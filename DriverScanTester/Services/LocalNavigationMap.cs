@@ -69,8 +69,9 @@ namespace DriverScanTester.Services
 
         private readonly Dictionary<(int X, int Y), CellData> _cells = new Dictionary<(int X, int Y), CellData>();
         private readonly Action<string> _log;
-        private readonly string _filePath;
+        private string _filePath;
         private readonly string _directoryPath;
+        private int _mapId;
         private bool _isDirty;
         private bool _loaded;
 
@@ -79,13 +80,51 @@ namespace DriverScanTester.Services
 
         public string FilePath => _filePath;
         public float CellSize => CELL_SIZE;
+        public int MapId => _mapId;
 
-        public LocalNavigationMap(Action<string> log)
+        /// <summary>
+        /// Creates a local navigation map for the given game map ID.
+        /// Each game map has its own file: Data/Navigation/local_nav_map_{mapId}.json
+        /// </summary>
+        public LocalNavigationMap(Action<string> log, int mapId)
         {
             _log = log;
+            _mapId = mapId;
             _directoryPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Data", "Navigation");
-            _filePath = Path.Combine(_directoryPath, "local_navigation_map.json");
+            _filePath = BuildFilePath(mapId);
             Load();
+        }
+
+        /// <summary>
+        /// Switches the map context. Saves any dirty data for the current map,
+        /// then loads the navigation data for the new map ID.
+        /// </summary>
+        public void ChangeMap(int newMapId)
+        {
+            if (newMapId == _mapId && _loaded)
+                return;
+
+            _log($"[LocalMap] Map change detected: {_mapId} -> {newMapId}.");
+
+            // Save current map's dirty data before switching
+            SaveIfDirty();
+
+            _mapId = newMapId;
+            _filePath = BuildFilePath(newMapId);
+            _cells.Clear();
+            _isDirty = false;
+            _loaded = false;
+
+            Load();
+        }
+
+        private static string BuildFilePath(int mapId)
+        {
+            return Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory,
+                "Data",
+                "Navigation",
+                $"local_nav_map_{mapId}.json");
         }
 
         // ── Load / Save ────────────────────────────────────────────
@@ -435,10 +474,17 @@ namespace DriverScanTester.Services
 
         // ─── Cell conversion ───────────────────────────────────────
 
+        /// <summary>
+        /// Converts world coordinates to cell indices using floor division (truncation).
+        /// This ensures that cell centers round-trip correctly:
+        ///   cell (N, M) → world center (N+0.5, M+0.5) → cell (N, M)
+        /// and that world coordinates map to the correct cell:
+        ///   world in [N, N+1) → cell N
+        /// </summary>
         public static (int CellX, int CellY) WorldToCell(float worldX, float worldY)
         {
-            int cx = (int)MathF.Round(worldX / CELL_SIZE);
-            int cy = (int)MathF.Round(worldY / CELL_SIZE);
+            int cx = (int)MathF.Floor(worldX / CELL_SIZE);
+            int cy = (int)MathF.Floor(worldY / CELL_SIZE);
             return (cx, cy);
         }
 

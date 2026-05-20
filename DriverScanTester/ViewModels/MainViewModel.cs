@@ -2907,7 +2907,7 @@ namespace DriverScanTester.ViewModels
                         while (!token.IsCancellationRequested && _isAttached && _movementSystem != null)
                         {
                             await _movementSystem.Update(token);
-                            await Task.Delay(50, token); // Update rate
+                            await Task.Delay(100, token); // Update rate
                         }
                     }
                     catch (TaskCanceledException) { }

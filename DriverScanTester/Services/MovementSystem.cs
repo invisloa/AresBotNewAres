@@ -105,6 +105,7 @@ namespace DriverScanTester.Services
         private const float LOCAL_MAP_CELL_SIZE = 1.0f;
 
         private readonly LocalNavigationMap _localNavigationMap;
+        private int _currentMapId = -1;
 
         // ────────────────────────────────────────────────────────
         //  ACTION-BASED STUCK CONSTANTS
@@ -324,25 +325,9 @@ namespace DriverScanTester.Services
         // Camera distance only.
         private const short CameraDistanceLock = 16980;
 
-        // Human-like camera smoothing constants (normal movement, not unstuck)
-        private const double CAMERA_MIN_UPDATE_INTERVAL_MS = 120.0;
-        private const float CAMERA_MAX_STEP_DEG_NORMAL = 2.0f;
-        private const float CAMERA_MAX_STEP_DEG_NEAR_TARGET = 0.75f;
-        private const float CAMERA_NORMAL_DEADZONE_DEG = 3.0f;
-        private const float CAMERA_NEAR_TARGET_DEADZONE_DEG = 10.0f;
-        private const float CAMERA_NEAR_TARGET_RADIUS = 8.0f;
-        private const float CAMERA_ARRIVAL_FREEZE_EXTRA = 2.5f;
-        private const float CAMERA_LOOKAHEAD_RADIUS = 10.0f;
-
-        // Legacy constants kept for reference but no longer used in MoveTowards
-        private const float BearingUpdateThresholdDeg = 1.5f;  // unused, replaced by CAMERA_NORMAL_DEADZONE_DEG
-        private const float NormalCameraStepDeg = 3.0f;         // unused
-        private const int NormalCameraMaxMicroStepsPerUpdate = 8; // unused
-        private const int NormalCameraMicroStepDelayMs = 1;      // unused
-
-        // Camera state for smoothing / rate limiting
-        private DateTime _lastCameraUpdateAt = DateTime.MinValue;
-        private float _smoothedTargetBearingDeg = UnsetBearing;
+        // Camera is now set directly each tick — no smoothing, no deadzone, no rate limiting.
+        // All previous smoothing constants (CAMERA_MIN_UPDATE_INTERVAL_MS,
+        // CAMERA_MAX_STEP_DEG_*, CAMERA_NORMAL_DEADZONE_DEG, etc.) removed.
 
         // Input
         private readonly object _inputLock = new object();
@@ -367,10 +352,13 @@ namespace DriverScanTester.Services
             GlobalPrecision = precision;
             LoopPath = loopPath;
 
-            _localNavigationMap = new LocalNavigationMap(_log);
+            int initialMapId = _memoryService.GetMapNumber();
+            _currentMapId = initialMapId;
+            _localNavigationMap = new LocalNavigationMap(_log, initialMapId);
 
             _isInitialized = true;
             _log($"MovementSystem: Initialized with GameMemoryService, Default Precision: {GlobalPrecision}, Loop: {LoopPath}");
+            _log($"[LocalMap] Initial map ID = {initialMapId}.");
             _log("[BearingCalib] Using manual N/E/S/W bearing table: N=16581, E=16632, S=16662, W=16688, N2=16710.");
 
             if (customPath != null)
@@ -404,13 +392,13 @@ namespace DriverScanTester.Services
 
             if (!_isInitialized)
             {
-                _log($"[Tick {_tickCount}] Update skipped — not initialized.");
+                _log($"[Tick {_tickCount}] Skipped — not initialized");
                 return;
             }
 
             if (_goalReached)
             {
-                _log($"[Tick {_tickCount}] Update skipped — goal already reached.");
+                _log($"[Tick {_tickCount}] Skipped — goal already reached");
                 return;
             }
 
@@ -421,24 +409,36 @@ namespace DriverScanTester.Services
             {
                 string modeStr = "none";
                 if (_waypoints.Count > 0) modeStr = _waypoints.Peek().Mode.ToString();
-                _log($"[State] Tick:{_tickCount} | WpQueue:{_waypoints.Count} | Mode:{modeStr} | MovingFwd:{_isMovingForward} | Unstuck:{_isUnstuckRoutineActive} | GoalReached:{_goalReached} | Loop:{LoopPath}");
+                var camAngle = _memoryService.GetCameraAngle();
+                _log($"[State] T:{_tickCount} Q:{_waypoints.Count} M:{modeStr} Fwd:{_isMovingForward} Unst:{_isUnstuckRoutineActive} Goal:{_goalReached} Loop:{LoopPath} Cam:{camAngle}");
             }
 
             // ── Repot / Report-and-go-back ──
             var repotAction = _repotHelper.EvaluateRepotTick(InternalRepotEnabled);
             if (repotAction != RepotAction.None)
             {
-                _log($"[Repot] EvaluateRepotTick returned {repotAction}.");
+                _log($"[Repot] {repotAction}");
             }
             if (repotAction == RepotAction.ReportAndGoBackActive)
             {
-                _log($"[Tick {_tickCount}] Repot/Report-and-go-back active — skipping movement tick.");
+                _log($"[Tick {_tickCount}] Report&GoBack — skip move");
                 return;
             }
             if (repotAction == RepotAction.Repotting)
             {
-                _log($"[Tick {_tickCount}] Repotting in progress — skipping movement tick.");
+                _log($"[Tick {_tickCount}] Repotting — skip move");
                 return;
+            }
+
+            // ── Map change detection ──
+            // Each game map has its own navigation file. If the player changed maps,
+            // save the current map's data and load the new map's data.
+            int currentMapId = _memoryService.GetMapNumber();
+            if (currentMapId != _currentMapId)
+            {
+                _log($"[Tick {_tickCount}] Map: {_currentMapId} → {currentMapId}");
+                _localNavigationMap.ChangeMap(currentMapId);
+                _currentMapId = currentMapId;
             }
 
             // Keep distance only.
@@ -447,11 +447,11 @@ namespace DriverScanTester.Services
             // ── Attack speed / potion check ──
             if (_combatHandler.CheckAttackSpeed(_memoryService))
             {
-                _log($"[Tick {_tickCount}] AttackSpeed 16341 detected. Using potions.");
-                _log("[Key] Pressing 7 (potion 1)");
+                _log($"[Tick {_tickCount}] Speed 16341 — using potions");
+                _log("[Key] 7 (pot1)");
                 GameInput.PressKey(GameInput.VK_7, GameInput.SCAN_7);
                 await Task.Delay(500, token);
-                _log("[Key] Pressing 8 (potion 2)");
+                _log("[Key] 8 (pot2)");
                 GameInput.PressKey(GameInput.VK_8, GameInput.SCAN_8);
             }
 
@@ -465,7 +465,7 @@ namespace DriverScanTester.Services
             var combatAction = _combatHandler.EvaluateCombatAction(_memoryService, currentMode, _isUnstuckRoutineActive);
             if (combatAction != CombatAction.None)
             {
-                _log($"[Tick {_tickCount}] Combat action: {combatAction}");
+                    _log($"[Tick {_tickCount}] Combat: {combatAction}");
             }
             switch (combatAction)
             {
@@ -521,7 +521,7 @@ namespace DriverScanTester.Services
             var (currX, currY, success) = _memoryService.GetPlayerPosition();
             if (!success)
             {
-                _log($"[Tick {_tickCount}] [Pos] Failed to read player position");
+                _log($"[Tick {_tickCount}] [Pos] Read failed");
                 return;
             }
 
@@ -531,14 +531,16 @@ namespace DriverScanTester.Services
                 float tickDelta = GeometryUtils.Distance(currX, currY, _progressTracker.LastX, _progressTracker.LastY);
                 if (tickDelta > MAX_REASONABLE_TICK_MOVEMENT)
                 {
-                    _log($"[Progress] Position jump detected ({tickDelta:F1} > {MAX_REASONABLE_TICK_MOVEMENT:F0} tiles in one tick). Resetting tracker.");
+                    _log($"[Progress] Jump! Δ{tickDelta:F1} > {MAX_REASONABLE_TICK_MOVEMENT:F0} — reset");
                     _progressTracker.Reset();
                 }
             }
 
             // Log position every 5 ticks
             if (_tickCount % 5 == 0)
-                _log($"[Pos] Player at ({currX:F1}, {currY:F1})");
+            {
+                _log($"[Tick {_tickCount}] @ ({currX:F1},{currY:F1}) Cam:{_memoryService.GetCameraAngle()}");
+            }
 
             byte currentAction = _memoryService.GetCurrentAction();
 
@@ -546,17 +548,17 @@ namespace DriverScanTester.Services
             if (_waypoints.Count == 0 && !_goalReached)
             {
                 _localNavigationMap.SaveIfDirty();
-                _log($"[Tick {_tickCount}] Waypoint queue empty, checking line-of-sight to final target ({Waypoint2.X:F1}, {Waypoint2.Y:F1}).");
+                _log($"[Tick {_tickCount}] Queue empty — LoS to ({Waypoint2.X:F1},{Waypoint2.Y:F1})");
                 if (GeometryUtils.CheckLineOfSight(currX, currY, Waypoint2.X, Waypoint2.Y))
                 {
                     _waypoints.Enqueue(new Waypoint(GeometryUtils.ObstacleCenter.X, GeometryUtils.ObstacleCenter.Y, GlobalPrecision, BotMode.OnlyMove));
                     _waypoints.Enqueue(new Waypoint(Waypoint2.X, Waypoint2.Y, GlobalPrecision, BotMode.OnlyMove));
-                    _log($"[Tick {_tickCount}] Path blocked (line-of-sight detected obstacle). Added obstacle center ({GeometryUtils.ObstacleCenter.X:F1},{GeometryUtils.ObstacleCenter.Y:F1}) + final target.");
+                    _log($"[Tick {_tickCount}] Blocked — added obstacle ({GeometryUtils.ObstacleCenter.X:F1},{GeometryUtils.ObstacleCenter.Y:F1}) + target");
                 }
                 else
                 {
                     _waypoints.Enqueue(new Waypoint(Waypoint2.X, Waypoint2.Y, GlobalPrecision, BotMode.OnlyMove));
-                    _log($"[Tick {_tickCount}] Path clear (no obstacle in line-of-sight). Re-added final target waypoint.");
+                    _log($"[Tick {_tickCount}] Clear — re-added target");
                 }
             }
 
@@ -570,16 +572,16 @@ namespace DriverScanTester.Services
                 // ── Unstuck active path ──
                 if (_isUnstuckRoutineActive)
                 {
-                    _log($"[Tick {_tickCount}] Unstuck routine active. Dist to target: {distToTarget:F2}.");
+                    _log($"[Tick {_tickCount}] Unstuck d:{distToTarget:F2} Cam:{_memoryService.GetCameraAngle()}");
                     if (TryResolveRouteProgressDuringUnstuck(currX, currY))
                     {
-                        _log($"[Tick {_tickCount}] Unstuck resolved via route progress during unstuck.");
+                        _log($"[Tick {_tickCount}] Unstuck resolved ✓");
                         return;
                     }
 
                     if (_waypoints.Count == 0)
                     {
-                        _log($"[Tick {_tickCount}] Unstuck active but waypoints became empty — returning.");
+                        _log($"[Tick {_tickCount}] Unstuck — empty queue");
                         return;
                     }
 
@@ -598,18 +600,17 @@ namespace DriverScanTester.Services
                     }
                 }
 
-                _log($"[Tick {_tickCount}] Advancing reached waypoints from ({currX:F1},{currY:F1}).");
                 AdvanceReachedWaypoints(currX, currY);
 
                 if (_goalReached)
                 {
-                    _log($"[Tick {_tickCount}] Goal reached after advancing waypoints — returning.");
+                    _log($"[Tick {_tickCount}] Goal reached ✓");
                     return;
                 }
 
                 if (_waypoints.Count == 0)
                 {
-                    _log($"[Tick {_tickCount}] Waypoints became empty after advancing — returning.");
+                    _log($"[Tick {_tickCount}] WpQueue empty after advance");
                     return;
                 }
 
@@ -653,7 +654,7 @@ namespace DriverScanTester.Services
                 {
                     string ghostFlag = IsGhostWaypoint(target) ? " [GHOST]" : "";
                     string progStatus = _progressTracker.GetStatusString();
-                    _log($"[Route] Tick:{_tickCount} | Target:({target.X:F1},{target.Y:F1}){ghostFlag} | Dist:{distNow:F2} | ReachThreshold:{thresholdNow:F2} | Mode:{target.Mode} | Prec:{target.Precision} | {progStatus}");
+                    _log($"[Route] T:{_tickCount} WP{ghostFlag}({target.X:F1},{target.Y:F1}) d:{distNow:F2} th:{thresholdNow:F2} M:{target.Mode} P:{target.Precision} {progStatus} Cam:{_memoryService.GetCameraAngle()}");
                 }
 
                 // Track healthy movement bearing for escape direction
@@ -670,14 +671,14 @@ namespace DriverScanTester.Services
                     }
                 }
 
-                _log($"[Tick {_tickCount}] Moving towards ({target.X:F1},{target.Y:F1}) from ({currX:F1},{currY:F1}).");
+                _log($"[Tick {_tickCount}] → ({target.X:F1},{target.Y:F1}) d:{distNow:F2} Cam:{_memoryService.GetCameraAngle()}");
                 MoveTowards(currX, currY, target.X, target.Y);
             }
             else
             {
                 if (!_goalReached)
                 {
-                    _log($"[Tick {_tickCount}] Waypoint queue empty and goal not reached — no action this tick.");
+                    _log($"[Tick {_tickCount}] No target — empty queue");
                 }
             }
         }
@@ -750,14 +751,14 @@ namespace DriverScanTester.Services
 
             if (distToTarget <= effectiveThreshold && stallTime >= FINAL_GOAL_STALL_TIME)
             {
-                _log($"[FinalGoal] Soft completion triggered. Dist:{distToTarget:F2} <= {effectiveThreshold:F2}, stallTime:{stallTime:F1}s >= {FINAL_GOAL_STALL_TIME:F1}s. Marking goal reached.");
+                _log($"[FinalGoal] Soft complete d:{distToTarget:F2} <= {effectiveThreshold:F2} stall:{stallTime:F1}s >= {FINAL_GOAL_STALL_TIME:F1}s");
                 AdvanceReachedWaypoints(currX, currY);
                 return true;
             }
 
             if (_tickCount % _stateLogInterval == 0 && distToTarget <= FINAL_GOAL_SOFT_RADIUS)
             {
-                _log($"[FinalGoal] Within soft radius. BestDist:{_finalGoalBestDist:F2}, stallTime:{stallTime:F1}s/{FINAL_GOAL_STALL_TIME:F1}s");
+                _log($"[FinalGoal] Soft radius — best:{_finalGoalBestDist:F2} stall:{stallTime:F1}s/{FINAL_GOAL_STALL_TIME:F1}s");
             }
 
             return false;
@@ -1899,28 +1900,17 @@ namespace DriverScanTester.Services
                 float dist = GeometryUtils.Distance(currX, currY, target.X, target.Y);
                 float threshold = GetEffectiveWaypointReachThreshold(target);
 
-                _log($"[AdvanceWp] Checking wp #{wpIndex}: ({target.X:F1},{target.Y:F1}) Prec:{target.Precision} Mode:{target.Mode} | Dist:{dist:F2} <= Threshold:{threshold:F2}");
-
                 if (dist > threshold)
                 {
-                    _log($"[AdvanceWp] Not reached (dist {dist:F2} > {threshold:F2}) — stopping advance scan.");
+                    _log($"[AdvWp] #{wpIndex} ({target.X:F1},{target.Y:F1}) d:{dist:F2} > {threshold:F2}");
                     break;
                 }
 
                 bool isGhost = IsGhostWaypoint(target);
-
-                if (isGhost)
-                {
-                    _log($"[AdvanceWp] REACHED Ghost Waypoint ({target.X:F1}, {target.Y:F1}) [Dist: {dist:F1} <= {threshold:F1}]. Removing temporary waypoint.");
-                    RemoveGhostWaypointRecord(target);
-                }
-                else
-                {
-                    _log($"[AdvanceWp] REACHED Waypoint ({target.X}, {target.Y}) [Dist: {dist:F1} <= {threshold:F1} (Prec: {target.Precision}, Mode: {target.Mode})].");
-                }
+                string ghostTag = isGhost ? " [GHOST]" : "";
 
                 _waypoints.Dequeue();
-                _log($"[AdvanceWp] Waypoint dequeued. Queue now has {_waypoints.Count} waypoints remaining.");
+                _log($"[AdvWp] #{wpIndex} ({target.X:F1},{target.Y:F1}) reached{ghostTag} ✓ | Queue: {_waypoints.Count}");
                 ResetBearingState();
                 _progressTracker.Reset();
                 ResetActionStuckTracking();
@@ -1929,19 +1919,11 @@ namespace DriverScanTester.Services
 
                 if (_waypoints.Count == 0)
                 {
-                    _log($"[AdvanceWp] Queue empty after dequeue — checking for loop/reached.");
                     HandleEmptyWaypointQueueAfterAdvance();
-
                     if (_goalReached)
-                    {
-                        _log($"[AdvanceWp] Goal reached flag set — returning.");
                         return true;
-                    }
                 }
             }
-
-            if (!advanced)
-                _log($"[AdvanceWp] No waypoints advanced this tick.");
 
             return advanced;
         }
@@ -2147,115 +2129,15 @@ namespace DriverScanTester.Services
             float targetBearingDeg = GeometryUtils.GetBearingToTargetDeg(currX, currY, targetX, targetY);
             ++_moveLogCounter;
 
-            // ── 1. Initial bearing setup (snap allowed once) ──
-            if (_lastSetBearingDeg == UnsetBearing)
-            {
-                _lastSetBearingDeg = targetBearingDeg;
-                _smoothedTargetBearingDeg = targetBearingDeg;
+            short gameAngle = GeometryUtils.ConvertBearingToGameAngle(targetBearingDeg, _lastSetGameAngle, _hasLastGameAngle);
 
-                short firstGameAngle = GeometryUtils.ConvertBearingToGameAngle(_lastSetBearingDeg, _lastSetGameAngle, _hasLastGameAngle);
-                _hasLastGameAngle = true;
-                _lastSetGameAngle = firstGameAngle;
-
-                _log($"[Move] INITIAL BEARING SETUP. Bearing:{targetBearingDeg:F1} GameAngle:{firstGameAngle}");
-                _memoryService.SetCameraAngle(firstGameAngle);
-                _lastCameraUpdateAt = DateTime.Now;
-                StartMoving();
-                return;
-            }
-
-            _lastSetBearingDeg = GeometryUtils.NormalizeBearingDeg(_lastSetBearingDeg);
-
-            // ── 2. Compute distance and waypoint info ──
-            float distToTarget = GeometryUtils.Distance(currX, currY, targetX, targetY);
-            float reachThreshold = 5.0f;
-            bool isLastWp = true;
-
-            if (_waypoints.Count > 0)
-            {
-                var curTarget = _waypoints.Peek();
-                reachThreshold = GetEffectiveWaypointReachThreshold(curTarget);
-                isLastWp = IsLastWaypoint();
-            }
-
-            // ── 3. Lookahead: near non-final waypoint, aim toward next real waypoint ──
-            float desiredBearing = targetBearingDeg;
-            bool suppressLookahead = false;
-
-            // For Exact waypoints, suppress lookahead unless very close (threshold + 1.0)
-            if ((int)MovementPrecision.Exact == 0 && _waypoints.Count > 0)
-            {
-                var curTarget = _waypoints.Peek();
-                if (curTarget.Precision == MovementPrecision.Exact && distToTarget > reachThreshold + 1.0f)
-                {
-                    suppressLookahead = true;
-                    _log($"[Camera] Lookahead suppressed: Exact waypoint dist={distToTarget:F2} threshold={reachThreshold:F2}");
-                }
-            }
-
-            if (!suppressLookahead && !isLastWp && distToTarget <= CAMERA_LOOKAHEAD_RADIUS && _waypoints.Count >= 2)
-            {
-                var items = _waypoints.ToList();
-                for (int i = 1; i < items.Count; i++)
-                {
-                    if (!IsGhostWaypoint(items[i]))
-                    {
-                        float lookBearing = GeometryUtils.GetBearingToTargetDeg(currX, currY, items[i].X, items[i].Y);
-                        _log($"[Camera] Lookahead bearing={lookBearing:F1} to next real wp ({items[i].X:F1},{items[i].Y:F1})");
-                        desiredBearing = lookBearing;
-                        break;
-                    }
-                }
-            }
-
-            // ── 4. Arrival freeze: within reach radius, do NOT adjust camera ──
-            float freezeRadius = reachThreshold + CAMERA_ARRIVAL_FREEZE_EXTRA;
-            if (distToTarget <= freezeRadius)
-            {
-                _log($"[Camera] Arrival freeze: dist={distToTarget:F2} freezeRadius={freezeRadius:F2} keeping={_lastSetBearingDeg:F1}");
-                StartMoving();
-                return;
-            }
-
-            // ── 5. Rate limit camera updates ──
-            double msSinceLastUpdate = (DateTime.Now - _lastCameraUpdateAt).TotalMilliseconds;
-            if (msSinceLastUpdate < CAMERA_MIN_UPDATE_INTERVAL_MS)
-            {
-                if (_tickCount % 5 == 0)
-                    _log($"[Camera] Skip update: rate-limit {msSinceLastUpdate:F0}ms/{CAMERA_MIN_UPDATE_INTERVAL_MS:F0}ms");
-                StartMoving();
-                return;
-            }
-
-            // ── 6. Compute diff vs desired bearing and apply deadzone ──
-            float diff = GeometryUtils.GetShortestBearingDiffDeg(_lastSetBearingDeg, desiredBearing);
-            float absDiff = Math.Abs(diff);
-            bool nearTarget = distToTarget <= CAMERA_NEAR_TARGET_RADIUS;
-            float deadzone = nearTarget ? CAMERA_NEAR_TARGET_DEADZONE_DEG : CAMERA_NORMAL_DEADZONE_DEG;
-
-            if (absDiff <= deadzone)
-            {
-                if (_tickCount % 5 == 0)
-                    _log($"[Camera] Within deadzone: diff={absDiff:F2} deadzone={deadzone:F1} near={nearTarget}");
-                StartMoving();
-                return;
-            }
-
-            // ── 7. Apply one smooth step (max one SetCameraAngle per tick) ──
-            float maxStep = nearTarget ? CAMERA_MAX_STEP_DEG_NEAR_TARGET : CAMERA_MAX_STEP_DEG_NORMAL;
-            float step = Math.Min(maxStep, absDiff);
-            float newBearing = GeometryUtils.NormalizeBearingDeg(_lastSetBearingDeg + Math.Sign(diff) * step);
-            short gameAngle = GeometryUtils.ConvertBearingToGameAngle(newBearing, _lastSetGameAngle, _hasLastGameAngle);
-
-            _log($"[Camera] SmoothAdjust dist={distToTarget:F2} desired={desiredBearing:F1} current={_lastSetBearingDeg:F1} diff={absDiff:F2} step={step:F2} near={nearTarget} next={newBearing:F1} gameAngle={gameAngle}");
-
-            _lastSetBearingDeg = newBearing;
-            _smoothedTargetBearingDeg = newBearing;
+            _lastSetBearingDeg = targetBearingDeg;
             _hasLastGameAngle = true;
             _lastSetGameAngle = gameAngle;
-            _memoryService.SetCameraAngle(gameAngle);
-            _lastCameraUpdateAt = DateTime.Now;
 
+            _log($"[Move] Bearing:{targetBearingDeg:F1} GameAngle:{gameAngle} Target:({targetX:F1},{targetY:F1})");
+
+            _memoryService.SetCameraAngle(gameAngle);
             StartMoving();
         }
 
@@ -2707,11 +2589,11 @@ namespace DriverScanTester.Services
                 ? new[] { -90f, -45f, 0f, 45f, 90f, 135f, -135f, 180f }
                 : new[] { 90f, 45f, 0f, -45f, -90f, -135f, 135f, 180f };
 
-            float baseBearing;
-            if (_lastSetBearingDeg != UnsetBearing)
-                baseBearing = _lastSetBearingDeg;
-            else
-                baseBearing = GeometryUtils.GetBearingToTargetDeg(currX, currY, target.X, target.Y);
+            // Use bearing-to-target as the base for offsets, NOT _lastSetBearingDeg.
+            // Using camera bearing as base causes each successful candidate to rotate
+            // the reference frame, making the bot drift in a circle instead of making
+            // progress toward the target.
+            float baseBearing = GeometryUtils.GetBearingToTargetDeg(currX, currY, target.X, target.Y);
 
             (int sourceCellX, int sourceCellY) = LocalNavigationMap.WorldToCell(currX, currY);
 

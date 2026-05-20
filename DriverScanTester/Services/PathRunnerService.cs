@@ -73,7 +73,7 @@ namespace DriverScanTester.Services
                     }
 
                     await _movementSystem.Update(token);
-                    await Task.Delay(50, token);
+                    await Task.Delay(100, token);
                 }
                 _log("[PathRunner] Loop exited due to cancellation request.");
             }
