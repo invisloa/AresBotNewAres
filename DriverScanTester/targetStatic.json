@@ -1,0 +1,80 @@
+[
+  {
+    "AddressText": "[[Ares.exe \u002B 0x620318] \u002B 0x774] - 0x30",
+    "NameText": "[[Ares.exe \u002B 0x620318] \u002B 0x774] - 0x30",
+    "ValueText": "",
+    "ValueType": 2
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x471BD0] \u002B 0xE0] - 0x541",
+    "NameText": "[[Ares.exe \u002B 0x471BD0] \u002B 0xE0] - 0x541",
+    "ValueText": "",
+    "ValueType": 2
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x3F1870] \u002B 0x2BF] \u002B 0x602",
+    "NameText": "[[Ares.exe \u002B 0x3F1870] \u002B 0x2BF] \u002B 0x602",
+    "ValueText": "",
+    "ValueType": 2
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x471BD0] \u002B 0x360] - 0x390",
+    "NameText": "[[Ares.exe \u002B 0x471BD0] \u002B 0x360] - 0x390",
+    "ValueText": "",
+    "ValueType": 2
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x471CA8] \u002B 0x8A4] \u002B 0xA8",
+    "NameText": "[[Ares.exe \u002B 0x471CA8] \u002B 0x8A4] \u002B 0xA8",
+    "ValueText": "",
+    "ValueType": 2
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x471CB4] \u002B 0x8A4] \u002B 0xA8",
+    "NameText": "[[Ares.exe \u002B 0x471CB4] \u002B 0x8A4] \u002B 0xA8",
+    "ValueText": "",
+    "ValueType": 2
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x471CB8] \u002B 0x8A4] \u002B 0xA8",
+    "NameText": "[[Ares.exe \u002B 0x471CB8] \u002B 0x8A4] \u002B 0xA8",
+    "ValueText": "",
+    "ValueType": 2
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x3F7CA4] \u002B 0xAE6] \u002B 0xD4F",
+    "NameText": "[[Ares.exe \u002B 0x3F7CA4] \u002B 0xAE6] \u002B 0xD4F",
+    "ValueText": "",
+    "ValueType": 2
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x3F813C] \u002B 0xAE6] \u002B 0xD4F",
+    "NameText": "[[Ares.exe \u002B 0x3F813C] \u002B 0xAE6] \u002B 0xD4F",
+    "ValueText": "",
+    "ValueType": 2
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x3F1F34] \u002B 0xBD4] \u002B 0x602",
+    "NameText": "[[Ares.exe \u002B 0x3F1F34] \u002B 0xBD4] \u002B 0x602",
+    "ValueText": "",
+    "ValueType": 2
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x3A2590] \u002B 0xC44] \u002B 0xB4",
+    "NameText": "[[Ares.exe \u002B 0x3A2590] \u002B 0xC44] \u002B 0xB4",
+    "ValueText": "",
+    "ValueType": 2
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x3F2818] \u002B 0xCB9] \u002B 0x602",
+    "NameText": "[[Ares.exe \u002B 0x3F2818] \u002B 0xCB9] \u002B 0x602",
+    "ValueText": "",
+    "ValueType": 2
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x471BD0] \u002B 0xD80] - 0xE88",
+    "NameText": "[[Ares.exe \u002B 0x471BD0] \u002B 0xD80] - 0xE88",
+    "ValueText": "",
+    "ValueType": 2
+  }
+]

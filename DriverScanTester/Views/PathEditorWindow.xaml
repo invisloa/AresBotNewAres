@@ -1,0 +1,143 @@
+﻿<Window x:Class="DriverScanTester.Views.PathEditorWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="clr-namespace:DriverScanTester.ViewModels"
+        mc:Ignorable="d"
+        Title="Path &amp; Route Editor" Height="700" Width="800">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TabControl Grid.Row="0">
+            <!-- TAB 1: SEGMENT EDITOR -->
+            <TabItem Header="Segment Creator">
+                <Grid Margin="5">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="2*"/>
+                        <ColumnDefinition Width="1.5*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <GroupBox Header="Current Segment Points" Grid.Column="0">
+                        <DataGrid ItemsSource="{Binding Points}" AutoGenerateColumns="False" 
+                                  SelectedItem="{Binding SelectedPoint}" CanUserAddRows="False">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="X" Binding="{Binding X}" Width="*"/>
+                                <DataGridTextColumn Header="Y" Binding="{Binding Y}" Width="*"/>
+                                <DataGridComboBoxColumn Header="Precision" 
+                                    ItemsSource="{Binding Source={x:Static vm:EnumSources.MovementPrecisions}}"
+                                    SelectedItemBinding="{Binding Precision}" Width="*"/>
+                                <DataGridComboBoxColumn Header="Mode" 
+                                    ItemsSource="{Binding Source={x:Static vm:EnumSources.BotModes}}"
+                                    SelectedItemBinding="{Binding Mode}" Width="*"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </GroupBox>
+
+                    <StackPanel Grid.Column="1" Margin="10,0,0,0">
+                        <Button Content="Capture Position (Bot)" Command="{Binding CapturePositionCommand}" Margin="0,0,0,10" Padding="8" Background="#FFE6F7FF" FontWeight="Bold"/>
+                        
+                        <Grid Margin="0,0,0,5">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Button Grid.Column="0" Content="Add (0,0)" Command="{Binding AddPointCommand}" Margin="0,0,2,0"/>
+                            <Button Grid.Column="1" Content="Remove" Command="{Binding RemovePointCommand}" Margin="2,0,0,0"/>
+                        </Grid>
+
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Button Grid.Column="0" Content="Move Up" Command="{Binding MovePointUpCommand}" Margin="0,0,2,0"/>
+                            <Button Grid.Column="1" Content="Move Down" Command="{Binding MovePointDownCommand}" Margin="2,0,0,0"/>
+                        </Grid>
+
+                        <Button Content="Clear All Points" Command="{Binding ClearPathCommand}" Margin="0,0,0,20"/>
+
+                        <CheckBox Content="Loop Path" IsChecked="{Binding LoopRoute}" Margin="0,0,0,10" ToolTip="Start over from first point when finished"/>
+
+                        <Label Content="Segment Name (Save As):"/>
+                        <TextBox Text="{Binding SegmentName, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,5" Padding="3"/>
+                        
+                        <Label Content="Precision for new points:"/>
+                        <ComboBox ItemsSource="{Binding Source={x:Static vm:EnumSources.MovementPrecisions}}"
+                                  SelectedItem="{Binding SegmentPrecision}"
+                                  Margin="0,0,0,10" Padding="3"
+                                  ToolTip="Default precision applied only when adding new points via Add/Capture. Each point in the grid can be edited individually."/>
+
+                        <Label Content="Bot mode for new points:"/>
+                        <ComboBox ItemsSource="{Binding Source={x:Static vm:EnumSources.BotModes}}"
+                                  SelectedItem="{Binding SegmentBotMode}"
+                                  Margin="0,0,0,10" Padding="3"
+                                  ToolTip="Default bot mode applied only when adding new points via Add/Capture. Each point in the grid can be edited individually."/>
+
+                        <Button Content="Save Segment to Library" Command="{Binding SaveSegmentCommand}" Margin="0,0,0,20" Padding="5"/>
+
+                        <Separator Height="10"/>
+                        <TextBlock Text="To edit an existing segment, select it in Route Builder and click Load." TextWrapping="Wrap" Foreground="Gray" FontSize="10"/>
+                        
+                        <Button Content="RUN THIS SEGMENT ONLY" Command="{Binding RunCurrentSegmentCommand}" Margin="0,20,0,0" Padding="5" Background="#FFF0F0F0"/>
+                        <Button Content="STOP BOT" Command="{Binding StopBotCommand}" Margin="0,5,0,0" Padding="5" Background="#FFFFCCCC" FontWeight="Bold"/>
+                    </StackPanel>
+                </Grid>
+            </TabItem>
+
+            <!-- TAB 2: ROUTE BUILDER -->
+            <TabItem Header="Route Builder">
+                <Grid Margin="5">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="1*"/>
+                        <ColumnDefinition Width="50"/> <!-- Buttons -->
+                        <ColumnDefinition Width="1*"/>
+                        <ColumnDefinition Width="120"/> <!-- Controls -->
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Library List -->
+                    <GroupBox Header="Library (SavedPaths)" Grid.Column="0">
+                        <ListBox ItemsSource="{Binding AvailableSegments}" SelectedItem="{Binding SelectedAvailableSegment}"/>
+                    </GroupBox>
+
+                    <!-- Middle Buttons -->
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                        <Button Content="&gt;&gt;" Command="{Binding AddToRouteCommand}" Margin="5" ToolTip="Add to Route"/>
+                        <Button Content="&lt;&lt;" Command="{Binding RemoveFromRouteCommand}" Margin="5" ToolTip="Remove from Route"/>
+                    </StackPanel>
+
+                    <!-- Route List -->
+                    <GroupBox Header="Current Route Sequence" Grid.Column="2">
+                        <ListBox ItemsSource="{Binding RouteSegments}" SelectedItem="{Binding SelectedRouteSegment}"/>
+                    </GroupBox>
+
+                    <!-- Right Controls -->
+                    <StackPanel Grid.Column="3" Margin="10,0,0,0">
+                        <Button Content="Refresh Lib" Command="{Binding RefreshLibraryCommand}" Margin="0,0,0,10"/>
+                        <Button Content="Load into Editor" Command="{Binding LoadSegmentCommand}" Margin="0,0,0,5" ToolTip="Edit selected Library item"/>
+                        <Button Content="Delete Segment" Command="{Binding DeleteSegmentCommand}" Margin="0,0,0,20" Background="#FFFFE6E6" ToolTip="Permanently delete from disk"/>
+                        
+                        <Label Content="Reorder:"/>
+                        <Button Content="Move Up" Command="{Binding MoveUpCommand}" Margin="0,0,0,5"/>
+                        <Button Content="Move Down" Command="{Binding MoveDownCommand}" Margin="0,0,0,20"/>
+
+                        <Button Content="Clear Route" Command="{Binding ClearRouteCommand}" Margin="0,0,0,20"/>
+
+                        <CheckBox Content="Loop Path" IsChecked="{Binding LoopRoute}" Margin="0,0,0,10" ToolTip="Start over from first point when finished"/>
+                        
+                        <Button Content="RUN FULL ROUTE" Command="{Binding RunFullRouteCommand}" Height="35" Background="#FFD4F4D4" FontWeight="Bold" />
+                        <Button Content="STOP BOT" Command="{Binding StopBotCommand}" Margin="0,5,0,0" Padding="5" Background="#FFFFCCCC" FontWeight="Bold"/>
+                    </StackPanel>
+                </Grid>
+            </TabItem>
+        </TabControl>
+
+        <!-- Status Bar -->
+        <Border Grid.Row="1" BorderBrush="LightGray" BorderThickness="0,1,0,0" Padding="5">
+            <TextBlock Text="{Binding StatusText}" Foreground="Blue" FontWeight="SemiBold"/>
+        </Border>
+    </Grid>
+</Window>

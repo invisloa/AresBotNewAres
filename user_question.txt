@@ -1,0 +1,4 @@
+Can you please provide more details about your 'heal and manna bot'?
+1.  Is it a separate application or part of this `DriverScanTester` project?
+2.  If it's part of `DriverScanTester`, could you point me to the relevant files or functions that implement its logic?
+3.  How was the 'heal and manna bot' interacting with the movement bot (e.g., were they running in the same loop, or were there specific calls from one to the other)?

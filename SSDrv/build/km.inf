@@ -1,0 +1,62 @@
+;
+; km.inf
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %ManufacturerName%
+CatalogFile = km.cat
+DriverVer = 08/17/2025,0.20.0.43
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 12  ; System32\drivers
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+km.sys = 1,,
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName% = Standard,NTamd64.10.0...16299
+
+[Standard.NTamd64.10.0...16299]
+%km.DeviceDesc% = km_Device, Root\km
+
+[km_Device.NT]
+CopyFiles = File_Copy
+
+[File_Copy]
+km.sys
+
+;-------------- Service installation
+[km_Device.NT.Services]
+AddService = km,%SPSVCINST_ASSOCSERVICE%, km_Service_Inst
+
+; -------------- km driver install sections
+[km_Service_Inst]
+DisplayName    = %km.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\km.sys
+
+[km_Device.NT.Wdf]
+KmdfService = km, km_wdfsect
+
+[km_wdfsect]
+KmdfLibraryVersion = 1.33
+
+[Strings]
+SPSVCINST_ASSOCSERVICE = 0x00000002
+ManufacturerName = "MyCompany"
+DiskName = "km Installation Disk"
+km.DeviceDesc = "km Device"
+km.SVCDESC = "km Service"
