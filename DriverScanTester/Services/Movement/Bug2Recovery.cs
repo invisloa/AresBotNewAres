@@ -41,6 +41,7 @@ namespace DriverScanTester.Services
         private readonly Action<float> _setLastSetBearingDeg;
         private readonly Action<bool> _setHasLastGameAngle;
         private readonly Action<float> _setLastSetGameAngle;
+        private readonly Action<float> _steerToBearingDeg;
 
         // ── Bug2 state ──
 
@@ -97,7 +98,8 @@ namespace DriverScanTester.Services
             Func<bool> getHasLastGameAngle,
             Action<float> setLastSetBearingDeg,
             Action<bool> setHasLastGameAngle,
-            Action<float> setLastSetGameAngle)
+            Action<float> setLastSetGameAngle,
+            Action<float> steerToBearingDeg)
         {
             _memory = memory ?? throw new ArgumentNullException(nameof(memory));
             _log = log ?? throw new ArgumentNullException(nameof(log));
@@ -115,6 +117,7 @@ namespace DriverScanTester.Services
             _setLastSetBearingDeg = setLastSetBearingDeg ?? throw new ArgumentNullException(nameof(setLastSetBearingDeg));
             _setHasLastGameAngle = setHasLastGameAngle ?? throw new ArgumentNullException(nameof(setHasLastGameAngle));
             _setLastSetGameAngle = setLastSetGameAngle ?? throw new ArgumentNullException(nameof(setLastSetGameAngle));
+            _steerToBearingDeg = steerToBearingDeg ?? throw new ArgumentNullException(nameof(steerToBearingDeg));
         }
 
         // ── Enter / Reset ──
@@ -391,13 +394,9 @@ namespace DriverScanTester.Services
             _bug2CandidateAttemptedDirY = chosen.DirY;
             _bug2CandidateStartTime = DateTime.Now;
 
-            // Set camera and start moving
-            short gameAngle = GeometryUtils.ConvertBearingToGameAngle(
-                chosen.Bearing, _getLastSetGameAngle(), _getHasLastGameAngle());
-            _setHasLastGameAngle(true);
-            _setLastSetGameAngle(gameAngle);
+            // Use keyboard steering (or legacy SetCameraAngle if UseKeyboardSteering=false)
             _setLastSetBearingDeg(chosen.Bearing);
-            _memory.SetCameraAngle(gameAngle);
+            _steerToBearingDeg(chosen.Bearing);
 
             _log($"[Bug2] Try candidate bearing={chosen.Bearing:F1} direction=({chosen.DirX},{chosen.DirY}) " +
                  $"cell=({chosen.CellX},{chosen.CellY}) " +

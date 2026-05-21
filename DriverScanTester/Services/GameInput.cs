@@ -27,6 +27,10 @@ namespace DriverScanTester.Services
         internal const byte SCAN_8 = 0x09;
         internal const byte VK_6 = 0x36;
         internal const byte SCAN_6 = 0x07;
+        internal const byte VK_A = 0x41;
+        internal const byte SCAN_A = 0x1E;
+        internal const byte VK_D = 0x44;
+        internal const byte SCAN_D = 0x20;
 
         /// <summary>
         /// Presses (down + up) a key with a 20 ms gap between down and up.

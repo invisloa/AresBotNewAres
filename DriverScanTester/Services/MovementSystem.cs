@@ -115,6 +115,9 @@ namespace DriverScanTester.Services
         private readonly WaypointSkipPolicy _skipPolicy;
         private readonly Bug2Recovery _bug2Recovery;
 
+        // Keyboard steering controller (replaces direct SetCameraAngle)
+        private readonly KeyboardSteeringController _steeringController;
+
         // Healthy movement tracking
         private float _lastHealthyMoveBearingDeg = UnsetBearing;
         private (float X, float Y) _lastHealthyMovePos;
@@ -159,6 +162,7 @@ namespace DriverScanTester.Services
             _stuckDetector = new StuckDetector(_memoryService, log, GetEffectiveWaypointReachThreshold, NEAR_TARGET_STUCK_IGNORE_EXTRA);
             _skipPolicy = new WaypointSkipPolicy(_memoryService, log, GetEffectiveWaypointReachThreshold);
             _localNavigationMap = new LocalNavigationMap(_log, initialMapId);
+            _steeringController = new KeyboardSteeringController(_memoryService, log);
             _bug2Recovery = new Bug2Recovery(
                 _memoryService, log, _localNavigationMap,
                 StopMoving, ForceStartMoving,
@@ -168,7 +172,8 @@ namespace DriverScanTester.Services
                 (x, y, wp, q, rb, rpt, ra) => _skipPolicy.TrySkip(x, y, wp, q, rb, rpt, ra),
                 ResetBearingState, ResetActionStuckTracking,
                 () => _lastSetGameAngle, () => _hasLastGameAngle,
-                v => _lastSetBearingDeg = v, v => _hasLastGameAngle = v, v => _lastSetGameAngle = v);
+                v => _lastSetBearingDeg = v, v => _hasLastGameAngle = v, v => _lastSetGameAngle = v,
+                ApplySteeringBearing);
 
             _isInitialized = true;
             _log($"MovementSystem: Initialized with GameMemoryService, Default Precision: {GlobalPrecision}, Loop: {LoopPath}");
@@ -412,13 +417,8 @@ namespace DriverScanTester.Services
                 if (_reverseDiagonalRecovery.IsActive)
                 {
                     RecoveryResult recoveryResult = _reverseDiagonalRecovery.Tick(currX, currY);
-                    short recoveryAngle = GeometryUtils.ConvertBearingToGameAngle(
-                        _reverseDiagonalRecovery.CurrentBearingDeg, _lastSetGameAngle, _hasLastGameAngle);
-                    _lastSetBearingDeg = _reverseDiagonalRecovery.CurrentBearingDeg;
-                    _hasLastGameAngle = true;
-                    _lastSetGameAngle = recoveryAngle;
-                    _memoryService.SetCameraAngle(recoveryAngle);
-                    StartMoving();
+                    float bearingDeg = _reverseDiagonalRecovery.CurrentBearingDeg;
+                    ApplySteeringBearing(bearingDeg);
                     switch (recoveryResult)
                     {
                         case RecoveryResult.InProgress:
@@ -697,21 +697,39 @@ namespace DriverScanTester.Services
             return threshold;
         }
 
+        /// <summary>
+        /// Applies a desired bearing: uses keyboard steering (A/D) when enabled,
+        /// falls back to legacy SetCameraAngle otherwise.
+        /// Always ensures W is held for forward movement.
+        /// </summary>
+        private void ApplySteeringBearing(float bearingDeg)
+        {
+            _lastSetBearingDeg = bearingDeg;
+            if (MovementTuning.UseKeyboardSteering)
+            {
+                short gameAngle = GeometryUtils.ConvertBearingToGameAngle(bearingDeg, _lastSetGameAngle, _hasLastGameAngle);
+                _hasLastGameAngle = true;
+                _lastSetGameAngle = gameAngle;
+                _steeringController.SteerTowards(bearingDeg, keepMovingForward: true);
+                StartMoving();
+            }
+            else
+            {
+                short gameAngle = GeometryUtils.ConvertBearingToGameAngle(bearingDeg, _lastSetGameAngle, _hasLastGameAngle);
+                _lastSetGameAngle = gameAngle;
+                _hasLastGameAngle = true;
+                _log($"[Move-Legacy] Bearing:{bearingDeg:F1} GameAngle:{gameAngle}");
+                _memoryService.SetCameraAngle(gameAngle);
+                StartMoving();
+            }
+        }
+
         private void MoveTowards(float currX, float currY, float targetX, float targetY)
         {
             float targetBearingDeg = GeometryUtils.GetBearingToTargetDeg(currX, currY, targetX, targetY);
             ++_moveLogCounter;
-
-            short gameAngle = GeometryUtils.ConvertBearingToGameAngle(targetBearingDeg, _lastSetGameAngle, _hasLastGameAngle);
-
-            _lastSetBearingDeg = targetBearingDeg;
-            _hasLastGameAngle = true;
-            _lastSetGameAngle = gameAngle;
-
-            _log($"[Move] Bearing:{targetBearingDeg:F1} GameAngle:{gameAngle} Target:({targetX:F1},{targetY:F1})");
-
-            _memoryService.SetCameraAngle(gameAngle);
-            StartMoving();
+            _log($"[Move] Bearing:{targetBearingDeg:F1} Target:({targetX:F1},{targetY:F1})");
+            ApplySteeringBearing(targetBearingDeg);
         }
 
         // ========================================================================
@@ -739,14 +757,9 @@ namespace DriverScanTester.Services
             _reverseDiagonalRecovery.Start(currX, currY, target.X, target.Y,
                 _lastHealthyMoveBearingDeg != UnsetBearing ? _lastHealthyMoveBearingDeg : (float?)null,
                 _lastHealthyMoveTime);
-            short recoveryAngle = GeometryUtils.ConvertBearingToGameAngle(
-                _reverseDiagonalRecovery.CurrentBearingDeg, _lastSetGameAngle, _hasLastGameAngle);
-            _lastSetBearingDeg = _reverseDiagonalRecovery.CurrentBearingDeg;
-            _hasLastGameAngle = true;
-            _lastSetGameAngle = recoveryAngle;
-            _memoryService.SetCameraAngle(recoveryAngle);
-            StartMoving();
-            _log($"[ReverseDiagonal] begin{logSuffix}. Bearing={_reverseDiagonalRecovery.CurrentBearingDeg:F1}°");
+            float bearingDeg = _reverseDiagonalRecovery.CurrentBearingDeg;
+            ApplySteeringBearing(bearingDeg);
+            _log($"[ReverseDiagonal] begin{logSuffix}. Bearing={bearingDeg:F1}°");
         }
 
         // ========================================================================
@@ -810,6 +823,12 @@ namespace DriverScanTester.Services
                 _log($"[Input] W up (StopMoving) — call #{_stopMoveCount}. Tick:{_tickCount}");
 
                 GameInput.keybd_event(GameInput.VK_W, GameInput.SCAN_W, (uint)GameInput.KEYEVENTF_KEYUP, 0);
+            }
+
+            // Release steering keys (A/D) when stopping
+            if (MovementTuning.UseKeyboardSteering)
+            {
+                _steeringController.ReleaseSteering();
             }
         }
 
