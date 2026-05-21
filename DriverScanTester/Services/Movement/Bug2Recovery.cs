@@ -394,7 +394,7 @@ namespace DriverScanTester.Services
             _bug2CandidateAttemptedDirY = chosen.DirY;
             _bug2CandidateStartTime = DateTime.Now;
 
-            // Use keyboard steering (or legacy SetCameraAngle if UseKeyboardSteering=false)
+            // Set camera angle directly to the candidate bearing
             _setLastSetBearingDeg(chosen.Bearing);
             _steerToBearingDeg(chosen.Bearing);
 

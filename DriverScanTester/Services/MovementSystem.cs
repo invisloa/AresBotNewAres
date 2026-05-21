@@ -115,9 +115,6 @@ namespace DriverScanTester.Services
         private readonly WaypointSkipPolicy _skipPolicy;
         private readonly Bug2Recovery _bug2Recovery;
 
-        // Keyboard steering controller (replaces direct SetCameraAngle)
-        private readonly KeyboardSteeringController _steeringController;
-
         // Healthy movement tracking
         private float _lastHealthyMoveBearingDeg = UnsetBearing;
         private (float X, float Y) _lastHealthyMovePos;
@@ -129,9 +126,38 @@ namespace DriverScanTester.Services
         // Camera distance only.
         private const short CameraDistanceLock = 16980;
 
-        // Camera is now set directly each tick — no smoothing, no deadzone, no rate limiting.
-        // All previous smoothing constants (CAMERA_MIN_UPDATE_INTERVAL_MS,
-        // CAMERA_MAX_STEP_DEG_*, CAMERA_NORMAL_DEADZONE_DEG, etc.) removed.
+        // ── Camera update filtering ───────────────────────────────────────────────
+        // Prevents camera oscillation (jitter between adjacent game-angle values)
+        // by applying deadband, hysteresis, cooldown, and heading freeze logic.
+
+        /// <summary>Minimum absolute circular difference in game-angle units to allow a camera update.</summary>
+        private const float CameraDeadbandGameUnits = 2.0f;
+
+        /// <summary>If the circular difference exceeds this threshold, update immediately (ignoring cooldown).</summary>
+        private const float CameraForceUpdateGameUnits = 8.0f;
+
+        /// <summary>Minimum interval between camera updates (for small/medium angle changes).</summary>
+        private const double MinCameraUpdateIntervalMs = 200.0;
+
+        /// <summary>Base freeze distance for heading lock near waypoints. Actual = max(reachThreshold*2, this).</summary>
+        private const float HeadingFreezeDistanceBase = 10.0f;
+
+        // ── Camera filter state ──
+
+        /// <summary>Last game-angle value that was actually written to the camera.</summary>
+        private short _cameraLastAppliedAngle;
+
+        /// <summary>When the last camera write occurred.</summary>
+        private DateTime _lastCameraUpdateTime = DateTime.MinValue;
+
+        /// <summary>Candidate angle for hysteresis tracking (medium-size changes).</summary>
+        private short _cameraHysteresisCandidate;
+
+        /// <summary>How many consecutive ticks _cameraHysteresisCandidate has been observed.</summary>
+        private int _cameraHysteresisStableTicks;
+
+        /// <summary>Whether a hysteresis candidate exists.</summary>
+        private bool _hasCameraHysteresisCandidate;
 
         // Input
         private readonly object _inputLock = new object();
@@ -162,7 +188,6 @@ namespace DriverScanTester.Services
             _stuckDetector = new StuckDetector(_memoryService, log, GetEffectiveWaypointReachThreshold, NEAR_TARGET_STUCK_IGNORE_EXTRA);
             _skipPolicy = new WaypointSkipPolicy(_memoryService, log, GetEffectiveWaypointReachThreshold);
             _localNavigationMap = new LocalNavigationMap(_log, initialMapId);
-            _steeringController = new KeyboardSteeringController(_memoryService, log);
             _bug2Recovery = new Bug2Recovery(
                 _memoryService, log, _localNavigationMap,
                 StopMoving, ForceStartMoving,
@@ -698,30 +723,127 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Applies a desired bearing: uses keyboard steering (A/D) when enabled,
-        /// falls back to legacy SetCameraAngle otherwise.
-        /// Always ensures W is held for forward movement.
+        /// Applies a desired bearing: converts bearing to game camera angle,
+        /// sets the camera directly (subject to filtering), and holds W for forward movement.
         /// </summary>
         private void ApplySteeringBearing(float bearingDeg)
         {
+            short gameAngle = GeometryUtils.ConvertBearingToGameAngle(bearingDeg, _lastSetGameAngle, _hasLastGameAngle);
             _lastSetBearingDeg = bearingDeg;
-            if (MovementTuning.UseKeyboardSteering)
+            _lastSetGameAngle = gameAngle;
+
+            // Capture whether this is a fresh segment BEFORE mutating _hasLastGameAngle.
+            // ResetBearingState() sets _hasLastGameAngle=false; the very next call to
+            // ApplySteeringBearing should bypass the camera filter so the new heading
+            // is applied immediately.
+            bool isFreshSegment = !_hasLastGameAngle;
+            _hasLastGameAngle = true;
+
+            // ── Camera update filter ──
+            if (ShouldUpdateCamera(gameAngle, isFreshSegment, out string? skipReason))
             {
-                short gameAngle = GeometryUtils.ConvertBearingToGameAngle(bearingDeg, _lastSetGameAngle, _hasLastGameAngle);
-                _hasLastGameAngle = true;
-                _lastSetGameAngle = gameAngle;
-                _steeringController.SteerTowards(bearingDeg, keepMovingForward: true);
-                StartMoving();
+                _log($"[Camera] Apply target={gameAngle} last={_cameraLastAppliedAngle} diff={CircularGameAngleDiff(gameAngle, _cameraLastAppliedAngle):F1}");
+                _memoryService.SetCameraAngle(gameAngle);
+                _cameraLastAppliedAngle = gameAngle;
+                _lastCameraUpdateTime = DateTime.Now;
+                _hasCameraHysteresisCandidate = false;
             }
             else
             {
-                short gameAngle = GeometryUtils.ConvertBearingToGameAngle(bearingDeg, _lastSetGameAngle, _hasLastGameAngle);
-                _lastSetGameAngle = gameAngle;
-                _hasLastGameAngle = true;
-                _log($"[Move-Legacy] Bearing:{bearingDeg:F1} GameAngle:{gameAngle}");
-                _memoryService.SetCameraAngle(gameAngle);
-                StartMoving();
+                _log($"[Camera] Skip target={gameAngle} last={_cameraLastAppliedAngle} diff={CircularGameAngleDiff(gameAngle, _cameraLastAppliedAngle):F1} reason={skipReason}");
             }
+
+            StartMoving();
+        }
+
+        /// <summary>
+        /// Determines whether the camera should actually be updated with the desired game angle.
+        /// Implements deadband, cooldown, hysteresis, and waypoint-change detection.
+        /// </summary>
+        /// <param name="desiredAngle">The newly computed game angle to consider.</param>
+        /// <param name="isFreshSegment">True when the waypoint just changed (bearing state was reset),
+        /// so filtering should be bypassed for an immediate camera update.</param>
+        /// <param name="skipReason">Set to a non-null string describing why the update was skipped.</param>
+        private bool ShouldUpdateCamera(short desiredAngle, bool isFreshSegment, out string? skipReason)
+        {
+            skipReason = null;
+
+            // 1. Fresh segment (waypoint just changed via ResetBearingState): allow immediate update.
+            if (isFreshSegment)
+            {
+                return true;
+            }
+
+            // 2. No previous camera write ever: allow.
+            if (_lastCameraUpdateTime == DateTime.MinValue)
+            {
+                return true;
+            }
+
+            // 3. Exactly the same angle: skip.
+            if (desiredAngle == _cameraLastAppliedAngle)
+            {
+                skipReason = "same-angle";
+                return false;
+            }
+
+            float diff = CircularGameAngleDiff(desiredAngle, _cameraLastAppliedAngle);
+            float absDiff = Math.Abs(diff);
+
+            // 4. Very small difference (within deadband): skip unconditionally.
+            if (absDiff <= CameraDeadbandGameUnits)
+            {
+                skipReason = "deadband";
+                return false;
+            }
+
+            // 5. Large difference: allow immediately, bypass cooldown and hysteresis.
+            if (absDiff >= CameraForceUpdateGameUnits)
+            {
+                return true;
+            }
+
+            // 6. Medium difference: apply cooldown + hysteresis.
+
+            // 6a. Cooldown: if we just updated recently and the change isn't urgent, wait.
+            double msSinceLastUpdate = (DateTime.Now - _lastCameraUpdateTime).TotalMilliseconds;
+            if (msSinceLastUpdate < MinCameraUpdateIntervalMs)
+            {
+                skipReason = $"cooldown ({msSinceLastUpdate:F0}ms < {MinCameraUpdateIntervalMs:F0}ms)";
+                return false;
+            }
+
+            // 6b. Hysteresis: require the same desired angle to persist for 2 consecutive ticks.
+            if (_hasCameraHysteresisCandidate && _cameraHysteresisCandidate == desiredAngle)
+            {
+                _cameraHysteresisStableTicks++;
+                if (_cameraHysteresisStableTicks >= 2)
+                {
+                    return true; // stable for 2 ticks → allow
+                }
+                skipReason = $"hysteresis-wait ({_cameraHysteresisStableTicks}/2)";
+                return false;
+            }
+
+            // First sighting of this angle (or it changed from the previous candidate).
+            _cameraHysteresisCandidate = desiredAngle;
+            _cameraHysteresisStableTicks = 1;
+            _hasCameraHysteresisCandidate = true;
+            skipReason = "hysteresis-start";
+            return false;
+        }
+
+        /// <summary>
+        /// Computes the shortest circular difference between two raw game-angle values,
+        /// taking into account the full-spin circumference.  Result is in [-halfSpin, +halfSpin].
+        /// </summary>
+        private static float CircularGameAngleDiff(float a, float b)
+        {
+            float diff = a - b;
+            float halfSpin = GeometryUtils.ManualFullSpinGameUnits / 2f;
+            while (diff > halfSpin) diff -= GeometryUtils.ManualFullSpinGameUnits;
+            while (diff < -halfSpin) diff += GeometryUtils.ManualFullSpinGameUnits;
+            return diff;
         }
 
         private void MoveTowards(float currX, float currY, float targetX, float targetY)
@@ -729,6 +851,31 @@ namespace DriverScanTester.Services
             float targetBearingDeg = GeometryUtils.GetBearingToTargetDeg(currX, currY, targetX, targetY);
             ++_moveLogCounter;
             _log($"[Move] Bearing:{targetBearingDeg:F1} Target:({targetX:F1},{targetY:F1})");
+
+            // ── Heading freeze near waypoint ──
+            // When close to the current waypoint, the bearing-to-target oscillates
+            // wildly due to position jitter.  Freeze the last stable camera angle
+            // and just keep moving forward until the waypoint is reached.
+            // NOTE: heading freeze is intentionally skipped during Bug2 recovery
+            // (_bug2Recovery.IsActive) because Bug2's MoveTowards call (via the
+            // _moveTowards delegate when leaving the boundary) must be allowed to
+            // reorient the camera toward the target.
+            if (_hasLastGameAngle && _cameraLastAppliedAngle != 0 && !_bug2Recovery.IsActive)
+            {
+                float dist = GeometryUtils.Distance(currX, currY, targetX, targetY);
+                // Use the same default threshold calculation as GetEffectiveWaypointReachThreshold
+                // but with a minimum floor so very-precise waypoints don't break freeze.
+                float reachBase = GeometryUtils.GetWaypointReachThreshold(MovementPrecision.Medium);
+                float freezeThreshold = Math.Max(reachBase * 2.0f, HeadingFreezeDistanceBase);
+
+                if (dist <= freezeThreshold)
+                {
+                    _log($"[Camera] Freeze near waypoint d={dist:F1} keep={_cameraLastAppliedAngle} th={freezeThreshold:F1}");
+                    StartMoving();
+                    return;
+                }
+            }
+
             ApplySteeringBearing(targetBearingDeg);
         }
 
@@ -741,6 +888,7 @@ namespace DriverScanTester.Services
             _lastSetBearingDeg = UnsetBearing;
             _hasLastGameAngle = false;
             _lastSetGameAngle = 0f;
+            _hasCameraHysteresisCandidate = false;
         }
 
         private void ResetActionStuckTracking()
@@ -825,11 +973,9 @@ namespace DriverScanTester.Services
                 GameInput.keybd_event(GameInput.VK_W, GameInput.SCAN_W, (uint)GameInput.KEYEVENTF_KEYUP, 0);
             }
 
-            // Release steering keys (A/D) when stopping
-            if (MovementTuning.UseKeyboardSteering)
-            {
-                _steeringController.ReleaseSteering();
-            }
+            // Defensive cleanup: release A/D in case they were pressed by a previous version
+            GameInput.keybd_event(GameInput.VK_A, GameInput.SCAN_A, (uint)GameInput.KEYEVENTF_KEYUP, 0);
+            GameInput.keybd_event(GameInput.VK_D, GameInput.SCAN_D, (uint)GameInput.KEYEVENTF_KEYUP, 0);
         }
 
         // ========================================================================

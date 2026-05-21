@@ -68,25 +68,6 @@ namespace DriverScanTester.Services
         /// </summary>
         public static float NearTargetStuckIgnoreExtra = 1.0f;
 
-        // ── Keyboard steering ──────────────────────────────────────────────────
-
-        /// <summary>
-        /// If true, bot steers by holding A/D keys instead of directly setting camera angle.
-        /// </summary>
-        public static bool UseKeyboardSteering = true;
-
-        /// <summary>Deadzone tolerance in raw game-angle units for releasing A/D when close enough to desired angle.</summary>
-        public static float SteeringStopToleranceRaw = 2.0f;
-
-        /// <summary>Threshold in raw game-angle units for initiating a steer (must exceed this to start holding A/D).</summary>
-        public static float SteeringStartToleranceRaw = 4.0f;
-
-        /// <summary>Maximum continuous turn time in ms before releasing keys as safety.</summary>
-        public static int SteeringMaxContinuousTurnMs = 1500;
-
-        /// <summary>If true, pressing D increases camera angle (clockwise). Set false if D decreases angle.</summary>
-        public static bool SteerDIsClockwise = true;
-
         // ── Debounced action-stuck detection ───────────────────────────────────
 
         /// <summary>
