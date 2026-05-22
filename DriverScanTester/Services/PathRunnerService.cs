@@ -87,6 +87,8 @@ namespace DriverScanTester.Services
             }
             finally
             {
+                // Persist any pending stuck-cell data before stopping
+                _movementSystem?.SaveLocalMap();
                 _movementSystem?.StopMoving();
                 _log("[PathRunner] Path stopped.");
             }
@@ -95,10 +97,11 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Stops the current movement immediately.
+        /// Stops the current movement immediately and persists any pending navigation data.
         /// </summary>
         public void Stop()
         {
+            _movementSystem?.SaveLocalMap();
             _movementSystem?.StopMoving();
         }
     }

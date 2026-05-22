@@ -2923,6 +2923,9 @@ namespace DriverScanTester.ViewModels
                             AppendLog("Movement Bot loop ended.");
                         });
                         
+                        // Persist any pending stuck-cell data before stopping
+                        _movementSystem?.SaveLocalMap();
+
                         // Ensure movement stops even on cancellation
                         _movementSystem?.StopMoving();
                     }

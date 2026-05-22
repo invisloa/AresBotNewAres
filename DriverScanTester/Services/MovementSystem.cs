@@ -243,6 +243,7 @@ namespace DriverScanTester.Services
 
             if (_goalReached)
             {
+                _localNavigationMap.SaveIfDirty();
                 _log($"[Tick {_tickCount}] Skipped — goal already reached");
                 return;
             }
@@ -444,6 +445,7 @@ namespace DriverScanTester.Services
 
                 if (_goalReached)
                 {
+                    _localNavigationMap.SaveIfDirty();
                     _log($"[Tick {_tickCount}] Goal reached ✓");
                     return;
                 }
@@ -1024,6 +1026,16 @@ namespace DriverScanTester.Services
             {
                 _localNavigationMap.Save();
             }
+        }
+
+        /// <summary>
+        /// Public entry point to persist the local navigation map.
+        /// Call this from cleanup / shutdown paths so stuck-cell data is not lost
+        /// when the bot is stopped or the path completes.
+        /// </summary>
+        public void SaveLocalMap()
+        {
+            _localNavigationMap.SaveIfDirty();
         }
 
         // ========================================================================
