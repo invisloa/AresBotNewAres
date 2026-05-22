@@ -1,5 +1,13 @@
 [
   {
+    "AddressText": "[Ares.exe \u002B 0x4704B0] \u002B 0x1BE",
+    "NameText": "Camera Vertical Angle",
+    "ValueText": "16320",
+    "ValueType": 1,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
     "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0x26c",
     "NameText": "0x119FE55C",
     "ValueText": "1142352701 ",
@@ -21,7 +29,7 @@
     "ValueText": "4",
     "ValueType": 0,
     "Priority": 2,
-    "LockGroup": 0
+    "LockGroup": 1
   },
   {
     "AddressText": "[Ares.exe \u002B 0x4704B0] \u002B 0x1BE",
@@ -85,7 +93,7 @@
     "ValueText": "0",
     "ValueType": 1,
     "Priority": 2,
-    "LockGroup": 0
+    "LockGroup": 1
   },
   {
     "AddressText": "[Ares.exe \u002B 0x4704B0] \u002B 0x1AA",
@@ -125,12 +133,12 @@
     "ValueText": "17090",
     "ValueType": 1,
     "Priority": 2,
-    "LockGroup": 0
+    "LockGroup": 1
   },
   {
     "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0x3Ba",
     "NameText": "A_Anim1 S17622",
-    "ValueText": "17622",
+    "ValueText": "17306",
     "ValueType": 1,
     "Priority": 2,
     "LockGroup": 0
@@ -141,7 +149,7 @@
     "ValueText": "0",
     "ValueType": 1,
     "Priority": 2,
-    "LockGroup": 0
+    "LockGroup": 1
   },
   {
     "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0xC58 ",
@@ -221,7 +229,7 @@
     "ValueText": "16310",
     "ValueType": 1,
     "Priority": 2,
-    "LockGroup": 0
+    "LockGroup": 1
   },
   {
     "AddressText": "[[Ares.exe \u002B 0x471CA8] \u002B 0x60] \u002B 0xE8",

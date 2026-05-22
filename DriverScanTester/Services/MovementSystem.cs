@@ -167,6 +167,7 @@ namespace DriverScanTester.Services
         private int _stateLogInterval = 5; // Log periodic state every N ticks
 
         private bool _isMovingForward = false;
+        private bool _isSkillThreeHeld = false;
         private int _startMoveCount = 0;
         private int _stopMoveCount = 0;
         private static readonly Random _rng = new Random();
@@ -307,32 +308,47 @@ namespace DriverScanTester.Services
 
             // ── Combat mode handling ──
             var combatAction = _combatHandler.EvaluateCombatAction(_memoryService, currentMode, _isUnstuckRoutineActive);
-            if (combatAction != CombatAction.None)
+            if (combatAction != CombatAction.None && combatAction != CombatAction.CombatWait)
             {
-                    _log($"[Tick {_tickCount}] Combat: {combatAction}");
+                _log($"[Tick {_tickCount}] Combat: {combatAction}");
             }
             switch (combatAction)
             {
                 case CombatAction.TabTarget:
                     _log("[Key] TAB (target cycle)");
+                    ReleaseSkillThree();
                     GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
                     await Task.Delay(50, token);
                     return;
 
                 case CombatAction.Attack:
-                    _log("[Key] 3 (attack skill)");
-                    StopMoving();
-                    GameInput.PressKey(GameInput.VK_3, GameInput.SCAN_3);
-                    await Task.Delay(50, token);
+                    if (!_isSkillThreeHeld)
+                    {
+                        _log("[Key] 3 hold (attack skill)");
+                        GameInput.keybd_event(GameInput.VK_3, GameInput.SCAN_3, 0, 0);
+                        _isSkillThreeHeld = true;
+                    }
+                    if (_isMovingForward)
+                    {
+                        StopMoving();
+                    }
+                    await Task.Delay(30, token);
+                    return;
+
+                case CombatAction.CombatWait:
+                    // Skill 3 is held, W is released — keep waiting in combat
+                    await Task.Delay(30, token);
                     return;
 
                 case CombatAction.StuckTabAttack:
                     _log("[Key] TAB (target cycle — stuck in attack)");
+                    ReleaseSkillThree();
                     GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
                     await Task.Delay(50, token);
                     return;
 
                 case CombatAction.UnstuckNeeded:
+                    ReleaseSkillThree();
                     var (combatStuckX, combatStuckY, combatStuckOk) = _memoryService.GetPlayerPosition();
                     _log($"[Tick {_tickCount}] CombatHandler requested UnstuckNeeded. Pos=({combatStuckX:F1},{combatStuckY:F1}) ok={combatStuckOk}");
                     _combatHandler.ResetStuckInAttack();
@@ -353,10 +369,14 @@ namespace DriverScanTester.Services
                     return;
 
                 case CombatAction.PotionsUsed:
+                    ReleaseSkillThree();
                     _log($"[Tick {_tickCount}] Potions used — brief delay.");
                     await Task.Delay(50, token);
                     return;
             }
+
+            // Combat is over — release skill 3 if held
+            ReleaseSkillThree();
 
             var (currX, currY, success) = _memoryService.GetPlayerPosition();
             if (!success)
@@ -976,6 +996,18 @@ namespace DriverScanTester.Services
             // Defensive cleanup: release A/D in case they were pressed by a previous version
             GameInput.keybd_event(GameInput.VK_A, GameInput.SCAN_A, (uint)GameInput.KEYEVENTF_KEYUP, 0);
             GameInput.keybd_event(GameInput.VK_D, GameInput.SCAN_D, (uint)GameInput.KEYEVENTF_KEYUP, 0);
+        }
+
+        // ── Skill 3 management ──
+
+        private void ReleaseSkillThree()
+        {
+            if (_isSkillThreeHeld)
+            {
+                _log("[Key] 3 up");
+                GameInput.keybd_event(GameInput.VK_3, GameInput.SCAN_3, (uint)GameInput.KEYEVENTF_KEYUP, 0);
+                _isSkillThreeHeld = false;
+            }
         }
 
         // ========================================================================

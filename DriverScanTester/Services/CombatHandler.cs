@@ -14,6 +14,8 @@ namespace DriverScanTester.Services
         TabTarget,
         /// <summary>Press 3 to use attack skill (and stop moving).</summary>
         Attack,
+        /// <summary>Waiting during combat (attack cooldown / stuck debounce) — skip movement entirely.</summary>
+        CombatWait,
         /// <summary>Press TAB (stuck in attack) to switch target.</summary>
         StuckTabAttack,
         /// <summary>Start the unstuck routine — too many stuck-in-attack attempts.</summary>
@@ -29,8 +31,6 @@ namespace DriverScanTester.Services
     internal class CombatHandler
     {
         // ── Knight Animation Constants ──
-        private const int KnightStuckMin = 16500;
-        private const int KnightStuckMax = 17000;
         private const int KnightAttackedMin = 17300;
         private const int KnightAttackedMax = 17400;
 
@@ -38,10 +38,18 @@ namespace DriverScanTester.Services
         private const double IDLE_TIMEOUT_SECONDS = 0.5;
         private const double MOVE_MODE_TAB_INTERVAL_SECONDS = 0.8;
 
+        // ── Combat stuck detection (same pattern as StuckDetector) ──
+        // Uses GetCurrentAction as the source of truth:
+        // - action 27 or 3 → running (not stuck)
+        // - action 25 or 1 → idle/stuck
+        private const int CombatStuckRequiredSamples = 2;
+        private const double CombatStuckRequiredMs = 200.0;
+
         // ── State ──
         private bool _wasAttacking;
         private DateTime _lastNonIdleActionTime = DateTime.MinValue;
-        private int _stuckInAttackCounter;
+        private int _combatStuckSamples;
+        private DateTime _combatStuckFirstSeenAt = DateTime.MinValue;
         private DateTime _lastMoveModeTabTime = DateTime.MinValue;
         private DateTime _lastAttackSpeedCheck = DateTime.MinValue;
 
@@ -108,48 +116,49 @@ namespace DriverScanTester.Services
                 {
                     _wasAttacking = true;
                     _lastNonIdleActionTime = DateTime.Now;
+                    _combatStuckSamples = 0;
+                    return CombatAction.Attack;
                 }
 
-                // A_CurrentAction values: 25=idle, 27=running, 28=being hit, 39=attacking (knight sword)
-                if (currentAction == 27 || currentAction == 28 || currentAction == 39)
+                // ── Stuck detection (same pattern as StuckDetector) ──
+                // Uses GetCurrentAction as the source of truth:
+                // - action 27 or 3 → running (not stuck)
+                // - action 25 or 1 → idle/stuck
+                if (StuckDetector.IsActionIdleOrStuck(currentAction))
                 {
-                    _lastNonIdleActionTime = DateTime.Now;
-                    _stuckInAttackCounter = 0;
+                    if (_combatStuckSamples == 0)
+                        _combatStuckFirstSeenAt = DateTime.Now;
+                    _combatStuckSamples++;
+
+                    if (_combatStuckSamples >= CombatStuckRequiredSamples ||
+                        (DateTime.Now - _combatStuckFirstSeenAt).TotalMilliseconds >= CombatStuckRequiredMs)
+                    {
+                        _log("[Combat] Action stuck. Mob dead or stuck. TAB.");
+                        _wasAttacking = false;
+                        return CombatAction.TabTarget;
+                    }
+
+                    // Waiting for debounce threshold — skip movement but keep W released
+                    return CombatAction.CombatWait;
                 }
-                else if (currentAction == 0 && (DateTime.Now - _lastNonIdleActionTime).TotalSeconds >= IDLE_TIMEOUT_SECONDS)
+
+                // ── Fallback: action 0 idle timeout ──
+                if (currentAction == 0 && (DateTime.Now - _lastNonIdleActionTime).TotalSeconds >= IDLE_TIMEOUT_SECONDS)
                 {
                     _log("[Combat] Action idle > 0.5s. Mob dead or stuck. TAB.");
                     _wasAttacking = false;
                     return CombatAction.TabTarget;
                 }
 
-                // ── Stuck-in-attack detection ──
-                if (anim1 > KnightStuckMin && anim1 < KnightStuckMax)
+                // ── Update non-idle timestamp for running/attacking actions ──
+                if (currentAction == 27 || currentAction == 3 || currentAction == 28 || currentAction == 39)
                 {
-                    _stuckInAttackCounter++;
-
-                    if (_stuckInAttackCounter < 20)
-                    {
-                        if (_stuckInAttackCounter % 5 == 0)
-                            _log($"Stuck in attack (Anim: {anim1}). Switching target (TAB + 3). Attempt {_stuckInAttackCounter}");
-
-                        _log("[Key] TAB (target cycle) — stuck in attack");
-                        return CombatAction.StuckTabAttack;
-                    }
-                    else
-                    {
-                        _log("Stuck in attack persisted. Starting Unstuck Routine.");
-                        return CombatAction.UnstuckNeeded;
-                    }
-                }
-                else
-                {
-                    _stuckInAttackCounter = 0;
+                    _lastNonIdleActionTime = DateTime.Now;
+                    _combatStuckSamples = 0;
                 }
 
-                // ── Normal attack ──
-                _log("[Key] 3 (attack skill)");
-                return CombatAction.Attack;
+                // Skill 3 is held by MovementSystem — skip movement, keep waiting in combat
+                return CombatAction.CombatWait;
             }
             else
             {
@@ -172,7 +181,7 @@ namespace DriverScanTester.Services
         /// </summary>
         public void ResetStuckInAttack()
         {
-            _stuckInAttackCounter = 0;
+            _combatStuckSamples = 0;
         }
 
         /// <summary>
@@ -181,7 +190,7 @@ namespace DriverScanTester.Services
         public void ResetState()
         {
             _wasAttacking = false;
-            _stuckInAttackCounter = 0;
+            _combatStuckSamples = 0;
         }
     }
 }
