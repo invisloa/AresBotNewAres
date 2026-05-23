@@ -129,7 +129,7 @@
   },
   {
     "AddressText": "[Ares.exe \u002B 0x4704B0] \u002B 0x1A6",
-    "NameText": "C_camera 16880",
+    "NameText": "C_camera_Distance 16880",
     "ValueText": "17090",
     "ValueType": 1,
     "Priority": 2,

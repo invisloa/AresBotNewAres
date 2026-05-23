@@ -54,6 +54,20 @@ namespace DriverScanTester.ViewModels
             set => SetProperty(ref _segmentBotMode, value);
         }
 
+        private string _segmentCameraDistanceLockText = PathPoint.DefaultCameraDistanceLock.ToString();
+        public string SegmentCameraDistanceLockText
+        {
+            get => _segmentCameraDistanceLockText;
+            set => SetProperty(ref _segmentCameraDistanceLockText, value);
+        }
+
+        private string _segmentAttackDisengageDistanceText = PathPoint.DefaultAttackDisengageDistance.ToString();
+        public string SegmentAttackDisengageDistanceText
+        {
+            get => _segmentAttackDisengageDistanceText;
+            set => SetProperty(ref _segmentAttackDisengageDistanceText, value);
+        }
+
         // --- Route Builder State (Tab 2) ---
         private ObservableCollection<string> _availableSegments = new ObservableCollection<string>();
         public ObservableCollection<string> AvailableSegments
@@ -172,8 +186,10 @@ namespace DriverScanTester.ViewModels
 
         private void AddPoint()
         {
-            Points.Add(new PathPoint(0, 0, SegmentPrecision, SegmentBotMode));
-            StatusText = "Added new point (0,0).";
+            short cameraDistanceLock = GetSegmentCameraDistanceLock();
+            short attackDisengageDistance = GetSegmentAttackDisengageDistance();
+            Points.Add(new PathPoint(0, 0, SegmentPrecision, SegmentBotMode, cameraDistanceLock, attackDisengageDistance));
+            StatusText = $"Added new point (0,0) with cam lock {cameraDistanceLock} and attack disengage {attackDisengageDistance}.";
         }
 
         private void RemovePoint()
@@ -235,8 +251,10 @@ namespace DriverScanTester.ViewModels
             {
                 float x = (float)BitConverter.ToInt16(xBuf, 0);
                 float y = (float)BitConverter.ToInt16(yBuf, 0);
-                Points.Add(new PathPoint(x, y, SegmentPrecision, SegmentBotMode));
-                StatusText = $"Captured ({x}, {y}) with {SegmentPrecision} precision and {SegmentBotMode}.";
+                short cameraDistanceLock = GetSegmentCameraDistanceLock();
+                short attackDisengageDistance = GetSegmentAttackDisengageDistance();
+                Points.Add(new PathPoint(x, y, SegmentPrecision, SegmentBotMode, cameraDistanceLock, attackDisengageDistance));
+                StatusText = $"Captured ({x}, {y}) with {SegmentPrecision} precision, {SegmentBotMode}, cam lock {cameraDistanceLock}, attack disengage {attackDisengageDistance}.";
             }
             else
             {
@@ -275,7 +293,7 @@ namespace DriverScanTester.ViewModels
 
                 string json = JsonSerializer.Serialize(segment);
                 File.WriteAllText(path, json);
-                StatusText = $"Saved '{cleanName}' ({Points.Count} points with per-point precision/mode).";
+                StatusText = $"Saved '{cleanName}' ({Points.Count} points with per-point precision/mode/cam lock/attack disengage).";
                 RefreshLibrary();
             }
             catch (Exception ex)
@@ -328,11 +346,22 @@ namespace DriverScanTester.ViewModels
                 var loaded = JsonSerializer.Deserialize<PathSegment>(json);
                 if (loaded != null)
                 {
-                    Points = new ObservableCollection<PathPoint>(loaded.Points);
+                    var loadedPoints = loaded.Points ?? new List<PathPoint>();
+                    Points = new ObservableCollection<PathPoint>(loadedPoints);
                     SegmentName = loaded.Name;
                     SegmentPrecision = loaded.Precision;
                     SegmentBotMode = loaded.Mode;
-                    StatusText = $"Loaded '{SelectedAvailableSegment}' ({SegmentPrecision}/{SegmentBotMode}) into Editor.";
+                    if (loadedPoints.Count > 0)
+                    {
+                        SegmentCameraDistanceLockText = loadedPoints[0].CameraDistanceLock.ToString();
+                        SegmentAttackDisengageDistanceText = loadedPoints[0].AttackDisengageDistance.ToString();
+                    }
+                    else
+                    {
+                        SegmentCameraDistanceLockText = PathPoint.DefaultCameraDistanceLock.ToString();
+                        SegmentAttackDisengageDistanceText = PathPoint.DefaultAttackDisengageDistance.ToString();
+                    }
+                    StatusText = $"Loaded '{SelectedAvailableSegment}' ({SegmentPrecision}/{SegmentBotMode}) into Editor with cam/attack defaults.";
                 }
             }
             catch (Exception ex)
@@ -343,7 +372,7 @@ namespace DriverScanTester.ViewModels
 
         private void RunEditorPath()
         {
-            var list = Points.Select(p => new DriverScanTester.Services.Waypoint(p.X, p.Y, p.Precision, p.Mode)).ToList();
+            var list = Points.Select(p => new DriverScanTester.Services.Waypoint(p.X, p.Y, p.Precision, p.Mode, p.CameraDistanceLock, p.AttackDisengageDistance)).ToList();
             OnRunPath?.Invoke(list, LoopRoute);
             StatusText = "Running current editor segment...";
         }
@@ -416,7 +445,8 @@ namespace DriverScanTester.ViewModels
                         var loaded = JsonSerializer.Deserialize<PathSegment>(json);
                         if (loaded != null)
                         {
-                            combinedWaypoints.AddRange(loaded.Points.Select(p => new DriverScanTester.Services.Waypoint(p.X, p.Y, p.Precision, p.Mode)));
+                            var loadedPoints = loaded.Points ?? new List<PathPoint>();
+                            combinedWaypoints.AddRange(loadedPoints.Select(p => new DriverScanTester.Services.Waypoint(p.X, p.Y, p.Precision, p.Mode, p.CameraDistanceLock, p.AttackDisengageDistance)));
                             segmentsLoaded++;
                         }
                     }
@@ -436,6 +466,26 @@ namespace DriverScanTester.ViewModels
             {
                 StatusText = "Combined route resulted in 0 points.";
             }
+        }
+
+        private short GetSegmentCameraDistanceLock()
+        {
+            if (short.TryParse(SegmentCameraDistanceLockText, out short cameraDistanceLock))
+            {
+                return cameraDistanceLock;
+            }
+
+            return PathPoint.DefaultCameraDistanceLock;
+        }
+
+        private short GetSegmentAttackDisengageDistance()
+        {
+            if (short.TryParse(SegmentAttackDisengageDistanceText, out short attackDisengageDistance))
+            {
+                return attackDisengageDistance;
+            }
+
+            return PathPoint.DefaultAttackDisengageDistance;
         }
     }
 }

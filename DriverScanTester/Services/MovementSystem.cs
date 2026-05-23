@@ -23,17 +23,30 @@ namespace DriverScanTester.Services
 
     public struct Waypoint
     {
+        public const short DefaultCameraDistanceLock = 17020;
+        public const short DefaultAttackDisengageDistance = 60;
+
         public float X { get; set; }
         public float Y { get; set; }
         public MovementPrecision Precision { get; set; }
         public BotMode Mode { get; set; }
+        public short CameraDistanceLock { get; set; }
+        public short AttackDisengageDistance { get; set; }
 
-        public Waypoint(float x, float y, MovementPrecision precision, BotMode mode)
+        public Waypoint(
+            float x,
+            float y,
+            MovementPrecision precision,
+            BotMode mode,
+            short cameraDistanceLock = DefaultCameraDistanceLock,
+            short attackDisengageDistance = DefaultAttackDisengageDistance)
         {
             X = x;
             Y = y;
             Precision = precision;
             Mode = mode;
+            CameraDistanceLock = cameraDistanceLock;
+            AttackDisengageDistance = attackDisengageDistance;
         }
     }
 
@@ -123,9 +136,6 @@ namespace DriverScanTester.Services
         // Position jump detection — reset tracker if one tick moves more than this
         private const float MAX_REASONABLE_TICK_MOVEMENT = 8.0f;
 
-        // Camera distance only.
-        private const short CameraDistanceLock = 16980;
-
         // ── Camera update filtering ───────────────────────────────────────────────
         // Prevents camera oscillation (jitter between adjacent game-angle values)
         // by applying deadband, hysteresis, cooldown, and heading freeze logic.
@@ -168,6 +178,7 @@ namespace DriverScanTester.Services
 
         private bool _isMovingForward = false;
         private bool _isSkillThreeHeld = false;
+        private bool _attackSuppressedForCurrentWaypoint = false;
         private int _startMoveCount = 0;
         private int _stopMoveCount = 0;
         private static readonly Random _rng = new Random();
@@ -219,7 +230,7 @@ namespace DriverScanTester.Services
                 int index = 1;
                 foreach (var p in _initialPath)
                 {
-                    _log($"[Path] #{index}: ({p.X:F1}, {p.Y:F1}) Precision:{p.Precision} Mode:{p.Mode}");
+                    _log($"[Path] #{index}: ({p.X:F1}, {p.Y:F1}) Precision:{p.Precision} Mode:{p.Mode} CamLock:{p.CameraDistanceLock} AtkDis:{p.AttackDisengageDistance}");
                     index++;
                 }
             }
@@ -227,7 +238,7 @@ namespace DriverScanTester.Services
             {
                 var wp = new Waypoint(Waypoint2.X, Waypoint2.Y, GlobalPrecision, initialMode);
                 _waypoints.Enqueue(wp);
-                _log($"[Path] Single target: ({wp.X:F1}, {wp.Y:F1}) Precision:{wp.Precision} Mode:{wp.Mode}");
+                _log($"[Path] Single target: ({wp.X:F1}, {wp.Y:F1}) Precision:{wp.Precision} Mode:{wp.Mode} CamLock:{wp.CameraDistanceLock} AtkDis:{wp.AttackDisengageDistance}");
             }
         }
 
@@ -287,9 +298,6 @@ namespace DriverScanTester.Services
                 _currentMapId = currentMapId;
             }
 
-            // Keep distance only.
-            _memoryService.SetCameraDistance(CameraDistanceLock);
-
             // ── Attack speed / potion check ──
             if (_combatHandler.CheckAttackSpeed(_memoryService))
             {
@@ -301,10 +309,58 @@ namespace DriverScanTester.Services
                 GameInput.PressKey(GameInput.VK_8, GameInput.SCAN_8);
             }
 
+            var (currX, currY, success) = _memoryService.GetPlayerPosition();
+            if (!success)
+            {
+                _log($"[Tick {_tickCount}] [Pos] Read failed");
+                return;
+            }
+
+            // Position jump / outlier detection: if one tick moves more than MAX_REASONABLE_TICK_MOVEMENT, reset tracker
+            if (_progressTracker.HasSamples)
+            {
+                float tickDelta = GeometryUtils.Distance(currX, currY, _progressTracker.LastX, _progressTracker.LastY);
+                if (tickDelta > MAX_REASONABLE_TICK_MOVEMENT)
+                {
+                    _log($"[Progress] Jump! Δ{tickDelta:F1} > {MAX_REASONABLE_TICK_MOVEMENT:F0} — reset");
+                    _progressTracker.Reset();
+                }
+            }
+
+            // Log position every 5 ticks
+            if (_tickCount % 5 == 0)
+            {
+                _log($"[Tick {_tickCount}] @ ({currX:F1},{currY:F1}) Cam:{_memoryService.GetCameraAngle()}");
+            }
+
+            byte currentAction = _memoryService.GetCurrentAction();
+
             BotMode currentMode = BotMode.OnlyMove;
+            float manhattanDistanceToTarget = 0f;
             if (_waypoints.Count > 0)
             {
-                currentMode = _waypoints.Peek().Mode;
+                var currentWaypoint = _waypoints.Peek();
+                currentMode = currentWaypoint.Mode;
+                _memoryService.SetCameraDistance(currentWaypoint.CameraDistanceLock);
+                manhattanDistanceToTarget = GeometryUtils.ManhattanDistance(currX, currY, currentWaypoint.X, currentWaypoint.Y);
+
+                bool isAttackMode = currentWaypoint.Mode == BotMode.MoveAndAttack || currentWaypoint.Mode == BotMode.MoveAndAttackAndLoot;
+                if (isAttackMode && manhattanDistanceToTarget > currentWaypoint.AttackDisengageDistance)
+                {
+                    if (!_attackSuppressedForCurrentWaypoint)
+                    {
+                        _attackSuppressedForCurrentWaypoint = true;
+                        _combatHandler.ResetState();
+                        ReleaseSkillThree();
+                        _log($"[CombatGate] Overshoot d:{manhattanDistanceToTarget:F1} > {currentWaypoint.AttackDisengageDistance:F1} at ({currentWaypoint.X:F1},{currentWaypoint.Y:F1}) — attack disabled until waypoint is reached.");
+                    }
+
+                    currentMode = BotMode.OnlyMove;
+                }
+                else if (_attackSuppressedForCurrentWaypoint && isAttackMode)
+                {
+                    currentMode = BotMode.OnlyMove;
+                }
             }
 
             // ── Combat mode handling ──
@@ -379,32 +435,6 @@ namespace DriverScanTester.Services
             // Combat is over — release skill 3 if held
             ReleaseSkillThree();
 
-            var (currX, currY, success) = _memoryService.GetPlayerPosition();
-            if (!success)
-            {
-                _log($"[Tick {_tickCount}] [Pos] Read failed");
-                return;
-            }
-
-            // Position jump / outlier detection: if one tick moves more than MAX_REASONABLE_TICK_MOVEMENT, reset tracker
-            if (_progressTracker.HasSamples)
-            {
-                float tickDelta = GeometryUtils.Distance(currX, currY, _progressTracker.LastX, _progressTracker.LastY);
-                if (tickDelta > MAX_REASONABLE_TICK_MOVEMENT)
-                {
-                    _log($"[Progress] Jump! Δ{tickDelta:F1} > {MAX_REASONABLE_TICK_MOVEMENT:F0} — reset");
-                    _progressTracker.Reset();
-                }
-            }
-
-            // Log position every 5 ticks
-            if (_tickCount % 5 == 0)
-            {
-                _log($"[Tick {_tickCount}] @ ({currX:F1},{currY:F1}) Cam:{_memoryService.GetCameraAngle()}");
-            }
-
-            byte currentAction = _memoryService.GetCurrentAction();
-
             // ── Waypoint re-queue when empty (obstacle bypass) ──
             if (_waypoints.Count == 0 && !_goalReached)
             {
@@ -428,7 +458,6 @@ namespace DriverScanTester.Services
             {
                 var activeTarget = _waypoints.Peek();
                 float distToTarget = GeometryUtils.Distance(currX, currY, activeTarget.X, activeTarget.Y);
-                float reachThreshold = GetEffectiveWaypointReachThreshold(activeTarget);
 
                 // ── Normal movement path ──
 
@@ -457,6 +486,7 @@ namespace DriverScanTester.Services
                 }
 
                 var target = _waypoints.Peek();
+                _memoryService.SetCameraDistance(target.CameraDistanceLock);
                 float distNow = GeometryUtils.Distance(currX, currY, target.X, target.Y);
                 float thresholdNow = GetEffectiveWaypointReachThreshold(target);
 
@@ -663,6 +693,7 @@ namespace DriverScanTester.Services
                 ResetBearingState();
                 _progressTracker.Reset();
                 ResetActionStuckTracking();
+                ResetCombatStateForWaypointChange();
 
                 advanced = true;
 
@@ -703,6 +734,7 @@ namespace DriverScanTester.Services
                 ResetBearingState();
                 _progressTracker.Reset();
                 ResetActionStuckTracking();
+                ResetCombatStateForWaypointChange();
             }
             else
             {
@@ -916,6 +948,13 @@ namespace DriverScanTester.Services
         private void ResetActionStuckTracking()
         {
             _stuckDetector.ResetTracking();
+        }
+
+        private void ResetCombatStateForWaypointChange()
+        {
+            _attackSuppressedForCurrentWaypoint = false;
+            _combatHandler.ResetState();
+            ReleaseSkillThree();
         }
 
         /// <summary>

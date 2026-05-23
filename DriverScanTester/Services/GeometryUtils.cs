@@ -182,6 +182,11 @@ namespace DriverScanTester.Services
             return (float)Math.Sqrt(dx * dx + dy * dy);
         }
 
+        internal static float ManhattanDistance(float x1, float y1, float x2, float y2)
+        {
+            return Math.Abs(x1 - x2) + Math.Abs(y1 - y2);
+        }
+
         // ─────────────────────── Line-of-sight / obstacle ───────────────────────
 
         /// <summary>

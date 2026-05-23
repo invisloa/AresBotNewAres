@@ -33,6 +33,12 @@
                                 <DataGridComboBoxColumn Header="Mode" 
                                     ItemsSource="{Binding Source={x:Static vm:EnumSources.BotModes}}"
                                     SelectedItemBinding="{Binding Mode}" Width="*"/>
+                                <DataGridTextColumn Header="Cam Lock"
+                                    Binding="{Binding CameraDistanceLock, UpdateSourceTrigger=PropertyChanged}"
+                                    Width="*"/>
+                                <DataGridTextColumn Header="Atk Dis"
+                                    Binding="{Binding AttackDisengageDistance, UpdateSourceTrigger=PropertyChanged}"
+                                    Width="*"/>
                             </DataGrid.Columns>
                         </DataGrid>
                     </GroupBox>
@@ -76,6 +82,16 @@
                                   SelectedItem="{Binding SegmentBotMode}"
                                   Margin="0,0,0,10" Padding="3"
                                   ToolTip="Default bot mode applied only when adding new points via Add/Capture. Each point in the grid can be edited individually."/>
+
+                        <Label Content="Camera distance lock for new points:"/>
+                        <TextBox Text="{Binding SegmentCameraDistanceLockText, UpdateSourceTrigger=PropertyChanged}"
+                                 Margin="0,0,0,10" Padding="3"
+                                 ToolTip="Default camera distance lock used when adding/capturing new points. The grid value can still be edited per point."/>
+
+                        <Label Content="Attack disengage distance for new points:"/>
+                        <TextBox Text="{Binding SegmentAttackDisengageDistanceText, UpdateSourceTrigger=PropertyChanged}"
+                                 Margin="0,0,0,10" Padding="3"
+                                 ToolTip="If the bot moves farther than this Manhattan distance from the current attack waypoint, it will stop attacking until the waypoint is reached again."/>
 
                         <Button Content="Save Segment to Library" Command="{Binding SaveSegmentCommand}" Margin="0,0,0,20" Padding="5"/>
 
