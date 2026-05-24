@@ -288,12 +288,13 @@ namespace DriverScanTester.ViewModels
                     Name = SegmentName,
                     Precision = SegmentPrecision,
                     Mode = SegmentBotMode,
+                    LoopRoute = LoopRoute,
                     Points = Points.ToList()
                 };
 
                 string json = JsonSerializer.Serialize(segment);
                 File.WriteAllText(path, json);
-                StatusText = $"Saved '{cleanName}' ({Points.Count} points with per-point precision/mode/cam lock/attack disengage).";
+                StatusText = $"Saved '{cleanName}' ({Points.Count} points with per-point precision/mode/cam lock/attack disengage, loop={LoopRoute}).";
                 RefreshLibrary();
             }
             catch (Exception ex)
@@ -351,6 +352,7 @@ namespace DriverScanTester.ViewModels
                     SegmentName = loaded.Name;
                     SegmentPrecision = loaded.Precision;
                     SegmentBotMode = loaded.Mode;
+                    LoopRoute = loaded.LoopRoute;
                     if (loadedPoints.Count > 0)
                     {
                         SegmentCameraDistanceLockText = loadedPoints[0].CameraDistanceLock.ToString();
@@ -361,7 +363,7 @@ namespace DriverScanTester.ViewModels
                         SegmentCameraDistanceLockText = PathPoint.DefaultCameraDistanceLock.ToString();
                         SegmentAttackDisengageDistanceText = PathPoint.DefaultAttackDisengageDistance.ToString();
                     }
-                    StatusText = $"Loaded '{SelectedAvailableSegment}' ({SegmentPrecision}/{SegmentBotMode}) into Editor with cam/attack defaults.";
+                    StatusText = $"Loaded '{SelectedAvailableSegment}' ({SegmentPrecision}/{SegmentBotMode}) into Editor with cam/attack defaults and loop={LoopRoute}.";
                 }
             }
             catch (Exception ex)

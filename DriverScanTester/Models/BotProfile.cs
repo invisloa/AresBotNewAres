@@ -34,7 +34,9 @@ namespace DriverScanTester.Models
         /// <summary>Weight ratio (current/max) above which repot is triggered.</summary>
         public float MaxWeightRatio { get; set; } = 0.85f;
         /// <summary>If HP is at or below this value, repot is triggered.</summary>
-        public int MinHp { get; set; } = 0;
+        public int MinHp { get; set; } = 500;
+        /// <summary>If Mana is at or below this value, repot is triggered.</summary>
+        public int MinMana { get; set; } = 100;
 
         // --- Workflow options ---
         /// <summary>If true, skip actual RepotSystem.Repot() and just log "dry run".</summary>

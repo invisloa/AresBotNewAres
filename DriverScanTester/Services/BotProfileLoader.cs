@@ -171,6 +171,10 @@ namespace DriverScanTester.Services
                 errors.Add("MinHpPotions is negative.");
             if (profile.MinManaPotions < 0)
                 errors.Add("MinManaPotions is negative.");
+            if (profile.MinHp < 0)
+                errors.Add("MinHp is negative.");
+            if (profile.MinMana < 0)
+                errors.Add("MinMana is negative.");
             if (profile.MaxWeightRatio <= 0 || profile.MaxWeightRatio > 1f)
                 errors.Add("MaxWeightRatio should be between 0 and 1.");
             if (profile.MaxTeleportRetries < 0)

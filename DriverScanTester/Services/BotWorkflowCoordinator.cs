@@ -107,6 +107,7 @@ namespace DriverScanTester.Services
             _repotDetector.MinManaPotions = profile.MinManaPotions;
             _repotDetector.MaxWeightRatio = profile.MaxWeightRatio;
             _repotDetector.MinHp = profile.MinHp;
+            _repotDetector.MinMana = profile.MinMana;
         }
 
         /// <summary>

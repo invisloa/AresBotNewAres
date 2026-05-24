@@ -20,7 +20,10 @@ namespace DriverScanTester.Services
         public float MaxWeightRatio { get; set; } = 0.85f;
 
         /// <summary>If HP is at or below this value, repot is triggered.</summary>
-        public int MinHp { get; set; } = 0;
+        public int MinHp { get; set; } = 500;
+
+        /// <summary>If Mana is at or below this value, repot is triggered.</summary>
+        public int MinMana { get; set; } = 100;
 
         public RepotDetectorService(Action<string> log)
         {
@@ -57,6 +60,12 @@ namespace DriverScanTester.Services
             if (snapshot.Hp <= MinHp)
             {
                 _log($"[RepotDetector] HP is {snapshot.Hp} <= {MinHp}");
+                return true;
+            }
+
+            if (snapshot.Mana <= MinMana)
+            {
+                _log($"[RepotDetector] Mana is {snapshot.Mana} <= {MinMana}");
                 return true;
             }
 

@@ -183,6 +183,18 @@ namespace DriverScanTester.Services
         private int _stopMoveCount = 0;
         private static readonly Random _rng = new Random();
 
+        private enum CombatRetargetCameraStage
+        {
+            None,
+            LowSearch,
+            MidSearch
+        }
+
+        private const short CombatRetargetLowCameraDistance = 16950;
+        private const short CombatRetargetMidCameraDistance = 17000;
+        private CombatRetargetCameraStage _combatRetargetCameraStage = CombatRetargetCameraStage.None;
+        private bool _combatRetargetAwaitingSelection = false;
+
         public MovementSystem(GameMemoryService memoryService, Action<string> log, float targetX, float targetY, MovementPrecision precision = MovementPrecision.Medium, IEnumerable<Waypoint>? customPath = null, BotMode initialMode = BotMode.OnlyMove, bool loopPath = false)
         {
             _memoryService = memoryService;
@@ -261,6 +273,19 @@ namespace DriverScanTester.Services
 
             token.ThrowIfCancellationRequested();
 
+            if (_memoryService.GetIsInCity())
+            {
+                if (_isMovingForward || _isSkillThreeHeld)
+                {
+                    _log($"[Tick {_tickCount}] In city — stopping movement and skipping actions.");
+                    StopMoving();
+                    ReleaseSkillThree();
+                    ClearCombatRetargetSearch();
+                }
+
+                return;
+            }
+
             // ── Periodic state dump ──
             if (_tickCount % _stateLogInterval == 0)
             {
@@ -301,7 +326,7 @@ namespace DriverScanTester.Services
             // ── Attack speed / potion check ──
             if (_combatHandler.CheckAttackSpeed(_memoryService))
             {
-                _log($"[Tick {_tickCount}] Speed 16341 — using potions");
+                _log($"[Tick {_tickCount}] Speed 16384 — using potions");
                 _log("[Key] 7 (pot1)");
                 GameInput.PressKey(GameInput.VK_7, GameInput.SCAN_7);
                 await Task.Delay(500, token);
@@ -334,6 +359,8 @@ namespace DriverScanTester.Services
             }
 
             byte currentAction = _memoryService.GetCurrentAction();
+            int attackStatus = _memoryService.GetAttackStatus();
+            bool mobSelected = _memoryService.IsMobSelected();
 
             BotMode currentMode = BotMode.OnlyMove;
             float manhattanDistanceToTarget = 0f;
@@ -341,7 +368,6 @@ namespace DriverScanTester.Services
             {
                 var currentWaypoint = _waypoints.Peek();
                 currentMode = currentWaypoint.Mode;
-                _memoryService.SetCameraDistance(currentWaypoint.CameraDistanceLock);
                 manhattanDistanceToTarget = GeometryUtils.ManhattanDistance(currX, currY, currentWaypoint.X, currentWaypoint.Y);
 
                 bool isAttackMode = currentWaypoint.Mode == BotMode.MoveAndAttack || currentWaypoint.Mode == BotMode.MoveAndAttackAndLoot;
@@ -352,6 +378,7 @@ namespace DriverScanTester.Services
                         _attackSuppressedForCurrentWaypoint = true;
                         _combatHandler.ResetState();
                         ReleaseSkillThree();
+                        ClearCombatRetargetSearch();
                         _log($"[CombatGate] Overshoot d:{manhattanDistanceToTarget:F1} > {currentWaypoint.AttackDisengageDistance:F1} at ({currentWaypoint.X:F1},{currentWaypoint.Y:F1}) — attack disabled until waypoint is reached.");
                     }
 
@@ -361,6 +388,82 @@ namespace DriverScanTester.Services
                 {
                     currentMode = BotMode.OnlyMove;
                 }
+
+                bool canUseCombatRetargetSearch = currentMode == BotMode.MoveAndAttack || currentMode == BotMode.MoveAndAttackAndLoot;
+                if (!canUseCombatRetargetSearch)
+                {
+                    ClearCombatRetargetSearch();
+                }
+
+                short cameraDistanceToApply = currentWaypoint.CameraDistanceLock;
+                if (canUseCombatRetargetSearch && _combatRetargetCameraStage != CombatRetargetCameraStage.None)
+                {
+                    cameraDistanceToApply = GetCombatRetargetCameraDistance();
+                }
+
+                _memoryService.SetCameraDistance(cameraDistanceToApply);
+
+                if (canUseCombatRetargetSearch && _combatRetargetCameraStage != CombatRetargetCameraStage.None)
+                {
+                    if (attackStatus > 0)
+                    {
+                        _log($"[CombatRetarget] Mob selected at camera {cameraDistanceToApply}. Resuming normal combat.");
+                        ClearCombatRetargetSearch();
+                    }
+                    else if (mobSelected)
+                    {
+                        _log($"[CombatRetarget] Mob selected at camera {cameraDistanceToApply}. Starting attack.");
+                        ClearCombatRetargetSearch();
+                        if (!_isSkillThreeHeld)
+                        {
+                            _log("[Key] 3 hold (attack skill)");
+                            GameInput.keybd_event(GameInput.VK_3, GameInput.SCAN_3, 0, 0);
+                            _isSkillThreeHeld = true;
+                        }
+
+                        if (_isMovingForward)
+                        {
+                            StopMoving();
+                        }
+
+                        await Task.Delay(30, token);
+                        return;
+                    }
+                    else if (!_combatRetargetAwaitingSelection)
+                    {
+                        ReleaseSkillThree();
+                        _log($"[CombatRetarget] Camera -> {cameraDistanceToApply}, TAB");
+                        await Task.Delay(100, token);
+                        GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
+                        _combatRetargetAwaitingSelection = true;
+                        await Task.Delay(50, token);
+                        return;
+                    }
+                    else if (_combatRetargetCameraStage == CombatRetargetCameraStage.LowSearch)
+                    {
+                        _log("[CombatRetarget] No mob selected at 16950. Retrying at 17000.");
+                        _combatRetargetCameraStage = CombatRetargetCameraStage.MidSearch;
+                        _combatRetargetAwaitingSelection = false;
+
+                        _memoryService.SetCameraDistance(CombatRetargetMidCameraDistance);
+                        ReleaseSkillThree();
+                        _log("[CombatRetarget] Camera -> 17000, TAB");
+                        await Task.Delay(100, token);
+                        GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
+                        _combatRetargetAwaitingSelection = true;
+                        await Task.Delay(50, token);
+                        return;
+                    }
+                    else
+                    {
+                        _log($"[CombatRetarget] No mob selected at 17000. Restoring camera to {currentWaypoint.CameraDistanceLock}.");
+                        _memoryService.SetCameraDistance(currentWaypoint.CameraDistanceLock);
+                        ClearCombatRetargetSearch();
+                        await Task.Delay(30, token);
+                        return;
+                    }
+                }
+
             }
 
             // ── Combat mode handling ──
@@ -372,6 +475,22 @@ namespace DriverScanTester.Services
             switch (combatAction)
             {
                 case CombatAction.TabTarget:
+                    if ((currentMode == BotMode.MoveAndAttack || currentMode == BotMode.MoveAndAttackAndLoot) &&
+                        _isSkillThreeHeld &&
+                        _combatRetargetCameraStage == CombatRetargetCameraStage.None)
+                    {
+                        _log("[CombatRetarget] Target lost after attack. Lowering camera to 16950.");
+                        StartCombatRetargetSearch();
+                        _memoryService.SetCameraDistance(CombatRetargetLowCameraDistance);
+                        ReleaseSkillThree();
+                        _log("[CombatRetarget] Camera -> 16950, TAB");
+                        await Task.Delay(100, token);
+                        GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
+                        _combatRetargetAwaitingSelection = true;
+                        await Task.Delay(50, token);
+                        return;
+                    }
+
                     _log("[Key] TAB (target cycle)");
                     ReleaseSkillThree();
                     GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
@@ -954,6 +1073,7 @@ namespace DriverScanTester.Services
         {
             _attackSuppressedForCurrentWaypoint = false;
             _combatHandler.ResetState();
+            ClearCombatRetargetSearch();
             ReleaseSkillThree();
         }
 
@@ -1049,6 +1169,28 @@ namespace DriverScanTester.Services
                 GameInput.keybd_event(GameInput.VK_3, GameInput.SCAN_3, (uint)GameInput.KEYEVENTF_KEYUP, 0);
                 _isSkillThreeHeld = false;
             }
+        }
+
+        private void StartCombatRetargetSearch()
+        {
+            _combatRetargetCameraStage = CombatRetargetCameraStage.LowSearch;
+            _combatRetargetAwaitingSelection = false;
+        }
+
+        private void ClearCombatRetargetSearch()
+        {
+            _combatRetargetCameraStage = CombatRetargetCameraStage.None;
+            _combatRetargetAwaitingSelection = false;
+        }
+
+        private short GetCombatRetargetCameraDistance()
+        {
+            return _combatRetargetCameraStage switch
+            {
+                CombatRetargetCameraStage.LowSearch => CombatRetargetLowCameraDistance,
+                CombatRetargetCameraStage.MidSearch => CombatRetargetMidCameraDistance,
+                _ => CombatRetargetLowCameraDistance
+            };
         }
 
         // ========================================================================

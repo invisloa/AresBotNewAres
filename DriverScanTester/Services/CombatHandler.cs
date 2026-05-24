@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 namespace DriverScanTester.Services
 {
@@ -71,7 +71,7 @@ namespace DriverScanTester.Services
             {
                 short attackSpeed = memoryService.GetAttackSpeed();
                 _lastAttackSpeedCheck = DateTime.Now;
-                return attackSpeed == 16341;
+                return attackSpeed == 16384;
             }
             return false;
         }
