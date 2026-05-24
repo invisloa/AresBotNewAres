@@ -17,93 +17,93 @@ namespace DriverScanTester.Services
         private readonly Action<string> _log;
 
         // --- Offsets from MovementSystem ---
-        private const ulong PlayerPtrOffset = 0x471C88;
-        private const ulong MobSelectedPtrOffset2 = 0x3F4D4C;
-        private const ulong MobSelectedSubOffset2 = 0x9D;
-        private const ulong MobSelectedOffset2 = 0x60;
-        private const ulong XOffset = 0x144;
-        private const ulong YOffset = 0xEE8;
-        private const ulong HpOffset = 0x168;
-        private const ulong MaxHpOffset = 0x16C;
-        private const ulong ManaOffset = 0xC58;
-        private const ulong MaxMpOffset = 0xC5C;
-        private const ulong IsInCityOffset = 0x5F4;
-        private const ulong MapNumberOffset = 0x5F0;
-        private const ulong CurrentMapOffset = 0x5F8;
-        private const ulong CurrentWeightOffset = 0xC70;
-        private const ulong MaxWeightOffset = 0xC74;
-        private const ulong RunSpeedOffset = 0x150A;
-        private const ulong SkillSpeedOffset = 0xACA;
-        private const ulong Animation1Offset = 0x3ba;
-        private const ulong Animation2Offset = 0x3be;
-        private const ulong InventorySlotHPCountOffset = 0xF20;
-        private const ulong ManaPotionsCountOffset = 0xF40;
-        private const ulong WhitePotionsCountOffset = 0xF60;
-        private const ulong RedPotionsCountOffset = 0xF80;
-        private const ulong InventoryFirstSlotSellValueOffset = 0x191A;
-        private const ulong TargetSelectedOffset = 0x60;
-        private const ulong AttackSpeed1Offset = 0x47A;
-        private const ulong AttackSpeed2Offset = 0x47E;
-        private const ulong CurrentActionOffset = 0x3B0;
+        private const ulong PlayerPtrOffset = BotConstants.MemoryOffsets.PlayerPtr;
+        private const ulong MobSelectedPtrOffset2 = BotConstants.MemoryOffsets.MobSelectedPtr2;
+        private const ulong MobSelectedSubOffset2 = BotConstants.MemoryOffsets.MobSelectedSub2;
+        private const ulong MobSelectedOffset2 = BotConstants.MemoryOffsets.MobSelected2;
+        private const ulong XOffset = BotConstants.MemoryOffsets.X;
+        private const ulong YOffset = BotConstants.MemoryOffsets.Y;
+        private const ulong HpOffset = BotConstants.MemoryOffsets.Hp;
+        private const ulong MaxHpOffset = BotConstants.MemoryOffsets.MaxHp;
+        private const ulong ManaOffset = BotConstants.MemoryOffsets.Mana;
+        private const ulong MaxMpOffset = BotConstants.MemoryOffsets.MaxMp;
+        private const ulong IsInCityOffset = BotConstants.MemoryOffsets.IsInCity;
+        private const ulong MapNumberOffset = BotConstants.MemoryOffsets.MapNumber;
+        private const ulong CurrentMapOffset = BotConstants.MemoryOffsets.CurrentMap;
+        private const ulong CurrentWeightOffset = BotConstants.MemoryOffsets.CurrentWeight;
+        private const ulong MaxWeightOffset = BotConstants.MemoryOffsets.MaxWeight;
+        private const ulong RunSpeedOffset = BotConstants.MemoryOffsets.RunSpeed;
+        private const ulong SkillSpeedOffset = BotConstants.MemoryOffsets.SkillSpeed;
+        private const ulong Animation1Offset = BotConstants.MemoryOffsets.Animation1;
+        private const ulong Animation2Offset = BotConstants.MemoryOffsets.Animation2;
+        private const ulong InventorySlotHPCountOffset = BotConstants.MemoryOffsets.InventorySlotHPCount;
+        private const ulong ManaPotionsCountOffset = BotConstants.MemoryOffsets.ManaPotionsCount;
+        private const ulong WhitePotionsCountOffset = BotConstants.MemoryOffsets.WhitePotionsCount;
+        private const ulong RedPotionsCountOffset = BotConstants.MemoryOffsets.RedPotionsCount;
+        private const ulong InventoryFirstSlotSellValueOffset = BotConstants.MemoryOffsets.InventoryFirstSlotSellValue;
+        private const ulong TargetSelectedOffset = BotConstants.MemoryOffsets.TargetSelected;
+        private const ulong AttackSpeed1Offset = BotConstants.MemoryOffsets.AttackSpeed1;
+        private const ulong AttackSpeed2Offset = BotConstants.MemoryOffsets.AttackSpeed2;
+        private const ulong CurrentActionOffset = BotConstants.MemoryOffsets.CurrentAction;
         // A_CurrentAction values: 0=idle, 3=running, 4=being hit, 7=attacking -knight no weapon
         // A_CurrentAction values: 25=idle, 27=running, 28wd=being hit, 39=attacking -knight sword
 
 
-        private const ulong CameraPtrOffset = 0x4704B0;
-        private const ulong CameraDistanceOffset = 0x1a6;
-        private const ulong CameraAngleOffset = 0x1aa;
-        private const ulong CameraVerticalAngleOffset = 0x1be;
+        private const ulong CameraPtrOffset = BotConstants.MemoryOffsets.CameraPtr;
+        private const ulong CameraDistanceOffset = BotConstants.MemoryOffsets.CameraDistance;
+        private const ulong CameraAngleOffset = BotConstants.MemoryOffsets.CameraAngle;
+        private const ulong CameraVerticalAngleOffset = BotConstants.MemoryOffsets.CameraVerticalAngle;
 
         // --- Offsets from RepotAddress ---
-        private const ulong BaseNormalMOffset = 0x471C88;
-        private const ulong UiWindowMOffset = 0x471CA8;
-        private const int ShopWindow2MOffset = 0x94;
-        private const int ShopWindowOffset1 = 0x100;
-        private const int InventoryOpenOffset = 0xE8;
+        private const ulong BaseNormalMOffset = BotConstants.MemoryOffsets.BaseNormalM;
+        private const ulong UiWindowMOffset = BotConstants.MemoryOffsets.UiWindowM;
+        private const int ShopWindow2MOffset = BotConstants.MemoryOffsets.ShopWindow2M;
+        private const int ShopWindowOffset1 = BotConstants.MemoryOffsets.ShopWindow1;
+        private const int InventoryOpenOffset = BotConstants.MemoryOffsets.InventoryOpen;
 
-        private const int SellerWindow2MOffset = 0xac;
-        private const int InventoryWindow2MOffset = 0x60;
-        private const int StorageWindow2MOffset = 0x94;
-        private const int ShopWindowOffset2 = 0xd8;
-        private const int SellerWindowOffset1 = 0xc0;
-        private const int StorageWindowOffset1 = 0xc0;
-        private const int StorageWindowOffset2 = 0xd8;
-        private const int InventoryWindowOffset1 = 0xc0;
-        private const int InventoryWindowOffset2 = 0xd8;
-        private const int InventoryCurrentTabOffset = 0x110;
-        private const int InventoryCurrentTabMOffset = 0x2AD2EC;
-        private const int SellWindowOffset = 0xc0;
-        private const ulong SellWindowMOffset = 0x2AD308;
-        private const int DeleteWindowOffset = 0x138c;
-        private const int SellItemSelectedOffset = 0x12e;
-        private const int SlotHPOffset = 0xbb2;
-        private const int SlotMannaOffset = 0xbce;
-        private const int SlotRedPotOffset = 0xbea;
-        private const int SlotWhitePotOffset = 0xc06;
-        private const int SlotFirstSellOffset = 0xc5a;
-        private const int SlotFirstStorageValueOffset = 0x116;
+        private const int SellerWindow2MOffset = BotConstants.MemoryOffsets.SellerWindow2M;
+        private const int InventoryWindow2MOffset = BotConstants.MemoryOffsets.InventoryWindow2M;
+        private const int StorageWindow2MOffset = BotConstants.MemoryOffsets.StorageWindow2M;
+        private const int ShopWindowOffset2 = BotConstants.MemoryOffsets.ShopWindow2;
+        private const int SellerWindowOffset1 = BotConstants.MemoryOffsets.SellerWindow1;
+        private const int StorageWindowOffset1 = BotConstants.MemoryOffsets.StorageWindow1;
+        private const int StorageWindowOffset2 = BotConstants.MemoryOffsets.StorageWindow2;
+        private const int InventoryWindowOffset1 = BotConstants.MemoryOffsets.InventoryWindow1;
+        private const int InventoryWindowOffset2 = BotConstants.MemoryOffsets.InventoryWindow2;
+        private const int InventoryCurrentTabOffset = BotConstants.MemoryOffsets.InventoryCurrentTab;
+        private const int InventoryCurrentTabMOffset = BotConstants.MemoryOffsets.InventoryCurrentTabM;
+        private const int SellWindowOffset = BotConstants.MemoryOffsets.SellWindow;
+        private const ulong SellWindowMOffset = BotConstants.MemoryOffsets.SellWindowM;
+        private const int DeleteWindowOffset = BotConstants.MemoryOffsets.DeleteWindow;
+        private const int SellItemSelectedOffset = BotConstants.MemoryOffsets.SellItemSelected;
+        private const int SlotHPOffset = BotConstants.MemoryOffsets.SlotHP;
+        private const int SlotMannaOffset = BotConstants.MemoryOffsets.SlotManna;
+        private const int SlotRedPotOffset = BotConstants.MemoryOffsets.SlotRedPot;
+        private const int SlotWhitePotOffset = BotConstants.MemoryOffsets.SlotWhitePot;
+        private const int SlotFirstSellOffset = BotConstants.MemoryOffsets.SlotFirstSell;
+        private const int SlotFirstStorageValueOffset = BotConstants.MemoryOffsets.SlotFirstStorageValue;
 
-        private const ulong InventoryTestPtrOffset = 0x242CB5;
-        private const ulong InventoryTestSubOffset = 0xF0;
+        private const ulong InventoryTestPtrOffset = BotConstants.MemoryOffsets.InventoryTestPtr;
+        private const ulong InventoryTestSubOffset = BotConstants.MemoryOffsets.InventoryTestSub;
 
         // --- Constants from RepotAddress ---
-        public const int ItemCount1 = 16777217;
-        public const int MannaPotionsCountValue = 16777257;
-        public const int WhitePotionsCountValue = 16777222;
-        public const int RedPotionsCountValue = 16777222;
-        public static readonly int[] ItemsNotForSaleValues = { 0, 246, 247, 1092, 1093, 1094, 1095, 3093 };
+        public const int ItemCount1 = BotConstants.GameMagicValues.ItemCount1;
+        public const int MannaPotionsCountValue = BotConstants.GameMagicValues.MannaPotionsCountValue;
+        public const int WhitePotionsCountValue = BotConstants.GameMagicValues.WhitePotionsCountValue;
+        public const int RedPotionsCountValue = BotConstants.GameMagicValues.RedPotionsCountValue;
+        public static readonly int[] ItemsNotForSaleValues = BotConstants.GameMagicValues.ItemsNotForSale;
 
         // --- Offsets from LootAddress ---
-        public const int SOD = -13799;
-        public const int SOP = 32627;
-        private const ulong CurrentItemHighlightedTypeOffset = 0x8C9Fd0;
-        private const int PositionXOffset = 0x23c;
+        public const int SOD = BotConstants.GameMagicValues.Sod;
+        public const int SOP = BotConstants.GameMagicValues.Sop;
+        private const ulong CurrentItemHighlightedTypeOffset = BotConstants.MemoryOffsets.CurrentItemHighlightedType;
+        private const int PositionXOffset = BotConstants.MemoryOffsets.PositionX;
 
         // --- Offsets from HealManaSystem ---
-        private const ulong HealManaBasePtrAddr2 = 0x8A3DA8;
-        private const ulong HealManaOffset2 = 0xC58;
-        private const ulong HealManaBasePtrAddr1 = 0x5C48CB;
-        private const ulong HealManaOffset1 = 0x2C8;
+        private const ulong HealManaBasePtrAddr2 = BotConstants.MemoryOffsets.HealManaBasePtr2;
+        private const ulong HealManaOffset2 = BotConstants.MemoryOffsets.HealManaOffset2;
+        private const ulong HealManaBasePtrAddr1 = BotConstants.MemoryOffsets.HealManaBasePtr1;
+        private const ulong HealManaOffset1 = BotConstants.MemoryOffsets.HealManaOffset1;
 
         public GameMemoryService(uint pid, ReadMemoryDelegate read, WriteMemoryDelegate write, ulong moduleBase, int pointerSize, Action<string> log)
         {

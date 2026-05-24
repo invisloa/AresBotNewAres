@@ -32,16 +32,16 @@ namespace DriverScanTester.Services
 
         // ── Configuration ──
 
-        private const int AttemptMs = 200;
-        private const int MaxAttempts = 4;
-        private const float SuccessDisplacement = 0.60f;
-        private const float SuccessDistImprove = 0.50f;
+        private const int AttemptMs = BotConstants.ReverseDiagonal.AttemptMs;
+        private const int MaxAttempts = BotConstants.ReverseDiagonal.MaxAttempts;
+        private const float SuccessDisplacement = BotConstants.ReverseDiagonal.SuccessDisplacement;
+        private const float SuccessDistImprove = BotConstants.ReverseDiagonal.SuccessDistImprove;
 
         /// <summary>Maximum age of a healthy bearing for it to be reused.</summary>
-        private static readonly TimeSpan HealthyBearingMaxAge = TimeSpan.FromSeconds(5.0);
+        private static readonly TimeSpan HealthyBearingMaxAge = TimeSpan.FromSeconds(BotConstants.Timeouts.HealthyBearingMaxAgeSeconds);
 
         // Offsets applied to the base bearing, in exact order.
-        private static readonly float[] AttemptOffsets = { 135f, -135f, 150f, -150f };
+        private static readonly float[] AttemptOffsets = BotConstants.ReverseDiagonal.AttemptOffsets;
 
         // ── State ──
 

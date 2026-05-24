@@ -14,10 +14,10 @@ namespace DriverScanTester.Models
         /// </summary>
         public static int GetScanInterval(LockPriority priority) => priority switch
         {
-            LockPriority.Low => 10_000,  // 10 seconds
-            LockPriority.Mid => 1_000,    // 1 second
-            LockPriority.High => 100,     // 100 ms
-            _ => 100
+            LockPriority.Low => BotConstants.LockPriority.LowScanInterval,  // 10 seconds
+            LockPriority.Mid => BotConstants.LockPriority.MidScanInterval,  // 1 second
+            LockPriority.High => BotConstants.LockPriority.HighScanInterval, // 100 ms
+            _ => BotConstants.LockPriority.HighScanInterval
         };
 
         /// <summary>
@@ -25,10 +25,10 @@ namespace DriverScanTester.Models
         /// </summary>
         public static int GetLockInterval(LockPriority priority) => priority switch
         {
-            LockPriority.Low => 10_000,   // 10 seconds
-            LockPriority.Mid => 100,      // 100 ms
-            LockPriority.High => 1,       // 1 ms
-            _ => 1
+            LockPriority.Low => BotConstants.LockPriority.LowLockInterval,   // 10 seconds
+            LockPriority.Mid => BotConstants.LockPriority.MidLockInterval,   // 100 ms
+            LockPriority.High => BotConstants.LockPriority.HighLockInterval, // 1 ms
+            _ => BotConstants.LockPriority.HighLockInterval
         };
     }
 }

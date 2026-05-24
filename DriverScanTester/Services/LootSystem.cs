@@ -14,16 +14,16 @@ namespace DriverScanTester.Services
         private readonly Action<string> _log;
 
         // Pixel Scan Constants
-        private static readonly int[] smallX = { 850, 1170 };
-        private static readonly int[] smallY = { 410, 730 };
-        private static readonly int[] bigX = { 550, 1360 };
-        private static readonly int[] bigY = { 290, 835 };
+        private static readonly int[] smallX = BotConstants.Loot.SmallScanX;
+        private static readonly int[] smallY = BotConstants.Loot.SmallScanY;
+        private static readonly int[] bigX = BotConstants.Loot.BigScanX;
+        private static readonly int[] bigY = BotConstants.Loot.BigScanY;
 
         // Character exclude zone
-        private const int ExcludeXMin = 934;
-        private const int ExcludeXMax = 979;
-        private const int ExcludeYMin = 500;
-        private const int ExcludeYMax = 538;
+        private const int ExcludeXMin = BotConstants.Loot.ExcludeXMin;
+        private const int ExcludeXMax = BotConstants.Loot.ExcludeXMax;
+        private const int ExcludeYMin = BotConstants.Loot.ExcludeYMin;
+        private const int ExcludeYMax = BotConstants.Loot.ExcludeYMax;
 
         private Bitmap _bitmap;
         private Graphics _graphics;
@@ -34,14 +34,14 @@ namespace DriverScanTester.Services
             _memoryService = memoryService;
             _log = log;
 
-            _bitmap = new Bitmap(1370, 840);
+            _bitmap = new Bitmap(BotConstants.Loot.BitmapWidth, BotConstants.Loot.BitmapHeight);
             _graphics = Graphics.FromImage(_bitmap);
         }
 
         public async Task Update(CancellationToken token)
         {
              PixelScan();
-             await Task.Delay(10, token);
+             await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
         }
 
         private void PixelScan()
@@ -110,7 +110,7 @@ namespace DriverScanTester.Services
         private void CheckIfSodSelected()
         {
             int highlighted = GetCurrentItemHighlightedType();
-            if (highlighted == GameMemoryService.SOD)
+            if (highlighted == BotConstants.GameMagicValues.Sod)
             {
                 _wasSodDetected = true;
             }
@@ -120,7 +120,7 @@ namespace DriverScanTester.Services
         {
             int highlighted = GetCurrentItemHighlightedType();
 
-            if (highlighted == GameMemoryService.SOD || highlighted == GameMemoryService.SOP)
+            if (highlighted == BotConstants.GameMagicValues.Sod || highlighted == BotConstants.GameMagicValues.Sop)
             {
                 CollectionClick(highlighted);
                 return true;
@@ -136,11 +136,11 @@ namespace DriverScanTester.Services
             MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.LeftDown);
 
             _log($"Collecting Item Type: {itemType}");
-            Thread.Sleep(50);
+            Thread.Sleep(BotConstants.Delays.CollectClickHoldMs);
 
             MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.LeftUp);
 
-            Thread.Sleep(500); // Wait for collection animation/movement
+            Thread.Sleep(BotConstants.Delays.CollectAnimationMs); // Wait for collection animation/movement
 
             UnbugWhenCollecting(positionBeforeClick);
 
@@ -152,15 +152,15 @@ namespace DriverScanTester.Services
             int currentX = GetPositionX();
             if (beforeClickPosX == currentX)
             {
-                MouseOperations.MoveAndLeftClick(900, 600, 100);
+                MouseOperations.MoveAndLeftClick(BotConstants.Loot.UnbugClickX, BotConstants.Loot.UnbugClickY, 100);
             }
         }
 
         private void PixelScanUnderChar()
         {
-            for (int x = 930; x < 980; x+=5)
+            for (int x = BotConstants.Loot.UnderCharScanStartX; x < BotConstants.Loot.UnderCharScanEndX; x += BotConstants.Loot.UnderCharScanStepX)
             {
-                for (int y = 500; y < 545; y+=5)
+                for (int y = BotConstants.Loot.UnderCharScanStartY; y < BotConstants.Loot.UnderCharScanEndY; y += BotConstants.Loot.UnderCharScanStepY)
                 {
                     WaitMouseInPosition(x, y);
                     if (ClickAndCollectWhatItem())

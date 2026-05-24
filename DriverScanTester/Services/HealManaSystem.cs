@@ -12,15 +12,15 @@ namespace DriverScanTester.Services
         private readonly Action<string> _log;
 
         // Constants for heal/mana
-        private const int VK_1 = 0x31;
-        private const int VK_2 = 0x32;
-        private const byte SCAN_CODE_1 = 0x02; // Scan code for '1'
-        private const byte SCAN_CODE_2 = 0x03; // Scan code for '2'
-        private const int KEYEVENTF_KEYUP = 0x0002;
+        private const int VK_1 = BotConstants.HealMana.Vk1;
+        private const int VK_2 = BotConstants.HealMana.Vk2;
+        private const byte SCAN_CODE_1 = BotConstants.HealMana.ScanCode1; // Scan code for '1'
+        private const byte SCAN_CODE_2 = BotConstants.HealMana.ScanCode2; // Scan code for '2'
+        private const int KEYEVENTF_KEYUP = BotConstants.Keyboard.KeyEventKeyUp;
 
         // Thresholds
-        public static short Threshold2 = 50;        // Threshold for key '2' (MP?)
-        public static short Threshold1 = 250;       // Threshold for key '1' (HP?)
+        public static short Threshold2 = BotConstants.HealMana.MpThreshold;        // Threshold for key '2' (MP?)
+        public static short Threshold1 = BotConstants.HealMana.HpThreshold;       // Threshold for key '1' (HP?)
 
         [DllImport("user32.dll")]
         static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
@@ -61,7 +61,7 @@ namespace DriverScanTester.Services
         private async Task PressKey(byte vkCode, byte scanCode, CancellationToken token)
         {
             keybd_event(vkCode, scanCode, 0, 0);
-            await Task.Delay(50, token); // Small delay to simulate key press duration
+            await Task.Delay(BotConstants.Delays.HealManaKeyPressMs, token); // Small delay to simulate key press duration
             keybd_event(vkCode, scanCode, (uint)KEYEVENTF_KEYUP, 0);
         }
     }

@@ -89,7 +89,7 @@ namespace DriverScanTester.Services
             int hpCount = _memoryService.GetHpPotionCount();
             int manaCount = _memoryService.GetManaPotionCount();
 
-            if (hpCount < 5 || manaCount < 5)
+            if (hpCount < BotConstants.Repot.MinHpPotionsInternal || manaCount < BotConstants.Repot.MinManaPotionsInternal)
             {
                 _log($"Low potions (HP: {hpCount}, Mana: {manaCount}). Switching to Repot.");
                 _stopMoving();
@@ -117,7 +117,7 @@ namespace DriverScanTester.Services
 
         private void TickReportAndGoBackRoutine()
         {
-            if ((DateTime.Now - _repotStageStartTime).TotalSeconds < 15)
+            if ((DateTime.Now - _repotStageStartTime).TotalSeconds < BotConstants.Timeouts.TeleportWaitSeconds)
             {
                 return;
             }
@@ -151,7 +151,7 @@ namespace DriverScanTester.Services
             }
             else if (_repotStage == 1)
             {
-                if ((DateTime.Now - _repotStageStartTime).TotalSeconds >= 15)
+                if ((DateTime.Now - _repotStageStartTime).TotalSeconds >= BotConstants.Timeouts.TeleportWaitSeconds)
                 {
                     _log("Repot Routine: Teleport wait time over. Checking if in city.");
                     bool inCity = _memoryService.GetIsInCity();

@@ -31,19 +31,19 @@ namespace DriverScanTester.Services
     internal class CombatHandler
     {
         // ── Knight Animation Constants ──
-        private const int KnightAttackedMin = 17300;
-        private const int KnightAttackedMax = 17400;
+        private const int KnightAttackedMin = BotConstants.Combat.KnightAttackedMin;
+        private const int KnightAttackedMax = BotConstants.Combat.KnightAttackedMax;
 
         // ── Timings ──
-        private const double IDLE_TIMEOUT_SECONDS = 0.5;
-        private const double MOVE_MODE_TAB_INTERVAL_SECONDS = 0.8;
+        private const double IDLE_TIMEOUT_SECONDS = BotConstants.Combat.IdleTimeoutSeconds;
+        private const double MOVE_MODE_TAB_INTERVAL_SECONDS = BotConstants.Combat.MoveModeTabIntervalSeconds;
 
         // ── Combat stuck detection (same pattern as StuckDetector) ──
         // Uses GetCurrentAction as the source of truth:
         // - action 27 or 3 → running (not stuck)
         // - action 25 or 1 → idle/stuck
-        private const int CombatStuckRequiredSamples = 2;
-        private const double CombatStuckRequiredMs = 200.0;
+        private const int CombatStuckRequiredSamples = BotConstants.Combat.StuckRequiredSamples;
+        private const double CombatStuckRequiredMs = BotConstants.Combat.StuckRequiredMs;
 
         // ── State ──
         private bool _wasAttacking;
@@ -67,11 +67,11 @@ namespace DriverScanTester.Services
         /// </summary>
         public bool CheckAttackSpeed(GameMemoryService memoryService)
         {
-            if ((DateTime.Now - _lastAttackSpeedCheck).TotalSeconds >= 5)
+            if ((DateTime.Now - _lastAttackSpeedCheck).TotalSeconds >= BotConstants.SpeedPotion.CheckIntervalSeconds)
             {
                 short attackSpeed = memoryService.GetAttackSpeed();
                 _lastAttackSpeedCheck = DateTime.Now;
-                return attackSpeed == 16384;
+                return attackSpeed == BotConstants.SpeedPotion.AttackSpeedThreshold;
             }
             return false;
         }

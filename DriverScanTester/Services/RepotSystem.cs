@@ -62,14 +62,14 @@ namespace DriverScanTester.Services
         {
             _log("Opening Shop Window...");
             // Logic from MouseClickOpenShop in OLD_ExpBotClass.cs
-            Thread.Sleep(1000);
+            Thread.Sleep(BotConstants.Delays.OpenShopInitialMs);
             MouseOperations.MoveAndLeftClick(580, 565, 200);
 
             // Wait for shop to open?
             int retries = 0;
-            while (!IsShopOpen() && retries < 10)
+            while (!IsShopOpen() && retries < BotConstants.Repot.OpenShopRetries)
             {
-                Thread.Sleep(500);
+                Thread.Sleep(BotConstants.Delays.OpenShopRetryMs);
                 retries++;
             }
             if (IsShopOpen()) _log("Shop Window Opened.");
@@ -88,25 +88,25 @@ namespace DriverScanTester.Services
                 Thread.Sleep(1000);
 
                 // Mana Potions (Index 0)
-                if (i == 0 && GetManaPotionCount() < GameMemoryService.ItemCount1 + 99)
+                if (i == 0 && GetManaPotionCount() < BotConstants.GameMagicValues.ItemCount1 + BotConstants.Repot.ManaBuyTarget)
                 {
                     MouseOperations.MoveAndLeftClick(positions[i].X, positions[i].Y, 150);
                     HowManyPotionsToBuy(i);
                 }
                 // Red Potions (Index 1)
-                else if (i == 1 && GetRedPotionCount() < GameMemoryService.ItemCount1 + 3)
+                else if (i == 1 && GetRedPotionCount() < BotConstants.GameMagicValues.ItemCount1 + BotConstants.Repot.RedBuyTarget)
                 {
                     MouseOperations.MoveAndLeftClick(positions[i].X, positions[i].Y, 150);
                     HowManyPotionsToBuy(i);
                 }
                 // White Potions (Index 2)
-                else if (i == 2 && GetWhitePotionCount() < GameMemoryService.ItemCount1 + 3)
+                else if (i == 2 && GetWhitePotionCount() < BotConstants.GameMagicValues.ItemCount1 + BotConstants.Repot.WhiteBuyTarget)
                 {
                     MouseOperations.MoveAndLeftClick(positions[i].X, positions[i].Y, 150);
                     HowManyPotionsToBuy(i);
                 }
                 // HP Potions (Index 3)
-                else if (i == 3 && GetHpPotionCount() < GameMemoryService.ItemCount1 + 120)
+                else if (i == 3 && GetHpPotionCount() < BotConstants.GameMagicValues.ItemCount1 + BotConstants.Repot.HpBuyTarget)
                 {
                     MouseOperations.MoveAndLeftClick(positions[i].X, positions[i].Y, 150);
                     HowManyPotionsToBuy(i);
@@ -185,7 +185,7 @@ namespace DriverScanTester.Services
                 if (itemType == 0) continue; // Empty slot
 
                 bool isSafe = false;
-                foreach (var safeItem in GameMemoryService.ItemsNotForSaleValues)
+                foreach (var safeItem in BotConstants.GameMagicValues.ItemsNotForSale)
                 {
                     if (itemType == safeItem)
                     {

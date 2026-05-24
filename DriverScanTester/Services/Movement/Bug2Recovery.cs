@@ -68,13 +68,13 @@ namespace DriverScanTester.Services
 
         // ── Constants ──
 
-        private const double BUG2_CANDIDATE_OBSERVE_MS = 700.0;
-        private const int BUG2_MAX_TOTAL_STEPS = 40;
-        private const int BUG2_MAX_FAILED_MOVES = 12;
-        private const double BUG2_MAX_DURATION_SECONDS = 20.0;
-        private const float BUG2_M_LINE_TOLERANCE = 1.5f;
-        private const float BUG2_LEAVE_MIN_IMPROVEMENT = 1.0f;
-        private const int BUG2_MAX_STEPS_BEFORE_SIDE_SWITCH = 8;
+        private const double BUG2_CANDIDATE_OBSERVE_MS = BotConstants.Bug2.CandidateObserveMs;
+        private const int BUG2_MAX_TOTAL_STEPS = BotConstants.Bug2.MaxTotalSteps;
+        private const int BUG2_MAX_FAILED_MOVES = BotConstants.Bug2.MaxFailedMoves;
+        private const double BUG2_MAX_DURATION_SECONDS = BotConstants.Bug2.MaxDurationSeconds;
+        private const float BUG2_M_LINE_TOLERANCE = BotConstants.Bug2.MLineTolerance;
+        private const float BUG2_LEAVE_MIN_IMPROVEMENT = BotConstants.Bug2.LeaveMinImprovement;
+        private const int BUG2_MAX_STEPS_BEFORE_SIDE_SWITCH = BotConstants.Bug2.MaxStepsBeforeSideSwitch;
 
         // ── Public properties ──
 

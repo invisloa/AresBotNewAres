@@ -13,7 +13,7 @@ namespace DriverScanTester.Services
         private readonly Action<string> _log;
         private readonly Func<Waypoint, float> _getReachThreshold;
 
-        private const float STUCK_SOFT_SKIP_DISTANCE = 5.5f;
+        private const float STUCK_SOFT_SKIP_DISTANCE = BotConstants.Movement.StuckSoftSkipDistance;
 
         public WaypointSkipPolicy(
             GameMemoryService memory,

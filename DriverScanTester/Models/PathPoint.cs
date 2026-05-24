@@ -4,8 +4,8 @@ namespace DriverScanTester.Models
 {
     public class PathPoint
     {
-        public const short DefaultCameraDistanceLock = 17020;
-        public const short DefaultAttackDisengageDistance = 60;
+        public const short DefaultCameraDistanceLock = BotConstants.Camera.DefaultDistanceLock;
+        public const short DefaultAttackDisengageDistance = BotConstants.Combat.DefaultAttackDisengageDistance;
 
         public float X { get; set; }
         public float Y { get; set; }

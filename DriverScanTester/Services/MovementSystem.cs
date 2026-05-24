@@ -23,8 +23,8 @@ namespace DriverScanTester.Services
 
     public struct Waypoint
     {
-        public const short DefaultCameraDistanceLock = 17020;
-        public const short DefaultAttackDisengageDistance = 60;
+        public const short DefaultCameraDistanceLock = BotConstants.Camera.DefaultDistanceLock;
+        public const short DefaultAttackDisengageDistance = BotConstants.Combat.DefaultAttackDisengageDistance;
 
         public float X { get; set; }
         public float Y { get; set; }
@@ -78,27 +78,27 @@ namespace DriverScanTester.Services
 
         // Temporary ghost waypoint tracking
         private readonly List<(float X, float Y)> _ghostWaypoints = new List<(float X, float Y)>();
-        private const float GHOST_MATCH_EPSILON = 0.35f;
-        private const float GHOST_REACH_THRESHOLD = 7.0f;
+        private const float GHOST_MATCH_EPSILON = BotConstants.Movement.GhostMatchEpsilon;
+        private const float GHOST_REACH_THRESHOLD = BotConstants.Movement.GhostReachThreshold;
         // Bearing state
-        private const float UnsetBearing = -999f;
+        private const float UnsetBearing = BotConstants.Movement.UnsetBearing;
         private float _lastSetBearingDeg = UnsetBearing;
         private bool _hasLastGameAngle = false;
         private float _lastSetGameAngle = 0f;
 
         // Stuck Detection
         private DateTime _ignoreStuckUntil = DateTime.MinValue;
-        private const double STUCK_GRACE_AFTER_START_SECONDS = 1.25;
+        private const double STUCK_GRACE_AFTER_START_SECONDS = BotConstants.Movement.StuckGraceAfterStartSeconds;
 
         // Progress tracker
         private readonly MovementProgressTracker _progressTracker;
 
         // Near-target stuck ignore
-        private const float NEAR_TARGET_STUCK_IGNORE_EXTRA = 1.0f;
+        private const float NEAR_TARGET_STUCK_IGNORE_EXTRA = BotConstants.Movement.NearTargetStuckIgnoreExtra;
 
         // Final-waypoint soft completion
-        private const float FINAL_GOAL_SOFT_RADIUS = 3.0f;
-        private const double FINAL_GOAL_STALL_TIME = 2.0;
+        private const float FINAL_GOAL_SOFT_RADIUS = BotConstants.Movement.FinalGoalSoftRadius;
+        private const double FINAL_GOAL_STALL_TIME = BotConstants.Movement.FinalGoalStallTime;
         private DateTime _finalGoalLastProgressTime = DateTime.MinValue;
         private float _finalGoalBestDist = float.MaxValue;
 
@@ -106,7 +106,7 @@ namespace DriverScanTester.Services
         //  LOCAL NAVIGATION MAP
         // ────────────────────────────────────────────────────────
 
-        private const float LOCAL_MAP_CELL_SIZE = 1.0f;
+        private const float LOCAL_MAP_CELL_SIZE = BotConstants.Movement.LocalMapCellSize;
 
         private readonly LocalNavigationMap _localNavigationMap;
         private int _currentMapId = -1;
@@ -115,12 +115,12 @@ namespace DriverScanTester.Services
         //  ACTION-BASED STUCK CONSTANTS
         // ────────────────────────────────────────────────────────
 
-        private const float STUCK_SOFT_SKIP_DISTANCE = 5.5f;
+        private const float STUCK_SOFT_SKIP_DISTANCE = BotConstants.Movement.StuckSoftSkipDistance;
 
         // (Bug2 state moved to Bug2Recovery strategy class)
 
         private bool _isUnstuckRoutineActive = false;
-        private const double FORCE_START_MIN_INTERVAL_MS = 700.0;
+        private const double FORCE_START_MIN_INTERVAL_MS = BotConstants.Movement.ForceStartMinIntervalMs;
         private DateTime _lastForceStartMovingAt = DateTime.MinValue;
 
         private readonly ReverseDiagonalRecovery _reverseDiagonalRecovery;
@@ -134,23 +134,23 @@ namespace DriverScanTester.Services
         private DateTime _lastHealthyMoveTime = DateTime.MinValue;
 
         // Position jump detection — reset tracker if one tick moves more than this
-        private const float MAX_REASONABLE_TICK_MOVEMENT = 8.0f;
+        private const float MAX_REASONABLE_TICK_MOVEMENT = BotConstants.Movement.MaxReasonableTickMovement;
 
         // ── Camera update filtering ───────────────────────────────────────────────
         // Prevents camera oscillation (jitter between adjacent game-angle values)
         // by applying deadband, hysteresis, cooldown, and heading freeze logic.
 
         /// <summary>Minimum absolute circular difference in game-angle units to allow a camera update.</summary>
-        private const float CameraDeadbandGameUnits = 2.0f;
+        private const float CameraDeadbandGameUnits = BotConstants.Camera.DeadbandGameUnits;
 
         /// <summary>If the circular difference exceeds this threshold, update immediately (ignoring cooldown).</summary>
-        private const float CameraForceUpdateGameUnits = 8.0f;
+        private const float CameraForceUpdateGameUnits = BotConstants.Camera.ForceUpdateGameUnits;
 
         /// <summary>Minimum interval between camera updates (for small/medium angle changes).</summary>
-        private const double MinCameraUpdateIntervalMs = 200.0;
+        private const double MinCameraUpdateIntervalMs = BotConstants.Camera.MinUpdateIntervalMs;
 
         /// <summary>Base freeze distance for heading lock near waypoints. Actual = max(reachThreshold*2, this).</summary>
-        private const float HeadingFreezeDistanceBase = 10.0f;
+        private const float HeadingFreezeDistanceBase = BotConstants.Camera.HeadingFreezeDistanceBase;
 
         // ── Camera filter state ──
 
@@ -190,8 +190,8 @@ namespace DriverScanTester.Services
             MidSearch
         }
 
-        private const short CombatRetargetLowCameraDistance = 16950;
-        private const short CombatRetargetMidCameraDistance = 17000;
+        private const short CombatRetargetLowCameraDistance = BotConstants.Camera.CombatRetargetLowDistance;
+        private const short CombatRetargetMidCameraDistance = BotConstants.Camera.CombatRetargetMidDistance;
         private CombatRetargetCameraStage _combatRetargetCameraStage = CombatRetargetCameraStage.None;
         private bool _combatRetargetAwaitingSelection = false;
 
@@ -227,7 +227,7 @@ namespace DriverScanTester.Services
             _isInitialized = true;
             _log($"MovementSystem: Initialized with GameMemoryService, Default Precision: {GlobalPrecision}, Loop: {LoopPath}");
             _log($"[LocalMap] Initial map ID = {initialMapId}.");
-            _log("[BearingCalib] Using manual N/E/S/W bearing table: N=16581, E=16632, S=16662, W=16688, N2=16710.");
+            _log($"[BearingCalib] Using manual N/E/S/W bearing table: N={BotConstants.BearingCalibration.North}, E={BotConstants.BearingCalibration.East}, S={BotConstants.BearingCalibration.South}, W={BotConstants.BearingCalibration.West}, N2={BotConstants.BearingCalibration.NorthFullCircle}.");
 
             if (customPath != null)
             {
@@ -326,10 +326,10 @@ namespace DriverScanTester.Services
             // ── Attack speed / potion check ──
             if (_combatHandler.CheckAttackSpeed(_memoryService))
             {
-                _log($"[Tick {_tickCount}] Speed 16384 — using potions");
+                _log($"[Tick {_tickCount}] Speed {BotConstants.SpeedPotion.AttackSpeedThreshold} — using potions");
                 _log("[Key] 7 (pot1)");
                 GameInput.PressKey(GameInput.VK_7, GameInput.SCAN_7);
-                await Task.Delay(500, token);
+                await Task.Delay(BotConstants.SpeedPotion.PostPotionDelayMs, token);
                 _log("[Key] 8 (pot2)");
                 GameInput.PressKey(GameInput.VK_8, GameInput.SCAN_8);
             }
@@ -433,33 +433,33 @@ namespace DriverScanTester.Services
                     {
                         ReleaseSkillThree();
                         _log($"[CombatRetarget] Camera -> {cameraDistanceToApply}, TAB");
-                        await Task.Delay(100, token);
+                        await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
                         GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
                         _combatRetargetAwaitingSelection = true;
-                        await Task.Delay(50, token);
+                        await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
                         return;
                     }
                     else if (_combatRetargetCameraStage == CombatRetargetCameraStage.LowSearch)
                     {
-                        _log("[CombatRetarget] No mob selected at 16950. Retrying at 17000.");
+                        _log($"[CombatRetarget] No mob selected at {CombatRetargetLowCameraDistance}. Retrying at {CombatRetargetMidCameraDistance}.");
                         _combatRetargetCameraStage = CombatRetargetCameraStage.MidSearch;
                         _combatRetargetAwaitingSelection = false;
 
                         _memoryService.SetCameraDistance(CombatRetargetMidCameraDistance);
                         ReleaseSkillThree();
-                        _log("[CombatRetarget] Camera -> 17000, TAB");
-                        await Task.Delay(100, token);
+                        _log($"[CombatRetarget] Camera -> {CombatRetargetMidCameraDistance}, TAB");
+                        await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
                         GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
                         _combatRetargetAwaitingSelection = true;
-                        await Task.Delay(50, token);
+                        await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
                         return;
                     }
                     else
                     {
-                        _log($"[CombatRetarget] No mob selected at 17000. Restoring camera to {currentWaypoint.CameraDistanceLock}.");
+                        _log($"[CombatRetarget] No mob selected at {CombatRetargetMidCameraDistance}. Restoring camera to {currentWaypoint.CameraDistanceLock}.");
                         _memoryService.SetCameraDistance(currentWaypoint.CameraDistanceLock);
                         ClearCombatRetargetSearch();
-                        await Task.Delay(30, token);
+                        await Task.Delay(BotConstants.Delays.CombatAttackWaitMs, token);
                         return;
                     }
                 }
@@ -479,22 +479,22 @@ namespace DriverScanTester.Services
                         _isSkillThreeHeld &&
                         _combatRetargetCameraStage == CombatRetargetCameraStage.None)
                     {
-                        _log("[CombatRetarget] Target lost after attack. Lowering camera to 16950.");
+                        _log($"[CombatRetarget] Target lost after attack. Lowering camera to {CombatRetargetLowCameraDistance}.");
                         StartCombatRetargetSearch();
                         _memoryService.SetCameraDistance(CombatRetargetLowCameraDistance);
                         ReleaseSkillThree();
-                        _log("[CombatRetarget] Camera -> 16950, TAB");
-                        await Task.Delay(100, token);
+                        _log($"[CombatRetarget] Camera -> {CombatRetargetLowCameraDistance}, TAB");
+                        await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
                         GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
                         _combatRetargetAwaitingSelection = true;
-                        await Task.Delay(50, token);
+                        await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
                         return;
                     }
 
                     _log("[Key] TAB (target cycle)");
                     ReleaseSkillThree();
                     GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
-                    await Task.Delay(50, token);
+                    await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
                     return;
 
                 case CombatAction.Attack:
@@ -508,19 +508,19 @@ namespace DriverScanTester.Services
                     {
                         StopMoving();
                     }
-                    await Task.Delay(30, token);
+                    await Task.Delay(BotConstants.Delays.CombatAttackWaitMs, token);
                     return;
 
                 case CombatAction.CombatWait:
                     // Skill 3 is held, W is released — keep waiting in combat
-                    await Task.Delay(30, token);
+                    await Task.Delay(BotConstants.Delays.CombatAttackWaitMs, token);
                     return;
 
                 case CombatAction.StuckTabAttack:
                     _log("[Key] TAB (target cycle — stuck in attack)");
                     ReleaseSkillThree();
                     GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
-                    await Task.Delay(50, token);
+                    await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
                     return;
 
                 case CombatAction.UnstuckNeeded:
@@ -547,7 +547,7 @@ namespace DriverScanTester.Services
                 case CombatAction.PotionsUsed:
                     ReleaseSkillThree();
                     _log($"[Tick {_tickCount}] Potions used — brief delay.");
-                    await Task.Delay(50, token);
+                    await Task.Delay(BotConstants.Delays.PotionsUsedMs, token);
                     return;
             }
 
@@ -884,7 +884,7 @@ namespace DriverScanTester.Services
             // Exact (enum=0) must have a non-zero effective threshold, at least 1.5f
             if (waypoint.Precision == MovementPrecision.Exact)
             {
-                threshold = Math.Max(threshold, 1.5f);
+                threshold = Math.Max(threshold, BotConstants.Movement.ExactMinThreshold);
             }
 
             if (IsGhostWaypoint(waypoint))
@@ -1130,7 +1130,7 @@ namespace DriverScanTester.Services
                 _lastForceStartMovingAt = DateTime.Now;
                 _log($"[Input] ForceStartMoving — releasing W key (call #{_startMoveCount + 1}). Tick:{_tickCount}");
                 GameInput.keybd_event(GameInput.VK_W, GameInput.SCAN_W, (uint)GameInput.KEYEVENTF_KEYUP, 0);
-                Thread.Sleep(25);
+                Thread.Sleep(BotConstants.Delays.ForceStartReleaseGapMs);
 
                 _isMovingForward = true;
                 _startMoveCount++;

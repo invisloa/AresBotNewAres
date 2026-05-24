@@ -30,27 +30,27 @@ namespace DriverScanTester.Services
         /// </summary>
         internal static readonly BearingCalibrationPoint[] BearingCalibration =
         {
-            new BearingCalibrationPoint(0f,   16581f), // Full N
-            new BearingCalibrationPoint(30f,  16600f), // +30 to E
-            new BearingCalibrationPoint(60f,  16617f), // +60 to E
-            new BearingCalibrationPoint(90f,  16632f), // Full E
-            new BearingCalibrationPoint(120f, 16647f), // +30 to S
-            new BearingCalibrationPoint(150f, 16654f), // +60 to S
-            new BearingCalibrationPoint(180f, 16662f), // Full S
-            new BearingCalibrationPoint(210f, 16671f), // +30 to W
-            new BearingCalibrationPoint(240f, 16678f), // +60 to W
-            new BearingCalibrationPoint(270f, 16688f), // Full W
-            new BearingCalibrationPoint(300f, 16697f), // +30 to N
-            new BearingCalibrationPoint(330f, 16704f), // +60 to N
-            new BearingCalibrationPoint(360f, 16710f)  // Full N again
+            new BearingCalibrationPoint(0f,   BotConstants.BearingCalibration.North),          // Full N
+            new BearingCalibrationPoint(30f,  BotConstants.BearingCalibration.Deg30),          // +30 to E
+            new BearingCalibrationPoint(60f,  BotConstants.BearingCalibration.Deg60),          // +60 to E
+            new BearingCalibrationPoint(90f,  BotConstants.BearingCalibration.East),           // Full E
+            new BearingCalibrationPoint(120f, BotConstants.BearingCalibration.Deg120),         // +30 to S
+            new BearingCalibrationPoint(150f, BotConstants.BearingCalibration.Deg150),         // +60 to S
+            new BearingCalibrationPoint(180f, BotConstants.BearingCalibration.South),          // Full S
+            new BearingCalibrationPoint(210f, BotConstants.BearingCalibration.Deg210),         // +30 to W
+            new BearingCalibrationPoint(240f, BotConstants.BearingCalibration.Deg240),         // +60 to W
+            new BearingCalibrationPoint(270f, BotConstants.BearingCalibration.West),           // Full W
+            new BearingCalibrationPoint(300f, BotConstants.BearingCalibration.Deg300),         // +30 to N
+            new BearingCalibrationPoint(330f, BotConstants.BearingCalibration.Deg330),         // +60 to N
+            new BearingCalibrationPoint(360f, BotConstants.BearingCalibration.NorthFullCircle) // Full N again
         };
 
-        internal const float ManualFullSpinGameUnits = 16710f - 16581f; // 129
+        internal const float ManualFullSpinGameUnits = BotConstants.BearingCalibration.FullSpinGameUnits; // 129
 
         // ─────────────────────── Obstacle constants ───────────────────────
 
-        internal static readonly (float X, float Y) ObstacleCenter = (4900, 5200);
-        internal const float ObstacleSize = 200; // Assuming 200x200 square centered
+        internal static readonly (float X, float Y) ObstacleCenter = BotConstants.Obstacle.Center;
+        internal const float ObstacleSize = BotConstants.Obstacle.Size; // Assuming 200x200 square centered
 
         // ─────────────────────── Bearing / angle helpers ───────────────────────
 
@@ -269,13 +269,13 @@ namespace DriverScanTester.Services
             switch (precision)
             {
                 case MovementPrecision.Exact:
-                    return 1.25f;
+                    return BotConstants.WaypointThresholds.Exact;
                 case MovementPrecision.Accurate:
-                    return 2.0f;
+                    return BotConstants.WaypointThresholds.Accurate;
                 case MovementPrecision.Medium:
-                    return 5.0f;
+                    return BotConstants.WaypointThresholds.Medium;
                 case MovementPrecision.High:
-                    return 8.0f;
+                    return BotConstants.WaypointThresholds.High;
                 default:
                     return (float)precision;
             }

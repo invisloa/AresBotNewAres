@@ -22,7 +22,7 @@ namespace DriverScanTester.Services
         [DllImport("user32.dll")]
         private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
 
-        private const int KEYEVENTF_KEYUP = 0x0002;
+        private const int KEYEVENTF_KEYUP = BotConstants.Keyboard.KeyEventKeyUp;
 
         #endregion
 
@@ -47,9 +47,9 @@ namespace DriverScanTester.Services
         private int _teleportRetryCount;
 
         // Hardcoded fallback path names (used when _profile is null)
-        public string FallbackCityToRepot { get; set; } = "Kharon_StartA_ToRepot.json";
-        public string FallbackRepotToExp { get; set; } = "Kharon_Repot_To_Wolves.json";
-        public string FallbackExpLoop { get; set; } = "Kharon_Wolves_ExpLoop.json";
+        public string FallbackCityToRepot { get; set; } = BotConstants.Workflow.FallbackCityToRepot;
+        public string FallbackRepotToExp { get; set; } = BotConstants.Workflow.FallbackRepotToExp;
+        public string FallbackExpLoop { get; set; } = BotConstants.Workflow.FallbackExpLoop;
 
         /// <summary>Current phase of the bot workflow.</summary>
         public BotPhase CurrentPhase
@@ -224,14 +224,14 @@ namespace DriverScanTester.Services
                         break;
                     case BotPhase.Failed:
                         _log("[Coordinator] Bot in Failed state. Manual restart required.");
-                        await Task.Delay(1000, token);
+                        await Task.Delay(BotConstants.Delays.FailedStateMs, token);
                         break;
                     default:
-                        await Task.Delay(100, token);
+                        await Task.Delay(BotConstants.Delays.DefaultPhaseMs, token);
                         break;
                 }
 
-                await Task.Delay(50, token);
+                await Task.Delay(BotConstants.Delays.WorkflowMainLoopMs, token);
             }
         }
 
@@ -411,7 +411,7 @@ namespace DriverScanTester.Services
             {
                 while (!expToken.IsCancellationRequested)
                 {
-                    await Task.Delay(3000, expToken);
+                    await Task.Delay(BotConstants.Delays.ExpLoopRepotCheckIntervalMs, expToken);
 
                     var snapshot = _memoryService.GetSnapshot();
                     if (_repotDetector.NeedsRepot(snapshot))
@@ -464,7 +464,7 @@ namespace DriverScanTester.Services
             }
             else
             {
-                int maxRetries = _profile?.MaxTeleportRetries ?? 3;
+                int maxRetries = _profile?.MaxTeleportRetries ?? BotConstants.Repot.MaxTeleportRetries;
                 _teleportRetryCount++;
                 if (_teleportRetryCount >= maxRetries)
                 {
@@ -494,18 +494,18 @@ namespace DriverScanTester.Services
             }
             else
             {
-                vk = 0x36; // '6'
-                scan = 0x07;
+                vk = (byte)BotConstants.Workflow.DefaultTeleportKey; // '6'
+                scan = (byte)BotConstants.Workflow.DefaultTeleportScanCode;
             }
 
             _log($"[Teleport] Pressing key (vk={vk}) for town teleport...");
             keybd_event(vk, scan, 0, 0);
-            await Task.Delay(50, token);
+            await Task.Delay(BotConstants.Delays.TeleportKeyDownMs, token);
             keybd_event(vk, scan, KEYEVENTF_KEYUP, 0);
 
-            for (int i = 0; i < 40; i++)
+            for (int i = 0; i < BotConstants.Delays.TeleportWaitIterations; i++)
             {
-                await Task.Delay(500, token);
+                await Task.Delay(BotConstants.Delays.TeleportWaitIterationMs, token);
                 if (_memoryService.GetIsInCity())
                 {
                     _log("[Teleport] Arrived in city.");

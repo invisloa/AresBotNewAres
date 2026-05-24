@@ -28,27 +28,27 @@ namespace DriverScanTester.Models
 
         // --- Repot thresholds (override RepotDetectorService defaults) ---
         /// <summary>Minimum HP potions before repot is needed.</summary>
-        public int MinHpPotions { get; set; } = 10;
+        public int MinHpPotions { get; set; } = BotConstants.Repot.DefaultMinHpPotions;
         /// <summary>Minimum mana potions before repot is needed.</summary>
-        public int MinManaPotions { get; set; } = 10;
+        public int MinManaPotions { get; set; } = BotConstants.Repot.DefaultMinManaPotions;
         /// <summary>Weight ratio (current/max) above which repot is triggered.</summary>
-        public float MaxWeightRatio { get; set; } = 0.85f;
+        public float MaxWeightRatio { get; set; } = BotConstants.Repot.DefaultMaxWeightRatio;
         /// <summary>If HP is at or below this value, repot is triggered.</summary>
-        public int MinHp { get; set; } = 500;
+        public int MinHp { get; set; } = BotConstants.Repot.DefaultMinHp;
         /// <summary>If Mana is at or below this value, repot is triggered.</summary>
-        public int MinMana { get; set; } = 100;
+        public int MinMana { get; set; } = BotConstants.Repot.DefaultMinMana;
 
         // --- Workflow options ---
         /// <summary>If true, skip actual RepotSystem.Repot() and just log "dry run".</summary>
         public bool DryRunRepot { get; set; } = false;
 
         /// <summary>Virtual-key code for town teleport (default 0x36 = '6').</summary>
-        public int TeleportKey { get; set; } = 0x36;
+        public int TeleportKey { get; set; } = BotConstants.Workflow.DefaultTeleportKey;
         /// <summary>Scan code for teleport key (default 0x07 for '6').</summary>
-        public int TeleportScanCode { get; set; } = 0x07;
+        public int TeleportScanCode { get; set; } = BotConstants.Workflow.DefaultTeleportScanCode;
 
         /// <summary>Maximum teleport retries before giving up.</summary>
-        public int MaxTeleportRetries { get; set; } = 3;
+        public int MaxTeleportRetries { get; set; } = BotConstants.Repot.MaxTeleportRetries;
     }
 
     /// <summary>

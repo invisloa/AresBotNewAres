@@ -20,7 +20,7 @@ namespace DriverScanTester.Services
     /// </summary>
     public sealed class LocalNavigationMap
     {
-        private const float CELL_SIZE = 1.0f;
+        private const float CELL_SIZE = BotConstants.NavMap.CellSize;
 
         // ── JSON DTO ────────────────────────────────────────────────
 
@@ -329,7 +329,7 @@ namespace DriverScanTester.Services
             else
             {
                 // Already Free — increase confidence
-                data.Confidence = Math.Min(data.Confidence + 1, 10);
+                data.Confidence = Math.Min(data.Confidence + BotConstants.NavMap.ConfidenceIncrement, BotConstants.NavMap.MaxFreeConfidence);
                 data.UpdatedAtUtc = DateTime.UtcNow;
                 _isDirty = true;
             }
@@ -428,8 +428,8 @@ namespace DriverScanTester.Services
             data.TargetY = targetY;
             data.UpdatedAtUtc = DateTime.UtcNow;
 
-            // Threshold: confidence >= 3 => Blocked, otherwise Risky
-            if (data.Confidence >= 3)
+            // Threshold: confidence >= BotConstants.NavMap.BlockedConfidenceThreshold => Blocked, otherwise Risky
+            if (data.Confidence >= BotConstants.NavMap.BlockedConfidenceThreshold)
             {
                 data.State = LocalCellState.Blocked;
                 _log($"[LocalMap] MarkBlocked cell=({cx},{cy}) confidence={data.Confidence} reason={reason} source=({sourceX},{sourceY}) target=({targetX},{targetY}) bearing={attemptedBearing}");

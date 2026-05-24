@@ -12,25 +12,25 @@ namespace DriverScanTester.Services
         [DllImport("user32.dll")]
         internal static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
 
-        internal const int KEYEVENTF_KEYUP = 0x0002;
+        internal const int KEYEVENTF_KEYUP = BotConstants.Keyboard.KeyEventKeyUp;
 
         // Virtual-key and scan codes
-        internal const byte VK_W = 0x57;
-        internal const byte SCAN_W = 0x11;
-        internal const byte VK_TAB = 0x09;
-        internal const byte SCAN_TAB = 0x0F;
-        internal const byte VK_3 = 0x33;
-        internal const byte SCAN_3 = 0x04;
-        internal const byte VK_7 = 0x37;
-        internal const byte SCAN_7 = 0x08;
-        internal const byte VK_8 = 0x38;
-        internal const byte SCAN_8 = 0x09;
-        internal const byte VK_6 = 0x36;
-        internal const byte SCAN_6 = 0x07;
-        internal const byte VK_A = 0x41;
-        internal const byte SCAN_A = 0x1E;
-        internal const byte VK_D = 0x44;
-        internal const byte SCAN_D = 0x20;
+        internal const byte VK_W = BotConstants.Keyboard.VkW;
+        internal const byte SCAN_W = BotConstants.Keyboard.ScanW;
+        internal const byte VK_TAB = BotConstants.Keyboard.VkTab;
+        internal const byte SCAN_TAB = BotConstants.Keyboard.ScanTab;
+        internal const byte VK_3 = BotConstants.Keyboard.Vk3;
+        internal const byte SCAN_3 = BotConstants.Keyboard.Scan3;
+        internal const byte VK_7 = BotConstants.Keyboard.Vk7;
+        internal const byte SCAN_7 = BotConstants.Keyboard.Scan7;
+        internal const byte VK_8 = BotConstants.Keyboard.Vk8;
+        internal const byte SCAN_8 = BotConstants.Keyboard.Scan8;
+        internal const byte VK_6 = BotConstants.Keyboard.Vk6;
+        internal const byte SCAN_6 = BotConstants.Keyboard.Scan6;
+        internal const byte VK_A = BotConstants.Keyboard.VkA;
+        internal const byte SCAN_A = BotConstants.Keyboard.ScanA;
+        internal const byte VK_D = BotConstants.Keyboard.VkD;
+        internal const byte SCAN_D = BotConstants.Keyboard.ScanD;
 
         /// <summary>
         /// Presses (down + up) a key with a 20 ms gap between down and up.
@@ -38,7 +38,7 @@ namespace DriverScanTester.Services
         internal static void PressKey(byte vk, byte scan)
         {
             keybd_event(vk, scan, 0, 0);
-            Thread.Sleep(20);
+            Thread.Sleep(BotConstants.Keyboard.PressKeyGapMs);
             keybd_event(vk, scan, (uint)KEYEVENTF_KEYUP, 0);
         }
     }
