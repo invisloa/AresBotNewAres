@@ -1,4 +1,4 @@
-// <copyright file="BotConstants.cs" company="DriverScanTester">
+﻿// <copyright file="BotConstants.cs" company="DriverScanTester">
 //     Copyright (c) DriverScanTester. All rights reserved.
 // </copyright>
 
@@ -22,10 +22,10 @@ namespace DriverScanTester
             public const short DefaultDistanceLock = 17020;
 
             /// <summary>Lower camera distance used during combat retarget low-search phase.</summary>
-            public const short CombatRetargetLowDistance = 16950;
+            public const short CombatRetargetLowDistance = 16910;
 
             /// <summary>Mid camera distance used during combat retarget mid-search phase.</summary>
-            public const short CombatRetargetMidDistance = 17000;
+            public const short CombatRetargetMidDistance = 16950;
 
             /// <summary>Minimum absolute circular difference (game-angle units) to allow a camera update (deadband).</summary>
             public const float DeadbandGameUnits = 2.0f;
