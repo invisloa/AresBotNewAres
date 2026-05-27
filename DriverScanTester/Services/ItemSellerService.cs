@@ -668,19 +668,22 @@ namespace DriverScanTester.Services
         {
             _log("ItemSeller: Opening shop window.");
             Thread.Sleep(1000);
-            MouseOperations.MoveAndLeftClick(580, 565, 200);
+            var (winX, winY) = GetWindowOrigin();
+            int screenX = 145 + winX;
+            int screenY = 460 + winY;
+            _log($"[ItemSeller] OpenShopWindow -> screen ({screenX},{screenY}) [relative (145,460) + window ({winX},{winY})]");
+            MouseOperations.MoveAndLeftClickAbsolute(screenX, screenY, 200);
         }
 
         private void OpenStorageWindow()
         {
             _log("ItemSeller: Opening storage window.");
-            // Storage opening logic — pressing a key or clicking
-            // In the old bot, storage was opened via OpenStorageWindow()
             Thread.Sleep(200);
-            // For now, use a simple approach: open via key shortcut or click
-            // This is typically done by pressing a hotkey or clicking on NPC
-            // The old bot used ProgramHandle.OpenStorageWindow() which we simulate here
-            MouseOperations.MoveAndLeftClick(580, 565, 200);
+            var (winX, winY) = GetWindowOrigin();
+            int screenX = 145 + winX;
+            int screenY = 460 + winY;
+            _log($"[ItemSeller] OpenStorageWindow -> screen ({screenX},{screenY}) [relative (145,460) + window ({winX},{winY})]");
+            MouseOperations.MoveAndLeftClickAbsolute(screenX, screenY, 200);
         }
 
         // ════════════════════════════════════════════════════════════════

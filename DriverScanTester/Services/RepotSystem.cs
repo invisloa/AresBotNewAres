@@ -61,14 +61,12 @@ namespace DriverScanTester.Services
 
         #region Shop Operations
 
-        // Expected window position for the shop NPC click.
+        // Window-relative position for clicking the shop NPC.
         // With window at (541,91), shop click should be at (685,550).
-        // Hardcoded (580,565) at expected window (436,106) gives correct click.
-        // Relative to window: (685-541, 550-91) = (144, 459)
-        private const int ShopExpectedWinX = 436;
-        private const int ShopExpectedWinY = 106;
-        private const int ShopHardcodedX = 580;
-        private const int ShopHardcodedY = 565;
+        // Relative to window: (685-541, 550-91) = (144, 459).
+        // Calibrated to give screen (590,565) at window (445,105).
+        private const int ShopRelX = 145;
+        private const int ShopRelY = 460;
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool GetWindowRect(nint hWnd, out RECT lpRect);
@@ -221,26 +219,22 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Calculates the shop NPC click position based on actual game window position
-        /// and the expected window position that hardcoded coords were designed for.
-        /// Hardcoded (580,565) at expected window (436,106) → actual screen position.
-        /// With actual window at (WX,WY): clickX = 580 + (WX - 436), clickY = 565 + (WY - 106).
+        /// Calculates the shop NPC click position relative to the actual game window.
+        /// Uses window-relative offsets (ShopRelX, ShopRelY) added to the window origin.
         /// </summary>
         private (int X, int Y) GetShopClickPosition()
         {
             nint hwnd = FindWindowByProcess();
             if (hwnd != nint.Zero && GetWindowRect(hwnd, out RECT rect))
             {
-                int offsetX = rect.Left - ShopExpectedWinX;
-                int offsetY = rect.Top - ShopExpectedWinY;
-                int clickX = ShopHardcodedX + offsetX;
-                int clickY = ShopHardcodedY + offsetY;
-                _log($"[ShopPos] Window=({rect.Left},{rect.Top}), offset=({offsetX},{offsetY}), click=({clickX},{clickY})");
+                int clickX = ShopRelX + rect.Left;
+                int clickY = ShopRelY + rect.Top;
+                _log($"[ShopPos] Window=({rect.Left},{rect.Top}), click=({clickX},{clickY}) [relative ({ShopRelX},{ShopRelY})]");
                 return (clickX, clickY);
             }
 
-            _log("[ShopPos] Could not get window rect, using hardcoded (580,565) directly");
-            return (ShopHardcodedX, ShopHardcodedY);
+            _log("[ShopPos] Could not get window rect, using relative position as fallback");
+            return (ShopRelX, ShopRelY);
         }
 
         [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
