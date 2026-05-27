@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using DriverScanTester.Models;
@@ -10,11 +11,13 @@ namespace DriverScanTester.Services
     {
         private readonly GameMemoryService _memoryService;
         private readonly Action<string> _log;
+        private readonly ItemSellerService _itemSeller;
 
         public RepotSystem(GameMemoryService memoryService, Action<string> log)
         {
             _memoryService = memoryService;
             _log = log;
+            _itemSeller = new ItemSellerService(memoryService, log);
         }
 
         #region State Checks
@@ -49,21 +52,39 @@ namespace DriverScanTester.Services
             return _memoryService.GetInventoryItemType(slotIndex);
         }
 
-        public bool IsSellWindowOpen()
+        public bool IsSellConfirmWindowOpen()
         {
-            return _memoryService.IsSellWindowOpen();
+            return _memoryService.IsSellConfirmWindowOpen();
         }
 
         #endregion
 
         #region Shop Operations
 
+        // Expected window position for the shop NPC click.
+        // With window at (541,91), shop click should be at (685,550).
+        // Hardcoded (580,565) at expected window (436,106) gives correct click.
+        // Relative to window: (685-541, 550-91) = (144, 459)
+        private const int ShopExpectedWinX = 436;
+        private const int ShopExpectedWinY = 106;
+        private const int ShopHardcodedX = 580;
+        private const int ShopHardcodedY = 565;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool GetWindowRect(nint hWnd, out RECT lpRect);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
         public void OpenShop()
         {
             _log("Opening Shop Window...");
-            // Logic from MouseClickOpenShop in OLD_ExpBotClass.cs
             Thread.Sleep(BotConstants.Delays.OpenShopInitialMs);
-            MouseOperations.MoveAndLeftClick(580, 565, 200);
+
+            // Calculate shop click position using actual window position (absolute screen coords)
+            (int clickX, int clickY) = GetShopClickPosition();
+            _log($"Shop click absolute: ({clickX}, {clickY})");
+            MouseOperations.MoveAndLeftClickAbsolute(clickX, clickY, 200);
 
             // Wait for shop to open?
             int retries = 0;
@@ -168,72 +189,69 @@ namespace DriverScanTester.Services
             Thread.Sleep(500);
         }
 
+        /// <summary>
+        /// New SellItems implementation that delegates to the ported ItemSellerService.
+        /// This uses the full logic from the old bot: high-value detection, tab switching,
+        /// storage management, and anti-bug handling.
+        /// </summary>
         public void SellItems()
         {
-            _log("Selling Items...");
+            _log("Selling Items using ItemSellerService (ported from old bot)...");
 
-            var sellPositions = RepotMousePositions.itemSellPositions;
-
-            // Loop through inventory slots
-            for (int i = 0; i < sellPositions.Length; i++)
+            if (!_itemSeller.IsCloseToShop())
             {
-                if (!IsShopOpen()) break;
+                _log("Not close to shop. Sell skipped.");
+                return;
+            }
 
-                int itemType = GetInventoryItemType(i);
+            // Open shop first if not already open
+            if (!IsShopOpen())
+            {
+                OpenShop();
+            }
 
-                // Check if item should be sold
-                if (itemType == 0) continue; // Empty slot
-
-                bool isSafe = false;
-                foreach (var safeItem in BotConstants.GameMagicValues.ItemsNotForSale)
-                {
-                    if (itemType == safeItem)
-                    {
-                        isSafe = true;
-                        break;
-                    }
-                }
-
-                if (isSafe) continue;
-
-                // Sell the item
-                _log($"Selling item in slot {i} (Type: {itemType})");
-
-                // Click on item
-                // Note: OLD_ExpBotClass used MoveAndLeftClick, but ItemSeller.cs used MoveAndRightClickOperation
-                // I will use RightClick as per ItemSeller.cs which seems more specific
-                MouseOperations.SetCursorPosition(sellPositions[i].X, sellPositions[i].Y);
-                Thread.Sleep(100);
-                MouseOperations.RightClick();
-                Thread.Sleep(200);
-
-                // Confirm Sell
-                MouseConfirmSelling();
+            if (IsShopOpen())
+            {
+                _itemSeller.SellItemsByMouseMove();
+            }
+            else
+            {
+                _log("Cannot sell — shop window is not open.");
             }
         }
 
-        private void MouseConfirmSelling()
+        /// <summary>
+        /// Calculates the shop NPC click position based on actual game window position
+        /// and the expected window position that hardcoded coords were designed for.
+        /// Hardcoded (580,565) at expected window (436,106) → actual screen position.
+        /// With actual window at (WX,WY): clickX = 580 + (WX - 436), clickY = 565 + (WY - 106).
+        /// </summary>
+        private (int X, int Y) GetShopClickPosition()
         {
-            // Logic from ItemSeller.MouseConfirmSelling
-            // Check if sell window is open
-            if (IsSellWindowOpen())
+            nint hwnd = FindWindowByProcess();
+            if (hwnd != nint.Zero && GetWindowRect(hwnd, out RECT rect))
             {
-                LeftClickOnConfirmSell();
+                int offsetX = rect.Left - ShopExpectedWinX;
+                int offsetY = rect.Top - ShopExpectedWinY;
+                int clickX = ShopHardcodedX + offsetX;
+                int clickY = ShopHardcodedY + offsetY;
+                _log($"[ShopPos] Window=({rect.Left},{rect.Top}), offset=({offsetX},{offsetY}), click=({clickX},{clickY})");
+                return (clickX, clickY);
             }
 
-            // Double check (High value items prompt?)
-            Thread.Sleep(100);
-            if (IsSellWindowOpen())
-            {
-                 LeftClickOnConfirmSell();
-            }
+            _log("[ShopPos] Could not get window rect, using hardcoded (580,565) directly");
+            return (ShopHardcodedX, ShopHardcodedY);
         }
 
-        private void LeftClickOnConfirmSell()
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern nint FindWindow(string lpClassName, string lpWindowName);
+
+        private static nint FindWindowByProcess()
         {
-            MouseOperations.SetCursorPosition(560, 570);
-            MouseOperations.LeftClick(); // Down/Up
-            Thread.Sleep(50);
+            nint hwnd = FindWindow(null, "Legend of Ares");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
+            return hwnd;
         }
 
         public void Repot()
@@ -248,14 +266,14 @@ namespace DriverScanTester.Services
 
             if (IsShopOpen())
             {
-                // 3. Sell Items
+                // 3. Sell Items (using new ItemSellerService)
                 SellItems();
 
                 // 4. Buy Potions
                 BuyPotions();
 
                 // Close Shop (Escape key)
-                PressKey(0x1B); // VK_ESCAPE
+                GameInput.PressKey(GameInput.VK_ESCAPE, GameInput.SCAN_ESCAPE);
             }
         }
 

@@ -49,6 +49,15 @@ namespace DriverScanTester.Models
 
         /// <summary>Maximum teleport retries before giving up.</summary>
         public int MaxTeleportRetries { get; set; } = BotConstants.Repot.MaxTeleportRetries;
+
+        // --- Window position offset ---
+        // All hardcoded mouse coordinates assume the game client area is at screen position (0,0).
+        // If your game window is elsewhere (e.g. second monitor, windowed mode), set these offsets.
+        // Set to 0,0 to auto-detect from the actual window position via ClientToScreen.
+        /// <summary>X offset of the game client area on screen (0 = auto-detect).</summary>
+        public int WindowOffsetX { get; set; } = 0;
+        /// <summary>Y offset of the game client area on screen (0 = auto-detect).</summary>
+        public int WindowOffsetY { get; set; } = 0;
     }
 
     /// <summary>

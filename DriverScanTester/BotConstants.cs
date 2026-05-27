@@ -21,6 +21,9 @@ namespace DriverScanTester
             /// <summary>Default camera distance lock for waypoints and movement.</summary>
             public const short DefaultDistanceLock = 17020;
 
+            /// <summary>Very low (closest) camera distance used during combat retarget very-low-search phase.</summary>
+            public const short CombatRetargetVeryLowDistance = 16880;
+
             /// <summary>Lower camera distance used during combat retarget low-search phase.</summary>
             public const short CombatRetargetLowDistance = 16910;
 
@@ -254,8 +257,12 @@ namespace DriverScanTester
             public const int InventoryWindow2 = 0xd8;
             public const int InventoryCurrentTab = 0x110;
             public const int InventoryCurrentTabM = 0x2AD2EC;
+            public const ulong InventoryTabSelectedPtr = 0x4CAEE8;
+            public const int InventoryTabSelectedSub1 = 0x9;
+            public const int InventoryTabSelectedSub2 = 0x36B;
             public const int SellWindow = 0xc0;
             public const ulong SellWindowM = 0x2AD308;
+            public const ulong SellConfirmWindowPtr = 0x471C98;
             public const int DeleteWindow = 0x138c;
             public const int SellItemSelected = 0x12e;
             public const int SlotHP = 0xbb2;
@@ -270,6 +277,7 @@ namespace DriverScanTester
             // Loot
             public const ulong CurrentItemHighlightedType = 0x8C9Fd0;
             public const int PositionX = 0x23c;
+            public const int PositionY = 0x244;
 
             // Heal/Mana
             public const ulong HealManaBasePtr2 = 0x8A3DA8;
@@ -303,6 +311,21 @@ namespace DriverScanTester
 
             /// <summary>Item type identifier for SOP items.</summary>
             public const int Sop = 32627;
+
+            /// <summary>Item types that are event/snowman items (not to be sold).</summary>
+            public static readonly int[] ItemValuesEventSnowman = { 9220, 9261, 9262, 9263, 9264, 9265, 9266, 9267 };
+
+            /// <summary>Size of each inventory/storage slot in bytes.</summary>
+            public const int InventorySlotSize = 0x1c;
+
+            /// <summary>Number of inventory slots per tab.</summary>
+            public const int SlotsPerInventoryTab = 36;
+
+            /// <summary>Total inventory slots (both tabs).</summary>
+            public const int TotalInventorySlots = 72;
+
+            /// <summary>Total storage slots.</summary>
+            public const int TotalStorageSlots = 98;
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -371,6 +394,10 @@ namespace DriverScanTester
             // D key (strafe right)
             public const byte VkD = 0x44;
             public const byte ScanD = 0x20;
+
+            // Escape key
+            public const byte VkEscape = 0x1B;
+            public const byte ScanEscape = 0x01;
 
             /// <summary>Delay in ms between key down and key up in PressKey().</summary>
             public const int PressKeyGapMs = 20;

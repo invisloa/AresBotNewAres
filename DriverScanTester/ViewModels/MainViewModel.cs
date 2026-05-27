@@ -2603,6 +2603,11 @@ namespace DriverScanTester.ViewModels
 
             FocusGameWindow();
 
+            // Detect window offset (auto or from profile)
+            int offsetX = profile?.WindowOffsetX ?? 0;
+            int offsetY = profile?.WindowOffsetY ?? 0;
+            DetectAndSetWindowOffset(offsetX, offsetY);
+
             ulong baseAddr = FindModuleInScanner("Ares.exe", false);
             if (baseAddr == 0)
             {
@@ -2668,10 +2673,11 @@ namespace DriverScanTester.ViewModels
                 return;
             }
             _workflowCoordinator.Stop();
+            MouseOperations.ResetWindowOffset();
             _workflowTask = null;
+            AppendLog("Workflow stop requested. Window offset reset.");
             OnPropertyChanged(nameof(IsWorkflowRunning));
             OnPropertyChanged(nameof(WorkflowPhaseText));
-            AppendLog("3-Phase Workflow stopped by user.");
         }
 
         public List<string> ListProfiles()
@@ -2749,12 +2755,60 @@ namespace DriverScanTester.ViewModels
                                 SetForegroundWindow(hwnd);
                             }
                         }
+
+                        // Detect game window position for mouse coordinate adjustment
+                        DetectAndSetWindowOffset();
                     }
                     catch (Exception ex)
                     {
                         AppendLog($"Warning: Could not focus window. {ex.Message}");
                     }
                 }
+
+        // Reference window position that hardcoded coordinates were designed for.
+        // Derived from user calibration: with window at (542,92), first sell item
+        // hardcoded (1260,565) maps to actual (1355,580).
+        // Expected X = 542 - (1355-1260) = 447, Expected Y = 92 - (580-565) = 77.
+        private const int ExpectedWindowX = 447;
+        private const int ExpectedWindowY = 77;
+
+        /// <summary>
+        /// Sets the mouse coordinate offset. Auto-detects the game window position via
+        /// GetWindowRect and calculates the offset from the expected reference window
+        /// position (447, 77) that the hardcoded coordinates were designed for.
+        /// If manual offsets are provided (profile), those override auto-detection.
+        /// Also wires up MouseOperations logging to the bot log.
+        /// </summary>
+        private void DetectAndSetWindowOffset(int manualOffsetX = 0, int manualOffsetY = 0)
+        {
+            // Wire up mouse logging
+            MouseOperations.Log = msg => AppendLog(msg);
+
+            if (manualOffsetX != 0 || manualOffsetY != 0)
+            {
+                MouseOperations.SetWindowOffset(manualOffsetX, manualOffsetY);
+                AppendLog($"Using window offset from profile: ({manualOffsetX}, {manualOffsetY})");
+                return;
+            }
+
+            try
+            {
+                var windowService = new GameWindowService(_attachedPid);
+                windowService.Initialize();
+                var (winX, winY) = windowService.WindowOrigin;
+
+                int offsetX = winX - ExpectedWindowX;
+                int offsetY = winY - ExpectedWindowY;
+
+                MouseOperations.SetWindowOffset(offsetX, offsetY);
+                AppendLog($"Game window at ({winX}, {winY}), offset from reference: ({offsetX}, {offsetY})");
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"Could not detect window position: {ex.Message}. Using no offset.");
+                MouseOperations.ResetWindowOffset();
+            }
+        }
         
                 private void ToggleBot()
                 {
@@ -2778,6 +2832,39 @@ namespace DriverScanTester.ViewModels
                 public void TestAngle()
                 {
                     RunTestAngle();
+                }
+
+                public void TestSell(int profileOffsetX = 0, int profileOffsetY = 0)
+                {
+                    if (!_isAttached) { AppendLog("Attach first."); return; }
+
+                    FocusGameWindow();
+                    DetectAndSetWindowOffset(profileOffsetX, profileOffsetY);
+
+                    ulong baseAddr = FindModuleInScanner("Ares.exe", false);
+                    if (baseAddr == 0)
+                    {
+                        _pointerScanner?.RefreshModules();
+                        baseAddr = FindModuleInScanner("Ares.exe", true);
+                    }
+                    if (baseAddr == 0)
+                    {
+                        AppendLog("Failed to resolve module base for TestSell.");
+                        return;
+                    }
+
+                    try
+                    {
+                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
+                        var seller = new ItemSellerService(memoryService, AppendLog);
+                        AppendLog("=== Test Sell: Starting ===");
+                        seller.SellItemsByMouseMove();
+                        AppendLog("=== Test Sell: Completed ===");
+                    }
+                    catch (Exception ex)
+                    {
+                        AppendLog($"=== Test Sell FAILED: {ex.Message} ===");
+                    }
                 }
 
                 public void StopAllBotsInternal()

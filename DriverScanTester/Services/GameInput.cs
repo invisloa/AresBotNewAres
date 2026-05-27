@@ -31,6 +31,8 @@ namespace DriverScanTester.Services
         internal const byte SCAN_A = BotConstants.Keyboard.ScanA;
         internal const byte VK_D = BotConstants.Keyboard.VkD;
         internal const byte SCAN_D = BotConstants.Keyboard.ScanD;
+        internal const byte VK_ESCAPE = BotConstants.Keyboard.VkEscape;
+        internal const byte SCAN_ESCAPE = BotConstants.Keyboard.ScanEscape;
 
         /// <summary>
         /// Presses (down + up) a key with a 20 ms gap between down and up.

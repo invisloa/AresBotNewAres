@@ -186,10 +186,12 @@ namespace DriverScanTester.Services
         private enum CombatRetargetCameraStage
         {
             None,
+            VeryLowSearch,
             LowSearch,
             MidSearch
         }
 
+        private const short CombatRetargetVeryLowCameraDistance = BotConstants.Camera.CombatRetargetVeryLowDistance;
         private const short CombatRetargetLowCameraDistance = BotConstants.Camera.CombatRetargetLowDistance;
         private const short CombatRetargetMidCameraDistance = BotConstants.Camera.CombatRetargetMidDistance;
         private CombatRetargetCameraStage _combatRetargetCameraStage = CombatRetargetCameraStage.None;
@@ -439,6 +441,21 @@ namespace DriverScanTester.Services
                         await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
                         return;
                     }
+                    else if (_combatRetargetCameraStage == CombatRetargetCameraStage.VeryLowSearch)
+                    {
+                        _log($"[CombatRetarget] No mob selected at {CombatRetargetVeryLowCameraDistance}. Retrying at {CombatRetargetLowCameraDistance}.");
+                        _combatRetargetCameraStage = CombatRetargetCameraStage.LowSearch;
+                        _combatRetargetAwaitingSelection = false;
+
+                        _memoryService.SetCameraDistance(CombatRetargetLowCameraDistance);
+                        ReleaseSkillThree();
+                        _log($"[CombatRetarget] Camera -> {CombatRetargetLowCameraDistance}, TAB");
+                        await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
+                        GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
+                        _combatRetargetAwaitingSelection = true;
+                        await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
+                        return;
+                    }
                     else if (_combatRetargetCameraStage == CombatRetargetCameraStage.LowSearch)
                     {
                         _log($"[CombatRetarget] No mob selected at {CombatRetargetLowCameraDistance}. Retrying at {CombatRetargetMidCameraDistance}.");
@@ -479,11 +496,11 @@ namespace DriverScanTester.Services
                         _isSkillThreeHeld &&
                         _combatRetargetCameraStage == CombatRetargetCameraStage.None)
                     {
-                        _log($"[CombatRetarget] Target lost after attack. Lowering camera to {CombatRetargetLowCameraDistance}.");
+                        _log($"[CombatRetarget] Target lost after attack. Lowering camera to {CombatRetargetVeryLowCameraDistance}.");
                         StartCombatRetargetSearch();
-                        _memoryService.SetCameraDistance(CombatRetargetLowCameraDistance);
+                        _memoryService.SetCameraDistance(CombatRetargetVeryLowCameraDistance);
                         ReleaseSkillThree();
-                        _log($"[CombatRetarget] Camera -> {CombatRetargetLowCameraDistance}, TAB");
+                        _log($"[CombatRetarget] Camera -> {CombatRetargetVeryLowCameraDistance}, TAB");
                         await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
                         GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
                         _combatRetargetAwaitingSelection = true;
@@ -1173,7 +1190,7 @@ namespace DriverScanTester.Services
 
         private void StartCombatRetargetSearch()
         {
-            _combatRetargetCameraStage = CombatRetargetCameraStage.LowSearch;
+            _combatRetargetCameraStage = CombatRetargetCameraStage.VeryLowSearch;
             _combatRetargetAwaitingSelection = false;
         }
 
@@ -1187,9 +1204,10 @@ namespace DriverScanTester.Services
         {
             return _combatRetargetCameraStage switch
             {
+                CombatRetargetCameraStage.VeryLowSearch => CombatRetargetVeryLowCameraDistance,
                 CombatRetargetCameraStage.LowSearch => CombatRetargetLowCameraDistance,
                 CombatRetargetCameraStage.MidSearch => CombatRetargetMidCameraDistance,
-                _ => CombatRetargetLowCameraDistance
+                _ => CombatRetargetVeryLowCameraDistance
             };
         }
 

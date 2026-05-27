@@ -72,8 +72,6 @@ namespace DriverScanTester.Services
         private const int InventoryWindowOffset2 = BotConstants.MemoryOffsets.InventoryWindow2;
         private const int InventoryCurrentTabOffset = BotConstants.MemoryOffsets.InventoryCurrentTab;
         private const int InventoryCurrentTabMOffset = BotConstants.MemoryOffsets.InventoryCurrentTabM;
-        private const int SellWindowOffset = BotConstants.MemoryOffsets.SellWindow;
-        private const ulong SellWindowMOffset = BotConstants.MemoryOffsets.SellWindowM;
         private const int DeleteWindowOffset = BotConstants.MemoryOffsets.DeleteWindow;
         private const int SellItemSelectedOffset = BotConstants.MemoryOffsets.SellItemSelected;
         private const int SlotHPOffset = BotConstants.MemoryOffsets.SlotHP;
@@ -399,21 +397,213 @@ namespace DriverScanTester.Services
             return ReadShort(playerBase + InventorySlotHPCountOffset);
         }
 
+        /// <summary>
+        /// Reads the inventory item type (2 bytes, short) for a given slot index (0-based).
+        /// ORIGINAL implementation — reads from playerBase + 0x191A (slot 0 only).
+        /// </summary>
         public int GetInventoryItemType(int slotIndex)
         {
             ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
             if (playerBase == 0) return 0;
-            // First slot sell value as indicator
+            // NOTE: Original only supported slot 0 via offset 0x191A.
+            // Full slot array reading uses offset 0xc5a from old bot (see TryGetSellSlotItemType).
             if (slotIndex == 0) return ReadShort(playerBase + InventoryFirstSlotSellValueOffset);
             return 0;
         }
 
-        public bool IsSellWindowOpen()
+        // ════════════════════════════════════════════════════════════════
+        //  OLD-BOT INVENTORY SLOT READING (UNVERIFIED OFFSETS)
+        //  The old bot (AresTrainerV3) stored inventory slot data at
+        //  playerBase + 0xC5A, with each slot = 0x1C bytes.
+        //  These offsets have NOT been verified with the new game version.
+        //  If they return 0 or garbage, the sell logic will simply skip items.
+        // ════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Gets the base address for inventory slots using old-bot offset 0xC5A.
+        /// UNVERIFIED — may differ from actual game memory layout.
+        /// </summary>
+        private ulong TryGetInventorySlotBase()
         {
-            // Placeholder: keeping old logic or update if needed
-            ulong sellWindow = ReadPointer(_moduleBase + SellWindowMOffset);
-            if (sellWindow == 0) return false;
-            return ReadByte(sellWindow + (ulong)SellWindowOffset) == 1;
+            ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
+            if (playerBase == 0) return 0;
+            return playerBase + (ulong)BotConstants.MemoryOffsets.SlotFirstSell; // 0xC5A
+        }
+
+        /// <summary>
+        /// Reads inventory slot item type using old-bot offsets.
+        /// UNVERIFIED — returns 0 if base address is invalid.
+        /// </summary>
+        public int TryGetSellSlotItemType(int slotIndex)
+        {
+            ulong slotBase = TryGetInventorySlotBase();
+            if (slotBase == 0) return 0;
+            ulong addr = slotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize) - 4;
+            return ReadShort(addr);
+        }
+
+        /// <summary>
+        /// Reads inventory slot item count using old-bot offsets.
+        /// UNVERIFIED.
+        /// </summary>
+        public int TryGetSellSlotItemCount(int slotIndex)
+        {
+            ulong slotBase = TryGetInventorySlotBase();
+            if (slotBase == 0) return 0;
+            ulong addr = slotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize);
+            return ReadByte(addr);
+        }
+
+        /// <summary>
+        /// Reads inventory slot item stat1 using old-bot offsets.
+        /// UNVERIFIED.
+        /// </summary>
+        public int TryGetSellSlotItemStat1(int slotIndex)
+        {
+            ulong slotBase = TryGetInventorySlotBase();
+            if (slotBase == 0) return 0;
+            ulong addr = slotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize) - 2;
+            return ReadByte(addr);
+        }
+
+        /// <summary>
+        /// Reads inventory slot item stat2 using old-bot offsets.
+        /// UNVERIFIED.
+        /// </summary>
+        public int TryGetSellSlotItemStat2(int slotIndex)
+        {
+            ulong slotBase = TryGetInventorySlotBase();
+            if (slotBase == 0) return 0;
+            ulong addr = slotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize) - 1;
+            return ReadByte(addr);
+        }
+
+        /// <summary>
+        /// Reads storage item type using old-bot offsets (UI chain + 0x116).
+        /// UNVERIFIED.
+        /// </summary>
+        public int TryGetStorageItemType(int slotIndex)
+        {
+            ulong storageSlotBase = TryGetStorageSlotBase();
+            if (storageSlotBase == 0) return 0;
+            ulong addr = storageSlotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize) - 4;
+            return ReadShort(addr);
+        }
+
+        /// <summary>
+        /// Reads storage item count using old-bot offsets.
+        /// UNVERIFIED.
+        /// </summary>
+        public int TryGetStorageItemCount(int slotIndex)
+        {
+            ulong storageSlotBase = TryGetStorageSlotBase();
+            if (storageSlotBase == 0) return 0;
+            ulong addr = storageSlotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize);
+            return ReadByte(addr);
+        }
+
+        /// <summary>
+        /// Reads storage item stat1 using old-bot offsets.
+        /// UNVERIFIED.
+        /// </summary>
+        public int TryGetStorageItemStat1(int slotIndex)
+        {
+            ulong storageSlotBase = TryGetStorageSlotBase();
+            if (storageSlotBase == 0) return 0;
+            ulong addr = storageSlotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize) - 2;
+            return ReadByte(addr);
+        }
+
+        /// <summary>
+        /// Reads storage item stat2 using old-bot offsets.
+        /// UNVERIFIED.
+        /// </summary>
+        public int TryGetStorageItemStat2(int slotIndex)
+        {
+            ulong storageSlotBase = TryGetStorageSlotBase();
+            if (storageSlotBase == 0) return 0;
+            ulong addr = storageSlotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize) - 1;
+            return ReadByte(addr);
+        }
+
+        /// <summary>
+        /// Gets the base address for storage slots using old-bot offsets.
+        /// UNVERIFIED.
+        /// </summary>
+        private ulong TryGetStorageSlotBase()
+        {
+            ulong storageWindow = TryGetStorageWindowAddress();
+            if (storageWindow == 0) return 0;
+            return storageWindow + (ulong)BotConstants.MemoryOffsets.SlotFirstStorageValue;
+        }
+
+        /// <summary>
+        /// Gets the storage window address via UI chain (same pattern as shop window).
+        /// UNVERIFIED.
+        /// </summary>
+        private ulong TryGetStorageWindowAddress()
+        {
+            ulong uiWindow = GetUiWindowAddress();
+            if (uiWindow == 0) return 0;
+            return ReadPointer(uiWindow + (ulong)BotConstants.MemoryOffsets.StorageWindow2M);
+        }
+
+        /// <summary>
+        /// Returns the current inventory tab (0 = first tab, 1 = second tab).
+        /// Pointer chain provided by user: [[Ares.exe + 0x4CAEE8] - 0x9] - 0x36B
+        /// </summary>
+        public int TryGetCurrentInventoryTab()
+        {
+            // Read [[moduleBase + 0x4CAEE8] - 0x9]
+            ulong ptr1 = ReadPointer(_moduleBase + BotConstants.MemoryOffsets.InventoryTabSelectedPtr);
+            if (ptr1 == 0) return 0;
+            ulong ptr2 = ReadPointer(ptr1 - (ulong)BotConstants.MemoryOffsets.InventoryTabSelectedSub1);
+            if (ptr2 == 0) return 0;
+            // Subtract 0x36B to get the final address, read byte
+            ulong finalAddr = ptr2 - (ulong)BotConstants.MemoryOffsets.InventoryTabSelectedSub2;
+            return ReadByte(finalAddr);
+        }
+
+        /// <summary>
+        /// Checks whether the storage window is currently open.
+        /// Uses old-bot offset pattern — UNVERIFIED.
+        /// </summary>
+        public bool IsStorageOpen()
+        {
+            ulong storageWindow = TryGetStorageWindowAddress();
+            if (storageWindow == 0) return false;
+            return ReadByte(storageWindow + (ulong)BotConstants.MemoryOffsets.StorageWindow1) == 1;
+        }
+
+        /// <summary>
+        /// Checks whether the SELL CONFIRMATION dialog is open (popup after right-clicking an item).
+        /// Pointer: [Ares.exe + 0x471C98] + 0xE8
+        /// </summary>
+        public bool IsSellConfirmWindowOpen()
+        {
+            ulong confirmWindow = ReadPointer(_moduleBase + BotConstants.MemoryOffsets.SellConfirmWindowPtr);
+            if (confirmWindow == 0) return false;
+            return ReadByte(confirmWindow + 0xE8) == 1;
+        }
+
+        /// <summary>
+        /// Reads max weight from player structure.
+        /// </summary>
+        public int GetMaxWeight()
+        {
+            ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
+            if (playerBase == 0) return 0;
+            return ReadShort(playerBase + MaxWeightOffset);
+        }
+
+        /// <summary>
+        /// Reads current weight from player structure.
+        /// </summary>
+        public int GetCurrentWeight()
+        {
+            ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
+            if (playerBase == 0) return 0;
+            return ReadShort(playerBase + CurrentWeightOffset);
         }
 
         #endregion

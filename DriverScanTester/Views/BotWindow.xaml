@@ -70,6 +70,7 @@
                     </WrapPanel>
                     <WrapPanel Orientation="Horizontal" Margin="5">
                         <Button Content="Path Editor" Command="{Binding OpenPathEditorCommand}" Width="100" Margin="2" Background="#FFF0F0FF"/>
+                        <Button Content="Test Sell" Command="{Binding TestSellCommand}" Width="100" Margin="10,2,2,2" Background="#FFFFF0D0" FontWeight="Bold"/>
                     </WrapPanel>
                 </StackPanel>
             </GroupBox>

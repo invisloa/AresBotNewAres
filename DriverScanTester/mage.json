@@ -1,0 +1,26 @@
+[
+  {
+    "AddressText": "0x82EAA16",
+    "NameText": "X_CastSpeed",
+    "ValueText": "16671",
+    "ValueType": 1,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "0x82EB05C",
+    "NameText": "0x82EB05C",
+    "ValueText": "",
+    "ValueType": 1,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "0x82EB05E",
+    "NameText": "X_Delay",
+    "ValueText": "0",
+    "ValueType": 1,
+    "Priority": 2,
+    "LockGroup": 0
+  }
+]

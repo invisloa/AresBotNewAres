@@ -46,6 +46,15 @@ namespace DriverScanTester.ViewModels
             ToggleHealManaBotCommand = new RelayCommand(_ => ToggleHealManaBot(), _ => _main.IsAttached);
             ToggleLootBotCommand = new RelayCommand(_ => ToggleLootBot(), _ => _main.IsAttached);
             OpenPathEditorCommand = new RelayCommand(_ => _main.OpenPathEditorInternal(), _ => _main.IsAttached);
+            TestSellCommand = new RelayCommand(_ => {
+                int ox = 0, oy = 0;
+                if (!string.IsNullOrEmpty(SelectedProfileName))
+                {
+                    var p = _main.LoadProfile(SelectedProfileName);
+                    if (p != null) { ox = p.WindowOffsetX; oy = p.WindowOffsetY; }
+                }
+                _main.TestSell(ox, oy);
+            }, _ => _main.IsAttached);
             ClearBotLogCommand = new RelayCommand(_ => BotLogText = "");
 
             // 3-Phase Workflow commands
@@ -194,6 +203,7 @@ namespace DriverScanTester.ViewModels
         public ICommand ToggleHealManaBotCommand { get; }
         public ICommand ToggleLootBotCommand { get; }
         public ICommand OpenPathEditorCommand { get; }
+        public ICommand TestSellCommand { get; }
         public ICommand ClearBotLogCommand { get; }
 
         // 3-Phase Workflow commands
