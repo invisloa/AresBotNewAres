@@ -420,61 +420,64 @@ namespace DriverScanTester.Services
         // ════════════════════════════════════════════════════════════════
 
         /// <summary>
-        /// Gets the base address for inventory slots using old-bot offset 0xC5A.
-        /// UNVERIFIED — may differ from actual game memory layout.
+        /// Gets the base address for inventory sell slots.
+        /// Slot 0 item type is at [Ares.exe + 0x471C88] + 0x109A (playerBase + 0x109A).
+        /// Each slot is 0x20 bytes. Slot 1 item type is at playerBase + 0x10BA.
         /// </summary>
         private ulong TryGetInventorySlotBase()
         {
             ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
             if (playerBase == 0) return 0;
-            return playerBase + (ulong)BotConstants.MemoryOffsets.SlotFirstSell; // 0xC5A
+            return playerBase + (ulong)BotConstants.MemoryOffsets.SlotFirstSell; // 0x109A
         }
 
         /// <summary>
-        /// Reads inventory slot item type using old-bot offsets.
-        /// UNVERIFIED — returns 0 if base address is invalid.
+        /// Reads inventory slot item type (2 bytes, short).
+        /// Item type is at offset 0 of each 0x20-byte slot.
+        /// Slot 0: [Ares.exe + 0x471C88] + 0x109A
+        /// Slot 1: [Ares.exe + 0x471C88] + 0x10BA
         /// </summary>
         public int TryGetSellSlotItemType(int slotIndex)
         {
             ulong slotBase = TryGetInventorySlotBase();
             if (slotBase == 0) return 0;
-            ulong addr = slotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize) - 4;
+            ulong addr = slotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize);
             return ReadShort(addr);
         }
 
         /// <summary>
-        /// Reads inventory slot item count using old-bot offsets.
-        /// UNVERIFIED.
+        /// Reads inventory slot item count.
+        /// Verified: [Ares.exe + 0x471C88] + 0x10A0 → slot offset +6.
         /// </summary>
         public int TryGetSellSlotItemCount(int slotIndex)
         {
             ulong slotBase = TryGetInventorySlotBase();
             if (slotBase == 0) return 0;
-            ulong addr = slotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize);
+            ulong addr = slotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize) + 6;
             return ReadByte(addr);
         }
 
         /// <summary>
-        /// Reads inventory slot item stat1 using old-bot offsets.
-        /// UNVERIFIED.
+        /// Reads inventory slot item stat1 (Baruch).
+        /// Verified offset: Baruch = [Ares.exe + 0x471C88] + 0x109C → slot offset +2.
         /// </summary>
         public int TryGetSellSlotItemStat1(int slotIndex)
         {
             ulong slotBase = TryGetInventorySlotBase();
             if (slotBase == 0) return 0;
-            ulong addr = slotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize) - 2;
+            ulong addr = slotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize) + 2;
             return ReadByte(addr);
         }
 
         /// <summary>
-        /// Reads inventory slot item stat2 using old-bot offsets.
-        /// UNVERIFIED.
+        /// Reads inventory slot item stat2 (Keluchi).
+        /// ASSUMED at slot offset +3 (next byte after Baruch). UNVERIFIED.
         /// </summary>
         public int TryGetSellSlotItemStat2(int slotIndex)
         {
             ulong slotBase = TryGetInventorySlotBase();
             if (slotBase == 0) return 0;
-            ulong addr = slotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize) - 1;
+            ulong addr = slotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize) + 3;
             return ReadByte(addr);
         }
 

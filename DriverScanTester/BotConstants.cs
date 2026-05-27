@@ -229,6 +229,7 @@ namespace DriverScanTester
             public const ulong WhitePotionsCount = 0xF60;
             public const ulong RedPotionsCount = 0xF80;
             public const ulong InventoryFirstSlotSellValue = 0x191A;
+            public const ulong FirstSellSlotPtr = 0x109A;
             public const ulong TargetSelected = 0x60;
             public const ulong AttackSpeed1 = 0x47A;
             public const ulong AttackSpeed2 = 0x47E;
@@ -269,7 +270,7 @@ namespace DriverScanTester
             public const int SlotManna = 0xbce;
             public const int SlotRedPot = 0xbea;
             public const int SlotWhitePot = 0xc06;
-            public const int SlotFirstSell = 0xc5a;
+            public const int SlotFirstSell = 0x109A;
             public const int SlotFirstStorageValue = 0x116;
             public const ulong InventoryTestPtr = 0x242CB5;
             public const ulong InventoryTestSub = 0xF0;
@@ -316,7 +317,7 @@ namespace DriverScanTester
             public static readonly int[] ItemValuesEventSnowman = { 9220, 9261, 9262, 9263, 9264, 9265, 9266, 9267 };
 
             /// <summary>Size of each inventory/storage slot in bytes.</summary>
-            public const int InventorySlotSize = 0x1c;
+            public const int InventorySlotSize = 0x20;
 
             /// <summary>Number of inventory slots per tab.</summary>
             public const int SlotsPerInventoryTab = 36;

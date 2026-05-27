@@ -108,6 +108,19 @@ namespace DriverScanTester.Utils
             Thread.Sleep(delay);
         }
 
+        /// <summary>
+        /// Moves the cursor to an absolute screen position WITHOUT adding window offset, then right-clicks.
+        /// Use this for coordinates that already account for window position.
+        /// </summary>
+        public static void MoveAndRightClickAbsolute(int screenX, int screenY, int delay = 100)
+        {
+            Log?.Invoke($"[Mouse] MoveAndRightClickAbsolute -> screen ({screenX},{screenY}) [no offset applied]");
+            SetCursorPos(screenX, screenY);
+            Thread.Sleep(delay);
+            RightClick();
+            Thread.Sleep(delay);
+        }
+
         public static void OpenInventoryTab1()
         {
             Log?.Invoke($"[Mouse] OpenInventoryTab1 -> hardcoded (1165,515) + offset ({_windowOffsetX},{_windowOffsetY}) = screen ({1165+_windowOffsetX},{515+_windowOffsetY})");

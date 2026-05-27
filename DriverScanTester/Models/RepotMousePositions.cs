@@ -111,8 +111,10 @@ namespace DriverScanTester.Models
             return tempTupleArr;
         }
 
-        static readonly int inventoryFirstSlotX = 1260;
-        static readonly int inventoryFirstSlotY = 530;
+        // Window-relative base (was absolute 1260,530 for reference window 447,77).
+        // 1260 - 447 = 813, 530 - 77 = 453
+        static readonly int inventoryFirstSlotX = 813;
+        static readonly int inventoryFirstSlotY = 453;
         static readonly int inventoryColumns = 5;
 
         static readonly int storageFirstSlotX = 985;

@@ -82,7 +82,11 @@ namespace DriverScanTester.Services
                 }
 
                 var pos = RepotMousePositions.itemSellPositions[sellItemNumber];
-                MouseOperations.MoveAndRightClick(pos.X, pos.Y);
+                var (winX, winY) = GetWindowOrigin();
+                int screenX = pos.X + winX;
+                int screenY = pos.Y + winY;
+                _log($"[ItemSeller] Sell slot {item} -> screen ({screenX},{screenY}) [relative ({pos.X},{pos.Y}) + window ({winX},{winY})]");
+                MouseOperations.MoveAndRightClickAbsolute(screenX, screenY);
                 MouseConfirmSelling();
                 bugVerifier++;
 
@@ -648,15 +652,16 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Opens inventory tab 2. Window-relative position: (859, 614).
-        /// At window (541,91): screen (1400,705) — FIXME: confirm actual position!
+        /// Opens inventory tab 2. Window-relative position: (795, 560).
+        /// User calibrated: at window (445,105) screen click should be (1240,665).
+        /// 1240 - 445 = 795, 665 - 105 = 560.
         /// </summary>
         private void OpenInventoryTab2()
         {
             var (winX, winY) = GetWindowOrigin();
-            int screenX = 859 + winX;
-            int screenY = 614 + winY;
-            _log($"[ItemSeller] OpenInventoryTab2 -> screen ({screenX},{screenY}) [relative (859,614) + window ({winX},{winY})]");
+            int screenX = 795 + winX;
+            int screenY = 560 + winY;
+            _log($"[ItemSeller] OpenInventoryTab2 -> screen ({screenX},{screenY}) [relative (795,560) + window ({winX},{winY})]");
             MouseOperations.OpenInventoryTab2Absolute(screenX, screenY);
         }
 
