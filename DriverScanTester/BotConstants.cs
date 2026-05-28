@@ -761,15 +761,6 @@ namespace DriverScanTester
         // ════════════════════════════════════════════════════════════════
         public static class Ui
         {
-            /// <summary>Default bot target X coordinate.</summary>
-            public const int DefaultBotTargetX = 766;
-
-            /// <summary>Default bot target Y coordinate.</summary>
-            public const int DefaultBotTargetY = 190;
-
-            /// <summary>Default test angle for manual camera test.</summary>
-            public const int DefaultTestAngle = 15400;
-
             /// <summary>Default HP threshold in UI.</summary>
             public const int DefaultHpThreshold = 250;
 

@@ -65,6 +65,9 @@ namespace DriverScanTester.Services
             List<int> itemsToOperate = ItemsForSaleListGenerate();
             int bugVerifier = 0;
 
+            // ── Szczegółowy log wszystkich przedmiotów do sprzedania ──
+            LogAllItemsForSale(itemsToOperate, "INVENTORY");
+
             Thread.Sleep(700);
             OpenInventoryTab1();
 
@@ -73,13 +76,11 @@ namespace DriverScanTester.Services
                 if (!_memory.IsShopOpen())
                     break;
 
-                // Skip equipment slots (indices 0-5)
-                if (item < 6)
-                    continue;
+                // Old bot logic: +6 offset → skip equipment row, start from grid position 6
+                int sellItemNumber = item + 6;
 
-                _log($"ItemSeller: Selling item slot {item}");
+                _log($"ItemSeller: Selling item slot {item} (grid position {sellItemNumber})");
 
-                int sellItemNumber = item;
                 if (sellItemNumber >= BotConstants.GameMagicValues.SlotsPerInventoryTab && _memory.TryGetCurrentInventoryTab() == 0)
                 {
                     OpenInventoryTab2();
@@ -89,7 +90,7 @@ namespace DriverScanTester.Services
                 var (winX, winY) = GetWindowOrigin();
                 int screenX = pos.X + winX;
                 int screenY = pos.Y + winY;
-                _log($"[ItemSeller] Sell slot {item} -> screen ({screenX},{screenY}) [relative ({pos.X},{pos.Y}) + window ({winX},{winY})]");
+                _log($"[ItemSeller] Sell slot {item} -> gridPos {sellItemNumber} -> screen ({screenX},{screenY}) [relative ({pos.X},{pos.Y}) + window ({winX},{winY})]");
                 MouseOperations.MoveAndRightClickAbsolute(screenX, screenY);
                 MouseConfirmSelling();
                 bugVerifier++;
@@ -201,7 +202,7 @@ namespace DriverScanTester.Services
         {
             List<int> itemsToOperate = new List<int>();
             int inventoryCount = (invType == InventoryType.Inventory)
-                ? BotConstants.GameMagicValues.TotalInventorySlots
+                ? 60  // old bot checked 60 slots (0-59); +6 offset → grid positions 6-65
                 : BotConstants.GameMagicValues.TotalStorageSlots;
 
             for (int i = 0; i < inventoryCount; i++)
@@ -499,6 +500,102 @@ namespace DriverScanTester.Services
         }
 
         // ════════════════════════════════════════════════════════════════
+        //  DETAILED SELL LIST LOGGING
+        // ════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Wypisuje szczegółowy log wszystkich przedmiotów zakwalifikowanych do sprzedania:
+        /// slot, tab, wiersz, kolumna, pozycja myszki (względem okna i ekranu) oraz dane itemu.
+        /// </summary>
+        private void LogAllItemsForSale(List<int> itemsToSell, string source)
+        {
+            _log("");
+            _log("╔══════════════════════════════════════════════════════════════════════════╗");
+            _log($"║  SELL LIST [{source}] - {itemsToSell.Count} items qualified for sale");
+            _log("╚══════════════════════════════════════════════════════════════════════════╝");
+
+            if (itemsToSell.Count == 0)
+            {
+                _log("  (no items to sell)");
+                _log("");
+                return;
+            }
+
+            var (winX, winY) = GetWindowOrigin();
+            const int colsPerTab = 6; // 6 columns (0-5) per tab row
+
+            foreach (var item in itemsToSell)
+            {
+                // Old bot: +6 offset to skip equipment rows in grid
+                int sellItemNumber = item + 6;
+
+                int tab = sellItemNumber < BotConstants.GameMagicValues.SlotsPerInventoryTab ? 1 : 2;
+                int localIndex = sellItemNumber % BotConstants.GameMagicValues.SlotsPerInventoryTab;
+                int row = localIndex / colsPerTab;
+                int col = localIndex % colsPerTab;
+
+                var pos = RepotMousePositions.itemSellPositions[sellItemNumber];
+                int screenX = pos.X + winX;
+                int screenY = pos.Y + winY;
+
+                // Read item details from memory (using original slot index, not offset)
+                int itemType = _memory.TryGetSellSlotItemType(item);
+                int stat1 = _memory.TryGetSellSlotItemStat1(item);
+                int stat2 = _memory.TryGetSellSlotItemStat2(item);
+                int count = _memory.TryGetSellSlotItemCount(item);
+
+                _log($"  ▶ Slot={item,2} | GridPos={sellItemNumber,2} | Tab={tab} | Wiersz={row} | Kolumna={col} | " +
+                     $"PozycjaMyszki=({pos.X,4},{pos.Y,4}) | Screen=({screenX,4},{screenY,4}) | " +
+                     $"ItemType={itemType} | Stat1={stat1} | Stat2={stat2} | Count={count}");
+            }
+
+            _log("");
+        }
+
+        /// <summary>
+        /// Wypisuje szczegółowy log wszystkich przedmiotów w storage do przeniesienia.
+        /// </summary>
+        private void LogAllStorageItemsForSale(List<int> itemsToMove, string source)
+        {
+            _log("");
+            _log("╔══════════════════════════════════════════════════════════════════════════╗");
+            _log($"║  STORAGE MOVE LIST [{source}] - {itemsToMove.Count} items to move from storage");
+            _log("╚══════════════════════════════════════════════════════════════════════════╝");
+
+            if (itemsToMove.Count == 0)
+            {
+                _log("  (no storage items to move)");
+                _log("");
+                return;
+            }
+
+            var (winX, winY) = GetWindowOrigin();
+            const int colsPerTab = 6; // storage has 6 columns (0-5)
+
+            foreach (var item in itemsToMove)
+            {
+                int row = item / colsPerTab;
+                int col = item % colsPerTab;
+
+                var pos = RepotMousePositions.itemMoveFromStoragePositions[item];
+                int screenX = pos.X + winX;
+                int screenY = pos.Y + winY;
+
+                // Read storage item details from memory
+                int itemType = _memory.TryGetStorageItemType(item);
+                int stat1 = _memory.TryGetStorageItemStat1(item);
+                int stat2 = _memory.TryGetStorageItemStat2(item);
+                int count = _memory.TryGetStorageItemCount(item);
+
+                _log($"  ▶ StorageSlot={item,2} | Wiersz={row} | Kolumna={col} | " +
+                     $"PozycjaMyszki=({pos.X,4},{pos.Y,4}) | Screen=({screenX,4},{screenY,4}) | " +
+                     $"ItemType={itemType} | Stat1={stat1} | Stat2={stat2} | Count={count}");
+            }
+
+            _log("");
+        }
+
+        // ════════════════════════════════════════════════════════════════
         //  STORAGE OPERATIONS (ported from StorageMover.cs)
         // ════════════════════════════════════════════════════════════════
 
@@ -516,6 +613,9 @@ namespace DriverScanTester.Services
 
             OpenInventoryTab1();
             List<int> itemsToMove = ItemsFromStorageListGenerate();
+
+            // ── Szczegółowy log wszystkich przedmiotów do przeniesienia ze storage ──
+            LogAllStorageItemsForSale(itemsToMove, "STORAGE");
 
             foreach (int item in itemsToMove)
             {

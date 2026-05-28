@@ -713,16 +713,6 @@ namespace DriverScanTester.Services
             }
         }
 
-        public void TestMove(short angle)
-        {
-            _log($"[TestMove] Setting camera to raw game angle {angle}");
-            _memoryService.SetCameraAngle(angle);
-            _hasLastGameAngle = true;
-            _lastSetGameAngle = angle;
-            _log("[TestMove] StartMoving (W press)");
-            StartMoving();
-        }
-
         /// <summary>
         /// Returns true if the current waypoint is the last real (non-ghost) waypoint in the queue.
         /// </summary>

@@ -1,5 +1,4 @@
 using DriverScanTester.Models;
-using DriverScanTester.Services;
 using DriverScanTester.Utils;
 using System;
 using System.Windows.Input;
@@ -11,11 +10,6 @@ namespace DriverScanTester.ViewModels
         private readonly MainViewModel _main;
         private readonly Action<string> _appendLog;
 
-        private string _botTargetXText = "766";
-        private string _botTargetYText = "190";
-        private string _testAngleText = "15400";
-        private MovementPrecision _selectedPrecision = MovementPrecision.Medium;
-        private BotMode _selectedBotMode = BotMode.OnlyMove;
         private string _hpThresholdText = "250";
         private string _manaThresholdText = "50";
         private string _currentHp = "--";
@@ -42,7 +36,6 @@ namespace DriverScanTester.ViewModels
 
             RunBotCommand = new RelayCommand(_ => RunBot(), _ => _main.IsAttached);
             StopBotCommand = new RelayCommand(_ => StopAllBots(), _ => _main.IsAttached && (IsMovementBotRunning || IsHealManaBotRunning || IsLootBotRunning));
-            TestAngleCommand = new RelayCommand(_ => _main.TestAngle(), _ => _main.IsAttached);
             ToggleHealManaBotCommand = new RelayCommand(_ => ToggleHealManaBot(), _ => _main.IsAttached);
             ToggleLootBotCommand = new RelayCommand(_ => ToggleLootBot(), _ => _main.IsAttached);
             OpenPathEditorCommand = new RelayCommand(_ => _main.OpenPathEditorInternal(), _ => _main.IsAttached);
@@ -64,36 +57,6 @@ namespace DriverScanTester.ViewModels
             ValidateProfileCommand = new RelayCommand(_ => ValidateSelectedProfile(), _ => _main.IsAttached);
 
             _statsTimer = new System.Threading.Timer(_ => RefreshStats(), null, 0, 1000);
-        }
-
-        public string BotTargetXText
-        {
-            get => _botTargetXText;
-            set => SetProperty(ref _botTargetXText, value);
-        }
-
-        public string BotTargetYText
-        {
-            get => _botTargetYText;
-            set => SetProperty(ref _botTargetYText, value);
-        }
-
-        public string TestAngleText
-        {
-            get => _testAngleText;
-            set => SetProperty(ref _testAngleText, value);
-        }
-
-        public MovementPrecision SelectedPrecision
-        {
-            get => _selectedPrecision;
-            set => SetProperty(ref _selectedPrecision, value);
-        }
-
-        public BotMode SelectedBotMode
-        {
-            get => _selectedBotMode;
-            set => SetProperty(ref _selectedBotMode, value);
         }
 
         public string HpThresholdText
@@ -199,7 +162,6 @@ namespace DriverScanTester.ViewModels
 
         public ICommand RunBotCommand { get; }
         public ICommand StopBotCommand { get; }
-        public ICommand TestAngleCommand { get; }
         public ICommand ToggleHealManaBotCommand { get; }
         public ICommand ToggleLootBotCommand { get; }
         public ICommand OpenPathEditorCommand { get; }
@@ -237,15 +199,8 @@ namespace DriverScanTester.ViewModels
 
         public bool CanStartWorkflow => !string.IsNullOrEmpty(SelectedProfileName);
 
-        public static System.Array MovementPrecisions => EnumSources.MovementPrecisions;
-        public static System.Array BotModes => EnumSources.BotModes;
-
         private void RunBot()
         {
-            _main.BotTargetXText = BotTargetXText;
-            _main.BotTargetYText = BotTargetYText;
-            _main.SelectedPrecision = SelectedPrecision;
-            _main.SelectedBotMode = SelectedBotMode;
             _main.RunBot();
         }
 
@@ -349,12 +304,6 @@ namespace DriverScanTester.ViewModels
 
             HpThresholdText = _main.HealManaThreshold1.ToString();
             ManaThresholdText = _main.HealManaThreshold2.ToString();
-
-            BotTargetXText = _main.BotTargetXText;
-            BotTargetYText = _main.BotTargetYText;
-            SelectedPrecision = _main.SelectedPrecision;
-            SelectedBotMode = _main.SelectedBotMode;
-            TestAngleText = _main.TestAngleText;
         }
 
         private void RefreshStats()

@@ -36,7 +36,6 @@ namespace DriverScanTester.ViewModels
         private string _logText = "";
         private string _botTargetXText = "766";
         private string _botTargetYText = "190";
-        private string _testAngleText = "15400";
         private string _subScan1Text = "";
         private string _subScan2Text = "";
         private MovementPrecision _selectedPrecision = MovementPrecision.Medium;
@@ -158,12 +157,6 @@ namespace DriverScanTester.ViewModels
             set => SetProperty(ref _botTargetYText, value);
         }
 
-        public string TestAngleText
-        {
-            get => _testAngleText;
-            set => SetProperty(ref _testAngleText, value);
-        }
-
         public string SubScan1Text
         {
             get => _subScan1Text;
@@ -198,7 +191,6 @@ namespace DriverScanTester.ViewModels
         public ICommand PointerScanCommand { get; }
         public ICommand RunBotCommand { get; }
         public ICommand RunLootBotCommand { get; }
-        public ICommand TestAngleCommand { get; }
         public ICommand OpenPathEditorCommand { get; }
         public ICommand OpenBotWindowCommand { get; }
         public ICommand ClearLogCommand { get; }
@@ -289,7 +281,6 @@ namespace DriverScanTester.ViewModels
             PointerScanCommand = new RelayCommand(_ => OpenPointerScanFromMain(), _ => _isAttached && _pointerScanner != null);
             RunBotCommand = new RelayCommand(_ => ToggleMovementBot(), _ => _isAttached);
             RunLootBotCommand = new RelayCommand(_ => ToggleLootBot(), _ => _isAttached);
-            TestAngleCommand = new RelayCommand(_ => RunTestAngle(), _ => _isAttached);
             OpenPathEditorCommand = new RelayCommand(_ => OpenPathEditor(), _ => _isAttached);
             OpenBotWindowCommand = new RelayCommand(_ => OpenBotWindow(), _ => _isAttached);
             ClearLogCommand = new RelayCommand(_ => LogText = "", _ => true);
@@ -2829,11 +2820,6 @@ namespace DriverScanTester.ViewModels
                     ToggleMovementBot();
                 }
 
-                public void TestAngle()
-                {
-                    RunTestAngle();
-                }
-
                 public void TestSell(int profileOffsetX = 0, int profileOffsetY = 0)
                 {
                     if (!_isAttached) { AppendLog("Attach first."); return; }
@@ -3113,58 +3099,6 @@ namespace DriverScanTester.ViewModels
                     return mem.GetManaPotionCount();
                 }
 
-                private void RunTestAngle()
-                {
-                    if (!_isAttached) return;
-        
-                    if (short.TryParse(TestAngleText, out short angle))
-                    {
-                        // Stop all other bots if they are running
-                        if (_isMovementBotRunning || _isHealManaBotRunning)
-                        {
-                            _movementBotCts?.Cancel();
-                            _healManaBotCts?.Cancel();
-                            _isMovementBotRunning = false;
-                            _isHealManaBotRunning = false;
-                        }
-        
-                        ulong baseAddr = FindModuleInScanner("Ares.exe", false);
-                        if (baseAddr == 0)
-                        {
-                            _pointerScanner?.RefreshModules();
-                            baseAddr = FindModuleInScanner("Ares.exe", true);
-                        }
-        
-                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
-                        _movementSystem = new MovementSystem(memoryService, AppendLog, 0, 0);
-                        
-                        _movementBotCts = new CancellationTokenSource();
-                        _isMovementBotRunning = true; // Use movement bot flag for test angle
-                        var token = _movementBotCts.Token;
-                        
-                        Task.Run(async () =>
-                        {
-                            try 
-                            {
-                                Application.Current?.Dispatcher?.Invoke(() => AppendLog($"Testing Angle: {angle}. Press PageUp or Run Bot to stop."));
-                                while (!token.IsCancellationRequested)
-                                {
-                                    _movementSystem.TestMove(angle);
-                                    await Task.Delay(50, token);
-                                }
-                            }
-                            catch (TaskCanceledException) {}
-                            finally 
-                            {
-                                Application.Current?.Dispatcher?.Invoke(() => 
-                                {
-                                    _isMovementBotRunning = false;
-                                    AppendLog("Test Angle stopped.");
-                                });
-                            }
-                        }, token);
-                    }
-                }
         private static class Native
         {
             public const uint GENERIC_READ = 0x80000000;
