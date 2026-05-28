@@ -471,13 +471,13 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Reads inventory slot item stat2 (Keluchi).
-        /// ASSUMED at slot offset +3 (next byte after Baruch). UNVERIFIED.
+        /// Verified: [Ares.exe + 0x471C88] + 0x109E → slot offset +4.
         /// </summary>
         public int TryGetSellSlotItemStat2(int slotIndex)
         {
             ulong slotBase = TryGetInventorySlotBase();
             if (slotBase == 0) return 0;
-            ulong addr = slotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize) + 3;
+            ulong addr = slotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize) + 4;
             return ReadByte(addr);
         }
 

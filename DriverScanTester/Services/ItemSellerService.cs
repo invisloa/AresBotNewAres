@@ -73,10 +73,14 @@ namespace DriverScanTester.Services
                 if (!_memory.IsShopOpen())
                     break;
 
+                // Skip equipment slots (indices 0-5)
+                if (item < 6)
+                    continue;
+
                 _log($"ItemSeller: Selling item slot {item}");
 
-                int sellItemNumber = item + 6; // START FROM 2 Row 1st Column = 12
-                if (sellItemNumber >= 36 && _memory.TryGetCurrentInventoryTab() == 0)
+                int sellItemNumber = item;
+                if (sellItemNumber >= BotConstants.GameMagicValues.SlotsPerInventoryTab && _memory.TryGetCurrentInventoryTab() == 0)
                 {
                     OpenInventoryTab2();
                 }
