@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -35,6 +35,27 @@ namespace DriverScanTester.Services
         private static readonly (int MinX, int MaxX, int MinY, int MaxY) KharonShopBounds =
             (1125115858, 1125782038, 1125170820, 1125701048);
 
+        // ── Inventory grid mapping ──
+        // TryGetSellSlotItem* uses compact SELLABLE inventory indexes:
+        //   0..29  = tab 1 sellable area, clicked as visual indexes 6..35
+        //            because tab 1 visual row 0 / indexes 0..5 are equipment/ignored.
+        //   30..65 = tab 2 sellable area, clicked as visual indexes 36..71.
+        //
+        // Correct mouse click index is always:
+        //   clickIndex = slotIndex + 6
+        private const int InventoryColumns = 6;
+        private const int InventoryRowsPerTab = 6;
+        private const int VisualSlotsPerInventoryTab = InventoryColumns * InventoryRowsPerTab; // 36
+        private const int FirstSellableClickIndexTab1 = InventoryColumns; // visual indexes 0..5 skipped on tab 1
+        private const int SellableSlotsTab1 = VisualSlotsPerInventoryTab - FirstSellableClickIndexTab1; // 30
+        private const int TotalSellableInventorySlots = SellableSlotsTab1 + VisualSlotsPerInventoryTab; // 66
+        private const int FirstTab2ClickIndex = VisualSlotsPerInventoryTab; // 36
+
+        // Diagnosed in test mode: itemSellPositions Y coordinates are one row too low.
+        // Old table Y values are 453..628, but real inventory slot rows are 418..593.
+        // Apply this correction only to inventory selling clicks.
+        private const int InventorySellYOffsetCorrection = -35;
+
         public ItemSellerService(GameMemoryService memory, Action<string> log)
         {
             _memory = memory;
@@ -60,67 +81,58 @@ namespace DriverScanTester.Services
             }
 
             OpenShopWindow();
-
-            int firstSellListCount = ItemsForSaleListGenerate().Count;
-            List<int> itemsToOperate = ItemsForSaleListGenerate();
-            int bugVerifier = 0;
-
-            // ── Szczegółowy log wszystkich przedmiotów do sprzedania ──
-            LogAllItemsForSale(itemsToOperate, "INVENTORY");
-
             Thread.Sleep(700);
-            OpenInventoryTab1();
 
-            foreach (var item in itemsToOperate)
+            int noProgressTries = 0;
+
+            while (_memory.IsShopOpen())
             {
-                if (!_memory.IsShopOpen())
-                    break;
+                List<int> itemsToOperate = ItemsForSaleListGenerate();
 
-                // Old bot logic: +6 offset → skip equipment row, start from grid position 6
-                int sellItemNumber = item + 6;
-
-                _log($"ItemSeller: Selling item slot {item} (grid position {sellItemNumber})");
-
-                if (sellItemNumber >= BotConstants.GameMagicValues.SlotsPerInventoryTab && _memory.TryGetCurrentInventoryTab() == 0)
+                if (itemsToOperate.Count == 0)
                 {
-                    OpenInventoryTab2();
+                    _log("ItemSeller: No inventory items qualified for sale.");
+                    break;
                 }
 
-                var pos = RepotMousePositions.itemSellPositions[sellItemNumber];
-                var (winX, winY) = GetWindowOrigin();
-                int screenX = pos.X + winX;
-                int screenY = pos.Y + winY;
-                _log($"[ItemSeller] Sell slot {item} -> gridPos {sellItemNumber} -> screen ({screenX},{screenY}) [relative ({pos.X},{pos.Y}) + window ({winX},{winY})]");
-                MouseOperations.MoveAndRightClickAbsolute(screenX, screenY);
-                MouseConfirmSelling();
-                bugVerifier++;
+                // Sell from the highest compact sellable slot down.
+                // This prevents sold items from shifting remaining slots and invalidating click targets.
+                itemsToOperate.Sort((a, b) => b.CompareTo(a));
 
-                if (bugVerifier == 3 && itemsToOperate.Count == ItemsForSaleListGenerate().Count)
+                LogAllItemsForSale(itemsToOperate, "INVENTORY");
+
+                int countBefore = itemsToOperate.Count;
+                int slotToSell = itemsToOperate[0];
+
+                SellInventorySlotByMouse(slotToSell);
+
+                Thread.Sleep(150);
+
+                int countAfter = ItemsForSaleListGenerate().Count;
+
+                if (countAfter >= countBefore)
                 {
-                    _howManyTries++;
-                    if (_howManyTries >= 5)
+                    noProgressTries++;
+                    _log($"ItemSeller: No sell progress detected. Before={countBefore}, After={countAfter}, Tries={noProgressTries}/5");
+
+                    if (noProgressTries >= 5)
                     {
+                        ShopTooFarAntiBug();
                         _log("ItemSeller: Too many sell attempts with no progress. Throwing.");
                         throw new InvalidOperationException("Sell routine stuck — no items sold after 5 attempts.");
                     }
-                    ShopTooFarAntiBug();
+
+                    // Do not close/ESC the shop after one missed click. Keep shop open and retry.
                     Thread.Sleep(200);
-                    SellItemsByMouseMove();
-                    return;
+                }
+                else
+                {
+                    noProgressTries = 0;
                 }
             }
 
             _howManyTries = 0;
             Thread.Sleep(50);
-
-            // If items remain but count changed (some were sold), retry
-            int remainingCount = ItemsForSaleListGenerate().Count;
-            if (remainingCount != 0 && firstSellListCount != remainingCount)
-            {
-                _log($"ItemSeller: Items for sale left: {remainingCount}. Retrying.");
-                SellItemsByMouseMove();
-                return;
-            }
 
             // Move items from storage if shop is still open and weight allows
             if (ItemsFromStorageListGenerate().Count != 0
@@ -134,6 +146,62 @@ namespace DriverScanTester.Services
                 Thread.Sleep(500);
                 SellItemsByMouseMove();
             }
+        }
+
+        /// <summary>
+        /// Converts compact memory/sellable inventory slot to visual mouse click target.
+        ///
+        /// Correct mapping:
+        /// - memory slots 0..29  -> tab 1, visual click indexes 6..35
+        /// - memory slots 30..65 -> tab 2, visual click indexes 36..71
+        ///
+        /// This is why clickIndex MUST be slotIndex + 6.
+        /// </summary>
+        private (int Tab, int ClickIndex, int LocalIndex, int Row, int Column) GetInventoryClickTarget(int slotIndex)
+        {
+            if (slotIndex < 0 || slotIndex >= TotalSellableInventorySlots)
+            {
+                throw new ArgumentOutOfRangeException(nameof(slotIndex), slotIndex,
+                    $"Inventory slot must be in sellable memory range 0..{TotalSellableInventorySlots - 1}.");
+            }
+
+            int clickIndex = slotIndex + FirstSellableClickIndexTab1;
+            int tab = slotIndex < SellableSlotsTab1 ? 1 : 2;
+            int localIndex = tab == 1
+                ? clickIndex
+                : clickIndex - FirstTab2ClickIndex;
+
+            int row = localIndex / InventoryColumns;
+            int column = localIndex % InventoryColumns;
+
+            return (tab, clickIndex, localIndex, row, column);
+        }
+
+        private void SellInventorySlotByMouse(int slotIndex)
+        {
+            if (!_memory.IsShopOpen())
+                return;
+
+            var target = GetInventoryClickTarget(slotIndex);
+
+            if (target.Tab == 1)
+                OpenInventoryTab1();
+            else
+                OpenInventoryTab2();
+
+            Thread.Sleep(150);
+
+            _log($"ItemSeller: Selling item compact slot {slotIndex} (tab {target.Tab}, click index {target.ClickIndex}, row {target.Row}, col {target.Column})");
+
+            var pos = RepotMousePositions.itemSellPositions[target.ClickIndex];
+            var (winX, winY) = GetWindowOrigin();
+            int correctedRelativeY = pos.Y + InventorySellYOffsetCorrection;
+            int screenX = pos.X + winX;
+            int screenY = correctedRelativeY + winY;
+
+            _log($"[ItemSeller] Sell slot {slotIndex} -> tab {target.Tab} -> clickIndex {target.ClickIndex} -> screen ({screenX},{screenY}) [relative ({pos.X},{correctedRelativeY}) = baseY {pos.Y} + yFix {InventorySellYOffsetCorrection} + window ({winX},{winY})]");
+            MouseOperations.MoveAndRightClickAbsolute(screenX, screenY);
+            MouseConfirmSelling();
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -179,7 +247,7 @@ namespace DriverScanTester.Services
         /// </summary>
         public List<int> ItemsForSaleListGenerate()
         {
-            return ItemsOperationsListGenerate(IsItemForSaleCheck, InventoryType.Inventory);
+            return ItemsOperationsListGenerate(slotIndex => IsItemForSaleCheck(slotIndex, InventoryType.Inventory), InventoryType.Inventory);
         }
 
         /// <summary>
@@ -187,7 +255,7 @@ namespace DriverScanTester.Services
         /// </summary>
         public List<int> ItemsFromStorageListGenerate()
         {
-            return ItemsOperationsListGenerate(IsItemForSaleCheck, InventoryType.Storage);
+            return ItemsOperationsListGenerate(slotIndex => IsItemForSaleCheck(slotIndex, InventoryType.Storage), InventoryType.Storage);
         }
 
         /// <summary>
@@ -202,7 +270,7 @@ namespace DriverScanTester.Services
         {
             List<int> itemsToOperate = new List<int>();
             int inventoryCount = (invType == InventoryType.Inventory)
-                ? 60  // old bot checked 60 slots (0-59); +6 offset → grid positions 6-65
+                ? TotalSellableInventorySlots  // compact sellable slots 0..65 -> visual click indexes 6..71
                 : BotConstants.GameMagicValues.TotalStorageSlots;
 
             for (int i = 0; i < inventoryCount; i++)
@@ -215,10 +283,17 @@ namespace DriverScanTester.Services
             return itemsToOperate;
         }
 
-        private bool IsItemForSaleCheck(int slotIndex)
+        private bool IsItemForSaleCheck(int slotIndex, InventoryType invType)
         {
-            return !IsItemHighValue(slotIndex, InventoryType.Inventory)
-                && IsItemSaleType(slotIndex, InventoryType.Inventory);
+            int count = invType == InventoryType.Inventory
+                ? _memory.TryGetSellSlotItemCount(slotIndex)
+                : _memory.TryGetStorageItemCount(slotIndex);
+
+            if (count <= 0)
+                return false;
+
+            return !IsItemHighValue(slotIndex, invType)
+                && IsItemSaleType(slotIndex, invType);
         }
 
         private bool IsItemSaleType(int slotIndex, InventoryType invType)
@@ -522,30 +597,24 @@ namespace DriverScanTester.Services
             }
 
             var (winX, winY) = GetWindowOrigin();
-            const int colsPerTab = 6; // 6 columns (0-5) per tab row
 
             foreach (var item in itemsToSell)
             {
-                // Old bot: +6 offset to skip equipment rows in grid
-                int sellItemNumber = item + 6;
+                var target = GetInventoryClickTarget(item);
 
-                int tab = sellItemNumber < BotConstants.GameMagicValues.SlotsPerInventoryTab ? 1 : 2;
-                int localIndex = sellItemNumber % BotConstants.GameMagicValues.SlotsPerInventoryTab;
-                int row = localIndex / colsPerTab;
-                int col = localIndex % colsPerTab;
-
-                var pos = RepotMousePositions.itemSellPositions[sellItemNumber];
+                var pos = RepotMousePositions.itemSellPositions[target.ClickIndex];
+                int correctedRelativeY = pos.Y + InventorySellYOffsetCorrection;
                 int screenX = pos.X + winX;
-                int screenY = pos.Y + winY;
+                int screenY = correctedRelativeY + winY;
 
-                // Read item details from memory (using original slot index, not offset)
+                // Read item details from memory using compact sellable slot index.
                 int itemType = _memory.TryGetSellSlotItemType(item);
                 int stat1 = _memory.TryGetSellSlotItemStat1(item);
                 int stat2 = _memory.TryGetSellSlotItemStat2(item);
                 int count = _memory.TryGetSellSlotItemCount(item);
 
-                _log($"  ▶ Slot={item,2} | GridPos={sellItemNumber,2} | Tab={tab} | Wiersz={row} | Kolumna={col} | " +
-                     $"PozycjaMyszki=({pos.X,4},{pos.Y,4}) | Screen=({screenX,4},{screenY,4}) | " +
+                _log($"  ▶ Slot={item,2} | ClickIdx={target.ClickIndex,2} | Tab={target.Tab} | Wiersz={target.Row} | Kolumna={target.Column} | " +
+                     $"PozycjaMyszki=({pos.X,4},{correctedRelativeY,4}) [baseY={pos.Y,4}, yFix={InventorySellYOffsetCorrection}] | Screen=({screenX,4},{screenY,4}) | " +
                      $"ItemType={itemType} | Stat1={stat1} | Stat2={stat2} | Count={count}");
             }
 
