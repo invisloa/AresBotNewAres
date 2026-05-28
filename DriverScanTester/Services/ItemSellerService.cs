@@ -14,8 +14,12 @@ using DriverScanTester.Utils;
 namespace DriverScanTester.Services
 {
     /// <summary>
-    /// Ported from old bot (AresTrainerV3_oldBot) ItemSeller.cs + ItemsToOperateListGenerator.cs + StorageMover.cs.
     /// Handles selling items from inventory and storage during repot.
+    ///
+    /// Main rule in this version:
+    /// - every click is based on REAL visual inventory slot index,
+    /// - realSlot is exactly the index in RepotMousePositions.itemSellPositions[],
+    /// - memorySlot is derived only for memory reads: memorySlot = realSlot - 6.
     /// </summary>
     public class ItemSellerService
     {
@@ -23,12 +27,9 @@ namespace DriverScanTester.Services
         private readonly Action<string> _log;
         private int _howManyTries;
 
-        // ── Known city map IDs (ported from TeleportValues.cs) ──
         public const int MapHershal = 17;
         public const int MapKharon = 44;
 
-        // ── Shop proximity boundaries (ported from old ItemSeller.IsCloseToShop) ──
-        // These are raw coordinate values from the game (int-based coordinate system)
         private static readonly (int MinX, int MaxX, int MinY, int MaxY) HershalShopBounds =
             (1141175465, 1141336640, 1141133820, 1141308147);
 
@@ -36,26 +37,41 @@ namespace DriverScanTester.Services
             (1125115858, 1125782038, 1125170820, 1125701048);
 
         // ════════════════════════════════════════════════════════════════
-        //  INVENTORY MAPPING
+        //  REAL INVENTORY SLOT MAPPING
         // ════════════════════════════════════════════════════════════════
         //
-        // WAŻNE:
-        // - pamięć sprzedaży używa compact sell slots 0..59,
-        // - tab 1 ma pierwszy wiersz pomijany,
-        // - dlatego klikamy clickIndex = slot + 6,
-        // - NIE robimy żadnego Y -35 w normalnej sprzedaży.
+        // realSlot = prawdziwy slot inventory / indeks itemSellPositions[]
+        // memorySlot = indeks używany tylko do _memory.TryGetSellSlotItem*()
         //
-        // slot 0..29  -> tab 1, clickIndex 6..35
-        // slot 30..59 -> tab 2, clickIndex 36..65
+        // Realne sloty inventory:
+        //   tab 1: realSlot 0..35
+        //   tab 2: realSlot 36..71
         //
-        // To jest stare działające mapowanie. Poprawka "Y -35" była dobra wyłącznie
-        // dla trybu testowego, który klikał visual indexy 0..71 bez compact offsetu.
+        // Sprzedaż:
+        //   tab 1: sprzedajemy realSlot 6..35, pierwszy wiersz 0..5 jest zawsze skipowany
+        //   tab 2: sprzedajemy realSlot 36..71, pierwszy wiersz taba 2 jest normalnie sprzedawany
+        //
+        // Mapowanie:
+        //   memorySlot = realSlot - 6
+        //
+        // Przykłady:
+        //   realSlot 10 -> tab 1, mousePosition itemSellPositions[10], memorySlot 4
+        //   realSlot 15 -> tab 1, mousePosition itemSellPositions[15], memorySlot 9
+        //   realSlot 40 -> tab 2, mousePosition itemSellPositions[40], memorySlot 34
+        //   realSlot 42 -> tab 2, mousePosition itemSellPositions[42], memorySlot 36
+        //
+        // Nie ma tutaj żadnego dodatkowego Y -35. Helper zwraca finalny indeks mouse position.
         private const int InventoryColumns = 6;
         private const int VisualSlotsPerInventoryTab = 36;
-        private const int FirstSellableClickIndexTab1 = 6;
-        private const int SellableSlotsTab1 = 30;
-        private const int TotalSellableInventorySlots = 60;
-        private const int FirstTab2ClickIndex = 36;
+        private const int TotalVisualInventorySlots = VisualSlotsPerInventoryTab * 2; // 72
+
+        private const int FirstSellableRealSlotTab1 = 6;
+        private const int LastSellableRealSlotTab1 = 35;
+        private const int FirstRealSlotTab2 = 36;
+        private const int LastRealSlotTab2 = 71;
+
+        private const int MemorySlotOffsetFromRealSlot = 6;
+        private const int TotalSellableInventoryMemorySlots = 66; // real 6..71 -> memory 0..65
 
         public ItemSellerService(GameMemoryService memory, Action<string> log)
         {
@@ -67,10 +83,6 @@ namespace DriverScanTester.Services
         //  PUBLIC ENTRY POINT
         // ════════════════════════════════════════════════════════════════
 
-        /// <summary>
-        /// Main sell routine: opens shop, sells filtered items from inventory,
-        /// then moves items from storage and sells those too.
-        /// </summary>
         public void SellItemsByMouseMove()
         {
             AssignWeight();
@@ -102,10 +114,8 @@ namespace DriverScanTester.Services
                     break;
                 }
 
-                // Sprzedajemy od największego compact slotu do najmniejszego.
-                // To odpowiada starej logice sprzedaży od końca listy slotów.
+                // Sprzedajemy od największego REALNEGO slotu inventory do najmniejszego.
                 itemsToOperate.Sort((a, b) => b.CompareTo(a));
-
                 int countBefore = itemsToOperate.Count;
 
                 LogAllItemsForSale(itemsToOperate, "INVENTORY");
@@ -117,7 +127,7 @@ namespace DriverScanTester.Services
                     if (!_memory.IsShopOpen())
                         break;
 
-                    var target = GetInventoryClickTarget(item);
+                    var target = MapRealInventorySlotToTarget(item);
 
                     if (target.Tab != currentOpenedTab)
                     {
@@ -134,7 +144,7 @@ namespace DriverScanTester.Services
                     Thread.Sleep(80);
                 }
 
-                Thread.Sleep(150);
+                Thread.Sleep(200);
 
                 int countAfter = ItemsForSaleListGenerate().Count;
 
@@ -177,51 +187,81 @@ namespace DriverScanTester.Services
             }
         }
 
-        /// <summary>
-        /// Converts compact memory/sellable inventory slot to visual mouse click target.
-        ///
-        /// Correct mapping:
-        /// - memory slots 0..29  -> tab 1, visual click indexes 6..35
-        /// - memory slots 30..59 -> tab 2, visual click indexes 36..65
-        ///
-        /// No Y correction here.
-        /// clickIndex = slotIndex + 6 is already the tab 1 row-skip.
-        /// </summary>
-        private (int Tab, int ClickIndex, int LocalIndex, int Row, int Column) GetInventoryClickTarget(int slotIndex)
+        private struct InventorySlotTarget
         {
-            if (slotIndex < 0 || slotIndex >= TotalSellableInventorySlots)
-            {
-                throw new ArgumentOutOfRangeException(nameof(slotIndex), slotIndex,
-                    $"Inventory slot must be in sellable compact range 0..{TotalSellableInventorySlots - 1}.");
-            }
-
-            int clickIndex = slotIndex + FirstSellableClickIndexTab1;
-            int tab = slotIndex < SellableSlotsTab1 ? 1 : 2;
-
-            int localIndex = tab == 1
-                ? clickIndex
-                : clickIndex - FirstTab2ClickIndex;
-
-            int row = localIndex / InventoryColumns;
-            int column = localIndex % InventoryColumns;
-
-            return (tab, clickIndex, localIndex, row, column);
+            public int RealSlot;
+            public int MemorySlot;
+            public int Tab;
+            public int MousePositionIndex;
+            public int LocalIndex;
+            public int Row;
+            public int Column;
         }
 
-        private void SellInventorySlotByMouse(int slotIndex, (int Tab, int ClickIndex, int LocalIndex, int Row, int Column) target)
+        /// <summary>
+        /// Helper: rzutuje REALNY wizualny slot inventory na tab oraz mouse position.
+        /// To jest jedyne miejsce w klasie, które decyduje gdzie kliknąć inventory.
+        /// </summary>
+        private InventorySlotTarget MapRealInventorySlotToTarget(int realSlot)
+        {
+            if (realSlot < 0 || realSlot >= TotalVisualInventorySlots)
+            {
+                throw new ArgumentOutOfRangeException(nameof(realSlot), realSlot,
+                    $"Real inventory slot must be in range 0..{TotalVisualInventorySlots - 1}.");
+            }
+
+            if (realSlot < FirstSellableRealSlotTab1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(realSlot), realSlot,
+                    "Tab 1 first row real slots 0..5 are skipped and must never be sold.");
+            }
+
+            int tab = realSlot < VisualSlotsPerInventoryTab ? 1 : 2;
+            int localIndex = tab == 1 ? realSlot : realSlot - VisualSlotsPerInventoryTab;
+            int memorySlot = realSlot - MemorySlotOffsetFromRealSlot;
+
+            if (memorySlot < 0 || memorySlot >= TotalSellableInventoryMemorySlots)
+            {
+                throw new ArgumentOutOfRangeException(nameof(realSlot), realSlot,
+                    $"Mapped memory slot must be in range 0..{TotalSellableInventoryMemorySlots - 1}.");
+            }
+
+            return new InventorySlotTarget
+            {
+                RealSlot = realSlot,
+                MemorySlot = memorySlot,
+                Tab = tab,
+                MousePositionIndex = realSlot,
+                LocalIndex = localIndex,
+                Row = localIndex / InventoryColumns,
+                Column = localIndex % InventoryColumns
+            };
+        }
+
+        private int RealInventorySlotToMemorySlot(int realSlot)
+        {
+            return MapRealInventorySlotToTarget(realSlot).MemorySlot;
+        }
+
+        private void SellInventorySlotByMouse(int realSlot, InventorySlotTarget target)
         {
             if (!_memory.IsShopOpen())
                 return;
 
-            _log($"ItemSeller: Selling item compact slot {slotIndex} (tab {target.Tab}, click index {target.ClickIndex}, row {target.Row}, col {target.Column})");
+            if (target.MousePositionIndex < 0 || target.MousePositionIndex >= RepotMousePositions.itemSellPositions.Length)
+            {
+                _log($"ItemSeller: Invalid mousePositionIndex {target.MousePositionIndex} for realSlot {realSlot}. Skipping.");
+                return;
+            }
 
-            var pos = RepotMousePositions.itemSellPositions[target.ClickIndex];
+            var pos = RepotMousePositions.itemSellPositions[target.MousePositionIndex];
             var (winX, winY) = GetWindowOrigin();
 
             int screenX = pos.X + winX;
             int screenY = pos.Y + winY;
 
-            _log($"[ItemSeller] Sell slot {slotIndex} -> tab {target.Tab} -> clickIndex {target.ClickIndex} -> screen ({screenX},{screenY}) [relative ({pos.X},{pos.Y}) + window ({winX},{winY})]");
+            _log($"ItemSeller: Selling REAL slot {realSlot} -> memorySlot {target.MemorySlot}, Tab={target.Tab}, MouseIdx={target.MousePositionIndex}, Row={target.Row}, Col={target.Column}");
+            _log($"[ItemSeller] Sell realSlot {realSlot} -> screen ({screenX},{screenY}) [relative ({pos.X},{pos.Y}) + window ({winX},{winY})]");
 
             MouseOperations.MoveAndRightClickAbsolute(screenX, screenY);
             MouseConfirmSelling();
@@ -231,13 +271,6 @@ namespace DriverScanTester.Services
         //  SHOP PROXIMITY
         // ════════════════════════════════════════════════════════════════
 
-        /// <summary>
-        /// Checks if the player is within the shop zone for the current city.
-        /// Uses the working GetPlayerPosition() with offsets 0x144/0xEE8.
-        /// NOTE: Shop bounds need calibration for these short coordinates.
-        /// Currently logs position for easy calibration and returns true
-        /// to allow sell to proceed.
-        /// </summary>
         public bool IsCloseToShop()
         {
             var (x, y, success) = _memory.GetPlayerPosition();
@@ -251,9 +284,7 @@ namespace DriverScanTester.Services
             _log($"IsCloseToShop: Map={currentMap}, Pos=({x:F1}, {y:F1})");
 
             if (currentMap == MapHershal || currentMap == MapKharon)
-            {
                 return true;
-            }
 
             return true;
         }
@@ -262,44 +293,52 @@ namespace DriverScanTester.Services
         //  ITEM EVALUATION
         // ════════════════════════════════════════════════════════════════
 
-        /// <summary>
-        /// Generates a list of inventory compact slot indexes that should be sold.
-        /// </summary>
         public List<int> ItemsForSaleListGenerate()
-        {
-            return ItemsOperationsListGenerate(slotIndex => IsItemForSaleCheck(slotIndex, InventoryType.Inventory), InventoryType.Inventory);
-        }
-
-        /// <summary>
-        /// Generates a list of storage slot indexes that should be sold.
-        /// </summary>
-        public List<int> ItemsFromStorageListGenerate()
-        {
-            return ItemsOperationsListGenerate(slotIndex => IsItemForSaleCheck(slotIndex, InventoryType.Storage), InventoryType.Storage);
-        }
-
-        /// <summary>
-        /// Generates a list of inventory slot indexes that should be moved to storage.
-        /// </summary>
-        public List<int> ItemsToStorageMoveListGenerate()
-        {
-            return ItemsOperationsListGenerate(IsItemForToStorageMoveCheck, InventoryType.Inventory);
-        }
-
-        private List<int> ItemsOperationsListGenerate(Func<int, bool> delegateIsItemFitToAdd, InventoryType invType)
         {
             List<int> itemsToOperate = new List<int>();
 
-            int inventoryCount = (invType == InventoryType.Inventory)
-                ? TotalSellableInventorySlots
-                : BotConstants.GameMagicValues.TotalStorageSlots;
-
-            for (int i = 0; i < inventoryCount; i++)
+            for (int realSlot = FirstSellableRealSlotTab1; realSlot <= LastSellableRealSlotTab1; realSlot++)
             {
-                if (delegateIsItemFitToAdd(i))
-                {
+                if (IsItemForSaleCheck(realSlot, InventoryType.Inventory))
+                    itemsToOperate.Add(realSlot);
+            }
+
+            for (int realSlot = FirstRealSlotTab2; realSlot <= LastRealSlotTab2; realSlot++)
+            {
+                if (IsItemForSaleCheck(realSlot, InventoryType.Inventory))
+                    itemsToOperate.Add(realSlot);
+            }
+
+            return itemsToOperate;
+        }
+
+        public List<int> ItemsFromStorageListGenerate()
+        {
+            List<int> itemsToOperate = new List<int>();
+
+            for (int i = 0; i < BotConstants.GameMagicValues.TotalStorageSlots; i++)
+            {
+                if (IsItemForSaleCheck(i, InventoryType.Storage))
                     itemsToOperate.Add(i);
-                }
+            }
+
+            return itemsToOperate;
+        }
+
+        public List<int> ItemsToStorageMoveListGenerate()
+        {
+            List<int> itemsToOperate = new List<int>();
+
+            for (int realSlot = FirstSellableRealSlotTab1; realSlot <= LastSellableRealSlotTab1; realSlot++)
+            {
+                if (IsItemForToStorageMoveCheck(realSlot))
+                    itemsToOperate.Add(realSlot);
+            }
+
+            for (int realSlot = FirstRealSlotTab2; realSlot <= LastRealSlotTab2; realSlot++)
+            {
+                if (IsItemForToStorageMoveCheck(realSlot))
+                    itemsToOperate.Add(realSlot);
             }
 
             return itemsToOperate;
@@ -307,9 +346,17 @@ namespace DriverScanTester.Services
 
         private bool IsItemForSaleCheck(int slotIndex, InventoryType invType)
         {
-            int count = invType == InventoryType.Inventory
-                ? _memory.TryGetSellSlotItemCount(slotIndex)
-                : _memory.TryGetStorageItemCount(slotIndex);
+            int count;
+
+            if (invType == InventoryType.Inventory)
+            {
+                int memorySlot = RealInventorySlotToMemorySlot(slotIndex);
+                count = _memory.TryGetSellSlotItemCount(memorySlot);
+            }
+            else
+            {
+                count = _memory.TryGetStorageItemCount(slotIndex);
+            }
 
             if (count <= 0)
                 return false;
@@ -324,7 +371,8 @@ namespace DriverScanTester.Services
 
             if (invType == InventoryType.Inventory)
             {
-                itemTypeValue = _memory.TryGetSellSlotItemType(slotIndex);
+                int memorySlot = RealInventorySlotToMemorySlot(slotIndex);
+                itemTypeValue = _memory.TryGetSellSlotItemType(memorySlot);
             }
             else
             {
@@ -332,9 +380,7 @@ namespace DriverScanTester.Services
             }
 
             if (IsItemNotForSale(itemTypeValue) || IsEventSnowmanItem(itemTypeValue))
-            {
                 return false;
-            }
 
             return true;
         }
@@ -346,7 +392,6 @@ namespace DriverScanTester.Services
                 if (itemType == safeItem)
                     return true;
             }
-
             return false;
         }
 
@@ -357,27 +402,24 @@ namespace DriverScanTester.Services
                 if (itemType == evtItem)
                     return true;
             }
-
             return false;
         }
 
-        private bool IsItemForToStorageMoveCheck(int slotIndex)
+        private bool IsItemForToStorageMoveCheck(int realSlot)
         {
-            return _memory.TryGetSellSlotItemCount(slotIndex) != 0;
+            int memorySlot = RealInventorySlotToMemorySlot(realSlot);
+            return _memory.TryGetSellSlotItemCount(memorySlot) != 0;
         }
 
-        /// <summary>
-        /// Determines if an item has "high value" and should be kept (not sold).
-        /// Ported from old ItemsToOperateListGenerator.isItemHighValue().
-        /// </summary>
         public bool IsItemHighValue(int slotIndex, InventoryType invType)
         {
             int stat1, stat2;
 
             if (invType == InventoryType.Inventory)
             {
-                stat1 = _memory.TryGetSellSlotItemStat1(slotIndex);
-                stat2 = _memory.TryGetSellSlotItemStat2(slotIndex);
+                int memorySlot = RealInventorySlotToMemorySlot(slotIndex);
+                stat1 = _memory.TryGetSellSlotItemStat1(memorySlot);
+                stat2 = _memory.TryGetSellSlotItemStat2(memorySlot);
             }
             else
             {
@@ -410,7 +452,6 @@ namespace DriverScanTester.Services
             else if (stat1 == 19) Agi += 5;
             else if (stat1 == 20) Agi += 7;
             else if (stat1 == 21) Agi += 9;
-
             if (stat2 == 15) Agi += 2;
             else if (stat2 == 16) Agi += 4;
             else if (stat2 == 17) Agi += 6;
@@ -424,7 +465,6 @@ namespace DriverScanTester.Services
             else if (stat1 == 3) Mp += 5;
             else if (stat1 == 4) Mp += 7;
             else if (stat1 == 5) Mp += 9;
-
             if (stat2 == 1) Mp += 2;
             else if (stat2 == 2) Mp += 4;
             else if (stat2 == 3) Mp += 6;
@@ -438,7 +478,6 @@ namespace DriverScanTester.Services
             else if (stat1 == 14) Con += 5;
             else if (stat1 == 15) Con += 7;
             else if (stat1 == 16) Con += 9;
-
             if (stat2 == 10) Con += 2;
             else if (stat2 == 11) Con += 4;
             else if (stat2 == 12) Con += 6;
@@ -451,7 +490,6 @@ namespace DriverScanTester.Services
             else if (stat1 == 76) Td += 10;
             else if (stat1 == 77) Td += 15;
             else if (stat1 == 78) Td += 20;
-
             if (stat2 == 64) Td += 5;
             else if (stat2 == 65) Td += 10;
             else if (stat2 == 66) Td += 15;
@@ -520,7 +558,6 @@ namespace DriverScanTester.Services
             if (stat2 == 97) Luck += 10;
             else if (stat2 == 98) Luck += 20;
             else if (stat2 == 99) Luck += 30;
-
             if (stat1 == 126) Luck += 5;
             else if (stat1 == 127) Luck += 15;
             else if (stat1 == 128) Luck += 25;
@@ -543,7 +580,6 @@ namespace DriverScanTester.Services
             else if (stat1 == 45) Water += 40;
             else if (stat1 == 46) Water += 50;
             else if (stat1 == 47) Water += 60;
-
             if (stat2 == 38) Water += 5;
             else if (stat2 == 39) Water += 15;
             else if (stat2 == 40) Water += 25;
@@ -560,7 +596,6 @@ namespace DriverScanTester.Services
             else if (stat1 == 52) Earth += 40;
             else if (stat1 == 53) Earth += 50;
             else if (stat1 == 54) Earth += 60;
-
             if (stat2 == 44) Earth += 5;
             else if (stat2 == 45) Earth += 15;
             else if (stat2 == 46) Earth += 25;
@@ -577,7 +612,6 @@ namespace DriverScanTester.Services
             else if (stat1 == 59) Air += 40;
             else if (stat1 == 60) Air += 50;
             else if (stat1 == 61) Air += 60;
-
             if (stat2 == 50) Air += 5;
             else if (stat2 == 51) Air += 15;
             else if (stat2 == 52) Air += 25;
@@ -606,7 +640,7 @@ namespace DriverScanTester.Services
         }
 
         // ════════════════════════════════════════════════════════════════
-        //  DETAILED SELL LIST LOGGING
+        //  DETAILED LOGGING
         // ════════════════════════════════════════════════════════════════
 
         private void LogAllItemsForSale(List<int> itemsToSell, string source)
@@ -627,18 +661,18 @@ namespace DriverScanTester.Services
 
             foreach (var item in itemsToSell)
             {
-                var target = GetInventoryClickTarget(item);
+                var target = MapRealInventorySlotToTarget(item);
 
-                var pos = RepotMousePositions.itemSellPositions[target.ClickIndex];
+                var pos = RepotMousePositions.itemSellPositions[target.MousePositionIndex];
                 int screenX = pos.X + winX;
                 int screenY = pos.Y + winY;
 
-                int itemType = _memory.TryGetSellSlotItemType(item);
-                int stat1 = _memory.TryGetSellSlotItemStat1(item);
-                int stat2 = _memory.TryGetSellSlotItemStat2(item);
-                int count = _memory.TryGetSellSlotItemCount(item);
+                int itemType = _memory.TryGetSellSlotItemType(target.MemorySlot);
+                int stat1 = _memory.TryGetSellSlotItemStat1(target.MemorySlot);
+                int stat2 = _memory.TryGetSellSlotItemStat2(target.MemorySlot);
+                int count = _memory.TryGetSellSlotItemCount(target.MemorySlot);
 
-                _log($"  ▶ Slot={item,2} | ClickIdx={target.ClickIndex,2} | Tab={target.Tab} | Wiersz={target.Row} | Kolumna={target.Column} | " +
+                _log($"  ▶ RealSlot={item,2} | MemorySlot={target.MemorySlot,2} | MouseIdx={target.MousePositionIndex,2} | Tab={target.Tab} | Wiersz={target.Row} | Kolumna={target.Column} | " +
                      $"PozycjaMyszki=({pos.X,4},{pos.Y,4}) | Screen=({screenX,4},{screenY,4}) | " +
                      $"ItemType={itemType} | Stat1={stat1} | Stat2={stat2} | Count={count}");
             }
@@ -730,7 +764,6 @@ namespace DriverScanTester.Services
         // ════════════════════════════════════════════════════════════════
 
         private int _maxCollectWeightNormalValue;
-
         public int MaxCollectWeightNormalValue => _maxCollectWeightNormalValue;
 
         private void AssignWeight()
@@ -798,7 +831,6 @@ namespace DriverScanTester.Services
         private void LeftClickOnConfirmSell(string debugMessage)
         {
             var (winX, winY) = GetWindowOrigin();
-
             int screenX = 104 + winX;
             int screenY = 464 + winY;
             int sleepTime = 35;
@@ -827,10 +859,8 @@ namespace DriverScanTester.Services
         private void OpenInventoryTab1()
         {
             var (winX, winY) = GetWindowOrigin();
-
             int screenX = 789 + winX;
             int screenY = 459 + winY;
-
             _log($"[ItemSeller] OpenInventoryTab1 -> screen ({screenX},{screenY}) [relative (789,459) + window ({winX},{winY})]");
             MouseOperations.OpenInventoryTab1Absolute(screenX, screenY);
         }
@@ -838,10 +868,8 @@ namespace DriverScanTester.Services
         private void OpenInventoryTab2()
         {
             var (winX, winY) = GetWindowOrigin();
-
             int screenX = 795 + winX;
             int screenY = 560 + winY;
-
             _log($"[ItemSeller] OpenInventoryTab2 -> screen ({screenX},{screenY}) [relative (795,560) + window ({winX},{winY})]");
             MouseOperations.OpenInventoryTab2Absolute(screenX, screenY);
         }
@@ -856,7 +884,6 @@ namespace DriverScanTester.Services
             Thread.Sleep(1000);
 
             var (winX, winY) = GetWindowOrigin();
-
             int screenX = 145 + winX;
             int screenY = 460 + winY;
 
@@ -870,17 +897,12 @@ namespace DriverScanTester.Services
             Thread.Sleep(200);
 
             var (winX, winY) = GetWindowOrigin();
-
             int screenX = 145 + winX;
             int screenY = 460 + winY;
 
             _log($"[ItemSeller] OpenStorageWindow -> screen ({screenX},{screenY}) [relative (145,460) + window ({winX},{winY})]");
             MouseOperations.MoveAndLeftClickAbsolute(screenX, screenY, 200);
         }
-
-        // ════════════════════════════════════════════════════════════════
-        //  ENUMS
-        // ════════════════════════════════════════════════════════════════
 
         public enum InventoryType
         {
