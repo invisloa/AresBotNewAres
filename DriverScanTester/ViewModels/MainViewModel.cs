@@ -2853,6 +2853,39 @@ namespace DriverScanTester.ViewModels
                     }
                 }
 
+                public void TestSellSpecificSlot(int realSlot, int profileOffsetX = 0, int profileOffsetY = 0)
+                {
+                    if (!_isAttached) { AppendLog("Attach first."); return; }
+
+                    FocusGameWindow();
+                    DetectAndSetWindowOffset(profileOffsetX, profileOffsetY);
+
+                    ulong baseAddr = FindModuleInScanner("Ares.exe", false);
+                    if (baseAddr == 0)
+                    {
+                        _pointerScanner?.RefreshModules();
+                        baseAddr = FindModuleInScanner("Ares.exe", true);
+                    }
+                    if (baseAddr == 0)
+                    {
+                        AppendLog("Failed to resolve module base for TestSellSpecificSlot.");
+                        return;
+                    }
+
+                    try
+                    {
+                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
+                        var seller = new ItemSellerService(memoryService, AppendLog);
+                        AppendLog($"=== Test Sell Specific Slot {realSlot}: Starting ===");
+                        seller.SellSpecificSlot(realSlot);
+                        AppendLog($"=== Test Sell Specific Slot {realSlot}: Completed ===");
+                    }
+                    catch (Exception ex)
+                    {
+                        AppendLog($"=== Test Sell Specific Slot {realSlot} FAILED: {ex.Message} ===");
+                    }
+                }
+
                 public void StopAllBotsInternal()
                 {
                     ToggleMovementBot(false);

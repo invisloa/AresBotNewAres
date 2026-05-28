@@ -12,6 +12,7 @@ namespace DriverScanTester.ViewModels
 
         private string _hpThresholdText = "250";
         private string _manaThresholdText = "50";
+        private string _manualSellSlotText = "6";
         private string _currentHp = "--";
         private string _currentMana = "--";
         private string _hpPotCount = "--";
@@ -48,6 +49,22 @@ namespace DriverScanTester.ViewModels
                 }
                 _main.TestSell(ox, oy);
             }, _ => _main.IsAttached);
+            TestSellSpecificSlotCommand = new RelayCommand(_ => {
+                if (int.TryParse(ManualSellSlotText, out int slot))
+                {
+                    int ox = 0, oy = 0;
+                    if (!string.IsNullOrEmpty(SelectedProfileName))
+                    {
+                        var p = _main.LoadProfile(SelectedProfileName);
+                        if (p != null) { ox = p.WindowOffsetX; oy = p.WindowOffsetY; }
+                    }
+                    _main.TestSellSpecificSlot(slot, ox, oy);
+                }
+                else
+                {
+                    _appendLog("Invalid slot number for Test Sell.");
+                }
+            }, _ => _main.IsAttached);
             ClearBotLogCommand = new RelayCommand(_ => BotLogText = "");
 
             // 3-Phase Workflow commands
@@ -83,6 +100,12 @@ namespace DriverScanTester.ViewModels
                         _main.HealManaThreshold2 = val;
                 }
             }
+        }
+
+        public string ManualSellSlotText
+        {
+            get => _manualSellSlotText;
+            set => SetProperty(ref _manualSellSlotText, value);
         }
 
         public string CurrentHp
@@ -166,6 +189,7 @@ namespace DriverScanTester.ViewModels
         public ICommand ToggleLootBotCommand { get; }
         public ICommand OpenPathEditorCommand { get; }
         public ICommand TestSellCommand { get; }
+        public ICommand TestSellSpecificSlotCommand { get; }
         public ICommand ClearBotLogCommand { get; }
 
         // 3-Phase Workflow commands

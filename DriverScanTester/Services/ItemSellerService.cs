@@ -187,6 +187,35 @@ namespace DriverScanTester.Services
             }
         }
 
+        public void SellSpecificSlot(int realSlot)
+        {
+            if (!_memory.IsShopOpen())
+            {
+                _log("ItemSeller: Shop is not open. Skipping specific slot sell.");
+                return;
+            }
+
+            try
+            {
+                var target = MapRealInventorySlotToTarget(realSlot);
+
+                // Ensure correct tab is open
+                if (target.Tab == 1)
+                    OpenInventoryTab1();
+                else
+                    OpenInventoryTab2();
+
+                Thread.Sleep(180);
+
+                SellInventorySlotByMouse(realSlot, target);
+                _log($"ItemSeller: Specific slot {realSlot} sell attempt finished.");
+            }
+            catch (Exception ex)
+            {
+                _log($"ItemSeller: Error selling specific slot {realSlot}: {ex.Message}");
+            }
+        }
+
         private struct InventorySlotTarget
         {
             public int RealSlot;
