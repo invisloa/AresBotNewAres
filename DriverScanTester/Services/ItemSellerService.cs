@@ -35,26 +35,27 @@ namespace DriverScanTester.Services
         private static readonly (int MinX, int MaxX, int MinY, int MaxY) KharonShopBounds =
             (1125115858, 1125782038, 1125170820, 1125701048);
 
-        // ── Inventory grid mapping ──
-        // TryGetSellSlotItem* uses compact SELLABLE inventory indexes:
-        //   0..29  = tab 1 sellable area, clicked as visual indexes 6..35
-        //            because tab 1 visual row 0 / indexes 0..5 are equipment/ignored.
-        //   30..65 = tab 2 sellable area, clicked as visual indexes 36..71.
+        // ════════════════════════════════════════════════════════════════
+        //  INVENTORY MAPPING
+        // ════════════════════════════════════════════════════════════════
         //
-        // Correct mouse click index is always:
-        //   clickIndex = slotIndex + 6
+        // WAŻNE:
+        // - pamięć sprzedaży używa compact sell slots 0..59,
+        // - tab 1 ma pierwszy wiersz pomijany,
+        // - dlatego klikamy clickIndex = slot + 6,
+        // - NIE robimy żadnego Y -35 w normalnej sprzedaży.
+        //
+        // slot 0..29  -> tab 1, clickIndex 6..35
+        // slot 30..59 -> tab 2, clickIndex 36..65
+        //
+        // To jest stare działające mapowanie. Poprawka "Y -35" była dobra wyłącznie
+        // dla trybu testowego, który klikał visual indexy 0..71 bez compact offsetu.
         private const int InventoryColumns = 6;
-        private const int InventoryRowsPerTab = 6;
-        private const int VisualSlotsPerInventoryTab = InventoryColumns * InventoryRowsPerTab; // 36
-        private const int FirstSellableClickIndexTab1 = InventoryColumns; // visual indexes 0..5 skipped on tab 1
-        private const int SellableSlotsTab1 = VisualSlotsPerInventoryTab - FirstSellableClickIndexTab1; // 30
-        private const int TotalSellableInventorySlots = SellableSlotsTab1 + VisualSlotsPerInventoryTab; // 66
-        private const int FirstTab2ClickIndex = VisualSlotsPerInventoryTab; // 36
-
-        // Diagnosed in test mode: itemSellPositions Y coordinates are one row too low.
-        // Old table Y values are 453..628, but real inventory slot rows are 418..593.
-        // Apply this correction only to inventory selling clicks.
-        private const int InventorySellYOffsetCorrection = -35;
+        private const int VisualSlotsPerInventoryTab = 36;
+        private const int FirstSellableClickIndexTab1 = 6;
+        private const int SellableSlotsTab1 = 30;
+        private const int TotalSellableInventorySlots = 60;
+        private const int FirstTab2ClickIndex = 36;
 
         public ItemSellerService(GameMemoryService memory, Action<string> log)
         {
@@ -67,7 +68,7 @@ namespace DriverScanTester.Services
         // ════════════════════════════════════════════════════════════════
 
         /// <summary>
-        /// Main sell routine: opens shop, sells items from inventory,
+        /// Main sell routine: opens shop, sells filtered items from inventory,
         /// then moves items from storage and sells those too.
         /// </summary>
         public void SellItemsByMouseMove()
@@ -83,7 +84,13 @@ namespace DriverScanTester.Services
             OpenShopWindow();
             Thread.Sleep(700);
 
-            int noProgressTries = 0;
+            if (!_memory.IsShopOpen())
+            {
+                _log("ItemSeller: Shop is not open after OpenShopWindow(). Skipping sell.");
+                return;
+            }
+
+            int noProgressPasses = 0;
 
             while (_memory.IsShopOpen())
             {
@@ -95,46 +102,68 @@ namespace DriverScanTester.Services
                     break;
                 }
 
-                // Sell from the highest compact sellable slot down.
-                // This prevents sold items from shifting remaining slots and invalidating click targets.
+                // Sprzedajemy od największego compact slotu do najmniejszego.
+                // To odpowiada starej logice sprzedaży od końca listy slotów.
                 itemsToOperate.Sort((a, b) => b.CompareTo(a));
+
+                int countBefore = itemsToOperate.Count;
 
                 LogAllItemsForSale(itemsToOperate, "INVENTORY");
 
-                int countBefore = itemsToOperate.Count;
-                int slotToSell = itemsToOperate[0];
+                int currentOpenedTab = -1;
 
-                SellInventorySlotByMouse(slotToSell);
+                foreach (int item in itemsToOperate)
+                {
+                    if (!_memory.IsShopOpen())
+                        break;
+
+                    var target = GetInventoryClickTarget(item);
+
+                    if (target.Tab != currentOpenedTab)
+                    {
+                        if (target.Tab == 1)
+                            OpenInventoryTab1();
+                        else
+                            OpenInventoryTab2();
+
+                        currentOpenedTab = target.Tab;
+                        Thread.Sleep(180);
+                    }
+
+                    SellInventorySlotByMouse(item, target);
+                    Thread.Sleep(80);
+                }
 
                 Thread.Sleep(150);
 
                 int countAfter = ItemsForSaleListGenerate().Count;
 
-                if (countAfter >= countBefore)
+                if (countAfter == 0)
                 {
-                    noProgressTries++;
-                    _log($"ItemSeller: No sell progress detected. Before={countBefore}, After={countAfter}, Tries={noProgressTries}/5");
-
-                    if (noProgressTries >= 5)
-                    {
-                        ShopTooFarAntiBug();
-                        _log("ItemSeller: Too many sell attempts with no progress. Throwing.");
-                        throw new InvalidOperationException("Sell routine stuck — no items sold after 5 attempts.");
-                    }
-
-                    // Do not close/ESC the shop after one missed click. Keep shop open and retry.
-                    Thread.Sleep(200);
+                    _log("ItemSeller: All inventory sale items sold.");
+                    break;
                 }
-                else
+
+                if (countAfter < countBefore)
                 {
-                    noProgressTries = 0;
+                    _log($"ItemSeller: Sell pass made progress. Before={countBefore}, After={countAfter}. Starting next pass.");
+                    noProgressPasses = 0;
+                    continue;
+                }
+
+                noProgressPasses++;
+                _log($"ItemSeller: No sell progress in full pass. Before={countBefore}, After={countAfter}, PassTries={noProgressPasses}/5");
+
+                if (noProgressPasses >= 5)
+                {
+                    _log("ItemSeller: Too many full sell passes with no progress. Throwing.");
+                    throw new InvalidOperationException("Sell routine stuck — no items sold after 5 full passes.");
                 }
             }
 
             _howManyTries = 0;
             Thread.Sleep(50);
 
-            // Move items from storage if shop is still open and weight allows
             if (ItemsFromStorageListGenerate().Count != 0
                 && _memory.IsShopOpen()
                 && _memory.GetCurrentWeight() < MaxCollectWeightNormalValue)
@@ -153,20 +182,22 @@ namespace DriverScanTester.Services
         ///
         /// Correct mapping:
         /// - memory slots 0..29  -> tab 1, visual click indexes 6..35
-        /// - memory slots 30..65 -> tab 2, visual click indexes 36..71
+        /// - memory slots 30..59 -> tab 2, visual click indexes 36..65
         ///
-        /// This is why clickIndex MUST be slotIndex + 6.
+        /// No Y correction here.
+        /// clickIndex = slotIndex + 6 is already the tab 1 row-skip.
         /// </summary>
         private (int Tab, int ClickIndex, int LocalIndex, int Row, int Column) GetInventoryClickTarget(int slotIndex)
         {
             if (slotIndex < 0 || slotIndex >= TotalSellableInventorySlots)
             {
                 throw new ArgumentOutOfRangeException(nameof(slotIndex), slotIndex,
-                    $"Inventory slot must be in sellable memory range 0..{TotalSellableInventorySlots - 1}.");
+                    $"Inventory slot must be in sellable compact range 0..{TotalSellableInventorySlots - 1}.");
             }
 
             int clickIndex = slotIndex + FirstSellableClickIndexTab1;
             int tab = slotIndex < SellableSlotsTab1 ? 1 : 2;
+
             int localIndex = tab == 1
                 ? clickIndex
                 : clickIndex - FirstTab2ClickIndex;
@@ -177,29 +208,21 @@ namespace DriverScanTester.Services
             return (tab, clickIndex, localIndex, row, column);
         }
 
-        private void SellInventorySlotByMouse(int slotIndex)
+        private void SellInventorySlotByMouse(int slotIndex, (int Tab, int ClickIndex, int LocalIndex, int Row, int Column) target)
         {
             if (!_memory.IsShopOpen())
                 return;
-
-            var target = GetInventoryClickTarget(slotIndex);
-
-            if (target.Tab == 1)
-                OpenInventoryTab1();
-            else
-                OpenInventoryTab2();
-
-            Thread.Sleep(150);
 
             _log($"ItemSeller: Selling item compact slot {slotIndex} (tab {target.Tab}, click index {target.ClickIndex}, row {target.Row}, col {target.Column})");
 
             var pos = RepotMousePositions.itemSellPositions[target.ClickIndex];
             var (winX, winY) = GetWindowOrigin();
-            int correctedRelativeY = pos.Y + InventorySellYOffsetCorrection;
-            int screenX = pos.X + winX;
-            int screenY = correctedRelativeY + winY;
 
-            _log($"[ItemSeller] Sell slot {slotIndex} -> tab {target.Tab} -> clickIndex {target.ClickIndex} -> screen ({screenX},{screenY}) [relative ({pos.X},{correctedRelativeY}) = baseY {pos.Y} + yFix {InventorySellYOffsetCorrection} + window ({winX},{winY})]");
+            int screenX = pos.X + winX;
+            int screenY = pos.Y + winY;
+
+            _log($"[ItemSeller] Sell slot {slotIndex} -> tab {target.Tab} -> clickIndex {target.ClickIndex} -> screen ({screenX},{screenY}) [relative ({pos.X},{pos.Y}) + window ({winX},{winY})]");
+
             MouseOperations.MoveAndRightClickAbsolute(screenX, screenY);
             MouseConfirmSelling();
         }
@@ -227,9 +250,6 @@ namespace DriverScanTester.Services
             int currentMap = _memory.GetCurrentMap();
             _log($"IsCloseToShop: Map={currentMap}, Pos=({x:F1}, {y:F1})");
 
-            // TODO: Calibrate bounds for the short coordinate space (0-65535).
-            // Old bot used int coords at 0x23C but those don't work with new bot.
-            // For now, assume at shop if in known city map.
             if (currentMap == MapHershal || currentMap == MapKharon)
             {
                 return true;
@@ -239,11 +259,11 @@ namespace DriverScanTester.Services
         }
 
         // ════════════════════════════════════════════════════════════════
-        //  ITEM EVALUATION (ported from ItemsToOperateListGenerator.cs)
+        //  ITEM EVALUATION
         // ════════════════════════════════════════════════════════════════
 
         /// <summary>
-        /// Generates a list of inventory slot indexes that should be sold.
+        /// Generates a list of inventory compact slot indexes that should be sold.
         /// </summary>
         public List<int> ItemsForSaleListGenerate()
         {
@@ -269,8 +289,9 @@ namespace DriverScanTester.Services
         private List<int> ItemsOperationsListGenerate(Func<int, bool> delegateIsItemFitToAdd, InventoryType invType)
         {
             List<int> itemsToOperate = new List<int>();
+
             int inventoryCount = (invType == InventoryType.Inventory)
-                ? TotalSellableInventorySlots  // compact sellable slots 0..65 -> visual click indexes 6..71
+                ? TotalSellableInventorySlots
                 : BotConstants.GameMagicValues.TotalStorageSlots;
 
             for (int i = 0; i < inventoryCount; i++)
@@ -280,6 +301,7 @@ namespace DriverScanTester.Services
                     itemsToOperate.Add(i);
                 }
             }
+
             return itemsToOperate;
         }
 
@@ -299,6 +321,7 @@ namespace DriverScanTester.Services
         private bool IsItemSaleType(int slotIndex, InventoryType invType)
         {
             int itemTypeValue;
+
             if (invType == InventoryType.Inventory)
             {
                 itemTypeValue = _memory.TryGetSellSlotItemType(slotIndex);
@@ -312,6 +335,7 @@ namespace DriverScanTester.Services
             {
                 return false;
             }
+
             return true;
         }
 
@@ -322,6 +346,7 @@ namespace DriverScanTester.Services
                 if (itemType == safeItem)
                     return true;
             }
+
             return false;
         }
 
@@ -332,6 +357,7 @@ namespace DriverScanTester.Services
                 if (itemType == evtItem)
                     return true;
             }
+
             return false;
         }
 
@@ -359,7 +385,6 @@ namespace DriverScanTester.Services
                 stat2 = _memory.TryGetStorageItemStat2(slotIndex);
             }
 
-            // Evaluate stats (ported from old bot isItemHighValue)
             int Mp = 0, Agi = 0, Con = 0, Td = 0;
             int Fire = 0, Earth = 0, Air = 0, Water = 0;
             int Sihon = 0, Luck = 0;
@@ -385,6 +410,7 @@ namespace DriverScanTester.Services
             else if (stat1 == 19) Agi += 5;
             else if (stat1 == 20) Agi += 7;
             else if (stat1 == 21) Agi += 9;
+
             if (stat2 == 15) Agi += 2;
             else if (stat2 == 16) Agi += 4;
             else if (stat2 == 17) Agi += 6;
@@ -398,6 +424,7 @@ namespace DriverScanTester.Services
             else if (stat1 == 3) Mp += 5;
             else if (stat1 == 4) Mp += 7;
             else if (stat1 == 5) Mp += 9;
+
             if (stat2 == 1) Mp += 2;
             else if (stat2 == 2) Mp += 4;
             else if (stat2 == 3) Mp += 6;
@@ -411,6 +438,7 @@ namespace DriverScanTester.Services
             else if (stat1 == 14) Con += 5;
             else if (stat1 == 15) Con += 7;
             else if (stat1 == 16) Con += 9;
+
             if (stat2 == 10) Con += 2;
             else if (stat2 == 11) Con += 4;
             else if (stat2 == 12) Con += 6;
@@ -423,6 +451,7 @@ namespace DriverScanTester.Services
             else if (stat1 == 76) Td += 10;
             else if (stat1 == 77) Td += 15;
             else if (stat1 == 78) Td += 20;
+
             if (stat2 == 64) Td += 5;
             else if (stat2 == 65) Td += 10;
             else if (stat2 == 66) Td += 15;
@@ -443,28 +472,27 @@ namespace DriverScanTester.Services
             #endregion
 
             #region Mage
-            // Air
             if (stat2 == 50) MageEmpPower += 5;
             else if (stat2 == 51) MageEmpPower += 15;
             else if (stat2 == 52) MageEmpPower += 25;
             else if (stat2 == 53) MageEmpPower += 35;
             else if (stat2 == 54) MageEmpPower += 45;
             else if (stat2 == 55) MageEmpPower += 55;
-            // Earth
+
             if (stat2 == 44) MageAlliPower += 5;
             else if (stat2 == 45) MageAlliPower += 15;
             else if (stat2 == 46) MageAlliPower += 25;
             else if (stat2 == 47) MageAlliPower += 35;
             else if (stat2 == 48) MageAlliPower += 45;
             else if (stat2 == 49) MageAlliPower += 55;
-            // Water (stat1)
+
             if (stat1 == 41 || stat1 == 35) MageEmpPower += 10;
             else if (stat1 == 41 || stat1 == 36) MageEmpPower += 20;
             else if (stat1 == 42 || stat1 == 37) MageEmpPower += 30;
             else if (stat1 == 43 || stat1 == 38) MageEmpPower += 40;
             else if (stat1 == 44 || stat1 == 39) MageEmpPower += 50;
             else if (stat1 == 45 || stat1 == 40) MageEmpPower += 60;
-            // Fire (stat1)
+
             if (stat1 == 35) MageAlliPower += 10;
             else if (stat1 == 36) MageAlliPower += 20;
             else if (stat1 == 37) MageAlliPower += 30;
@@ -492,6 +520,7 @@ namespace DriverScanTester.Services
             if (stat2 == 97) Luck += 10;
             else if (stat2 == 98) Luck += 20;
             else if (stat2 == 99) Luck += 30;
+
             if (stat1 == 126) Luck += 5;
             else if (stat1 == 127) Luck += 15;
             else if (stat1 == 128) Luck += 25;
@@ -514,6 +543,7 @@ namespace DriverScanTester.Services
             else if (stat1 == 45) Water += 40;
             else if (stat1 == 46) Water += 50;
             else if (stat1 == 47) Water += 60;
+
             if (stat2 == 38) Water += 5;
             else if (stat2 == 39) Water += 15;
             else if (stat2 == 40) Water += 25;
@@ -530,6 +560,7 @@ namespace DriverScanTester.Services
             else if (stat1 == 52) Earth += 40;
             else if (stat1 == 53) Earth += 50;
             else if (stat1 == 54) Earth += 60;
+
             if (stat2 == 44) Earth += 5;
             else if (stat2 == 45) Earth += 15;
             else if (stat2 == 46) Earth += 25;
@@ -546,6 +577,7 @@ namespace DriverScanTester.Services
             else if (stat1 == 59) Air += 40;
             else if (stat1 == 60) Air += 50;
             else if (stat1 == 61) Air += 60;
+
             if (stat2 == 50) Air += 5;
             else if (stat2 == 51) Air += 15;
             else if (stat2 == 52) Air += 25;
@@ -554,7 +586,6 @@ namespace DriverScanTester.Services
             else if (stat2 == 55) Air += 55;
             #endregion
 
-            // ---- High-value checks ----
             if (Agi > hightValueMainStats) return true;
             if (Mp > hightValueMainStats) return true;
             if (Con > hightValueMainStats) return true;
@@ -578,10 +609,6 @@ namespace DriverScanTester.Services
         //  DETAILED SELL LIST LOGGING
         // ════════════════════════════════════════════════════════════════
 
-        /// <summary>
-        /// Wypisuje szczegółowy log wszystkich przedmiotów zakwalifikowanych do sprzedania:
-        /// slot, tab, wiersz, kolumna, pozycja myszki (względem okna i ekranu) oraz dane itemu.
-        /// </summary>
         private void LogAllItemsForSale(List<int> itemsToSell, string source)
         {
             _log("");
@@ -603,27 +630,22 @@ namespace DriverScanTester.Services
                 var target = GetInventoryClickTarget(item);
 
                 var pos = RepotMousePositions.itemSellPositions[target.ClickIndex];
-                int correctedRelativeY = pos.Y + InventorySellYOffsetCorrection;
                 int screenX = pos.X + winX;
-                int screenY = correctedRelativeY + winY;
+                int screenY = pos.Y + winY;
 
-                // Read item details from memory using compact sellable slot index.
                 int itemType = _memory.TryGetSellSlotItemType(item);
                 int stat1 = _memory.TryGetSellSlotItemStat1(item);
                 int stat2 = _memory.TryGetSellSlotItemStat2(item);
                 int count = _memory.TryGetSellSlotItemCount(item);
 
                 _log($"  ▶ Slot={item,2} | ClickIdx={target.ClickIndex,2} | Tab={target.Tab} | Wiersz={target.Row} | Kolumna={target.Column} | " +
-                     $"PozycjaMyszki=({pos.X,4},{correctedRelativeY,4}) [baseY={pos.Y,4}, yFix={InventorySellYOffsetCorrection}] | Screen=({screenX,4},{screenY,4}) | " +
+                     $"PozycjaMyszki=({pos.X,4},{pos.Y,4}) | Screen=({screenX,4},{screenY,4}) | " +
                      $"ItemType={itemType} | Stat1={stat1} | Stat2={stat2} | Count={count}");
             }
 
             _log("");
         }
 
-        /// <summary>
-        /// Wypisuje szczegółowy log wszystkich przedmiotów w storage do przeniesienia.
-        /// </summary>
         private void LogAllStorageItemsForSale(List<int> itemsToMove, string source)
         {
             _log("");
@@ -639,7 +661,7 @@ namespace DriverScanTester.Services
             }
 
             var (winX, winY) = GetWindowOrigin();
-            const int colsPerTab = 6; // storage has 6 columns (0-5)
+            const int colsPerTab = 6;
 
             foreach (var item in itemsToMove)
             {
@@ -650,7 +672,6 @@ namespace DriverScanTester.Services
                 int screenX = pos.X + winX;
                 int screenY = pos.Y + winY;
 
-                // Read storage item details from memory
                 int itemType = _memory.TryGetStorageItemType(item);
                 int stat1 = _memory.TryGetStorageItemStat1(item);
                 int stat2 = _memory.TryGetStorageItemStat2(item);
@@ -665,25 +686,20 @@ namespace DriverScanTester.Services
         }
 
         // ════════════════════════════════════════════════════════════════
-        //  STORAGE OPERATIONS (ported from StorageMover.cs)
+        //  STORAGE OPERATIONS
         // ════════════════════════════════════════════════════════════════
 
-        /// <summary>
-        /// Moves items from storage to inventory (for selling).
-        /// </summary>
         public void MoveItemsFromStorage()
         {
             GameInput.PressKey(GameInput.VK_ESCAPE, GameInput.SCAN_ESCAPE);
             Thread.Sleep(200);
 
-            // Open storage window
             OpenStorageWindow();
             Thread.Sleep(700);
 
             OpenInventoryTab1();
             List<int> itemsToMove = ItemsFromStorageListGenerate();
 
-            // ── Szczegółowy log wszystkich przedmiotów do przeniesienia ze storage ──
             LogAllStorageItemsForSale(itemsToMove, "STORAGE");
 
             foreach (int item in itemsToMove)
@@ -699,9 +715,6 @@ namespace DriverScanTester.Services
             }
         }
 
-        /// <summary>
-        /// Checks if storage is full (last few slots have items).
-        /// </summary>
         public bool IsStorageFull()
         {
             int invSlotValue = 0;
@@ -709,7 +722,7 @@ namespace DriverScanTester.Services
             {
                 invSlotValue += _memory.TryGetStorageItemCount(i);
             }
-            return invSlotValue > 2; // not =3 because potions etc. might be there
+            return invSlotValue > 2;
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -727,7 +740,7 @@ namespace DriverScanTester.Services
         }
 
         // ════════════════════════════════════════════════════════════════
-        //  WINDOW POSITION (for calculating absolute screen coords)
+        //  WINDOW POSITION
         // ════════════════════════════════════════════════════════════════
 
         [DllImport("user32.dll", SetLastError = true)]
@@ -737,18 +750,23 @@ namespace DriverScanTester.Services
         private static extern nint FindWindow(string lpClassName, string lpWindowName);
 
         [StructLayout(LayoutKind.Sequential)]
-        private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+        private struct RECT
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
 
-        /// <summary>
-        /// Gets the game window's top-left corner position.
-        /// </summary>
         private (int X, int Y) GetWindowOrigin()
         {
             nint hwnd = FindWindow(null, "Legend of Ares");
             if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
             if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
+
             if (hwnd != nint.Zero && GetWindowRect(hwnd, out RECT rect))
                 return (rect.Left, rect.Top);
+
             return (0, 0);
         }
 
@@ -756,14 +774,11 @@ namespace DriverScanTester.Services
         //  MOUSE OPERATIONS
         // ════════════════════════════════════════════════════════════════
 
-        /// <summary>
-        /// Confirms the sell dialog (left-click on OK button).
-        /// Uses window-relative position: confirm OK at (104, 464) relative to window.
-        /// </summary>
         public void MouseConfirmSelling()
         {
             _log("ItemSeller: Checking if sell window is open.");
             Thread.Sleep(50);
+
             if (_memory.IsSellConfirmWindowOpen())
             {
                 LeftClickOnConfirmSell("normal item sell");
@@ -771,6 +786,7 @@ namespace DriverScanTester.Services
 
             _log("ItemSeller: Checking if high value confirmation.");
             Thread.Sleep(100);
+
             if (_memory.IsSellConfirmWindowOpen())
             {
                 Thread.Sleep(10);
@@ -779,16 +795,14 @@ namespace DriverScanTester.Services
             }
         }
 
-        /// <summary>
-        /// Confirm OK button: hardcoded (560,570), at window (541,91) should be (645,555).
-        /// Window-relative: (645-541, 555-91) = (104, 464).
-        /// </summary>
         private void LeftClickOnConfirmSell(string debugMessage)
         {
             var (winX, winY) = GetWindowOrigin();
+
             int screenX = 104 + winX;
             int screenY = 464 + winY;
             int sleepTime = 35;
+
             _log($"ItemSeller: {debugMessage} -> screen ({screenX},{screenY}) [relative (104,464) + window ({winX},{winY})]");
             MouseOperations.LeftClickAbsolute(screenX, screenY, sleepTime);
         }
@@ -802,7 +816,6 @@ namespace DriverScanTester.Services
             if (IsCloseToShop())
             {
                 GameInput.PressKey(GameInput.VK_ESCAPE, GameInput.SCAN_ESCAPE);
-                // ShopUnbugger.UnBugShop() — would need NPC interaction, skip for now
                 _log("ItemSeller: ShopTooFarAntiBug triggered.");
             }
         }
@@ -811,29 +824,24 @@ namespace DriverScanTester.Services
         //  WINDOW-RELATIVE INVENTORY TAB CLICKS
         // ════════════════════════════════════════════════════════════════
 
-        /// <summary>
-        /// Opens inventory tab 1. Window-relative position: (789, 459).
-        /// At window (541,91): screen (1330,550).
-        /// </summary>
         private void OpenInventoryTab1()
         {
             var (winX, winY) = GetWindowOrigin();
+
             int screenX = 789 + winX;
             int screenY = 459 + winY;
+
             _log($"[ItemSeller] OpenInventoryTab1 -> screen ({screenX},{screenY}) [relative (789,459) + window ({winX},{winY})]");
             MouseOperations.OpenInventoryTab1Absolute(screenX, screenY);
         }
 
-        /// <summary>
-        /// Opens inventory tab 2. Window-relative position: (795, 560).
-        /// User calibrated: at window (445,105) screen click should be (1240,665).
-        /// 1240 - 445 = 795, 665 - 105 = 560.
-        /// </summary>
         private void OpenInventoryTab2()
         {
             var (winX, winY) = GetWindowOrigin();
+
             int screenX = 795 + winX;
             int screenY = 560 + winY;
+
             _log($"[ItemSeller] OpenInventoryTab2 -> screen ({screenX},{screenY}) [relative (795,560) + window ({winX},{winY})]");
             MouseOperations.OpenInventoryTab2Absolute(screenX, screenY);
         }
@@ -846,9 +854,12 @@ namespace DriverScanTester.Services
         {
             _log("ItemSeller: Opening shop window.");
             Thread.Sleep(1000);
+
             var (winX, winY) = GetWindowOrigin();
+
             int screenX = 145 + winX;
             int screenY = 460 + winY;
+
             _log($"[ItemSeller] OpenShopWindow -> screen ({screenX},{screenY}) [relative (145,460) + window ({winX},{winY})]");
             MouseOperations.MoveAndLeftClickAbsolute(screenX, screenY, 200);
         }
@@ -857,9 +868,12 @@ namespace DriverScanTester.Services
         {
             _log("ItemSeller: Opening storage window.");
             Thread.Sleep(200);
+
             var (winX, winY) = GetWindowOrigin();
+
             int screenX = 145 + winX;
             int screenY = 460 + winY;
+
             _log($"[ItemSeller] OpenStorageWindow -> screen ({screenX},{screenY}) [relative (145,460) + window ({winX},{winY})]");
             MouseOperations.MoveAndLeftClickAbsolute(screenX, screenY, 200);
         }
