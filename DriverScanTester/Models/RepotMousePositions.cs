@@ -99,7 +99,7 @@ namespace DriverScanTester.Models
                     spaceMultiplier = 0;
                 }
 
-                if (spaceMultiplier > columns)
+                if (spaceMultiplier >= columns)
                 {
                     spaceMultiplier = 0;
                     spaceBetweenRows += 35;
@@ -114,12 +114,12 @@ namespace DriverScanTester.Models
         // Window-relative base (was absolute 1260,530 for reference window 447,77).
         // 1260 - 447 = 813, 530 - 77 = 453
         static readonly int inventoryFirstSlotX = 813;
-        static readonly int inventoryFirstSlotY = 453;
-        static readonly int inventoryColumns = 5;
+        static readonly int inventoryFirstSlotY = 418;
+        static readonly int inventoryColumns = 6;
 
         static readonly int storageFirstSlotX = 985;
         static readonly int storageFirstSlotY = 175;
-        static readonly int storageColumns = 6;
+        static readonly int storageColumns = 7;
 
         public static (int X, int Y)[] itemSellPositions = ItemsInvArrPosInit(inventoryFirstSlotX, inventoryFirstSlotY, inventoryColumns, true);
         public static (int X, int Y)[] itemMoveFromStoragePositions = ItemsInvArrPosInit(storageFirstSlotX, storageFirstSlotY, storageColumns, false);
