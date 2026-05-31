@@ -13,6 +13,7 @@ namespace DriverScanTester.Models
         public BotMode Mode { get; set; } = BotMode.OnlyMove;
         public short CameraDistanceLock { get; set; } = DefaultCameraDistanceLock;
         public short AttackDisengageDistance { get; set; } = DefaultAttackDisengageDistance;
+        public ZoneRestriction ZoneRestriction { get; set; } = ZoneRestriction.OutsideOnly;
 
         public PathPoint() { }
         public PathPoint(
@@ -21,7 +22,8 @@ namespace DriverScanTester.Models
             MovementPrecision precision = MovementPrecision.Medium,
             BotMode mode = BotMode.OnlyMove,
             short cameraDistanceLock = DefaultCameraDistanceLock,
-            short attackDisengageDistance = DefaultAttackDisengageDistance)
+            short attackDisengageDistance = DefaultAttackDisengageDistance,
+            ZoneRestriction zoneRestriction = ZoneRestriction.OutsideOnly)
         { 
             X = x; 
             Y = y; 
@@ -29,6 +31,7 @@ namespace DriverScanTester.Models
             Mode = mode;
             CameraDistanceLock = cameraDistanceLock;
             AttackDisengageDistance = attackDisengageDistance;
+            ZoneRestriction = zoneRestriction;
         }
     }
 }

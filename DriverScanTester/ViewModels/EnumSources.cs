@@ -18,5 +18,8 @@ namespace DriverScanTester.ViewModels
 
         public static System.Array LockGroups { get; } =
             System.Enum.GetValues(typeof(LockGroup));
+
+        public static System.Array ZoneRestrictions { get; } =
+            System.Enum.GetValues(typeof(ZoneRestriction));
     }
 }

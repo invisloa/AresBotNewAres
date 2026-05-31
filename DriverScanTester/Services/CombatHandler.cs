@@ -1,7 +1,9 @@
 ﻿using System;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Runtime.InteropServices;
 
 namespace DriverScanTester.Services
 {
@@ -161,20 +163,57 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Captures the current screen and saves it as a PNG file in the Screenshots subfolder
-        /// with the prefix "PlayerSelectedSS_" and the current date/time.
-        /// Called when a player character (not a mob/NPC) is selected as a target.
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern nint FindWindow(string lpClassName, string lpWindowName);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool GetClientRect(nint hWnd, out RECT lpRect);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool ClientToScreen(nint hWnd, ref POINT lpPoint);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT { public int X; public int Y; }
+
+        /// <summary>
+        /// Finds the game window and captures its client area as a PNG file
+        /// in Screenshots/PlayerSelected/ with the current date/time.
         /// </summary>
         private void CapturePlayerScreenshot()
         {
             try
             {
-                using (Bitmap bitmap = new Bitmap(BotConstants.Loot.BitmapWidth, BotConstants.Loot.BitmapHeight))
+                nint hwnd = FindWindow(null, "Legend of Ares");
+                if (hwnd == nint.Zero) hwnd = FindWindow(null, "Ares");
+                if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
+                if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
+
+                int captureX = 0, captureY = 0, captureW = BotConstants.Loot.BitmapWidth, captureH = BotConstants.Loot.BitmapHeight;
+
+                if (hwnd != nint.Zero)
+                {
+                    if (GetClientRect(hwnd, out RECT clientRect))
+                    {
+                        POINT topLeft = new POINT { X = 0, Y = 0 };
+                        if (ClientToScreen(hwnd, ref topLeft))
+                        {
+                            captureX = topLeft.X;
+                            captureY = topLeft.Y;
+                            captureW = clientRect.Right - clientRect.Left;
+                            captureH = clientRect.Bottom - clientRect.Top;
+                        }
+                    }
+                }
+
+                using (Bitmap bitmap = new Bitmap(captureW, captureH))
                 using (Graphics graphics = Graphics.FromImage(bitmap))
                 {
-                    graphics.CopyFromScreen(0, 0, 0, 0, bitmap.Size);
+                    graphics.CopyFromScreen(captureX, captureY, 0, 0, bitmap.Size);
 
-                    string screenshotsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Screenshots", "PlayerSelected");
+                    string screenshotsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", "Screenshots", "PlayerSelected");
                     Directory.CreateDirectory(screenshotsDir);
 
                     string fileName = $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.png";

@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -24,6 +25,16 @@ namespace DriverScanTester.Services
         MoveAndAttackAndLoot
     }
 
+    public enum ZoneRestriction
+    {
+        /// <summary>Movement allowed only outside city (default).</summary>
+        OutsideOnly,
+        /// <summary>Movement allowed only inside city.</summary>
+        InCityOnly,
+        /// <summary>Movement allowed both in and out of city.</summary>
+        Both
+    }
+
     public struct Waypoint
     {
         public const short DefaultCameraDistanceLock = BotConstants.Camera.DefaultDistanceLock;
@@ -35,6 +46,7 @@ namespace DriverScanTester.Services
         public BotMode Mode { get; set; }
         public short CameraDistanceLock { get; set; }
         public short AttackDisengageDistance { get; set; }
+        public ZoneRestriction ZoneRestriction { get; set; }
 
         public Waypoint(
             float x,
@@ -42,7 +54,8 @@ namespace DriverScanTester.Services
             MovementPrecision precision,
             BotMode mode,
             short cameraDistanceLock = DefaultCameraDistanceLock,
-            short attackDisengageDistance = DefaultAttackDisengageDistance)
+            short attackDisengageDistance = DefaultAttackDisengageDistance,
+            ZoneRestriction zoneRestriction = ZoneRestriction.OutsideOnly)
         {
             X = x;
             Y = y;
@@ -50,6 +63,7 @@ namespace DriverScanTester.Services
             Mode = mode;
             CameraDistanceLock = cameraDistanceLock;
             AttackDisengageDistance = attackDisengageDistance;
+            ZoneRestriction = zoneRestriction;
         }
     }
 
@@ -115,10 +129,14 @@ namespace DriverScanTester.Services
         private const double FORCE_START_MIN_INTERVAL_MS = BotConstants.Movement.ForceStartMinIntervalMs;
         private DateTime _lastForceStartMovingAt = DateTime.MinValue;
 
-        // Consecutive stuck attempts counter — after this many stuck detections without
+        // Consecutive stuck attempts counters — after this many stuck detections without
         // reaching a waypoint, the bot triggers a repot (teleport to town).
-        private const int STUCK_MAX_CONSECUTIVE_ATTEMPTS = 10;
+        private const int STUCK_MAX_ATTEMPTS_OUTSIDE = 15;
+        private const int STUCK_MAX_ATTEMPTS_IN_CITY = 3;
         private int _consecutiveStuckAttempts = 0;
+
+        // When stuck in city triggers teleport, wait this long before resuming.
+        private DateTime _inCityStuckCooldownUntil = DateTime.MinValue;
 
         private readonly ReverseDiagonalRecovery _reverseDiagonalRecovery;
         private readonly StuckDetector _stuckDetector;
@@ -254,17 +272,47 @@ namespace DriverScanTester.Services
 
             token.ThrowIfCancellationRequested();
 
-            if (_memoryService.GetIsInCity())
+            // ── In-city stuck cooldown ──
+            // After 3 stuck attempts in city, bot presses 6 and waits 10 minutes.
+            if (DateTime.Now < _inCityStuckCooldownUntil)
             {
                 if (_isMovingForward || _isSkillThreeHeld)
                 {
-                    _log($"[Tick {_tickCount}] In city — stopping movement and skipping actions.");
                     StopMoving();
                     ReleaseSkillThree();
-                    ClearCombatRetargetSearch();
                 }
 
+                _log($"[Tick {_tickCount}] In-city stuck cooldown — waiting {(_inCityStuckCooldownUntil - DateTime.Now).TotalMinutes:F1} min more.");
                 return;
+            }
+
+            // ── Zone restriction check ──
+            // Skip zone blocking when ReportAndGoBack is active (bot is teleporting to/from town).
+            if (!_repotHelper.IsReportAndGoBackActive)
+            {
+                bool inCity = _memoryService.GetIsInCity();
+                ZoneRestriction currentRestriction = _waypoints.Count > 0
+                    ? _waypoints.Peek().ZoneRestriction
+                    : ZoneRestriction.OutsideOnly;
+
+                // Block movement if we're in a zone the current waypoint doesn't allow.
+                // OutsideOnly waypoints are blocked in city; InCityOnly waypoints are blocked outside.
+                bool zoneBlocked = (inCity && currentRestriction == ZoneRestriction.OutsideOnly)
+                                || (!inCity && currentRestriction == ZoneRestriction.InCityOnly);
+
+                if (zoneBlocked)
+                {
+                    _log($"[Tick {_tickCount}] Zone blocked (inCity={inCity}, restriction={currentRestriction}, waypoints={_waypoints.Count}) — stopping movement.");
+
+                    if (_isMovingForward || _isSkillThreeHeld)
+                    {
+                        StopMoving();
+                        ReleaseSkillThree();
+                        ClearCombatRetargetSearch();
+                    }
+
+                    return;
+                }
             }
 
             // ── Periodic state dump ──
@@ -565,6 +613,13 @@ namespace DriverScanTester.Services
                 _memoryService.SetCameraDistance(target.CameraDistanceLock);
                 float distNow = GeometryUtils.Distance(currX, currY, target.X, target.Y);
                 float thresholdNow = GetEffectiveWaypointReachThreshold(target);
+
+                // Reset stuck counter when close to target (within 15 units) — bot is making progress
+                if (_consecutiveStuckAttempts > 0 && distNow <= 15f)
+                {
+                    _consecutiveStuckAttempts = 0;
+                    _log($"[Unstuck] Reset counter — within 15 of target ({distNow:F1}).");
+                }
 
                 // ── Active ReverseDiagonalRecovery ──
                 if (_reverseDiagonalRecovery.IsActive)
@@ -1024,15 +1079,29 @@ namespace DriverScanTester.Services
         private void StartReverseDiagonalRecovery(float currX, float currY, Waypoint target, string logSuffix)
         {
             _consecutiveStuckAttempts++;
-            _log($"[Unstuck] Consecutive stuck attempts: {_consecutiveStuckAttempts}/{STUCK_MAX_CONSECUTIVE_ATTEMPTS}");
+            bool inCity = _memoryService.GetIsInCity();
+            int maxAttempts = inCity ? STUCK_MAX_ATTEMPTS_IN_CITY : STUCK_MAX_ATTEMPTS_OUTSIDE;
+            _log($"[Unstuck] Consecutive stuck attempts: {_consecutiveStuckAttempts}/{maxAttempts} ({(inCity ? "in city" : "outside")})");
 
-            if (_consecutiveStuckAttempts >= STUCK_MAX_CONSECUTIVE_ATTEMPTS)
+            if (_consecutiveStuckAttempts >= maxAttempts)
             {
-                _log($"[Unstuck] Reached {STUCK_MAX_CONSECUTIVE_ATTEMPTS} consecutive stuck attempts — triggering ReportAndGoBack.");
                 _consecutiveStuckAttempts = 0;
                 CaptureStuckScreenshot();
                 _reverseDiagonalRecovery.Stop();
-                _repotHelper.ReportAndGoBack();
+
+                if (inCity)
+                {
+                    _log($"[Unstuck] Reached {maxAttempts} stuck attempts in city — pressing 6 and waiting 10 minutes.");
+                    StopMoving();
+                    GameInput.PressKey(GameInput.VK_6, GameInput.SCAN_6);
+                    _inCityStuckCooldownUntil = DateTime.Now.AddMinutes(10);
+                }
+                else
+                {
+                    _log($"[Unstuck] Reached {maxAttempts} stuck attempts outside — triggering ReportAndGoBack.");
+                    _repotHelper.ReportAndGoBack();
+                }
+
                 return;
             }
 
@@ -1044,21 +1113,55 @@ namespace DriverScanTester.Services
             _log($"[ReverseDiagonal] begin{logSuffix}. Bearing={bearingDeg:F1}°");
         }
 
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern nint FindWindow(string lpClassName, string lpWindowName);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool GetClientRect(nint hWnd, out RECT lpRect);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool ClientToScreen(nint hWnd, ref POINT lpPoint);
+
+        private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+        private struct POINT { public int X; public int Y; }
+
         /// <summary>
-        /// Captures the current screen and saves it as a PNG file in the Screenshots subfolder
-        /// with the prefix "Stuck_" and the current date/time.
+        /// Finds the game window and captures its client area as a PNG file
+        /// in Screenshots/Stuck/ with the current date/time.
         /// Called before triggering ReportAndGoBack after too many consecutive stuck attempts.
         /// </summary>
         private void CaptureStuckScreenshot()
         {
             try
             {
-                using (Bitmap bitmap = new Bitmap(BotConstants.Loot.BitmapWidth, BotConstants.Loot.BitmapHeight))
+                nint hwnd = FindWindow(null, "Legend of Ares");
+                if (hwnd == nint.Zero) hwnd = FindWindow(null, "Ares");
+                if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
+                if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
+
+                int captureX = 0, captureY = 0, captureW = BotConstants.Loot.BitmapWidth, captureH = BotConstants.Loot.BitmapHeight;
+
+                if (hwnd != nint.Zero)
+                {
+                    if (GetClientRect(hwnd, out RECT clientRect))
+                    {
+                        POINT topLeft = new POINT { X = 0, Y = 0 };
+                        if (ClientToScreen(hwnd, ref topLeft))
+                        {
+                            captureX = topLeft.X;
+                            captureY = topLeft.Y;
+                            captureW = clientRect.Right - clientRect.Left;
+                            captureH = clientRect.Bottom - clientRect.Top;
+                        }
+                    }
+                }
+
+                using (Bitmap bitmap = new Bitmap(captureW, captureH))
                 using (Graphics graphics = Graphics.FromImage(bitmap))
                 {
-                    graphics.CopyFromScreen(0, 0, 0, 0, bitmap.Size);
+                    graphics.CopyFromScreen(captureX, captureY, 0, 0, bitmap.Size);
 
-                    string screenshotsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Screenshots", "Stuck");
+                    string screenshotsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", "Screenshots", "Stuck");
                     Directory.CreateDirectory(screenshotsDir);
 
                     string fileName = $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.png";

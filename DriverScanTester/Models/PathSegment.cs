@@ -9,6 +9,7 @@ namespace DriverScanTester.Models
         public MovementPrecision Precision { get; set; } = MovementPrecision.Medium;
         public BotMode Mode { get; set; } = BotMode.OnlyMove;
         public bool LoopRoute { get; set; } = false;
+        public ZoneRestriction ZoneRestriction { get; set; } = ZoneRestriction.OutsideOnly;
         public List<PathPoint> Points { get; set; } = new List<PathPoint>();
 
         public PathSegment() { }

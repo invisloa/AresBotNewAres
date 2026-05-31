@@ -76,6 +76,13 @@ namespace DriverScanTester.ViewModels
             set => SetProperty(ref _segmentAttackDisengageDistanceText, value);
         }
 
+        private ZoneRestriction _segmentZoneRestriction = ZoneRestriction.OutsideOnly;
+        public ZoneRestriction SegmentZoneRestriction
+        {
+            get => _segmentZoneRestriction;
+            set => SetProperty(ref _segmentZoneRestriction, value);
+        }
+
         // --- Route Builder State (Tab 2) ---
         private ObservableCollection<string> _availableSegments = new ObservableCollection<string>();
         public ObservableCollection<string> AvailableSegments
@@ -199,7 +206,7 @@ namespace DriverScanTester.ViewModels
         {
             short cameraDistanceLock = GetSegmentCameraDistanceLock();
             short attackDisengageDistance = GetSegmentAttackDisengageDistance();
-            Points.Add(new PathPoint(0, 0, SegmentPrecision, SegmentBotMode, cameraDistanceLock, attackDisengageDistance));
+            Points.Add(new PathPoint(0, 0, SegmentPrecision, SegmentBotMode, cameraDistanceLock, attackDisengageDistance, SegmentZoneRestriction));
             StatusText = $"Added new point (0,0) with cam lock {cameraDistanceLock} and attack disengage {attackDisengageDistance}.";
         }
 
@@ -264,7 +271,7 @@ namespace DriverScanTester.ViewModels
                 float y = (float)BitConverter.ToInt16(yBuf, 0);
                 short cameraDistanceLock = GetSegmentCameraDistanceLock();
                 short attackDisengageDistance = GetSegmentAttackDisengageDistance();
-                Points.Add(new PathPoint(x, y, SegmentPrecision, SegmentBotMode, cameraDistanceLock, attackDisengageDistance));
+                Points.Add(new PathPoint(x, y, SegmentPrecision, SegmentBotMode, cameraDistanceLock, attackDisengageDistance, SegmentZoneRestriction));
                 StatusText = $"Captured ({x}, {y}) with {SegmentPrecision} precision, {SegmentBotMode}, cam lock {cameraDistanceLock}, attack disengage {attackDisengageDistance}.";
             }
             else
@@ -300,6 +307,7 @@ namespace DriverScanTester.ViewModels
                     Precision = SegmentPrecision,
                     Mode = SegmentBotMode,
                     LoopRoute = LoopRoute,
+                    ZoneRestriction = SegmentZoneRestriction,
                     Points = Points.ToList()
                 };
 
@@ -364,6 +372,7 @@ namespace DriverScanTester.ViewModels
                     SegmentPrecision = loaded.Precision;
                     SegmentBotMode = loaded.Mode;
                     LoopRoute = loaded.LoopRoute;
+                    SegmentZoneRestriction = loaded.ZoneRestriction;
                     if (loadedPoints.Count > 0)
                     {
                         SegmentCameraDistanceLockText = loadedPoints[0].CameraDistanceLock.ToString();
@@ -385,7 +394,7 @@ namespace DriverScanTester.ViewModels
 
         private void RunEditorPath()
         {
-            var list = Points.Select(p => new DriverScanTester.Services.Waypoint(p.X, p.Y, p.Precision, p.Mode, p.CameraDistanceLock, p.AttackDisengageDistance)).ToList();
+            var list = Points.Select(p => new DriverScanTester.Services.Waypoint(p.X, p.Y, p.Precision, p.Mode, p.CameraDistanceLock, p.AttackDisengageDistance, p.ZoneRestriction)).ToList();
             OnRunPath?.Invoke(list, LoopRoute);
             StatusText = "Running current editor segment...";
         }
@@ -459,7 +468,7 @@ namespace DriverScanTester.ViewModels
                         if (loaded != null)
                         {
                             var loadedPoints = loaded.Points ?? new List<PathPoint>();
-                            combinedWaypoints.AddRange(loadedPoints.Select(p => new DriverScanTester.Services.Waypoint(p.X, p.Y, p.Precision, p.Mode, p.CameraDistanceLock, p.AttackDisengageDistance)));
+                            combinedWaypoints.AddRange(loadedPoints.Select(p => new DriverScanTester.Services.Waypoint(p.X, p.Y, p.Precision, p.Mode, p.CameraDistanceLock, p.AttackDisengageDistance, p.ZoneRestriction)));
                             segmentsLoaded++;
                         }
                     }

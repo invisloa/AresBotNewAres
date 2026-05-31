@@ -33,6 +33,9 @@
                                 <DataGridComboBoxColumn Header="Mode" 
                                     ItemsSource="{Binding Source={x:Static vm:EnumSources.BotModes}}"
                                     SelectedItemBinding="{Binding Mode}" Width="*"/>
+                                <DataGridComboBoxColumn Header="Zone" 
+                                    ItemsSource="{Binding Source={x:Static vm:EnumSources.ZoneRestrictions}}"
+                                    SelectedItemBinding="{Binding ZoneRestriction}" Width="*"/>
                                 <DataGridTextColumn Header="Cam Lock"
                                     Binding="{Binding CameraDistanceLock, UpdateSourceTrigger=PropertyChanged}"
                                     Width="*"/>
@@ -82,6 +85,12 @@
                                   SelectedItem="{Binding SegmentBotMode}"
                                   Margin="0,0,0,10" Padding="3"
                                   ToolTip="Default bot mode applied only when adding new points via Add/Capture. Each point in the grid can be edited individually."/>
+
+                        <Label Content="Zone restriction:"/>
+                        <ComboBox ItemsSource="{Binding Source={x:Static vm:EnumSources.ZoneRestrictions}}"
+                                  SelectedItem="{Binding SegmentZoneRestriction}"
+                                  Margin="0,0,0,10" Padding="3"
+                                  ToolTip="OutsideOnly = block movement in city. InCityOnly = block movement outside. Both = move anywhere."/>
 
                         <Label Content="Camera distance lock for new points:"/>
                         <TextBox Text="{Binding SegmentCameraDistanceLockText, UpdateSourceTrigger=PropertyChanged}"
