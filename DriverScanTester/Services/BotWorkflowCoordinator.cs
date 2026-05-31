@@ -115,6 +115,12 @@ namespace DriverScanTester.Services
             _repotDetector.MaxWeightRatio = profile.MaxWeightRatio;
             _repotDetector.MinHp = profile.MinHp;
             _repotDetector.MinMana = profile.MinMana;
+
+            // Apply profile potion buy targets
+            _repotSystem.HpBuyTarget = profile.HpBuyTarget;
+            _repotSystem.ManaBuyTarget = profile.ManaBuyTarget;
+            _repotSystem.RedBuyTarget = profile.RedBuyTarget;
+            _repotSystem.WhiteBuyTarget = profile.WhiteBuyTarget;
         }
 
         /// <summary>

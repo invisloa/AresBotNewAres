@@ -20,6 +20,16 @@ namespace DriverScanTester.Services
             _itemSeller = new ItemSellerService(memoryService, log);
         }
 
+        // --- Potion buy targets (can be overridden per-profile) ---
+        /// <summary>Target count for HP potions (added to ItemCount1 base). Default = BotConstants.Repot.HpBuyTarget.</summary>
+        public int HpBuyTarget { get; set; } = BotConstants.Repot.HpBuyTarget;
+        /// <summary>Target count for Mana potions (added to ItemCount1 base). Default = BotConstants.Repot.ManaBuyTarget.</summary>
+        public int ManaBuyTarget { get; set; } = BotConstants.Repot.ManaBuyTarget;
+        /// <summary>Target count for Red potions (added to ItemCount1 base). Default = BotConstants.Repot.RedBuyTarget.</summary>
+        public int RedBuyTarget { get; set; } = BotConstants.Repot.RedBuyTarget;
+        /// <summary>Target count for White potions (added to ItemCount1 base). Default = BotConstants.Repot.WhiteBuyTarget.</summary>
+        public int WhiteBuyTarget { get; set; } = BotConstants.Repot.WhiteBuyTarget;
+
         #region State Checks
 
         public bool IsShopOpen()
@@ -107,25 +117,25 @@ namespace DriverScanTester.Services
                 Thread.Sleep(1000);
 
                 // Mana Potions (Index 0)
-                if (i == 0 && GetManaPotionCount() < BotConstants.GameMagicValues.ItemCount1 + BotConstants.Repot.ManaBuyTarget)
+                if (i == 0 && GetManaPotionCount() < BotConstants.GameMagicValues.ItemCount1 + ManaBuyTarget)
                 {
                     MouseOperations.MoveAndLeftClick(positions[i].X, positions[i].Y, 150);
                     HowManyPotionsToBuy(i);
                 }
                 // Red Potions (Index 1)
-                else if (i == 1 && GetRedPotionCount() < BotConstants.GameMagicValues.ItemCount1 + BotConstants.Repot.RedBuyTarget)
+                else if (i == 1 && GetRedPotionCount() < BotConstants.GameMagicValues.ItemCount1 + RedBuyTarget)
                 {
                     MouseOperations.MoveAndLeftClick(positions[i].X, positions[i].Y, 150);
                     HowManyPotionsToBuy(i);
                 }
                 // White Potions (Index 2)
-                else if (i == 2 && GetWhitePotionCount() < BotConstants.GameMagicValues.ItemCount1 + BotConstants.Repot.WhiteBuyTarget)
+                else if (i == 2 && GetWhitePotionCount() < BotConstants.GameMagicValues.ItemCount1 + WhiteBuyTarget)
                 {
                     MouseOperations.MoveAndLeftClick(positions[i].X, positions[i].Y, 150);
                     HowManyPotionsToBuy(i);
                 }
                 // HP Potions (Index 3)
-                else if (i == 3 && GetHpPotionCount() < BotConstants.GameMagicValues.ItemCount1 + BotConstants.Repot.HpBuyTarget)
+                else if (i == 3 && GetHpPotionCount() < BotConstants.GameMagicValues.ItemCount1 + HpBuyTarget)
                 {
                     MouseOperations.MoveAndLeftClick(positions[i].X, positions[i].Y, 150);
                     HowManyPotionsToBuy(i);

@@ -18,6 +18,14 @@ namespace DriverScanTester.ViewModels
     {
         private const string SAVE_DIR = "SavedPaths";
 
+        // --- Profile Editor (Tab 3) ---
+        private ProfileEditorViewModel _profileEditor;
+        public ProfileEditorViewModel ProfileEditor
+        {
+            get => _profileEditor;
+            set => SetProperty(ref _profileEditor, value);
+        }
+
         // --- Editor State (Tab 1) ---
         private ObservableCollection<PathPoint> _points = new ObservableCollection<PathPoint>();
         public ObservableCollection<PathPoint> Points
@@ -180,6 +188,9 @@ namespace DriverScanTester.ViewModels
             // Init
             if (!Directory.Exists(SAVE_DIR)) Directory.CreateDirectory(SAVE_DIR);
             RefreshLibrary();
+
+            // Profile Editor (no game process dependencies)
+            _profileEditor = new ProfileEditorViewModel();
         }
 
         // ========================== EDITOR LOGIC ==========================

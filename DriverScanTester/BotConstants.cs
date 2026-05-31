@@ -127,14 +127,15 @@ namespace DriverScanTester
             /// <summary>Minimum interval in seconds between TAB presses while in move+attack mode.</summary>
             public const double MoveModeTabIntervalSeconds = 0.8;
 
-            /// <summary>Consecutive idle/stuck action samples required to confirm stuck-in-attack.</summary>
-            public const int StuckRequiredSamples = 2;
-
-            /// <summary>Time window in ms for confirming stuck-in-attack.</summary>
-            public const double StuckRequiredMs = 200.0;
-
             /// <summary>Default distance at which the bot disengages attack from a waypoint.</summary>
             public const short DefaultAttackDisengageDistance = 60;
+
+            /// <summary>
+            /// Maximum target ID value considered a valid mob/NPC.
+            /// Values above this threshold are player characters and should be skipped.
+            /// Ported from AresTrainerV3_oldBot (isMobSelected &lt; 8300000 = mob, > 8300000 = player).
+            /// </summary>
+            public const int MaxMobTargetId = 8300000;
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -165,9 +166,6 @@ namespace DriverScanTester
 
             /// <summary>Size of local navigation map cells in game tiles.</summary>
             public const float LocalMapCellSize = 1.0f;
-
-            /// <summary>Distance threshold for soft-skipping a waypoint when stuck nearby.</summary>
-            public const float StuckSoftSkipDistance = 5.5f;
 
             /// <summary>Rate-limit interval in ms for ForceStartMoving calls.</summary>
             public const double ForceStartMinIntervalMs = 700.0;
@@ -289,6 +287,10 @@ namespace DriverScanTester
             public const ulong HealManaOffset2 = 0xC58;
             public const ulong HealManaBasePtr1 = 0x5C48CB;
             public const ulong HealManaOffset1 = 0x2C8;
+
+            // Mouseover / NPC highlight
+            public const ulong IsNpcMousePointedPtr = 0x471C84;
+            public const ulong IsNpcMousePointed = 0x7C;
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -525,8 +527,7 @@ namespace DriverScanTester
             /// <summary>Maximum age of a healthy bearing for reuse in reverse-diagonal recovery.</summary>
             public const double HealthyBearingMaxAgeSeconds = 5.0;
 
-            /// <summary>Warmup period for movement progress tracker before making decisions.</summary>
-            public const double ProgressTrackerWarmupSeconds = 0.5;
+
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -581,66 +582,6 @@ namespace DriverScanTester
 
             /// <summary>Bearing offsets applied sequentially to the base bearing.</summary>
             public static readonly float[] AttemptOffsets = { 135f, -135f, 150f, -150f };
-        }
-
-        // ════════════════════════════════════════════════════════════════
-        //  BUG2 BOUNDARY-FOLLOWING ALGORITHM
-        // ════════════════════════════════════════════════════════════════
-        public static class Bug2
-        {
-            /// <summary>Time in ms to observe a candidate direction before evaluating success.</summary>
-            public const double CandidateObserveMs = 700.0;
-
-            /// <summary>Maximum total steps before Bug2 gives up.</summary>
-            public const int MaxTotalSteps = 40;
-
-            /// <summary>Maximum failed moves before Bug2 gives up.</summary>
-            public const int MaxFailedMoves = 12;
-
-            /// <summary>Maximum duration in seconds for Bug2 recovery.</summary>
-            public const double MaxDurationSeconds = 20.0;
-
-            /// <summary>Distance tolerance for considering the bot "on the m-line".</summary>
-            public const float MLineTolerance = 1.5f;
-
-            /// <summary>Minimum improvement vs hit distance to leave boundary following.</summary>
-            public const float LeaveMinImprovement = 1.0f;
-
-            /// <summary>Max consecutive same-side steps before switching boundary-follow direction.</summary>
-            public const int MaxStepsBeforeSideSwitch = 8;
-        }
-
-        // ════════════════════════════════════════════════════════════════
-        //  MOVEMENT PROGRESS TRACKER
-        // ════════════════════════════════════════════════════════════════
-        public static class ProgressTracker
-        {
-            /// <summary>Time between movement samples in seconds.</summary>
-            public const double SampleIntervalSeconds = 0.100;
-
-            /// <summary>Rolling window length in seconds for progress evaluation.</summary>
-            public const double ProgressWindowSeconds = 1.50;
-
-            /// <summary>Window in seconds for "hard no movement" detection.</summary>
-            public const double HardNoMovementWindowSeconds = 1.25;
-
-            /// <summary>Minimum displacement (tiles) expected over the progress window.</summary>
-            public const float MinDistanceProgress = 0.75f;
-
-            /// <summary>Minimum projection-advance (tiles) expected over the progress window.</summary>
-            public const float MinProjectionProgress = 0.50f;
-
-            /// <summary>Maximum displacement (tiles) over hard-no-movement window before declaring stuck.</summary>
-            public const float HardNoMovementDistance = 0.35f;
-
-            /// <summary>Distance-to-target worsening threshold (tiles) that triggers "wrong way".</summary>
-            public const float WrongWayWorsenThreshold = 2.0f;
-
-            /// <summary>Window in seconds for wrong-way detection.</summary>
-            public const double WrongWayWindowSeconds = 0.80;
-
-            /// <summary>Hard cap on sample list size to prevent unbounded growth.</summary>
-            public const int MaxSamples = 200;
         }
 
         // ════════════════════════════════════════════════════════════════

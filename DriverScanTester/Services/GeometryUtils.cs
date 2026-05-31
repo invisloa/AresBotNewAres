@@ -113,6 +113,13 @@ namespace DriverScanTester.Services
                 }
             }
 
+            // Ensure the result stays within the valid game angle range [North, NorthFullCircle)
+            // to avoid sending out-of-range values that cause the camera to over-rotate.
+            while (best < BearingCalibration[0].GameAngle)
+                best += ManualFullSpinGameUnits;
+            while (best >= BearingCalibration[BearingCalibration.Length - 1].GameAngle)
+                best -= ManualFullSpinGameUnits;
+
             return (short)Math.Round(best);
         }
 

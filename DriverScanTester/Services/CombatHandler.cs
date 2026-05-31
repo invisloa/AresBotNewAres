@@ -1,4 +1,7 @@
 ﻿using System;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
 
 namespace DriverScanTester.Services
 {
@@ -14,12 +17,8 @@ namespace DriverScanTester.Services
         TabTarget,
         /// <summary>Press 3 to use attack skill (and stop moving).</summary>
         Attack,
-        /// <summary>Waiting during combat (attack cooldown / stuck debounce) — skip movement entirely.</summary>
+        /// <summary>Waiting during combat (attack cooldown) — skip movement entirely.</summary>
         CombatWait,
-        /// <summary>Press TAB (stuck in attack) to switch target.</summary>
-        StuckTabAttack,
-        /// <summary>Start the unstuck routine — too many stuck-in-attack attempts.</summary>
-        UnstuckNeeded,
         /// <summary>Potion keys were pressed — caller should delay briefly.</summary>
         PotionsUsed
     }
@@ -38,18 +37,9 @@ namespace DriverScanTester.Services
         private const double IDLE_TIMEOUT_SECONDS = BotConstants.Combat.IdleTimeoutSeconds;
         private const double MOVE_MODE_TAB_INTERVAL_SECONDS = BotConstants.Combat.MoveModeTabIntervalSeconds;
 
-        // ── Combat stuck detection (same pattern as StuckDetector) ──
-        // Uses GetCurrentAction as the source of truth:
-        // - action 27 or 3 → running (not stuck)
-        // - action 25 or 1 → idle/stuck
-        private const int CombatStuckRequiredSamples = BotConstants.Combat.StuckRequiredSamples;
-        private const double CombatStuckRequiredMs = BotConstants.Combat.StuckRequiredMs;
-
         // ── State ──
         private bool _wasAttacking;
         private DateTime _lastNonIdleActionTime = DateTime.MinValue;
-        private int _combatStuckSamples;
-        private DateTime _combatStuckFirstSeenAt = DateTime.MinValue;
         private DateTime _lastMoveModeTabTime = DateTime.MinValue;
         private DateTime _lastAttackSpeedCheck = DateTime.MinValue;
 
@@ -111,35 +101,30 @@ namespace DriverScanTester.Services
 
             if (attackVal > 0)
             {
+                // ── Player character check: skip attacking other players ──
+                if (memoryService.IsPlayerSelected())
+                {
+                    CapturePlayerScreenshot();
+                    _log("[Combat] Target is a player character — skipping attack. TAB.");
+                    _wasAttacking = false;
+                    return CombatAction.TabTarget;
+                }
+
                 // ── Attacking ──
                 if (!_wasAttacking)
                 {
                     _wasAttacking = true;
                     _lastNonIdleActionTime = DateTime.Now;
-                    _combatStuckSamples = 0;
                     return CombatAction.Attack;
                 }
 
-                // ── Stuck detection (same pattern as StuckDetector) ──
-                // Uses GetCurrentAction as the source of truth:
-                // - action 27 or 3 → running (not stuck)
-                // - action 25 or 1 → idle/stuck
+                // ── Stuck detection via StuckDetector ──
+                // Action 25 or 1 = idle/stuck → mob dead or stuck, TAB to retarget
                 if (StuckDetector.IsActionIdleOrStuck(currentAction))
                 {
-                    if (_combatStuckSamples == 0)
-                        _combatStuckFirstSeenAt = DateTime.Now;
-                    _combatStuckSamples++;
-
-                    if (_combatStuckSamples >= CombatStuckRequiredSamples ||
-                        (DateTime.Now - _combatStuckFirstSeenAt).TotalMilliseconds >= CombatStuckRequiredMs)
-                    {
-                        _log("[Combat] Action stuck. Mob dead or stuck. TAB.");
-                        _wasAttacking = false;
-                        return CombatAction.TabTarget;
-                    }
-
-                    // Waiting for debounce threshold — skip movement but keep W released
-                    return CombatAction.CombatWait;
+                    _log("[Combat] Action stuck. Mob dead or stuck. TAB.");
+                    _wasAttacking = false;
+                    return CombatAction.TabTarget;
                 }
 
                 // ── Fallback: action 0 idle timeout ──
@@ -154,7 +139,6 @@ namespace DriverScanTester.Services
                 if (currentAction == 27 || currentAction == 3 || currentAction == 28 || currentAction == 39)
                 {
                     _lastNonIdleActionTime = DateTime.Now;
-                    _combatStuckSamples = 0;
                 }
 
                 // Skill 3 is held by MovementSystem — skip movement, keep waiting in combat
@@ -177,11 +161,33 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Resets the stuck-in-attack counter (called when unstuck routine starts due to stuck in attack).
+        /// Captures the current screen and saves it as a PNG file in the Screenshots subfolder
+        /// with the prefix "PlayerSelectedSS_" and the current date/time.
+        /// Called when a player character (not a mob/NPC) is selected as a target.
         /// </summary>
-        public void ResetStuckInAttack()
+        private void CapturePlayerScreenshot()
         {
-            _combatStuckSamples = 0;
+            try
+            {
+                using (Bitmap bitmap = new Bitmap(BotConstants.Loot.BitmapWidth, BotConstants.Loot.BitmapHeight))
+                using (Graphics graphics = Graphics.FromImage(bitmap))
+                {
+                    graphics.CopyFromScreen(0, 0, 0, 0, bitmap.Size);
+
+                    string screenshotsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Screenshots", "PlayerSelected");
+                    Directory.CreateDirectory(screenshotsDir);
+
+                    string fileName = $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.png";
+                    string filePath = Path.Combine(screenshotsDir, fileName);
+
+                    bitmap.Save(filePath, ImageFormat.Png);
+                    _log($"[Combat] Player screenshot saved: {filePath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                _log($"[Combat] Failed to save player screenshot: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -190,7 +196,6 @@ namespace DriverScanTester.Services
         public void ResetState()
         {
             _wasAttacking = false;
-            _combatStuckSamples = 0;
         }
     }
 }

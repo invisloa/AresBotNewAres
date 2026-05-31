@@ -3,19 +3,24 @@ using System;
 namespace DriverScanTester.Services
 {
     /// <summary>
-    /// Tick-driven reverse-diagonal recovery that runs before Bug2.
-    /// Tries a deterministic sequence of backward+strafe offsets to unstick the bot.
+    /// Tick-driven reverse-diagonal recovery.
+    /// Tries a deterministic sequence of camera angles to unstick the bot.
     ///
-    /// Each attempt lasts <see cref="AttemptMs"/> milliseconds.
-    /// After all <see cref="MaxAttempts"/> fail, the caller (MovementSystem)
-    /// escalates to obstacle marking and Bug2.
+    /// Per attempt:
+    ///   1. Set camera to new angle (W NOT pressed)
+    ///   2. Wait 200ms (camera settle)
+    ///   3. Press W
+    ///   4. Wait 200ms (movement attempt)
+    ///   5. Check current action:
+    ///      - If still stuck (25/1) → stop W, try next angle
+    ///      - If running (27/3) → wait 300ms cooldown, then success
     ///
     /// Thread.Sleep / blocking is NOT used — the caller invokes Tick() each
     /// movement update cycle.
     /// </summary>
     internal enum RecoveryResult
     {
-        /// <summary>Recovery is still in progress (within current attempt).</summary>
+        /// <summary>Recovery is still in progress.</summary>
         InProgress,
 
         /// <summary>An attempt succeeded — bot is unstuck.</summary>
@@ -29,27 +34,39 @@ namespace DriverScanTester.Services
     {
         private readonly GameMemoryService _memory;
         private readonly Action<string> _log;
+        private readonly Action _startMoving;
+        private readonly Action _stopMoving;
 
         // ── Configuration ──
 
-        private const int AttemptMs = BotConstants.ReverseDiagonal.AttemptMs;
+        private const int CameraSettleMs = 200;
+        private const int MoveAttemptMs = 200;
+        private const int SuccessCooldownMs = 300;
         private const int MaxAttempts = BotConstants.ReverseDiagonal.MaxAttempts;
-        private const float SuccessDisplacement = BotConstants.ReverseDiagonal.SuccessDisplacement;
-        private const float SuccessDistImprove = BotConstants.ReverseDiagonal.SuccessDistImprove;
 
-        /// <summary>Maximum age of a healthy bearing for it to be reused.</summary>
         private static readonly TimeSpan HealthyBearingMaxAge = TimeSpan.FromSeconds(BotConstants.Timeouts.HealthyBearingMaxAgeSeconds);
 
         // Offsets applied to the base bearing, in exact order.
         private static readonly float[] AttemptOffsets = BotConstants.ReverseDiagonal.AttemptOffsets;
 
+        // ── Attempt stages ──
+
+        private enum AttemptStage
+        {
+            /// <summary>Camera was just set. Waiting CameraSettleMs (W released).</summary>
+            CameraSettle,
+            /// <summary>W pressed. Waiting MoveAttemptMs.</summary>
+            Moving,
+            /// <summary>Character is running. Waiting SuccessCooldownMs before declaring success.</summary>
+            SuccessCooldown
+        }
+
         // ── State ──
 
         private bool _active;
         private int _attemptIndex;
-        private DateTime _attemptStartTime;
-        private (float X, float Y) _attemptStartPos;
-        private float _attemptStartDist;
+        private AttemptStage _stage;
+        private DateTime _stageStartTime;
         private float _baseBearing;
         private (float X, float Y) _target;
         private float _currentBearing;
@@ -60,26 +77,18 @@ namespace DriverScanTester.Services
         /// <summary>Bearing (degrees from North) of the current diagonal attempt.</summary>
         public float CurrentBearingDeg => _currentBearing;
 
-        public ReverseDiagonalRecovery(GameMemoryService memory, Action<string> log)
+        public ReverseDiagonalRecovery(GameMemoryService memory, Action<string> log, Action startMoving, Action stopMoving)
         {
             _memory = memory ?? throw new ArgumentNullException(nameof(memory));
             _log = log ?? throw new ArgumentNullException(nameof(log));
+            _startMoving = startMoving ?? throw new ArgumentNullException(nameof(startMoving));
+            _stopMoving = stopMoving ?? throw new ArgumentNullException(nameof(stopMoving));
         }
 
         /// <summary>
         /// Start a new reverse-diagonal recovery sequence.
+        /// Sets the first camera angle and releases W (camera settle phase).
         /// </summary>
-        /// <param name="currX">Current player X.</param>
-        /// <param name="currY">Current player Y.</param>
-        /// <param name="targetX">Target waypoint X.</param>
-        /// <param name="targetY">Target waypoint Y.</param>
-        /// <param name="healthyBearingDeg">
-        /// Last known healthy movement bearing, or null if unavailable.
-        /// Used as base bearing if not too old.
-        /// </param>
-        /// <param name="healthyBearingTime">
-        /// Time when <paramref name="healthyBearingDeg"/> was recorded.
-        /// </param>
         public void Start(
             float currX, float currY,
             float targetX, float targetY,
@@ -104,13 +113,14 @@ namespace DriverScanTester.Services
                 _log($"[ReverseDiagonal] Base bearing from target direction: {_baseBearing:F1}°");
             }
 
-            _attemptStartPos = (currX, currY);
-            _attemptStartDist = GeometryUtils.Distance(currX, currY, targetX, targetY);
-            _attemptStartTime = DateTime.Now;
-
             // Fire the first attempt
             float offset = AttemptOffsets[0];
             _currentBearing = GeometryUtils.NormalizeBearingDeg(_baseBearing + offset);
+            _stage = AttemptStage.CameraSettle;
+            _stageStartTime = DateTime.Now;
+
+            // Ensure W is released during camera settle phase
+            _stopMoving();
 
             _log($"[ReverseDiagonal] Started. Attempt=1/{MaxAttempts} offset={offset:F0}° " +
                  $"bearing={_currentBearing:F1} target=({targetX:F1},{targetY:F1})");
@@ -118,69 +128,86 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Call every update tick while <see cref="IsActive"/> is true.
-        /// Evaluates the current attempt and advances if needed.
+        /// Evaluates the current stage and advances if needed.
+        /// When a new attempt begins, <see cref="CurrentBearingDeg"/> is updated —
+        /// the caller should apply the new camera angle.
         /// </summary>
-        /// <param name="currX">Current player X.</param>
-        /// <param name="currY">Current player Y.</param>
-        /// <returns>
-        /// <see cref="RecoveryResult.InProgress"/> if still waiting,
-        /// <see cref="RecoveryResult.Recovered"/> if a attempt succeeded, or
-        /// <see cref="RecoveryResult.Failed"/> if all attempts exhausted.
-        /// When <see cref="RecoveryResult.InProgress"/> is returned and a new
-        /// attempt just started, <see cref="CurrentBearingDeg"/> has already been
-        /// updated — the caller should apply it immediately.
-        /// </returns>
         public RecoveryResult Tick(float currX, float currY)
         {
             if (!_active)
                 return RecoveryResult.Failed;
 
-            double elapsedMs = (DateTime.Now - _attemptStartTime).TotalMilliseconds;
+            double elapsedMs = (DateTime.Now - _stageStartTime).TotalMilliseconds;
 
-            // Still within the current attempt window
-            if (elapsedMs < AttemptMs)
-                return RecoveryResult.InProgress;
-
-            // ── Attempt finished — evaluate success ──
-            float displacement = GeometryUtils.Distance(
-                currX, currY, _attemptStartPos.X, _attemptStartPos.Y);
-            float distNow = GeometryUtils.Distance(
-                currX, currY, _target.X, _target.Y);
-            float distImprove = _attemptStartDist - distNow; // positive = closer
-
-            if (displacement >= SuccessDisplacement || distImprove >= SuccessDistImprove)
+            switch (_stage)
             {
-                _log($"[ReverseDiagonal] SUCCESS attempt {_attemptIndex + 1}. " +
-                     $"disp={displacement:F2} dImprove={distImprove:F2}");
-                _active = false;
-                return RecoveryResult.Recovered;
+                case AttemptStage.CameraSettle:
+                    if (elapsedMs >= CameraSettleMs)
+                    {
+                        // Camera settled — press W and try to move
+                        _startMoving();
+                        _stage = AttemptStage.Moving;
+                        _stageStartTime = DateTime.Now;
+
+                        _log($"[ReverseDiagonal] Attempt {_attemptIndex + 1}/{MaxAttempts}: " +
+                             $"offset={AttemptOffsets[_attemptIndex]:F0}° bearing={_currentBearing:F1} — W pressed");
+                    }
+                    return RecoveryResult.InProgress;
+
+                case AttemptStage.Moving:
+                    if (elapsedMs < MoveAttemptMs)
+                        return RecoveryResult.InProgress;
+
+                    // Movement window elapsed — check if still stuck
+                    byte currentAction = _memory.GetCurrentAction();
+
+                    if (StuckDetector.IsActionIdleOrStuck(currentAction))
+                    {
+                        // Still stuck — this attempt failed
+                        _stopMoving();
+                        _log($"[ReverseDiagonal] FAIL attempt {_attemptIndex + 1}. Action={currentAction} still stuck.");
+
+                        _attemptIndex++;
+
+                        if (_attemptIndex >= MaxAttempts)
+                        {
+                            _log($"[ReverseDiagonal] All {MaxAttempts} attempts failed.");
+                            _active = false;
+                            _stopMoving();
+                            return RecoveryResult.Failed;
+                        }
+
+                        // Start next attempt
+                        float offset = AttemptOffsets[_attemptIndex];
+                        _currentBearing = GeometryUtils.NormalizeBearingDeg(_baseBearing + offset);
+                        _stage = AttemptStage.CameraSettle;
+                        _stageStartTime = DateTime.Now;
+                        _stopMoving(); // ensure W is released for camera settle
+
+                        _log($"[ReverseDiagonal] Next attempt {_attemptIndex + 1}/{MaxAttempts}: " +
+                             $"offset={offset:F0}° bearing={_currentBearing:F1}");
+                        return RecoveryResult.InProgress; // caller should apply new camera bearing
+                    }
+                    else
+                    {
+                        // Character is running — success! Enter cooldown.
+                        _log($"[ReverseDiagonal] Attempt {_attemptIndex + 1} succeeded. Action={currentAction} running. Cooldown {SuccessCooldownMs}ms.");
+                        _stage = AttemptStage.SuccessCooldown;
+                        _stageStartTime = DateTime.Now;
+                        return RecoveryResult.InProgress;
+                    }
+
+                case AttemptStage.SuccessCooldown:
+                    if (elapsedMs >= SuccessCooldownMs)
+                    {
+                        _log($"[ReverseDiagonal] SUCCESS. Cooldown finished.");
+                        _active = false;
+                        return RecoveryResult.Recovered;
+                    }
+                    return RecoveryResult.InProgress;
             }
 
-            // ── This attempt failed ──
-            _log($"[ReverseDiagonal] FAIL attempt {_attemptIndex + 1}. " +
-                 $"disp={displacement:F2} dImprove={distImprove:F2}");
-
-            _attemptIndex++;
-
-            if (_attemptIndex >= MaxAttempts)
-            {
-                _log($"[ReverseDiagonal] All {MaxAttempts} attempts failed.");
-                _active = false;
-                return RecoveryResult.Failed;
-            }
-
-            // ── Start next attempt ──
-            _attemptStartPos = (currX, currY);
-            _attemptStartDist = GeometryUtils.Distance(currX, currY, _target.X, _target.Y);
-            _attemptStartTime = DateTime.Now;
-
-            float offset = AttemptOffsets[_attemptIndex];
-            _currentBearing = GeometryUtils.NormalizeBearingDeg(_baseBearing + offset);
-
-            _log($"[ReverseDiagonal] Attempt {_attemptIndex + 1}/{MaxAttempts}: " +
-                 $"offset={offset:F0}° bearing={_currentBearing:F1}");
-
-            return RecoveryResult.InProgress; // caller must apply the new bearing
+            return RecoveryResult.Failed;
         }
 
         /// <summary>Immediately stops the recovery sequence.</summary>
@@ -190,6 +217,7 @@ namespace DriverScanTester.Services
             {
                 _log("[ReverseDiagonal] Stopped.");
                 _active = false;
+                _stopMoving();
             }
         }
     }

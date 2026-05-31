@@ -103,6 +103,10 @@ namespace DriverScanTester.Services
         private const ulong HealManaBasePtrAddr1 = BotConstants.MemoryOffsets.HealManaBasePtr1;
         private const ulong HealManaOffset1 = BotConstants.MemoryOffsets.HealManaOffset1;
 
+        // --- Offsets for NPC mouseover ---
+        private const ulong IsNpcMousePointedPtrOffset = BotConstants.MemoryOffsets.IsNpcMousePointedPtr;
+        private const ulong IsNpcMousePointedOffset = BotConstants.MemoryOffsets.IsNpcMousePointed;
+
         public GameMemoryService(uint pid, ReadMemoryDelegate read, WriteMemoryDelegate write, ulong moduleBase, int pointerSize, Action<string> log)
         {
             _pid = pid;
@@ -254,7 +258,38 @@ namespace DriverScanTester.Services
             if (ptr == 0) return false;
             ulong sub = ReadPointer(ptr + MobSelectedSubOffset2);
             if (sub == 0) return false;
-            return ReadInt(sub + MobSelectedOffset2) != 0;
+            int targetId = ReadInt(sub + MobSelectedOffset2);
+            // targetId > MaxMobTargetId indicates a player character — skip it
+            return targetId != 0 && targetId < BotConstants.Combat.MaxMobTargetId;
+        }
+
+        /// <summary>
+        /// Returns true only when a player character (not a mob/NPC) is confirmed as the current target.
+        /// Unlike <see cref="IsMobSelected()"/>, this does NOT return true when the pointer chain
+        /// fails or targetId is 0 — it specifically checks for targetId > <see cref="BotConstants.Combat.MaxMobTargetId"/>.
+        /// </summary>
+        public bool IsPlayerSelected()
+        {
+            ulong ptr = ReadPointer(_moduleBase + MobSelectedPtrOffset2);
+            if (ptr == 0) return false;
+            ulong sub = ReadPointer(ptr + MobSelectedSubOffset2);
+            if (sub == 0) return false;
+            int targetId = ReadInt(sub + MobSelectedOffset2);
+            // Only return true when targetId is confirmed to be a player character (above threshold)
+            return targetId > BotConstants.Combat.MaxMobTargetId;
+        }
+
+        /// <summary>
+        /// Checks whether the mouse is currently pointing at an NPC/mob (highlighted).
+        /// Pointer: [Ares.exe + 0x471C84] + 0x7C
+        /// Returns 1 if pointed, 0 if not.
+        /// </summary>
+        public bool IsNpcMousePointed()
+        {
+            ulong ptrAddr = _moduleBase + IsNpcMousePointedPtrOffset;
+            ulong baseAddr = ReadPointer(ptrAddr);
+            if (baseAddr == 0) return false;
+            return ReadByte(baseAddr + IsNpcMousePointedOffset) == 1;
         }
 
         public short GetAttackSpeed()

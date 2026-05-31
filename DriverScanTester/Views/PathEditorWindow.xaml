@@ -149,6 +149,202 @@
                     </StackPanel>
                 </Grid>
             </TabItem>
+
+            <!-- TAB 3: PROFILE EDITOR -->
+            <TabItem Header="Profile Editor">
+                <Grid Margin="5" DataContext="{Binding ProfileEditor}">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- Row 0: Profile toolbar -->
+                    <Border Grid.Row="0" BorderBrush="#FF3399FF" BorderThickness="1" CornerRadius="4" Padding="8" Margin="0,0,0,8" Background="#FFF0F8FF">
+                        <WrapPanel Orientation="Horizontal">
+                            <TextBlock Text="Profile:" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                            <ComboBox ItemsSource="{Binding ProfileNames}" SelectedItem="{Binding SelectedProfileName}"
+                                      Width="150" VerticalAlignment="Center" IsEditable="True" Margin="0,0,5,0"/>
+                            <Button Content="New" Command="{Binding NewProfileCommand}" Width="50" Margin="2" Background="#FFE6FFE6" FontWeight="Bold"/>
+                            <Button Content="Save" Command="{Binding SaveProfileCommand}" Width="50" Margin="2" Background="#FFE6F7FF" FontWeight="Bold"/>
+                            <Button Content="Delete" Command="{Binding DeleteProfileCommand}" Width="55" Margin="2" Background="#FFFFE6E6"/>
+                            <Button Content="Refresh" Command="{Binding RefreshProfilesCommand}" Width="60" Margin="2"/>
+                            <Separator Width="1" Margin="5,2" Background="LightGray"/>
+                            <Button Content="Refresh Segments" Command="{Binding RefreshSegmentsCommand}" Width="120" Margin="2"/>
+                        </WrapPanel>
+                    </Border>
+
+                    <!-- Row 1: Main content -->
+                    <Grid Grid.Row="1">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <!-- Left column: Profile settings + Start Routes -->
+                        <Grid Grid.Column="0" Margin="0,0,5,0">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+
+                            <!-- Profile Settings -->
+                            <GroupBox Header="Profile Settings" Grid.Row="0" Margin="0,0,0,5">
+                                <Grid Margin="3">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+
+                                    <Label Grid.Row="0" Grid.Column="0" Content="Name:"/>
+                                    <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding ProfileName, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
+
+                                    <Label Grid.Row="1" Grid.Column="0" Content="Min HP Pots:"/>
+                                    <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding MinHpPotions, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
+
+                                    <Label Grid.Row="2" Grid.Column="0" Content="Min Mana Pots:"/>
+                                    <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding MinManaPotions, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
+
+                                    <Label Grid.Row="3" Grid.Column="0" Content="Max Weight Ratio:"/>
+                                    <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding MaxWeightRatio, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
+
+                                    <Label Grid.Row="4" Grid.Column="0" Content="Min HP:"/>
+                                    <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding MinHp, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
+
+                                    <Label Grid.Row="5" Grid.Column="0" Content="Min Mana:"/>
+                                    <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding MinMana, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
+
+                                    <Label Grid.Row="6" Grid.Column="0" Content="HP Buy Target:"/>
+                                    <TextBox Grid.Row="6" Grid.Column="1" Text="{Binding HpBuyTarget, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
+
+                                    <Label Grid.Row="7" Grid.Column="0" Content="Mana Buy Target:"/>
+                                    <TextBox Grid.Row="7" Grid.Column="1" Text="{Binding ManaBuyTarget, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
+
+                                    <Label Grid.Row="8" Grid.Column="0" Content="Red Buy Target:"/>
+                                    <TextBox Grid.Row="8" Grid.Column="1" Text="{Binding RedBuyTarget, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
+
+                                    <Label Grid.Row="9" Grid.Column="0" Content="White Buy Target:"/>
+                                    <TextBox Grid.Row="9" Grid.Column="1" Text="{Binding WhiteBuyTarget, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
+
+                                    <CheckBox Grid.Row="10" Grid.Column="1" Content="Dry Run Repot" IsChecked="{Binding DryRunRepot}" Margin="2"/>
+
+                                    <Label Grid.Row="11" Grid.Column="0" Content="Default Hunt:"/>
+                                    <TextBox Grid.Row="11" Grid.Column="1" Text="{Binding DefaultHuntName, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
+                                </Grid>
+                            </GroupBox>
+
+                            <!-- Start Routes -->
+                            <GroupBox Header="Start Routes (city → repot)" Grid.Row="1" Margin="0,5,0,0">
+                                <Grid Margin="3">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="*"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+
+                                    <DataGrid Grid.Row="0" ItemsSource="{Binding StartRoutes}" SelectedItem="{Binding SelectedStartRoute}"
+                                              AutoGenerateColumns="False" CanUserAddRows="False" MaxHeight="200" Margin="0,0,0,5">
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="Name" Binding="{Binding Name, UpdateSourceTrigger=PropertyChanged}" Width="80"/>
+                                            <DataGridTextColumn Header="Map" Binding="{Binding MapNumber, UpdateSourceTrigger=PropertyChanged}" Width="40"/>
+                                            <DataGridTextColumn Header="MinX" Binding="{Binding MinX, UpdateSourceTrigger=PropertyChanged}" Width="50"/>
+                                            <DataGridTextColumn Header="MaxX" Binding="{Binding MaxX, UpdateSourceTrigger=PropertyChanged}" Width="50"/>
+                                            <DataGridTextColumn Header="MinY" Binding="{Binding MinY, UpdateSourceTrigger=PropertyChanged}" Width="50"/>
+                                            <DataGridTextColumn Header="MaxY" Binding="{Binding MaxY, UpdateSourceTrigger=PropertyChanged}" Width="50"/>
+                                            <DataGridTextColumn Header="PathFile" Binding="{Binding PathFile, UpdateSourceTrigger=PropertyChanged}" Width="*"/>
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+
+                                    <WrapPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,5">
+                                        <TextBlock Text="Segment:" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                        <ComboBox ItemsSource="{Binding AvailableSegments}" SelectedItem="{Binding SelectedStartRouteSegment}"
+                                                  Width="160" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                        <Button Content="Add Start Route" Command="{Binding AddStartRouteCommand}" Width="110" Margin="2" Background="#FFE6F7FF"/>
+                                        <Button Content="Remove" Command="{Binding RemoveStartRouteCommand}" Width="70" Margin="2" Background="#FFFFE6E6"/>
+                                    </WrapPanel>
+                                </Grid>
+                            </GroupBox>
+                        </Grid>
+
+                        <!-- Right column: Hunt Definitions -->
+                        <Grid Grid.Column="1" Margin="5,0,0,0">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <GroupBox Header="Hunt Definitions (repot → exp + exp loop)" Grid.Row="0">
+                                <Grid Margin="3">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="*"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+
+                                    <DataGrid Grid.Row="0" ItemsSource="{Binding HuntDefinitions}" SelectedItem="{Binding SelectedHunt}"
+                                              AutoGenerateColumns="False" CanUserAddRows="False" Margin="0,0,0,5">
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="Hunt Name" Binding="{Binding Name, UpdateSourceTrigger=PropertyChanged}" Width="100"/>
+                                            <DataGridTextColumn Header="Repot→Exp Path" Binding="{Binding RepotToExpPath, UpdateSourceTrigger=PropertyChanged}" Width="*"/>
+                                            <DataGridTextColumn Header="Exp Loop Path" Binding="{Binding ExpLoopPath, UpdateSourceTrigger=PropertyChanged}" Width="*"/>
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+
+                                    <WrapPanel Grid.Row="1" Orientation="Horizontal" Margin="0,5,0,0">
+                                        <Button Content="▲" Command="{Binding MoveHuntUpCommand}" Width="30" ToolTip="Move up"/>
+                                        <Button Content="▼" Command="{Binding MoveHuntDownCommand}" Width="30" Margin="2,0,10,0" ToolTip="Move down"/>
+                                        <Button Content="Remove Hunt" Command="{Binding RemoveHuntCommand}" Width="90" Background="#FFFFE6E6"/>
+                                    </WrapPanel>
+                                </Grid>
+                            </GroupBox>
+
+                            <!-- Add Hunt controls -->
+                            <GroupBox Header="Add New Hunt" Grid.Row="1" Margin="0,5,0,0">
+                                <Grid Margin="3">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+
+                                    <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,5">
+                                        <TextBlock Text="Repot→Exp segment:" FontWeight="Bold" VerticalAlignment="Center" Width="130"/>
+                                        <ComboBox ItemsSource="{Binding AvailableSegments}" SelectedItem="{Binding SelectedRepotToExpSegment}"
+                                                  Width="180" VerticalAlignment="Center"/>
+                                    </WrapPanel>
+
+                                    <WrapPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,5">
+                                        <TextBlock Text="Exp Loop segment:" FontWeight="Bold" VerticalAlignment="Center" Width="130"/>
+                                        <ComboBox ItemsSource="{Binding AvailableSegments}" SelectedItem="{Binding SelectedExpLoopSegment}"
+                                                  Width="180" VerticalAlignment="Center"/>
+                                    </WrapPanel>
+
+                                    <Button Grid.Row="2" Content="Add Hunt from Selected Segments" Command="{Binding AddHuntCommand}"
+                                            Width="250" HorizontalAlignment="Left" Background="#FFE6F7FF" FontWeight="Bold"/>
+                                </Grid>
+                            </GroupBox>
+                        </Grid>
+                    </Grid>
+
+                    <!-- Row 2: Status -->
+                    <Border Grid.Row="2" BorderBrush="LightGray" BorderThickness="0,1,0,0" Padding="5" Margin="0,5,0,0">
+                        <TextBlock Text="{Binding StatusText}" Foreground="Blue" FontWeight="SemiBold"/>
+                    </Border>
+                </Grid>
+            </TabItem>
         </TabControl>
 
         <!-- Status Bar -->

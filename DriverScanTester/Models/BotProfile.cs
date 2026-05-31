@@ -64,6 +64,16 @@ namespace DriverScanTester.Models
         /// <summary>If Mana is at or below this value, repot is triggered.</summary>
         public int MinMana { get; set; } = BotConstants.Repot.DefaultMinMana;
 
+        // --- Potion buy targets (override RepotSystem defaults) ---
+        /// <summary>Target count for HP potions (added to ItemCount1 base).</summary>
+        public int HpBuyTarget { get; set; } = BotConstants.Repot.HpBuyTarget;
+        /// <summary>Target count for Mana potions (added to ItemCount1 base).</summary>
+        public int ManaBuyTarget { get; set; } = BotConstants.Repot.ManaBuyTarget;
+        /// <summary>Target count for Red potions (added to ItemCount1 base).</summary>
+        public int RedBuyTarget { get; set; } = BotConstants.Repot.RedBuyTarget;
+        /// <summary>Target count for White potions (added to ItemCount1 base).</summary>
+        public int WhiteBuyTarget { get; set; } = BotConstants.Repot.WhiteBuyTarget;
+
         // --- Workflow options ---
         /// <summary>If true, skip actual RepotSystem.Repot() and just log "dry run".</summary>
         public bool DryRunRepot { get; set; } = false;

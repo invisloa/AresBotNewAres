@@ -48,19 +48,18 @@ namespace DriverScanTester.Services
         //   tab 2: realSlot 36..71
         //
         // Sprzedaż:
-        //   tab 1: sprzedajemy realSlot 6..35, pierwszy wiersz 0..5 jest zawsze skipowany
-        //   tab 2: sprzedajemy realSlot 36..71, pierwszy wiersz taba 2 jest normalnie sprzedawany
+        //   tab 1: sprzedajemy realSlot 6..35, wiersz 0 (sloty 0..5) pomijamy
+        //   tab 2: sprzedajemy realSlot 36..71
         //
         // Mapowanie:
-        //   memorySlot = realSlot - 6
+        //   memorySlot = realSlot (bez offsetu, pointer wskazuje prosto na slot 0)
         //
         // Przykłady:
-        //   realSlot 10 -> tab 1, mousePosition itemSellPositions[10], memorySlot 4
-        //   realSlot 15 -> tab 1, mousePosition itemSellPositions[15], memorySlot 9
-        //   realSlot 40 -> tab 2, mousePosition itemSellPositions[40], memorySlot 34
-        //   realSlot 42 -> tab 2, mousePosition itemSellPositions[42], memorySlot 36
+        //   realSlot 0  -> tab 1, mousePosition itemSellPositions[0],  memorySlot 0
+        //   realSlot 10 -> tab 1, mousePosition itemSellPositions[10], memorySlot 10
+        //   realSlot 35 -> tab 1, mousePosition itemSellPositions[35], memorySlot 35
+        //   realSlot 40 -> tab 2, mousePosition itemSellPositions[40], memorySlot 40
         //
-        // Nie ma tutaj żadnego dodatkowego Y -35. Helper zwraca finalny indeks mouse position.
         private const int InventoryColumns = 6;
         private const int VisualSlotsPerInventoryTab = 36;
         private const int TotalVisualInventorySlots = VisualSlotsPerInventoryTab * 2; // 72
@@ -70,8 +69,8 @@ namespace DriverScanTester.Services
         private const int FirstRealSlotTab2 = 36;
         private const int LastRealSlotTab2 = 71;
 
-        private const int MemorySlotOffsetFromRealSlot = 6;
-        private const int TotalSellableInventoryMemorySlots = 66; // real 6..71 -> memory 0..65
+        private const int MemorySlotOffsetFromRealSlot = 0;
+        private const int TotalSellableInventoryMemorySlots = 72; // real 0..71 -> memory 0..71
 
         public ItemSellerService(GameMemoryService memory, Action<string> log)
         {
@@ -237,12 +236,6 @@ namespace DriverScanTester.Services
             {
                 throw new ArgumentOutOfRangeException(nameof(realSlot), realSlot,
                     $"Real inventory slot must be in range 0..{TotalVisualInventorySlots - 1}.");
-            }
-
-            if (realSlot < FirstSellableRealSlotTab1)
-            {
-                throw new ArgumentOutOfRangeException(nameof(realSlot), realSlot,
-                    "Tab 1 first row real slots 0..5 are skipped and must never be sold.");
             }
 
             int tab = realSlot < VisualSlotsPerInventoryTab ? 1 : 2;

@@ -1,5 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -90,9 +93,6 @@ namespace DriverScanTester.Services
         private DateTime _ignoreStuckUntil = DateTime.MinValue;
         private const double STUCK_GRACE_AFTER_START_SECONDS = BotConstants.Movement.StuckGraceAfterStartSeconds;
 
-        // Progress tracker
-        private readonly MovementProgressTracker _progressTracker;
-
         // Near-target stuck ignore
         private const float NEAR_TARGET_STUCK_IGNORE_EXTRA = BotConstants.Movement.NearTargetStuckIgnoreExtra;
 
@@ -111,30 +111,22 @@ namespace DriverScanTester.Services
         private readonly LocalNavigationMap _localNavigationMap;
         private int _currentMapId = -1;
 
-        // ────────────────────────────────────────────────────────
-        //  ACTION-BASED STUCK CONSTANTS
-        // ────────────────────────────────────────────────────────
-
-        private const float STUCK_SOFT_SKIP_DISTANCE = BotConstants.Movement.StuckSoftSkipDistance;
-
-        // (Bug2 state moved to Bug2Recovery strategy class)
-
         private bool _isUnstuckRoutineActive = false;
         private const double FORCE_START_MIN_INTERVAL_MS = BotConstants.Movement.ForceStartMinIntervalMs;
         private DateTime _lastForceStartMovingAt = DateTime.MinValue;
 
+        // Consecutive stuck attempts counter — after this many stuck detections without
+        // reaching a waypoint, the bot triggers a repot (teleport to town).
+        private const int STUCK_MAX_CONSECUTIVE_ATTEMPTS = 10;
+        private int _consecutiveStuckAttempts = 0;
+
         private readonly ReverseDiagonalRecovery _reverseDiagonalRecovery;
         private readonly StuckDetector _stuckDetector;
-        private readonly WaypointSkipPolicy _skipPolicy;
-        private readonly Bug2Recovery _bug2Recovery;
 
         // Healthy movement tracking
         private float _lastHealthyMoveBearingDeg = UnsetBearing;
         private (float X, float Y) _lastHealthyMovePos;
         private DateTime _lastHealthyMoveTime = DateTime.MinValue;
-
-        // Position jump detection — reset tracker if one tick moves more than this
-        private const float MAX_REASONABLE_TICK_MOVEMENT = BotConstants.Movement.MaxReasonableTickMovement;
 
         // ── Camera update filtering ───────────────────────────────────────────────
         // Prevents camera oscillation (jitter between adjacent game-angle values)
@@ -203,28 +195,15 @@ namespace DriverScanTester.Services
             _log = log;
             _combatHandler = new CombatHandler(log);
             _repotHelper = new RepotHelper(memoryService, log, StopMoving, () => _goalReached = true);
-            _progressTracker = new MovementProgressTracker(log);
             Waypoint2 = (targetX, targetY);
             GlobalPrecision = precision;
             LoopPath = loopPath;
 
             int initialMapId = _memoryService.GetMapNumber();
             _currentMapId = initialMapId;
-            _reverseDiagonalRecovery = new ReverseDiagonalRecovery(_memoryService, log);
+            _reverseDiagonalRecovery = new ReverseDiagonalRecovery(_memoryService, log, StartMoving, StopMoving);
             _stuckDetector = new StuckDetector(_memoryService, log, GetEffectiveWaypointReachThreshold, NEAR_TARGET_STUCK_IGNORE_EXTRA);
-            _skipPolicy = new WaypointSkipPolicy(_memoryService, log, GetEffectiveWaypointReachThreshold);
             _localNavigationMap = new LocalNavigationMap(_log, initialMapId);
-            _bug2Recovery = new Bug2Recovery(
-                _memoryService, log, _localNavigationMap,
-                StopMoving, ForceStartMoving,
-                (x, y, tx, ty) => MoveTowards(x, y, tx, ty),
-                (x, y) => AdvanceReachedWaypoints(x, y),
-                () => SaveLocalMapIfDirty(),
-                (x, y, wp, q, rb, rpt, ra) => _skipPolicy.TrySkip(x, y, wp, q, rb, rpt, ra),
-                ResetBearingState, ResetActionStuckTracking,
-                () => _lastSetGameAngle, () => _hasLastGameAngle,
-                v => _lastSetBearingDeg = v, v => _hasLastGameAngle = v, v => _lastSetGameAngle = v,
-                ApplySteeringBearing);
 
             _isInitialized = true;
             _log($"MovementSystem: Initialized with GameMemoryService, Default Precision: {GlobalPrecision}, Loop: {LoopPath}");
@@ -341,17 +320,6 @@ namespace DriverScanTester.Services
             {
                 _log($"[Tick {_tickCount}] [Pos] Read failed");
                 return;
-            }
-
-            // Position jump / outlier detection: if one tick moves more than MAX_REASONABLE_TICK_MOVEMENT, reset tracker
-            if (_progressTracker.HasSamples)
-            {
-                float tickDelta = GeometryUtils.Distance(currX, currY, _progressTracker.LastX, _progressTracker.LastY);
-                if (tickDelta > MAX_REASONABLE_TICK_MOVEMENT)
-                {
-                    _log($"[Progress] Jump! Δ{tickDelta:F1} > {MAX_REASONABLE_TICK_MOVEMENT:F0} — reset");
-                    _progressTracker.Reset();
-                }
             }
 
             // Log position every 5 ticks
@@ -533,34 +501,6 @@ namespace DriverScanTester.Services
                     await Task.Delay(BotConstants.Delays.CombatAttackWaitMs, token);
                     return;
 
-                case CombatAction.StuckTabAttack:
-                    _log("[Key] TAB (target cycle — stuck in attack)");
-                    ReleaseSkillThree();
-                    GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
-                    await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
-                    return;
-
-                case CombatAction.UnstuckNeeded:
-                    ReleaseSkillThree();
-                    var (combatStuckX, combatStuckY, combatStuckOk) = _memoryService.GetPlayerPosition();
-                    _log($"[Tick {_tickCount}] CombatHandler requested UnstuckNeeded. Pos=({combatStuckX:F1},{combatStuckY:F1}) ok={combatStuckOk}");
-                    _combatHandler.ResetStuckInAttack();
-                    if (combatStuckOk && _waypoints.Count > 0 && !_bug2Recovery.IsActive)
-                    {
-                        byte combatActionStuck = _memoryService.GetCurrentAction();
-                        if (StuckDetector.IsActionIdleOrStuck(combatActionStuck))
-                        {
-                            var combatTarget = _waypoints.Peek();
-                            _log($"[CombatUnstuck] Action={combatActionStuck} stuck. Starting reverse-diagonal recovery.");
-                            StartReverseDiagonalRecovery(combatStuckX, combatStuckY, combatTarget, " from combat");
-                        }
-                        else
-                        {
-                            _log($"[CombatUnstuck] Action={combatActionStuck} is not stuck. Letting normal movement handle it.");
-                        }
-                    }
-                    return;
-
                 case CombatAction.PotionsUsed:
                     ReleaseSkillThree();
                     _log($"[Tick {_tickCount}] Potions used — brief delay.");
@@ -631,7 +571,7 @@ namespace DriverScanTester.Services
                 {
                     RecoveryResult recoveryResult = _reverseDiagonalRecovery.Tick(currX, currY);
                     float bearingDeg = _reverseDiagonalRecovery.CurrentBearingDeg;
-                    ApplySteeringBearing(bearingDeg);
+                    ApplyCameraBearing(bearingDeg); // camera only — W controlled by Recovery internally
                     switch (recoveryResult)
                     {
                         case RecoveryResult.InProgress:
@@ -642,26 +582,11 @@ namespace DriverScanTester.Services
                             return;
                         case RecoveryResult.Failed:
                             _log($"[ReverseDiagonal] failed - all attempts exhausted.");
-                            if (_skipPolicy.TrySkip(currX, currY, target, _waypoints, ResetBearingState, () => _progressTracker.Reset(), ResetActionStuckTracking))
-                            {
-                                _log($"[Bug2Gate] skip waypoint before map marking.");
-                                _bug2Recovery.Reset();
-                                return;
-                            }
-                            _log($"[Bug2Gate] marking obstacle and entering Bug2.");
                             _log($"[ActionStuck] Action={currentAction} while moving. Stuck confirmed by action.");
                             MarkObstacleFromActionStuck(currX, currY, target);
                             _localNavigationMap.SaveIfDirty();
-                            _bug2Recovery.Enter(currX, currY, target);
                             return;
                     }
-                }
-
-                // ── Bug2 / action-stuck local navigation ──
-                if (_bug2Recovery.IsActive)
-                {
-                    _bug2Recovery.RunStep(currX, currY, target, _waypoints, GetEffectiveWaypointReachThreshold, () => _progressTracker.Reset());
-                    return;
                 }
 
                 if (_stuckDetector.IsActionStuck(currX, currY, target, _isMovingForward))
@@ -671,34 +596,19 @@ namespace DriverScanTester.Services
                     return;
                 }
 
-                // Set segment only when target changes, not every tick.
-                if (!_progressTracker.HasSegment ||
-                    _progressTracker.SegmentEndX != target.X ||
-                    _progressTracker.SegmentEndY != target.Y)
-                {
-                    _progressTracker.SetSegment(currX, currY, target.X, target.Y);
-                }
-                _progressTracker.RecordSample(currX, currY, target.X, target.Y, currentAction);
-
+                // Log route info periodically
                 if (_tickCount % _stateLogInterval == 0)
                 {
                     string ghostFlag = IsGhostWaypoint(target) ? " [GHOST]" : "";
-                    string progStatus = _progressTracker.GetStatusString();
-                    _log($"[Route] T:{_tickCount} WP{ghostFlag}({target.X:F1},{target.Y:F1}) d:{distNow:F2} th:{thresholdNow:F2} M:{target.Mode} P:{target.Precision} {progStatus} Cam:{_memoryService.GetCameraAngle()}");
+                    _log($"[Route] T:{_tickCount} WP{ghostFlag}({target.X:F1},{target.Y:F1}) d:{distNow:F2} th:{thresholdNow:F2} M:{target.Mode} P:{target.Precision} Cam:{_memoryService.GetCameraAngle()}");
                 }
 
                 // Track healthy movement bearing for escape direction
-                if (!_isUnstuckRoutineActive && currentAction != 25 && currentAction != 1 &&
-                    _progressTracker.HasEnoughSamples && !_progressTracker.IsWarmingUp)
+                if (!_isUnstuckRoutineActive && StuckDetector.IsActionRunning(currentAction))
                 {
-                    float disp = _progressTracker.GetWindowDisplacement();
-                    float distDelta = _progressTracker.GetWindowDistDelta();
-                    if (disp > 0.5f && distDelta < 0.5f) // moving and not worsening
-                    {
-                        _lastHealthyMoveBearingDeg = GeometryUtils.GetBearingToTargetDeg(currX, currY, target.X, target.Y);
-                        _lastHealthyMovePos = (currX, currY);
-                        _lastHealthyMoveTime = DateTime.Now;
-                    }
+                    _lastHealthyMoveBearingDeg = GeometryUtils.GetBearingToTargetDeg(currX, currY, target.X, target.Y);
+                    _lastHealthyMovePos = (currX, currY);
+                    _lastHealthyMoveTime = DateTime.Now;
                 }
 
                 _log($"[Tick {_tickCount}] → ({target.X:F1},{target.Y:F1}) d:{distNow:F2} Cam:{_memoryService.GetCameraAngle()}");
@@ -816,8 +726,8 @@ namespace DriverScanTester.Services
 
                 _waypoints.Dequeue();
                 _log($"[AdvWp] #{wpIndex} ({target.X:F1},{target.Y:F1}) reached{ghostTag} ✓ | Queue: {_waypoints.Count}");
+                _consecutiveStuckAttempts = 0; // reset stuck counter — we made progress
                 ResetBearingState();
-                _progressTracker.Reset();
                 ResetActionStuckTracking();
                 ResetCombatStateForWaypointChange();
 
@@ -858,7 +768,6 @@ namespace DriverScanTester.Services
                 _log($"[WpQueue] Re-enqueued {_initialPath.Count} waypoints. Queue now has {_waypoints.Count} entries.");
 
                 ResetBearingState();
-                _progressTracker.Reset();
                 ResetActionStuckTracking();
                 ResetCombatStateForWaypointChange();
             }
@@ -934,6 +843,35 @@ namespace DriverScanTester.Services
             }
 
             StartMoving();
+        }
+
+        /// <summary>
+        /// Applies a desired bearing: converts bearing to game camera angle,
+        /// sets the camera directly (subject to filtering) — WITHOUT pressing W.
+        /// Used by ReverseDiagonalRecovery which controls W itself.
+        /// </summary>
+        private void ApplyCameraBearing(float bearingDeg)
+        {
+            short gameAngle = GeometryUtils.ConvertBearingToGameAngle(bearingDeg, _lastSetGameAngle, _hasLastGameAngle);
+            _lastSetBearingDeg = bearingDeg;
+            _lastSetGameAngle = gameAngle;
+
+            bool isFreshSegment = !_hasLastGameAngle;
+            _hasLastGameAngle = true;
+
+            if (ShouldUpdateCamera(gameAngle, isFreshSegment, out string? skipReason))
+            {
+                _log($"[Camera] Apply target={gameAngle} last={_cameraLastAppliedAngle} diff={CircularGameAngleDiff(gameAngle, _cameraLastAppliedAngle):F1}");
+                _memoryService.SetCameraAngle(gameAngle);
+                _cameraLastAppliedAngle = gameAngle;
+                _lastCameraUpdateTime = DateTime.Now;
+                _hasCameraHysteresisCandidate = false;
+            }
+            else
+            {
+                _log($"[Camera] Skip target={gameAngle} last={_cameraLastAppliedAngle} diff={CircularGameAngleDiff(gameAngle, _cameraLastAppliedAngle):F1} reason={skipReason}");
+            }
+            // NOTE: W is NOT pressed here — callers that need W use ApplySteeringBearing instead.
         }
 
         /// <summary>
@@ -1036,11 +974,7 @@ namespace DriverScanTester.Services
             // When close to the current waypoint, the bearing-to-target oscillates
             // wildly due to position jitter.  Freeze the last stable camera angle
             // and just keep moving forward until the waypoint is reached.
-            // NOTE: heading freeze is intentionally skipped during Bug2 recovery
-            // (_bug2Recovery.IsActive) because Bug2's MoveTowards call (via the
-            // _moveTowards delegate when leaving the boundary) must be allowed to
-            // reorient the camera toward the target.
-            if (_hasLastGameAngle && _cameraLastAppliedAngle != 0 && !_bug2Recovery.IsActive)
+            if (_hasLastGameAngle && _cameraLastAppliedAngle != 0)
             {
                 float dist = GeometryUtils.Distance(currX, currY, targetX, targetY);
                 // Use the same default threshold calculation as GetEffectiveWaypointReachThreshold
@@ -1086,16 +1020,58 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Starts ReverseDiagonalRecovery and applies the initial camera bearing + W key.
-        /// Used by both normal action-stuck flow and CombatAction.UnstuckNeeded.
         /// </summary>
         private void StartReverseDiagonalRecovery(float currX, float currY, Waypoint target, string logSuffix)
         {
+            _consecutiveStuckAttempts++;
+            _log($"[Unstuck] Consecutive stuck attempts: {_consecutiveStuckAttempts}/{STUCK_MAX_CONSECUTIVE_ATTEMPTS}");
+
+            if (_consecutiveStuckAttempts >= STUCK_MAX_CONSECUTIVE_ATTEMPTS)
+            {
+                _log($"[Unstuck] Reached {STUCK_MAX_CONSECUTIVE_ATTEMPTS} consecutive stuck attempts — triggering ReportAndGoBack.");
+                _consecutiveStuckAttempts = 0;
+                CaptureStuckScreenshot();
+                _reverseDiagonalRecovery.Stop();
+                _repotHelper.ReportAndGoBack();
+                return;
+            }
+
             _reverseDiagonalRecovery.Start(currX, currY, target.X, target.Y,
                 _lastHealthyMoveBearingDeg != UnsetBearing ? _lastHealthyMoveBearingDeg : (float?)null,
                 _lastHealthyMoveTime);
             float bearingDeg = _reverseDiagonalRecovery.CurrentBearingDeg;
-            ApplySteeringBearing(bearingDeg);
+            ApplyCameraBearing(bearingDeg); // camera only — Recovery controls W
             _log($"[ReverseDiagonal] begin{logSuffix}. Bearing={bearingDeg:F1}°");
+        }
+
+        /// <summary>
+        /// Captures the current screen and saves it as a PNG file in the Screenshots subfolder
+        /// with the prefix "Stuck_" and the current date/time.
+        /// Called before triggering ReportAndGoBack after too many consecutive stuck attempts.
+        /// </summary>
+        private void CaptureStuckScreenshot()
+        {
+            try
+            {
+                using (Bitmap bitmap = new Bitmap(BotConstants.Loot.BitmapWidth, BotConstants.Loot.BitmapHeight))
+                using (Graphics graphics = Graphics.FromImage(bitmap))
+                {
+                    graphics.CopyFromScreen(0, 0, 0, 0, bitmap.Size);
+
+                    string screenshotsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Screenshots", "Stuck");
+                    Directory.CreateDirectory(screenshotsDir);
+
+                    string fileName = $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.png";
+                    string filePath = Path.Combine(screenshotsDir, fileName);
+
+                    bitmap.Save(filePath, ImageFormat.Png);
+                    _log($"[Unstuck] Screenshot saved: {filePath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                _log($"[Unstuck] Failed to capture screenshot: {ex.Message}");
+            }
         }
 
         // ========================================================================
