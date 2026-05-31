@@ -1,7 +1,8 @@
-using DriverScanTester.Models;
+﻿using DriverScanTester.Models;
 using DriverScanTester.Utils;
 using System;
 using System.Windows.Input;
+using static DriverScanTester.BotConstants;
 
 namespace DriverScanTester.ViewModels
 {
@@ -10,8 +11,8 @@ namespace DriverScanTester.ViewModels
         private readonly MainViewModel _main;
         private readonly Action<string> _appendLog;
 
-        private string _hpThresholdText = "250";
-        private string _manaThresholdText = "50";
+        private string _hpThresholdText = HealMana.HpThreshold.ToString();
+        private string _manaThresholdText = HealMana.MpThreshold.ToString();
         private string _manualSellSlotText = "6";
         private string _currentHp = "--";
         private string _currentMana = "--";
@@ -29,6 +30,10 @@ namespace DriverScanTester.ViewModels
         private System.Collections.ObjectModel.ObservableCollection<string> _profileNames = new();
         private string? _selectedProfileName;
         private string _validationText = "";
+
+        // Hunt selection (within selected profile)
+        private System.Collections.ObjectModel.ObservableCollection<string> _huntNames = new();
+        private string? _selectedHuntName;
 
         public BotViewModel(MainViewModel main, Action<string> appendLog)
         {
@@ -68,7 +73,7 @@ namespace DriverScanTester.ViewModels
             ClearBotLogCommand = new RelayCommand(_ => BotLogText = "");
 
             // 3-Phase Workflow commands
-            StartWorkflowCommand = new RelayCommand(_ => StartWorkflowWithProfile(), _ => _main.IsAttached);
+            StartWorkflowCommand = new RelayCommand(_ => StartWorkflowWithProfile(), _ => _main.IsAttached && CanStartWorkflow);
             StopWorkflowCommand = new RelayCommand(_ => _main.StopWorkflow(), _ => _main.IsAttached);
             RefreshProfilesCommand = new RelayCommand(_ => RefreshProfiles(), _ => _main.IsAttached);
             ValidateProfileCommand = new RelayCommand(_ => ValidateSelectedProfile(), _ => _main.IsAttached);
@@ -211,7 +216,11 @@ namespace DriverScanTester.ViewModels
             set
             {
                 if (SetProperty(ref _selectedProfileName, value))
+                {
+                    OnProfileChanged();
                     OnPropertyChanged(nameof(CanStartWorkflow));
+                    System.Windows.Input.CommandManager.InvalidateRequerySuggested();
+                }
             }
         }
 
@@ -221,7 +230,27 @@ namespace DriverScanTester.ViewModels
             set => SetProperty(ref _validationText, value);
         }
 
-        public bool CanStartWorkflow => !string.IsNullOrEmpty(SelectedProfileName);
+        // Hunt selection (within selected profile)
+        public System.Collections.ObjectModel.ObservableCollection<string> HuntNames
+        {
+            get => _huntNames;
+            set => SetProperty(ref _huntNames, value);
+        }
+
+        public string? SelectedHuntName
+        {
+            get => _selectedHuntName;
+            set
+            {
+                if (SetProperty(ref _selectedHuntName, value))
+                {
+                    OnPropertyChanged(nameof(CanStartWorkflow));
+                    System.Windows.Input.CommandManager.InvalidateRequerySuggested();
+                }
+            }
+        }
+
+        public bool CanStartWorkflow => !string.IsNullOrEmpty(SelectedProfileName) && !string.IsNullOrEmpty(SelectedHuntName);
 
         private void RunBot()
         {
@@ -249,6 +278,11 @@ namespace DriverScanTester.ViewModels
             ProfileNames.Clear();
             foreach (var n in names)
                 ProfileNames.Add(n);
+
+            // Refresh hunt names for the currently selected profile
+            if (!string.IsNullOrEmpty(SelectedProfileName))
+                OnProfileChanged();
+
             ValidationText = $"Found {names.Count} profile(s).";
         }
 
@@ -285,9 +319,42 @@ namespace DriverScanTester.ViewModels
             }
         }
 
+        /// <summary>
+        /// Called when the user selects a different profile. Loads the profile
+        /// and populates the HuntNames list from its HuntDefinitions.
+        /// </summary>
+        private void OnProfileChanged()
+        {
+            HuntNames.Clear();
+            SelectedHuntName = null;
+
+            if (string.IsNullOrEmpty(SelectedProfileName))
+                return;
+
+            var profile = _main.LoadProfile(SelectedProfileName);
+            if (profile == null || profile.HuntDefinitions == null || profile.HuntDefinitions.Count == 0)
+            {
+                _appendLog($"Profile '{SelectedProfileName}' has no HuntDefinitions.");
+                return;
+            }
+
+            foreach (var hunt in profile.HuntDefinitions)
+            {
+                if (!string.IsNullOrWhiteSpace(hunt.Name))
+                    HuntNames.Add(hunt.Name);
+            }
+
+            // If DefaultHuntName matches an existing hunt, select it; otherwise select the first one
+            if (!string.IsNullOrEmpty(profile.DefaultHuntName) && HuntNames.Contains(profile.DefaultHuntName))
+                SelectedHuntName = profile.DefaultHuntName;
+            else if (HuntNames.Count > 0)
+                SelectedHuntName = HuntNames[0];
+        }
+
         private void StartWorkflowWithProfile()
         {
             BotProfile? profile = null;
+            HuntDefinition? activeHunt = null;
 
             if (!string.IsNullOrEmpty(SelectedProfileName))
             {
@@ -298,13 +365,42 @@ namespace DriverScanTester.ViewModels
                 }
                 else
                 {
+                    // Resolve the selected hunt
+                    if (!string.IsNullOrEmpty(SelectedHuntName) && profile.HuntDefinitions != null)
+                        activeHunt = profile.HuntDefinitions.Find(h => h.Name == SelectedHuntName);
+
+                    // If the selected hunt name doesn't exist, try DefaultHuntName or first hunt
+                    if (activeHunt == null && profile.HuntDefinitions != null && profile.HuntDefinitions.Count > 0)
+                    {
+                        if (!string.IsNullOrEmpty(profile.DefaultHuntName))
+                        {
+                            activeHunt = profile.HuntDefinitions.Find(h => h.Name == profile.DefaultHuntName);
+                            if (activeHunt != null)
+                                _appendLog($"Selected hunt '{SelectedHuntName}' not found; using DefaultHuntName '{activeHunt.Name}'.");
+                        }
+
+                        if (activeHunt == null)
+                        {
+                            activeHunt = profile.HuntDefinitions[0];
+                            _appendLog($"Selected hunt '{SelectedHuntName}' not found; using first hunt '{activeHunt.Name}'.");
+                        }
+                    }
+
+                    // Require active hunt when profile is loaded
+                    if (activeHunt == null)
+                    {
+                        _appendLog("No active hunt selected. Workflow cannot start.");
+                        ValidationText = "No active hunt selected.";
+                        return;
+                    }
+
                     // Validate before starting
                     var errors = _main.ValidateProfile(profile);
                     if (errors.Count > 0)
                     {
-                        _appendLog($"Profile validation FAILED for '{profile.Name}':");
-                        foreach (var err in errors)
-                            _appendLog($"  - {err}");
+                        _appendLog("Profile validation failed:");
+                        foreach (var error in errors)
+                            _appendLog(" - " + error);
                         _appendLog("Workflow NOT started. Fix profile errors first.");
                         ValidationText = "Validation FAILED — check main log.";
                         return;
@@ -312,12 +408,15 @@ namespace DriverScanTester.ViewModels
                 }
             }
 
-            _main.StartWorkflow(profile);
+            // Single call — profile+activeHunt are paired consistently
+            _main.StartWorkflow(profile, activeHunt);
 
             if (profile != null)
                 _appendLog($"Workflow started with profile '{profile.Name}'.");
             else
                 _appendLog("Workflow started (no profile).");
+            if (activeHunt != null)
+                _appendLog($"Active hunt: '{activeHunt.Name}' (RepotToExpPath: '{activeHunt.RepotToExpPath}', ExpLoopPath: '{activeHunt.ExpLoopPath}')");
         }
 
         public void SyncBotStates()

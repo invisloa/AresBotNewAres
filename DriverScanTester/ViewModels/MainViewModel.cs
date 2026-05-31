@@ -2586,8 +2586,9 @@ namespace DriverScanTester.ViewModels
         /// <summary>
         /// Starts the 3-phase workflow. If a profile is provided, uses profile-based constructor
         /// with CityToRepotRouteSelector. Otherwise uses legacy hardcoded fallback paths.
+        /// The activeHunt ties phase 2 (move to exp) and phase 3 (exp loop) together.
         /// </summary>
-        public void StartWorkflow(BotProfile? profile = null)
+        public void StartWorkflow(BotProfile? profile = null, HuntDefinition? activeHunt = null)
         {
             if (!_isAttached) { AppendLog("Attach first."); return; }
             if (_workflowCoordinator?.IsRunning == true) { AppendLog("Workflow already running."); return; }
@@ -2622,7 +2623,7 @@ namespace DriverScanTester.ViewModels
                 var routeSelector = new CityToRepotRouteSelector(AppendLog);
                 _workflowCoordinator = new BotWorkflowCoordinator(
                     memoryService, repotSystem, repotDetector, pathLoader, pathRunner,
-                    profile, routeSelector, AppendLog, FocusGameWindow);
+                    profile, routeSelector, activeHunt, AppendLog, FocusGameWindow);
                 AppendLog($"Starting workflow with profile '{profile.Name}'.");
             }
             else
@@ -2631,6 +2632,11 @@ namespace DriverScanTester.ViewModels
                     memoryService, repotSystem, repotDetector, pathLoader, pathRunner,
                     AppendLog, FocusGameWindow);
                 AppendLog("Starting workflow without profile (hardcoded fallback paths).");
+            }
+
+            if (activeHunt != null)
+            {
+                AppendLog($"Active hunt: '{activeHunt.Name}' | RepotToExpPath: '{activeHunt.RepotToExpPath}' | ExpLoopPath: '{activeHunt.ExpLoopPath}'");
             }
 
             _workflowCoordinator.OnPhaseChanged = phaseName =>

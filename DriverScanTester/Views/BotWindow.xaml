@@ -94,22 +94,28 @@
         <!-- Row 2: 3-Phase Workflow -->
         <GroupBox Grid.Row="2" Header="3-Phase Workflow" Margin="0,0,0,10" BorderBrush="#FF3399FF" BorderThickness="1">
             <StackPanel>
-                <!-- Row within groupbox: Profile selection -->
+                <!-- Row within groupbox: Profile selection + Hunt selection -->
                 <WrapPanel Orientation="Horizontal" Margin="5,3">
                     <TextBlock Text="Profile:" FontWeight="Bold" VerticalAlignment="Center"/>
                     <ComboBox ItemsSource="{Binding ProfileNames}"
                               SelectedItem="{Binding SelectedProfileName}"
-                              Width="180" VerticalAlignment="Center" Margin="5,0"
+                              Width="140" VerticalAlignment="Center" Margin="5,0"
                               IsEditable="True" IsTextSearchEnabled="True"/>
                     <Button Content="Refresh" Command="{Binding RefreshProfilesCommand}"
-                            Width="70" Margin="3,0" FontSize="10"/>
+                            Width="60" Margin="3,0" FontSize="10"/>
                     <Button Content="Validate" Command="{Binding ValidateProfileCommand}"
-                            Width="70" Margin="3,0" FontSize="10"/>
-                    <Separator Width="1" Margin="10,2" Background="LightGray"/>
+                            Width="60" Margin="3,0" FontSize="10"/>
+                    <Separator Width="1" Margin="5,2" Background="LightGray"/>
+                    <TextBlock Text="Hunt:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,3,0"/>
+                    <ComboBox ItemsSource="{Binding HuntNames}"
+                              SelectedItem="{Binding SelectedHuntName}"
+                              Width="120" VerticalAlignment="Center" Margin="3,0"
+                              IsEditable="True" IsTextSearchEnabled="True"/>
+                    <Separator Width="1" Margin="5,2" Background="LightGray"/>
                     <Button Content="Start" Command="{Binding StartWorkflowCommand}"
-                            Width="80" Margin="2" Background="#FFDEFFDE" FontWeight="Bold"/>
+                            Width="70" Margin="2" Background="#FFDEFFDE" FontWeight="Bold"/>
                     <Button Content="Stop" Command="{Binding StopWorkflowCommand}"
-                            Width="80" Margin="3,2" Background="#FFFFD0D0" FontWeight="Bold"/>
+                            Width="70" Margin="3,2" Background="#FFFFD0D0" FontWeight="Bold"/>
                 </WrapPanel>
                 <!-- Row within groupbox: Status + Phase -->
                 <WrapPanel Orientation="Horizontal" Margin="5,0,5,3">

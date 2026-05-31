@@ -421,20 +421,20 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Gets the base address for inventory sell slots.
-        /// Slot 0 item type is at [Ares.exe + 0x471C88] + 0x109A (playerBase + 0x109A).
+        /// Slot 0 item type is at [Ares.exe + 0x471C88] + 0xF1A (playerBase + 0xF1A).
         /// Each slot is 0x20 bytes. Slot 1 item type is at playerBase + 0x10BA.
         /// </summary>
         private ulong TryGetInventorySlotBase()
         {
             ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
             if (playerBase == 0) return 0;
-            return playerBase + (ulong)BotConstants.MemoryOffsets.SlotFirstSell; // 0x109A
+            return playerBase + (ulong)BotConstants.MemoryOffsets.SlotFirstSell; // 0xF1A
         }
 
         /// <summary>
         /// Reads inventory slot item type (2 bytes, short).
         /// Item type is at offset 0 of each 0x20-byte slot.
-        /// Slot 0: [Ares.exe + 0x471C88] + 0x109A
+        /// Slot 0: [Ares.exe + 0x471C88] + 0xF1A
         /// Slot 1: [Ares.exe + 0x471C88] + 0x10BA
         /// </summary>
         public int TryGetSellSlotItemType(int slotIndex)

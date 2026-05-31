@@ -4,6 +4,10 @@
 
 namespace DriverScanTester
 {
+    // Buckerty blade BuckertyBlade 2530
+
+
+
     /// <summary>
     /// Central repository for all hardcoded bot constants — camera values, speeds,
     /// delays, thresholds, keyboard codes, scan coordinates, etc.
@@ -229,7 +233,7 @@ namespace DriverScanTester
             public const ulong WhitePotionsCount = 0xF60;
             public const ulong RedPotionsCount = 0xF80;
             public const ulong InventoryFirstSlotSellValue = 0x191A;
-            public const ulong FirstSellSlotPtr = 0x109A;
+            public const ulong FirstSellSlotPtr = 0xF1A;
             public const ulong TargetSelected = 0x60;
             public const ulong AttackSpeed1 = 0x47A;
             public const ulong AttackSpeed2 = 0x47E;
@@ -270,7 +274,7 @@ namespace DriverScanTester
             public const int SlotManna = 0xbce;
             public const int SlotRedPot = 0xbea;
             public const int SlotWhitePot = 0xc06;
-            public const int SlotFirstSell = 0x109A;
+            public const int SlotFirstSell = 0xF1A;
             public const int SlotFirstStorageValue = 0x116;
             public const ulong InventoryTestPtr = 0x242CB5;
             public const ulong InventoryTestSub = 0xF0;
@@ -347,10 +351,10 @@ namespace DriverScanTester
             public const byte ScanCode2 = 0x03;
 
             /// <summary>HP threshold below which key '1' is pressed.</summary>
-            public const short HpThreshold = 250;
+            public const short HpThreshold = 666;
 
             /// <summary>MP threshold below which key '2' is pressed.</summary>
-            public const short MpThreshold = 50;
+            public const short MpThreshold = 150    ;
 
             /// <summary>Delay in ms between key down and key up events.</summary>
             public const int KeyPressDelayMs = 50;

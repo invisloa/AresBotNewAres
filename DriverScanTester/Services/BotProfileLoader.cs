@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using DriverScanTester.Models;
 
@@ -41,7 +42,8 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Loads a profile by name (with or without .json extension).
-        /// Returns null if the file does not exist or cannot be parsed.
+        /// Handles legacy profiles by auto-converting RepotToExpPath/ExpLoopPath
+        /// into a single HuntDefinition named "Default".
         /// </summary>
         public BotProfile? LoadProfile(string profileName)
         {
@@ -64,7 +66,25 @@ namespace DriverScanTester.Services
                     _log($"[BotProfileLoader] Failed to deserialize profile: {path}");
                     return null;
                 }
-                _log($"[BotProfileLoader] Loaded profile '{profile.Name}' ({profile.StartRoutes.Count} start routes).");
+
+                // Backward compatibility: convert legacy RepotToExpPath/ExpLoopPath into HuntDefinitions
+                if ((profile.HuntDefinitions == null || profile.HuntDefinitions.Count == 0)
+                    && (!string.IsNullOrWhiteSpace(profile.RepotToExpPath) || !string.IsNullOrWhiteSpace(profile.ExpLoopPath)))
+                {
+                    profile.HuntDefinitions = new List<HuntDefinition>
+                    {
+                        new HuntDefinition
+                        {
+                            Name = "Default",
+                            RepotToExpPath = profile.RepotToExpPath ?? "",
+                            ExpLoopPath = profile.ExpLoopPath ?? ""
+                        }
+                    };
+                    profile.DefaultHuntName = "Default";
+                    _log($"[BotProfileLoader] Legacy profile converted: created HuntDefinition 'Default' from RepotToExpPath/ExpLoopPath.");
+                }
+
+                _log($"[BotProfileLoader] Loaded profile '{profile.Name}' ({profile.StartRoutes.Count} start routes, {profile.HuntDefinitions?.Count ?? 0} hunt(s)).");
                 return profile;
             }
             catch (Exception ex)
@@ -107,6 +127,8 @@ namespace DriverScanTester.Services
         /// <summary>
         /// Validates a profile and returns a list of error messages.
         /// Returns an empty list if the profile is valid.
+        /// Validates HuntDefinitions as the primary source for phase 2+3 paths,
+        /// but also handles legacy profiles with RepotToExpPath/ExpLoopPath.
         /// </summary>
         public List<string> ValidateProfile(BotProfile profile)
         {
@@ -145,26 +167,87 @@ namespace DriverScanTester.Services
                 }
             }
 
-            if (string.IsNullOrWhiteSpace(profile.RepotToExpPath))
-                errors.Add("RepotToExpPath is empty.");
-            else
-            {
-                string path = profile.RepotToExpPath;
-                if (!path.EndsWith(".json")) path += ".json";
-                string fullPath = Path.Combine(SAVE_DIR, path);
-                if (!File.Exists(fullPath))
-                    errors.Add($"RepotToExpPath '{profile.RepotToExpPath}' not found in SavedPaths/.");
-            }
+            // --- Validate HuntDefinitions (new format, preferred) ---
+            bool hasHuntDefinitions = profile.HuntDefinitions != null && profile.HuntDefinitions.Count > 0;
 
-            if (string.IsNullOrWhiteSpace(profile.ExpLoopPath))
-                errors.Add("ExpLoopPath is empty.");
+            if (hasHuntDefinitions)
+            {
+                // Check for duplicate names
+                var duplicateNames = profile.HuntDefinitions
+                    .GroupBy(h => h.Name)
+                    .Where(g => g.Count() > 1)
+                    .Select(g => g.Key)
+                    .ToList();
+                foreach (var dup in duplicateNames)
+                    errors.Add($"HuntDefinitions: Duplicate hunt name '{dup}'.");
+
+                for (int i = 0; i < profile.HuntDefinitions.Count; i++)
+                {
+                    var hunt = profile.HuntDefinitions[i];
+                    if (string.IsNullOrWhiteSpace(hunt.Name))
+                        errors.Add($"HuntDefinitions[{i}]: Name is empty.");
+                    if (string.IsNullOrWhiteSpace(hunt.RepotToExpPath))
+                        errors.Add($"HuntDefinitions[{i}] '{hunt.Name}': RepotToExpPath is empty.");
+                    else
+                    {
+                        string path = hunt.RepotToExpPath;
+                        if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                            path += ".json";
+                        string fullPath = Path.Combine(SAVE_DIR, path);
+                        if (!File.Exists(fullPath))
+                            errors.Add($"HuntDefinitions[{i}] '{hunt.Name}': RepotToExpPath '{hunt.RepotToExpPath}' not found in SavedPaths/.");
+                    }
+                    if (string.IsNullOrWhiteSpace(hunt.ExpLoopPath))
+                        errors.Add($"HuntDefinitions[{i}] '{hunt.Name}': ExpLoopPath is empty.");
+                    else
+                    {
+                        string path = hunt.ExpLoopPath;
+                        if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                            path += ".json";
+                        string fullPath = Path.Combine(SAVE_DIR, path);
+                        if (!File.Exists(fullPath))
+                            errors.Add($"HuntDefinitions[{i}] '{hunt.Name}': ExpLoopPath '{hunt.ExpLoopPath}' not found in SavedPaths/.");
+                    }
+                }
+            }
             else
             {
-                string path = profile.ExpLoopPath;
-                if (!path.EndsWith(".json")) path += ".json";
-                string fullPath = Path.Combine(SAVE_DIR, path);
-                if (!File.Exists(fullPath))
-                    errors.Add($"ExpLoopPath '{profile.ExpLoopPath}' not found in SavedPaths/.");
+                // --- Legacy fallback: validate RepotToExpPath / ExpLoopPath ---
+                bool hasLegacyRepot = !string.IsNullOrWhiteSpace(profile.RepotToExpPath);
+                bool hasLegacyExp = !string.IsNullOrWhiteSpace(profile.ExpLoopPath);
+
+                if (!hasLegacyRepot && !hasLegacyExp)
+                {
+                    errors.Add("Profile has no HuntDefinitions and no legacy RepotToExpPath/ExpLoopPath. Add at least one hunt.");
+                }
+                else
+                {
+                    _log("[BotProfileLoader] WARNING: Profile uses legacy RepotToExpPath/ExpLoopPath. Consider migrating to HuntDefinitions.");
+
+                    if (string.IsNullOrWhiteSpace(profile.RepotToExpPath))
+                        errors.Add("RepotToExpPath is empty (legacy fallback).");
+                    else
+                    {
+                        string path = profile.RepotToExpPath;
+                        if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                            path += ".json";
+                        string fullPath = Path.Combine(SAVE_DIR, path);
+                        if (!File.Exists(fullPath))
+                            errors.Add($"RepotToExpPath '{profile.RepotToExpPath}' not found in SavedPaths/ (legacy fallback).");
+                    }
+
+                    if (string.IsNullOrWhiteSpace(profile.ExpLoopPath))
+                        errors.Add("ExpLoopPath is empty (legacy fallback).");
+                    else
+                    {
+                        string path = profile.ExpLoopPath;
+                        if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                            path += ".json";
+                        string fullPath = Path.Combine(SAVE_DIR, path);
+                        if (!File.Exists(fullPath))
+                            errors.Add($"ExpLoopPath '{profile.ExpLoopPath}' not found in SavedPaths/ (legacy fallback).");
+                    }
+                }
             }
 
             if (profile.MinHpPotions < 0)

@@ -296,7 +296,7 @@
     "LockGroup": 1
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0x109A",
+    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0xF1A",
     "NameText": "Sell_FirstSellSlotItem",
     "ValueText": "",
     "ValueType": 1,

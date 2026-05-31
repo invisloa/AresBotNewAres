@@ -38,6 +38,9 @@ namespace DriverScanTester.Services
         private readonly BotProfile? _profile;
         private readonly CityToRepotRouteSelector? _routeSelector;
 
+        // Active hunt definition (ties phase 2 + phase 3 together)
+        private readonly HuntDefinition? _activeHunt;
+
         private CancellationTokenSource? _cts;
         private bool _isRunning;
         private BotPhase _currentPhase = BotPhase.Idle;
@@ -80,6 +83,8 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Profile-based constructor (preferred). Validates the profile before starting.
+        /// The activeHunt ties phase 2 (move to exp) and phase 3 (exp loop) together
+        /// so they always use a consistent pair of paths.
         /// </summary>
         public BotWorkflowCoordinator(
             GameMemoryService memoryService,
@@ -89,6 +94,7 @@ namespace DriverScanTester.Services
             PathRunnerService pathRunner,
             BotProfile profile,
             CityToRepotRouteSelector routeSelector,
+            HuntDefinition? activeHunt,
             Action<string> log,
             Action focusGameWindow)
         {
@@ -99,6 +105,7 @@ namespace DriverScanTester.Services
             _pathRunner = pathRunner;
             _profile = profile;
             _routeSelector = routeSelector;
+            _activeHunt = activeHunt;
             _log = log;
             _focusGameWindow = focusGameWindow;
 
@@ -152,6 +159,21 @@ namespace DriverScanTester.Services
             _log("[Coordinator] Workflow started.");
             if (_profile != null)
                 _log($"[Coordinator] Using profile: {_profile.Name}");
+
+            if (_activeHunt != null)
+            {
+                _log($"[Coordinator] Active hunt: '{_activeHunt.Name}'");
+                _log($"[Coordinator]   RepotToExpPath: '{_activeHunt.RepotToExpPath}'");
+                _log($"[Coordinator]   ExpLoopPath:    '{_activeHunt.ExpLoopPath}'");
+            }
+            else if (_profile != null)
+            {
+                _log("[Coordinator] ERROR: Profile workflow started without active hunt.");
+            }
+            else
+            {
+                _log("[Coordinator] No profile selected — using hardcoded fallback paths.");
+            }
 
             try
             {
@@ -361,8 +383,26 @@ namespace DriverScanTester.Services
 
         private async Task PhaseMoveToExp(CancellationToken token)
         {
-            string pathName = _profile?.RepotToExpPath ?? FallbackRepotToExp;
-            _log($"[Phase] MoveToExp — loading path '{pathName}'...");
+            // Phase 2: MUST use active hunt's RepotToExpPath when profile is loaded.
+            // Fallback to hardcoded path only when _profile is null (no-profile mode).
+            string pathName;
+
+            if (_activeHunt != null && !string.IsNullOrWhiteSpace(_activeHunt.RepotToExpPath))
+            {
+                pathName = _activeHunt.RepotToExpPath;
+                _log($"[Phase] MoveToExp — using active hunt '{_activeHunt.Name}', path '{pathName}'...");
+            }
+            else if (_profile == null)
+            {
+                pathName = FallbackRepotToExp;
+                _log($"[Phase] MoveToExp — no profile, hardcoded fallback path '{pathName}'...");
+            }
+            else
+            {
+                _log($"[Phase] MoveToExp: Profile loaded but no active hunt or empty RepotToExpPath. Failing.");
+                CurrentPhase = BotPhase.Failed;
+                return;
+            }
 
             var waypoints = _pathLoader.LoadSegment(pathName);
             if (waypoints == null)
@@ -390,8 +430,26 @@ namespace DriverScanTester.Services
 
         private async Task PhaseExpLoop(CancellationToken token)
         {
-            string pathName = _profile?.ExpLoopPath ?? FallbackExpLoop;
-            _log($"[Phase] ExpLoop — loading path '{pathName}'...");
+            // Phase 3: MUST use active hunt's ExpLoopPath when profile is loaded.
+            // Fallback to hardcoded path only when _profile is null (no-profile mode).
+            string pathName;
+
+            if (_activeHunt != null && !string.IsNullOrWhiteSpace(_activeHunt.ExpLoopPath))
+            {
+                pathName = _activeHunt.ExpLoopPath;
+                _log($"[Phase] ExpLoop — using active hunt '{_activeHunt.Name}', path '{pathName}'...");
+            }
+            else if (_profile == null)
+            {
+                pathName = FallbackExpLoop;
+                _log($"[Phase] ExpLoop — no profile, hardcoded fallback path '{pathName}'...");
+            }
+            else
+            {
+                _log($"[Phase] ExpLoop: Profile loaded but no active hunt or empty ExpLoopPath. Failing.");
+                CurrentPhase = BotPhase.Failed;
+                return;
+            }
 
             var waypoints = _pathLoader.LoadSegment(pathName);
             if (waypoints == null)

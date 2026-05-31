@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json.Serialization;
 
 namespace DriverScanTester.Models
 {
@@ -20,10 +22,34 @@ namespace DriverScanTester.Models
         /// </summary>
         public List<StartRoute> StartRoutes { get; set; } = new();
 
-        /// <summary>Filename of the repot -> exp area segment (relative to SavedPaths/).</summary>
+        // --- Hunt definitions (phase 2 + phase 3 paired together) ---
+        /// <summary>
+        /// List of hunt/exp definitions. Each entry pairs a move-to-exp path (phase 2)
+        /// with an exp-loop path (phase 3) as one inseparable spot.
+        /// </summary>
+        public List<HuntDefinition> HuntDefinitions { get; set; } = new();
+
+        /// <summary>
+        /// Name of the default hunt from HuntDefinitions (used when no explicit hunt is selected).
+        /// </summary>
+        public string DefaultHuntName { get; set; } = "";
+
+        /// <summary>
+        /// Returns the default HuntDefinition based on DefaultHuntName, or the first one if not found.
+        /// </summary>
+        [JsonIgnore]
+        public HuntDefinition? DefaultHunt =>
+            HuntDefinitions.FirstOrDefault(h => h.Name == DefaultHuntName)
+            ?? HuntDefinitions.FirstOrDefault();
+
+        // --- Legacy fields (backward compatibility) ---
+        // Old profiles used separate RepotToExpPath / ExpLoopPath instead of HuntDefinitions.
+        // These fields are kept for deserialization of legacy profiles.
+        // BotProfileLoader will convert them into a single "Default" HuntDefinition on load.
+        /// <summary>Filename of the repot -> exp area segment (legacy, use HuntDefinitions instead).</summary>
         public string RepotToExpPath { get; set; } = "";
 
-        /// <summary>Filename of the exp loop segment (relative to SavedPaths/).</summary>
+        /// <summary>Filename of the exp loop segment (legacy, use HuntDefinitions instead).</summary>
         public string ExpLoopPath { get; set; } = "";
 
         // --- Repot thresholds (override RepotDetectorService defaults) ---
