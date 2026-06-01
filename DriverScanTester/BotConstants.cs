@@ -53,25 +53,25 @@ namespace DriverScanTester
         public static class BearingCalibration
         {
             /// <summary>Raw game angle when facing North (0° bearing).</summary>
-            public const float North = 16581f;
+            public const float North = 16585f;
 
             /// <summary>30° from North toward East.</summary>
-            public const float Deg30 = 16600f;
+            public const float Deg30 = 16602f;
 
             /// <summary>60° from North toward East.</summary>
-            public const float Deg60 = 16617f;
+            public const float Deg60 = 16618f;
 
             /// <summary>Raw game angle when facing East (90° bearing).</summary>
-            public const float East = 16632f;
+            public const float East = 16635f;
 
             /// <summary>120° from North (30° past East).</summary>
-            public const float Deg120 = 16647f;
+            public const float Deg120 = 16644f;
 
             /// <summary>150° from North (60° past East).</summary>
             public const float Deg150 = 16654f;
 
             /// <summary>Raw game angle when facing South (180° bearing).</summary>
-            public const float South = 16662f;
+            public const float South = 16663f;
 
             /// <summary>210° from North (30° past South).</summary>
             public const float Deg210 = 16671f;
@@ -80,19 +80,19 @@ namespace DriverScanTester
             public const float Deg240 = 16678f;
 
             /// <summary>Raw game angle when facing West (270° bearing).</summary>
-            public const float West = 16688f;
+            public const float West = 16686f;
 
             /// <summary>300° from North (30° past West).</summary>
-            public const float Deg300 = 16697f;
+            public const float Deg300 = 16695f;
 
             /// <summary>330° from North (60° past West).</summary>
             public const float Deg330 = 16704f;
 
             /// <summary>Full circle back to North.</summary>
-            public const float NorthFullCircle = 16710f;
+            public const float NorthFullCircle = 16713f;
 
             /// <summary>Total span of one full camera spin in game-angle units (NorthFullCircle - North).</summary>
-            public const float FullSpinGameUnits = NorthFullCircle - North; // = 129
+            public const float FullSpinGameUnits = NorthFullCircle - North; // = 128
         }
 
         // ════════════════════════════════════════════════════════════════

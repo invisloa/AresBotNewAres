@@ -27,25 +27,19 @@ namespace DriverScanTester.Services
         /// <summary>
         /// Manual yaw/bearing calibration from measured data.
         /// Bearing convention: 0 = N / +Y, 90 = E / +X, 180 = S / -Y, 270 = W / -X.
+        ///
+        /// Delegates to <see cref="BearingCalibrationService"/> so the table can be
+        /// re-measured and overridden at runtime via the Camera Calibration window.
+        /// A fresh array is built on every access — the table is small (13 entries)
+        /// and the call is rare (a handful of times per bot tick).
         /// </summary>
-        internal static readonly BearingCalibrationPoint[] BearingCalibration =
-        {
-            new BearingCalibrationPoint(0f,   BotConstants.BearingCalibration.North),          // Full N
-            new BearingCalibrationPoint(30f,  BotConstants.BearingCalibration.Deg30),          // +30 to E
-            new BearingCalibrationPoint(60f,  BotConstants.BearingCalibration.Deg60),          // +60 to E
-            new BearingCalibrationPoint(90f,  BotConstants.BearingCalibration.East),           // Full E
-            new BearingCalibrationPoint(120f, BotConstants.BearingCalibration.Deg120),         // +30 to S
-            new BearingCalibrationPoint(150f, BotConstants.BearingCalibration.Deg150),         // +60 to S
-            new BearingCalibrationPoint(180f, BotConstants.BearingCalibration.South),          // Full S
-            new BearingCalibrationPoint(210f, BotConstants.BearingCalibration.Deg210),         // +30 to W
-            new BearingCalibrationPoint(240f, BotConstants.BearingCalibration.Deg240),         // +60 to W
-            new BearingCalibrationPoint(270f, BotConstants.BearingCalibration.West),           // Full W
-            new BearingCalibrationPoint(300f, BotConstants.BearingCalibration.Deg300),         // +30 to N
-            new BearingCalibrationPoint(330f, BotConstants.BearingCalibration.Deg330),         // +60 to N
-            new BearingCalibrationPoint(360f, BotConstants.BearingCalibration.NorthFullCircle) // Full N again
-        };
+        internal static BearingCalibrationPoint[] BearingCalibration
+            => BearingCalibrationService.BuildGeometryTable();
 
-        internal const float ManualFullSpinGameUnits = BotConstants.BearingCalibration.FullSpinGameUnits; // 129
+        /// <summary>Full spin circumference in game-angle units. Delegates to the
+        /// calibration service so overrides take effect immediately.</summary>
+        internal static float ManualFullSpinGameUnits
+            => BearingCalibrationService.FullSpinGameUnits;
 
         // ─────────────────────── Obstacle constants ───────────────────────
 
