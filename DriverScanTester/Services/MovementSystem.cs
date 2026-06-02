@@ -150,11 +150,11 @@ namespace DriverScanTester.Services
         // Prevents camera oscillation (jitter between adjacent game-angle values)
         // by applying deadband, hysteresis, cooldown, and heading freeze logic.
 
-        /// <summary>Minimum absolute circular difference in game-angle units to allow a camera update.</summary>
-        private const float CameraDeadbandGameUnits = BotConstants.Camera.DeadbandGameUnits;
+        /// <summary>Minimum absolute circular difference in radians to allow a camera update.</summary>
+        private const float CameraDeadbandRadians = BotConstants.Camera.DeadbandRadians;
 
         /// <summary>If the circular difference exceeds this threshold, update immediately (ignoring cooldown).</summary>
-        private const float CameraForceUpdateGameUnits = BotConstants.Camera.ForceUpdateGameUnits;
+        private const float CameraForceUpdateRadians = BotConstants.Camera.ForceUpdateRadians;
 
         /// <summary>Minimum interval between camera updates (for small/medium angle changes).</summary>
         private const double MinCameraUpdateIntervalMs = BotConstants.Camera.MinUpdateIntervalMs;
@@ -164,14 +164,14 @@ namespace DriverScanTester.Services
 
         // ── Camera filter state ──
 
-        /// <summary>Last game-angle value that was actually written to the camera.</summary>
-        private short _cameraLastAppliedAngle;
+        /// <summary>Last game-angle value that was actually written to the camera (radians, normalised to [0, 2π)).</summary>
+        private float _cameraLastAppliedAngle;
 
         /// <summary>When the last camera write occurred.</summary>
         private DateTime _lastCameraUpdateTime = DateTime.MinValue;
 
-        /// <summary>Candidate angle for hysteresis tracking (medium-size changes).</summary>
-        private short _cameraHysteresisCandidate;
+        /// <summary>Candidate angle for hysteresis tracking (medium-size changes, radians).</summary>
+        private float _cameraHysteresisCandidate;
 
         /// <summary>How many consecutive ticks _cameraHysteresisCandidate has been observed.</summary>
         private int _cameraHysteresisStableTicks;
@@ -226,7 +226,7 @@ namespace DriverScanTester.Services
             _isInitialized = true;
             _log($"MovementSystem: Initialized with GameMemoryService, Default Precision: {GlobalPrecision}, Loop: {LoopPath}");
             _log($"[LocalMap] Initial map ID = {initialMapId}.");
-            _log($"[BearingCalib] Using manual N/E/S/W bearing table: N={BotConstants.BearingCalibration.North}, E={BotConstants.BearingCalibration.East}, S={BotConstants.BearingCalibration.South}, W={BotConstants.BearingCalibration.West}, N2={BotConstants.BearingCalibration.NorthFullCircle}.");
+            _log($"[BearingCalib] Using pure float math: Math.Atan2(target-current) → radians written to camera (32-bit float).");
 
             if (customPath != null)
             {
@@ -867,14 +867,14 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Applies a desired bearing: converts bearing to game camera angle,
+        /// Applies a desired bearing: converts bearing to game camera angle (radians),
         /// sets the camera directly (subject to filtering), and holds W for forward movement.
         /// </summary>
         private void ApplySteeringBearing(float bearingDeg)
         {
-            short gameAngle = GeometryUtils.ConvertBearingToGameAngle(bearingDeg, _lastSetGameAngle, _hasLastGameAngle);
+            float cameraRadians = GeometryUtils.ConvertBearingToRadians(bearingDeg);
             _lastSetBearingDeg = bearingDeg;
-            _lastSetGameAngle = gameAngle;
+            _lastSetGameAngle = cameraRadians;
 
             // Capture whether this is a fresh segment BEFORE mutating _hasLastGameAngle.
             // ResetBearingState() sets _hasLastGameAngle=false; the very next call to
@@ -884,47 +884,47 @@ namespace DriverScanTester.Services
             _hasLastGameAngle = true;
 
             // ── Camera update filter ──
-            if (ShouldUpdateCamera(gameAngle, isFreshSegment, out string? skipReason))
+            if (ShouldUpdateCamera(cameraRadians, isFreshSegment, out string? skipReason))
             {
-                _log($"[Camera] Apply target={gameAngle} last={_cameraLastAppliedAngle} diff={CircularGameAngleDiff(gameAngle, _cameraLastAppliedAngle):F1}");
-                _memoryService.SetCameraAngle(gameAngle);
-                _cameraLastAppliedAngle = gameAngle;
+                _log($"[Camera] Apply target={cameraRadians:F4}rad last={_cameraLastAppliedAngle:F4}rad diff={CircularGameAngleDiff(cameraRadians, _cameraLastAppliedAngle):F4}");
+                _memoryService.SetCameraAngle(cameraRadians);
+                _cameraLastAppliedAngle = cameraRadians;
                 _lastCameraUpdateTime = DateTime.Now;
                 _hasCameraHysteresisCandidate = false;
             }
             else
             {
-                _log($"[Camera] Skip target={gameAngle} last={_cameraLastAppliedAngle} diff={CircularGameAngleDiff(gameAngle, _cameraLastAppliedAngle):F1} reason={skipReason}");
+                _log($"[Camera] Skip target={cameraRadians:F4}rad last={_cameraLastAppliedAngle:F4}rad diff={CircularGameAngleDiff(cameraRadians, _cameraLastAppliedAngle):F4} reason={skipReason}");
             }
 
             StartMoving();
         }
 
         /// <summary>
-        /// Applies a desired bearing: converts bearing to game camera angle,
+        /// Applies a desired bearing: converts bearing to game camera angle (radians),
         /// sets the camera directly (subject to filtering) — WITHOUT pressing W.
         /// Used by ReverseDiagonalRecovery which controls W itself.
         /// </summary>
         private void ApplyCameraBearing(float bearingDeg)
         {
-            short gameAngle = GeometryUtils.ConvertBearingToGameAngle(bearingDeg, _lastSetGameAngle, _hasLastGameAngle);
+            float cameraRadians = GeometryUtils.ConvertBearingToRadians(bearingDeg);
             _lastSetBearingDeg = bearingDeg;
-            _lastSetGameAngle = gameAngle;
+            _lastSetGameAngle = cameraRadians;
 
             bool isFreshSegment = !_hasLastGameAngle;
             _hasLastGameAngle = true;
 
-            if (ShouldUpdateCamera(gameAngle, isFreshSegment, out string? skipReason))
+            if (ShouldUpdateCamera(cameraRadians, isFreshSegment, out string? skipReason))
             {
-                _log($"[Camera] Apply target={gameAngle} last={_cameraLastAppliedAngle} diff={CircularGameAngleDiff(gameAngle, _cameraLastAppliedAngle):F1}");
-                _memoryService.SetCameraAngle(gameAngle);
-                _cameraLastAppliedAngle = gameAngle;
+                _log($"[Camera] Apply target={cameraRadians:F4}rad last={_cameraLastAppliedAngle:F4}rad diff={CircularGameAngleDiff(cameraRadians, _cameraLastAppliedAngle):F4}");
+                _memoryService.SetCameraAngle(cameraRadians);
+                _cameraLastAppliedAngle = cameraRadians;
                 _lastCameraUpdateTime = DateTime.Now;
                 _hasCameraHysteresisCandidate = false;
             }
             else
             {
-                _log($"[Camera] Skip target={gameAngle} last={_cameraLastAppliedAngle} diff={CircularGameAngleDiff(gameAngle, _cameraLastAppliedAngle):F1} reason={skipReason}");
+                _log($"[Camera] Skip target={cameraRadians:F4}rad last={_cameraLastAppliedAngle:F4}rad diff={CircularGameAngleDiff(cameraRadians, _cameraLastAppliedAngle):F4} reason={skipReason}");
             }
             // NOTE: W is NOT pressed here — callers that need W use ApplySteeringBearing instead.
         }
@@ -933,11 +933,11 @@ namespace DriverScanTester.Services
         /// Determines whether the camera should actually be updated with the desired game angle.
         /// Implements deadband, cooldown, hysteresis, and waypoint-change detection.
         /// </summary>
-        /// <param name="desiredAngle">The newly computed game angle to consider.</param>
+        /// <param name="desiredAngle">The newly computed game angle (radians) to consider.</param>
         /// <param name="isFreshSegment">True when the waypoint just changed (bearing state was reset),
         /// so filtering should be bypassed for an immediate camera update.</param>
         /// <param name="skipReason">Set to a non-null string describing why the update was skipped.</param>
-        private bool ShouldUpdateCamera(short desiredAngle, bool isFreshSegment, out string? skipReason)
+        private bool ShouldUpdateCamera(float desiredAngle, bool isFreshSegment, out string? skipReason)
         {
             skipReason = null;
 
@@ -964,14 +964,14 @@ namespace DriverScanTester.Services
             float absDiff = Math.Abs(diff);
 
             // 4. Very small difference (within deadband): skip unconditionally.
-            if (absDiff <= CameraDeadbandGameUnits)
+            if (absDiff <= CameraDeadbandRadians)
             {
                 skipReason = "deadband";
                 return false;
             }
 
             // 5. Large difference: allow immediately, bypass cooldown and hysteresis.
-            if (absDiff >= CameraForceUpdateGameUnits)
+            if (absDiff >= CameraForceUpdateRadians)
             {
                 return true;
             }
@@ -1007,15 +1007,16 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Computes the shortest circular difference between two raw game-angle values,
-        /// taking into account the full-spin circumference.  Result is in [-halfSpin, +halfSpin].
+        /// Computes the shortest circular difference between two camera-angle values in
+        /// radians, wrapping at the full 2π circumference. Result is in [-π, +π].
         /// </summary>
         private static float CircularGameAngleDiff(float a, float b)
         {
             float diff = a - b;
-            float halfSpin = GeometryUtils.ManualFullSpinGameUnits / 2f;
-            while (diff > halfSpin) diff -= GeometryUtils.ManualFullSpinGameUnits;
-            while (diff < -halfSpin) diff += GeometryUtils.ManualFullSpinGameUnits;
+            float fullSpin = (float)(2 * Math.PI);
+            float halfSpin = fullSpin / 2f;
+            while (diff > halfSpin) diff -= fullSpin;
+            while (diff < -halfSpin) diff += fullSpin;
             return diff;
         }
 
@@ -1029,7 +1030,7 @@ namespace DriverScanTester.Services
             // When close to the current waypoint, the bearing-to-target oscillates
             // wildly due to position jitter.  Freeze the last stable camera angle
             // and just keep moving forward until the waypoint is reached.
-            if (_hasLastGameAngle && _cameraLastAppliedAngle != 0)
+            if (_hasLastGameAngle)
             {
                 float dist = GeometryUtils.Distance(currX, currY, targetX, targetY);
                 // Use the same default threshold calculation as GetEffectiveWaypointReachThreshold

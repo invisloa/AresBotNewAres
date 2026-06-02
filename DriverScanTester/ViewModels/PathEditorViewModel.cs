@@ -16,7 +16,8 @@ namespace DriverScanTester.ViewModels
 {
     public class PathEditorViewModel : BaseViewModel
     {
-        private const string SAVE_DIR = "SavedPaths";
+        private static readonly string SAVE_DIR = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "SavedPaths"));
 
         // --- Profile Editor (Tab 3) ---
         private ProfileEditorViewModel _profileEditor;

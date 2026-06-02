@@ -40,59 +40,17 @@ namespace DriverScanTester
             /// <summary>If circular diff exceeds this threshold, update immediately (bypass cooldown).</summary>
             public const float ForceUpdateGameUnits = 8.0f;
 
+            /// <summary>Minimum absolute circular difference (radians) to allow a camera update (deadband). Equivalent to the old 2-game-unit threshold (≈ 2.8°) when the legacy full spin was 257 game units.</summary>
+            public const float DeadbandRadians = 0.0489f;
+
+            /// <summary>If circular diff exceeds this threshold, update immediately (bypass cooldown). Equivalent to the old 8-game-unit threshold (≈ 11.2°) when the legacy full spin was 257 game units.</summary>
+            public const float ForceUpdateRadians = 0.1956f;
+
             /// <summary>Minimum interval in ms between camera updates for small/medium changes.</summary>
             public const double MinUpdateIntervalMs = 200.0;
 
             /// <summary>Base freeze distance for heading lock near waypoints. Actual = max(reachThreshold*2, this).</summary>
             public const float HeadingFreezeDistanceBase = 10.0f;
-        }
-
-        // ════════════════════════════════════════════════════════════════
-        //  BEARING CALIBRATION — raw game-angle values for cardinal directions
-        // ════════════════════════════════════════════════════════════════
-        public static class BearingCalibration
-        {
-            /// <summary>Raw game angle when facing North (0° bearing).</summary>
-            public const float North = 16585f;
-
-            /// <summary>30° from North toward East.</summary>
-            public const float Deg30 = 16499f;
-
-            /// <summary>60° from North toward East.</summary>
-            public const float Deg60 = 16414f;
-
-            /// <summary>Raw game angle when facing East (90° bearing).</summary>
-            public const float East = 16328f;
-
-            /// <summary>120° from North (30° past East).</summary>
-            public const float Deg120 = 16371f;
-
-            /// <summary>150° from North (60° past East).</summary>
-            public const float Deg150 = 16414f;
-
-            /// <summary>Raw game angle when facing South (180° bearing).</summary>
-            public const float South = 16457f;
-
-            /// <summary>210° from North (30° past South).</summary>
-            public const float Deg210 = 16483f;
-
-            /// <summary>240° from North (60° past South).</summary>
-            public const float Deg240 = 16508f;
-
-            /// <summary>Raw game angle when facing West (270° bearing).</summary>
-            public const float West = 16534f;
-
-            /// <summary>300° from North (30° past West).</summary>
-            public const float Deg300 = 16637f;
-
-            /// <summary>330° from North (60° past West).</summary>
-            public const float Deg330 = 16739f;
-
-            /// <summary>Full circle back to North.</summary>
-            public const float NorthFullCircle = 16841f;
-
-            /// <summary>Total span of one full camera spin in game-angle units (NorthFullCircle - North).</summary>
-            public const float FullSpinGameUnits = NorthFullCircle - North; // = 257
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -241,7 +199,7 @@ namespace DriverScanTester
             public const ulong CameraPtr = 0x4704B0;
             public const ulong CameraDistance = 0x1a6;
             public const ulong CameraAngle = 0x1aa;
-            public const ulong CameraVerticalAngle = 0x1be;
+            public const ulong CameraVerticalAngle = 0x1A8;
 
             // UI / Window
             public const ulong BaseNormalM = 0x471C88;

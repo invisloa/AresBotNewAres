@@ -10,37 +10,6 @@ namespace DriverScanTester.Services
         internal const float PI = (float)Math.PI;
         internal const float TwoPI = PI * 2;
 
-        // ─────────────────────── Bearing calibration data ───────────────────────
-
-        internal struct BearingCalibrationPoint
-        {
-            public float BearingDeg;
-            public float GameAngle;
-
-            public BearingCalibrationPoint(float bearingDeg, float gameAngle)
-            {
-                BearingDeg = bearingDeg;
-                GameAngle = gameAngle;
-            }
-        }
-
-        /// <summary>
-        /// Manual yaw/bearing calibration from measured data.
-        /// Bearing convention: 0 = N / +Y, 90 = E / +X, 180 = S / -Y, 270 = W / -X.
-        ///
-        /// Delegates to <see cref="BearingCalibrationService"/> so the table can be
-        /// re-measured and overridden at runtime via the Camera Calibration window.
-        /// A fresh array is built on every access — the table is small (13 entries)
-        /// and the call is rare (a handful of times per bot tick).
-        /// </summary>
-        internal static BearingCalibrationPoint[] BearingCalibration
-            => BearingCalibrationService.BuildGeometryTable();
-
-        /// <summary>Full spin circumference in game-angle units. Delegates to the
-        /// calibration service so overrides take effect immediately.</summary>
-        internal static float ManualFullSpinGameUnits
-            => BearingCalibrationService.FullSpinGameUnits;
-
         // ─────────────────────── Obstacle constants ───────────────────────
 
         internal static readonly (float X, float Y) ObstacleCenter = BotConstants.Obstacle.Center;
@@ -75,76 +44,29 @@ namespace DriverScanTester.Services
             return degrees * PI / 180f;
         }
 
-        // ─────────────────────── Bearing → game angle ───────────────────────
+        // ─────────────────────── Bearing → camera angle (radians) ───────────────────────
 
         /// <summary>
-        /// Converts a bearing (degrees from North) into the game's raw camera angle value.
-        /// Uses the calibration table and wraps around full-spin revolutions to keep
-        /// the angle close to the last-set game angle.
+        /// Converts a bearing (degrees from North) into the game's camera angle
+        /// (radians). This is a pure unit conversion: the camera in memory is a
+        /// 32-bit float in radians with the same convention as our bearings
+        /// (0 = N, π/2 = E, π = S, 3π/2 = W), so the math is just degrees → radians.
+        /// No calibration table is involved.
         /// </summary>
-        internal static short ConvertBearingToGameAngle(float bearingDeg, float lastSetGameAngle, bool hasLastGameAngle)
+        internal static float ConvertBearingToRadians(float bearingDeg)
         {
             bearingDeg = NormalizeBearingDeg(bearingDeg);
-            float baseAngle = InterpolateBearingToGameAngle(bearingDeg);
-
-            if (!hasLastGameAngle || ManualFullSpinGameUnits <= 0.001f)
-            {
-                return (short)Math.Round(baseAngle);
-            }
-
-            float best = baseAngle;
-            float bestDiff = Math.Abs(best - lastSetGameAngle);
-
-            for (int k = -3; k <= 3; k++)
-            {
-                float candidate = baseAngle + (ManualFullSpinGameUnits * k);
-                float candidateDiff = Math.Abs(candidate - lastSetGameAngle);
-
-                if (candidateDiff < bestDiff)
-                {
-                    best = candidate;
-                    bestDiff = candidateDiff;
-                }
-            }
-
-            // Ensure the result stays within the valid game angle range [North, NorthFullCircle)
-            // to avoid sending out-of-range values that cause the camera to over-rotate.
-            while (best < BearingCalibration[0].GameAngle)
-                best += ManualFullSpinGameUnits;
-            while (best >= BearingCalibration[BearingCalibration.Length - 1].GameAngle)
-                best -= ManualFullSpinGameUnits;
-
-            return (short)Math.Round(best);
+            return DegToRad(bearingDeg);
         }
 
-        internal static float InterpolateBearingToGameAngle(float bearingDeg)
+        /// <summary>
+        /// Converts a camera angle in radians (0 = N, π/2 = E, …) back into a
+        /// bearing in degrees (0 = N, 90 = E, …). Pure unit conversion.
+        /// </summary>
+        internal static float ConvertRadiansToBearingDeg(float radians)
         {
-            bearingDeg = NormalizeBearingDeg(bearingDeg);
-
-            if (bearingDeg <= 0.0001f)
-            {
-                return BearingCalibration[0].GameAngle;
-            }
-
-            for (int i = 0; i < BearingCalibration.Length - 1; i++)
-            {
-                BearingCalibrationPoint a = BearingCalibration[i];
-                BearingCalibrationPoint b = BearingCalibration[i + 1];
-
-                if (bearingDeg >= a.BearingDeg && bearingDeg <= b.BearingDeg)
-                {
-                    float range = b.BearingDeg - a.BearingDeg;
-                    if (Math.Abs(range) < 0.001f)
-                    {
-                        return a.GameAngle;
-                    }
-
-                    float t = (bearingDeg - a.BearingDeg) / range;
-                    return a.GameAngle + ((b.GameAngle - a.GameAngle) * t);
-                }
-            }
-
-            return BearingCalibration[BearingCalibration.Length - 1].GameAngle;
+            float deg = RadToDeg(radians);
+            return NormalizeBearingDeg(deg);
         }
 
         // ─────────────────────── Bearing → delta / target ───────────────────────

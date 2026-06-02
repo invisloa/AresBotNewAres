@@ -13,8 +13,10 @@ namespace DriverScanTester.Services
     /// </summary>
     public class BotProfileLoader
     {
-        private const string PROFILE_DIR = "SavedBotProfiles";
-        private const string SAVE_DIR = "SavedPaths";
+        private static readonly string PROFILE_DIR = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "SavedBotProfiles"));
+        private static readonly string SAVE_DIR = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "SavedPaths"));
         private readonly Action<string> _log;
 
         public BotProfileLoader(Action<string> log)

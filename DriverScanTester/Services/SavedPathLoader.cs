@@ -14,7 +14,8 @@ namespace DriverScanTester.Services
     /// </summary>
     public class SavedPathLoader
     {
-        private const string SAVE_DIR = "SavedPaths";
+        private static readonly string SAVE_DIR = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "SavedPaths"));
         private readonly Action<string> _log;
 
         public SavedPathLoader(Action<string> log)

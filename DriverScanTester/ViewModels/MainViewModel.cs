@@ -193,7 +193,6 @@ namespace DriverScanTester.ViewModels
         public ICommand RunLootBotCommand { get; }
         public ICommand OpenPathEditorCommand { get; }
         public ICommand OpenBotWindowCommand { get; }
-        public ICommand ShowCameraCalibrationCommand { get; }
         public ICommand ClearLogCommand { get; }
 
         public delegate bool DriverWriteDelegate(uint pid, ulong remoteAddr, byte[] src, out uint wrote);
@@ -284,16 +283,7 @@ namespace DriverScanTester.ViewModels
             RunLootBotCommand = new RelayCommand(_ => ToggleLootBot(), _ => _isAttached);
             OpenPathEditorCommand = new RelayCommand(_ => OpenPathEditor(), _ => _isAttached);
             OpenBotWindowCommand = new RelayCommand(_ => OpenBotWindow(), _ => _isAttached);
-            ShowCameraCalibrationCommand = new RelayCommand(_ => OpenCameraCalibration(), _ => _isAttached);
             ClearLogCommand = new RelayCommand(_ => LogText = "", _ => true);
-
-            // Auto-load a saved bearing calibration (if any) so the bot uses the
-            // user-measured N/E/S/W values on first tick, not just when the
-            // calibration window is opened.
-            if (BearingCalibrationService.LoadFromFile())
-            {
-                AppendLog($"[Calib] Loaded saved bearing calibration from {BearingCalibrationService.DefaultFilePath}.");
-            }
 
             StartHotkeyListener();
         }
@@ -323,47 +313,6 @@ namespace DriverScanTester.ViewModels
         /// <see cref="GameMemoryService"/> so the live camera-angle read works
         /// even if the bot itself has not been started yet.
         /// </summary>
-        private void OpenCameraCalibration()
-        {
-            try
-            {
-                if (!_isAttached)
-                {
-                    AppendLog("Attach first.");
-                    return;
-                }
-
-                ulong baseAddr = FindModuleInScanner("Ares.exe", false);
-                if (baseAddr == 0 && _pointerScanner != null)
-                {
-                    _pointerScanner.RefreshModules();
-                    baseAddr = FindModuleInScanner("Ares.exe", true);
-                }
-
-                GameMemoryService.ReadMemoryDelegate readFunc = (uint pid, ulong addr, byte[] buf, out uint _bytesRead) =>
-                {
-                    return DriverRead(pid, addr, buf, out _bytesRead);
-                };
-
-                var memoryService = new GameMemoryService(_attachedPid, readFunc, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
-                var vm = new CameraCalibrationViewModel(memoryService, AppendLog);
-
-                // Auto-load saved calibration if present so the user sees the active values.
-                BearingCalibrationService.LoadFromFile();
-
-                var win = new Views.CameraCalibrationWindow
-                {
-                    DataContext = vm,
-                    Owner = Application.Current?.MainWindow
-                };
-                win.Show();
-            }
-            catch (Exception ex)
-            {
-                AppendLog("OpenCameraCalibration error: " + ex.Message);
-            }
-        }
-
         private void OpenPathEditor()
         {
             try

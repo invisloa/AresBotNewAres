@@ -207,31 +207,82 @@ namespace DriverScanTester.Services
             return ((float)xVal, (float)yVal, true);
         }
 
-        public short GetCameraAngle()
+        /// <summary>
+        /// Reads the raw camera rotation (horizontal yaw) from memory as a
+        /// 32-bit float in radians. The value is normalised to the [0, 2π)
+        /// range so callers always see a positive, monotonically-comparable angle.
+        /// </summary>
+        public float GetCameraAngle()
+        {
+            ulong ptrAddr = _moduleBase + CameraPtrOffset;
+            ulong cameraBase = ReadPointer(ptrAddr);
+            if (cameraBase == 0) return 0f;
+
+            float raw = ReadFloat(cameraBase + CameraAngleOffset);
+            float twoPi = (float)(2 * Math.PI);
+            float normalized = raw % twoPi;
+            if (float.IsNaN(normalized) || float.IsInfinity(normalized)) return 0f;
+            if (normalized < 0) normalized += twoPi;
+            return normalized;
+        }
+
+        /// <summary>
+        /// Writes the camera rotation (horizontal yaw) to memory as a
+        /// 32-bit float in radians. The caller is expected to pass an angle
+        /// in the [0, 2π) range, matching what <see cref="GetCameraAngle"/> returns.
+        /// </summary>
+        public void SetCameraAngle(float radians)
+        {
+            ulong ptrAddr = _moduleBase + CameraPtrOffset;
+            ulong cameraBase = ReadPointer(ptrAddr);
+            if (cameraBase == 0) return;
+
+            WriteFloat(cameraBase + CameraAngleOffset, radians);
+        }
+
+        /// <summary>
+        /// Reads the raw unbounded vertical camera angle from memory (radians as 4-byte float).
+        /// </summary>
+        private float ReadRawCameraVerticalRadians()
         {
             ulong ptrAddr = _moduleBase + CameraPtrOffset;
             ulong cameraBase = ReadPointer(ptrAddr);
             if (cameraBase == 0) return 0;
 
-            return ReadShort(cameraBase + CameraAngleOffset);
+            return ReadFloat(cameraBase + CameraVerticalAngleOffset);
         }
 
-        public void SetCameraAngle(short angle)
+        /// <summary>
+        /// Gets the camera vertical angle normalized to the [0, 2π) range (radians).
+        /// Uses modulo (%) to prevent infinitely growing radian values from multiple full rotations.
+        /// </summary>
+        public float GetCameraVerticalRadians()
+        {
+            float raw = ReadRawCameraVerticalRadians();
+            float twoPi = (float)(2 * Math.PI);
+            float normalized = raw % twoPi;
+            if (normalized < 0) normalized += twoPi;
+            return normalized;
+        }
+
+        /// <summary>
+        /// Gets the camera vertical angle in degrees (0–360), derived from the normalized radians.
+        /// </summary>
+        public float CameraVerticalDegrees
+        {
+            get { return GetCameraVerticalRadians() * (180f / (float)Math.PI); }
+        }
+
+        /// <summary>
+        /// Sets the camera vertical angle from a radian float value.
+        /// </summary>
+        public void SetCameraVerticalAngle(float radians)
         {
             ulong ptrAddr = _moduleBase + CameraPtrOffset;
             ulong cameraBase = ReadPointer(ptrAddr);
             if (cameraBase == 0) return;
 
-            WriteShort(cameraBase + CameraAngleOffset, angle);
-        }
-
-        public void SetCameraVerticalAngle(short angle)
-        {
-            ulong ptrAddr = _moduleBase + CameraPtrOffset;
-            ulong cameraBase = ReadPointer(ptrAddr);
-            if (cameraBase == 0) return;
-
-            WriteShort(cameraBase + CameraVerticalAngleOffset, angle);
+            WriteFloat(cameraBase + CameraVerticalAngleOffset, radians);
         }
 
         public void SetCameraDistance(short distance)

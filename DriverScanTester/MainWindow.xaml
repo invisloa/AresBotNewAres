@@ -101,8 +101,6 @@
                     <Button Content="Hex Window" Command="{Binding ShowHexWindowCommand}" Width="100" Margin="5,2"/>
                     <Button Content="Path Editor" Command="{Binding OpenPathEditorCommand}" Width="100" Margin="5,2" Background="#FFF0F0FF"/>
                     <Button Content="Bot Window" Command="{Binding OpenBotWindowCommand}" Width="100" Margin="5,2" Background="#FFFFF0D0" FontWeight="Bold"/>
-                    <Button Content="Camera Calibration" Command="{Binding ShowCameraCalibrationCommand}" Width="130" Margin="5,2" Background="#FFE0FFE0"
-                            ToolTip="Re-measure the 4 cardinal directions (N/E/S/W) so the bot picks the right camera angle for any target."/>
                     
                     <Separator Width="1" Margin="15,2" Background="LightGray"/>
                     

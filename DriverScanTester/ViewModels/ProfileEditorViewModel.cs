@@ -18,8 +18,10 @@ namespace DriverScanTester.ViewModels
     /// </summary>
     public class ProfileEditorViewModel : BaseViewModel
     {
-        private const string PROFILE_DIR = "SavedBotProfiles";
-        private const string SEGMENT_DIR = "SavedPaths";
+        private static readonly string PROFILE_DIR = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "SavedBotProfiles"));
+        private static readonly string SEGMENT_DIR = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "SavedPaths"));
 
         private readonly Action<string> _log;
 
