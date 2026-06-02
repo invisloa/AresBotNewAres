@@ -89,7 +89,7 @@ namespace DriverScanTester
             public const float Deg330 = 16739f;
 
             /// <summary>Full circle back to North.</summary>
-            public const float NorthFullCircle = 16842f;
+            public const float NorthFullCircle = 16841f;
 
             /// <summary>Total span of one full camera spin in game-angle units (NorthFullCircle - North).</summary>
             public const float FullSpinGameUnits = NorthFullCircle - North; // = 257
