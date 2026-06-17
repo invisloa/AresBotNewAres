@@ -1,5 +1,13 @@
 [
   {
+    "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xC",
+    "NameText": "S_IsSellerPointed 143850200 ",
+    "ValueText": "",
+    "ValueType": 2,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
     "AddressText": "[Ares.exe \u002B 0x471C98] \u002B 0xE8",
     "NameText": "I_SellConfirmationUI",
     "ValueText": "",

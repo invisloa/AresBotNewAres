@@ -48,24 +48,27 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Converts a bearing (degrees from North) into the game's camera angle
-        /// (radians). This is a pure unit conversion: the camera in memory is a
-        /// 32-bit float in radians with the same convention as our bearings
-        /// (0 = N, π/2 = E, π = S, 3π/2 = W), so the math is just degrees → radians.
-        /// No calibration table is involved.
+        /// (radians). The camera in memory is a 32-bit float in radians whose
+        /// North baseline is the exact value <see cref="BotConstants.CardinalDirections.N"/>
+        /// (derived from the measured bit-pattern of 0° = 0x40C90FDB ≈ 2π),
+        /// so the math is <c>N + degrees → radians</c>. E/S/W are the
+        /// mathematically linked cardinal offsets (N + π/2, N + π, N + 1.5π).
         /// </summary>
         internal static float ConvertBearingToRadians(float bearingDeg)
         {
             bearingDeg = NormalizeBearingDeg(bearingDeg);
-            return DegToRad(bearingDeg);
+            return BotConstants.CardinalDirections.N + DegToRad(bearingDeg);
         }
 
         /// <summary>
-        /// Converts a camera angle in radians (0 = N, π/2 = E, …) back into a
-        /// bearing in degrees (0 = N, 90 = E, …). Pure unit conversion.
+        /// Converts a camera angle in radians (whose North baseline is
+        /// <see cref="BotConstants.CardinalDirections.N"/> ≈ 2π) back into a
+        /// bearing in degrees (0 = N, 90 = E, …). Inverse of
+        /// <see cref="ConvertBearingToRadians"/> using the same N baseline.
         /// </summary>
         internal static float ConvertRadiansToBearingDeg(float radians)
         {
-            float deg = RadToDeg(radians);
+            float deg = RadToDeg(radians - BotConstants.CardinalDirections.N);
             return NormalizeBearingDeg(deg);
         }
 
@@ -108,6 +111,37 @@ namespace DriverScanTester.Services
         internal static float ManhattanDistance(float x1, float y1, float x2, float y2)
         {
             return Math.Abs(x1 - x2) + Math.Abs(y1 - y2);
+        }
+
+        // ─────────────────────── Point-to-segment projection ───────────────────────
+
+        /// <summary>
+        /// Projects point (px,py) onto the line segment (ax,ay)-(bx,by).
+        /// Returns the projected point, the parametric value t in [0,1],
+        /// and the Euclidean distance from the original point to the projection.
+        /// </summary>
+        internal static (float projX, float projY, float t, float distance) ProjectPointOnSegment(
+            float px, float py, float ax, float ay, float bx, float by)
+        {
+            float dx = bx - ax;
+            float dy = by - ay;
+            float lengthSq = dx * dx + dy * dy;
+
+            if (lengthSq < 1e-10f)
+            {
+                // Degenerate segment (points are identical) — distance to the single point
+                float d = Distance(px, py, ax, ay);
+                return (ax, ay, 0f, d);
+            }
+
+            float t = ((px - ax) * dx + (py - ay) * dy) / lengthSq;
+            t = Math.Clamp(t, 0f, 1f);
+
+            float projX = ax + t * dx;
+            float projY = ay + t * dy;
+            float dist = Distance(px, py, projX, projY);
+
+            return (projX, projY, t, dist);
         }
 
         // ─────────────────────── Line-of-sight / obstacle ───────────────────────

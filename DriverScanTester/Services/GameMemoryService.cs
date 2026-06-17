@@ -54,6 +54,13 @@ namespace DriverScanTester.Services
         private const ulong CameraAngleOffset = BotConstants.MemoryOffsets.CameraAngle;
         private const ulong CameraVerticalAngleOffset = BotConstants.MemoryOffsets.CameraVerticalAngle;
 
+        /// <summary>
+        /// Horizontal camera yaw offset — full 32-bit float.
+        /// Reads/writes must treat this as a 4-byte value; reading only the
+        /// upper 2 bytes (i.e. <c>+0x1AA</c>) yields a corrupt, partial value.
+        /// </summary>
+        private const int CameraAngleOffsetLocal = (int)BotConstants.MemoryOffsets.CameraAngle;
+
         // --- Offsets from RepotAddress ---
         private const ulong BaseNormalMOffset = BotConstants.MemoryOffsets.BaseNormalM;
         private const ulong UiWindowMOffset = BotConstants.MemoryOffsets.UiWindowM;
@@ -185,6 +192,12 @@ namespace DriverScanTester.Services
             return _write(_pid, address, buf, out _);
         }
 
+        private bool WriteInt(ulong address, int value)
+        {
+            byte[] buf = BitConverter.GetBytes(value);
+            return _write(_pid, address, buf, out _);
+        }
+
         private bool WriteShort(ulong address, short value)
         {
             byte[] buf = BitConverter.GetBytes(value);
@@ -214,22 +227,16 @@ namespace DriverScanTester.Services
         /// </summary>
         public float GetCameraAngle()
         {
-            ulong ptrAddr = _moduleBase + CameraPtrOffset;
-            ulong cameraBase = ReadPointer(ptrAddr);
-            if (cameraBase == 0) return 0f;
-
-            float raw = ReadFloat(cameraBase + CameraAngleOffset);
-            float twoPi = (float)(2 * Math.PI);
-            float normalized = raw % twoPi;
-            if (float.IsNaN(normalized) || float.IsInfinity(normalized)) return 0f;
-            if (normalized < 0) normalized += twoPi;
-            return normalized;
+            return NormalizeRadians(ReadCameraAngleRadians());
         }
 
         /// <summary>
         /// Writes the camera rotation (horizontal yaw) to memory as a
         /// 32-bit float in radians. The caller is expected to pass an angle
         /// in the [0, 2π) range, matching what <see cref="GetCameraAngle"/> returns.
+        /// Internally the float is serialised to its <see cref="int"/> bit
+        /// pattern and written as a 32-bit integer at <c>+0x1A8</c>, so the
+        /// value round-trips without truncation.
         /// </summary>
         public void SetCameraAngle(float radians)
         {
@@ -237,8 +244,155 @@ namespace DriverScanTester.Services
             ulong cameraBase = ReadPointer(ptrAddr);
             if (cameraBase == 0) return;
 
-            WriteFloat(cameraBase + CameraAngleOffset, radians);
+            int bits = BitConverter.SingleToInt32Bits(radians);
+            WriteInt(cameraBase + (ulong)CameraAngleOffsetLocal, bits);
         }
+
+        // ────────────────────────────────────────────────────────────
+        //  CENTRAL CAMERA-ANGLE HELPER
+        //  All camera-angle reads/writes should go through this set of
+        //  methods so the address, byte-width, and serialisation format
+        //  are kept in one place. The legacy approach of reading the upper
+        //  2 bytes at +0x1AA or interpreting partial-byte values like
+        //  16585/16635 as a real angle is incorrect — those are fragments
+        //  of the 32-bit float at +0x1A8.
+        // ────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Cardinal directions that have a pre-computed exact bit-pattern
+        /// stored under <see cref="BotConstants.CameraAngleBits"/>. Use
+        /// <see cref="SetCameraAngle(CameraCardinalAngle)"/> to set the
+        /// camera to one of these exact angles without any rounding error.
+        /// </summary>
+        public enum CameraCardinalAngle
+        {
+            North0,
+            East90,
+            South180,
+            Deg240,
+            West270,
+            North360
+        }
+
+        /// <summary>
+        /// Resolves a <see cref="CameraCardinalAngle"/> to its exact
+        /// 32-bit float bit-pattern (as <see cref="int"/>). These values
+        /// come from a measured read of the 4-byte float at +0x1A8.
+        /// </summary>
+        public static int GetCameraAngleInt(CameraCardinalAngle angle)
+        {
+            return angle switch
+            {
+                CameraCardinalAngle.North0   => BotConstants.CameraAngleBits.North_0Deg,
+                CameraCardinalAngle.East90   => BotConstants.CameraAngleBits.East_90Deg,
+                CameraCardinalAngle.South180 => BotConstants.CameraAngleBits.South_180Deg,
+                CameraCardinalAngle.West270  => BotConstants.CameraAngleBits.West_270Deg,
+                CameraCardinalAngle.North360 => BotConstants.CameraAngleBits.North_360Deg,
+                _ => BotConstants.CameraAngleBits.North_0Deg
+            };
+        }
+
+        /// <summary>
+        /// Reads the camera horizontal yaw as the raw 4-byte float stored
+        /// at <c>+0x1A8</c>. The returned value is in radians and is NOT
+        /// normalised — multiple full rotations will accumulate.
+        /// </summary>
+        public float ReadCameraAngleRadians()
+        {
+            ulong ptrAddr = _moduleBase + CameraPtrOffset;
+            ulong cameraBase = ReadPointer(ptrAddr);
+            if (cameraBase == 0) return 0f;
+            return ReadFloat(cameraBase + (ulong)CameraAngleOffsetLocal);
+        }
+
+        /// <summary>
+        /// Reads the camera horizontal yaw and returns it as a normalised
+        /// degree value in <c>[0, 360)</c>.
+        /// </summary>
+        public float ReadCameraAngleDegreesNormalized()
+        {
+            float radians = ReadCameraAngleRadians();
+            float degrees = RadiansToDegrees(radians);
+            return NormalizeDegrees(degrees);
+        }
+
+        /// <summary>
+        /// Writes the exact 32-bit float bit-pattern (as <see cref="int"/>)
+        /// to <c>+0x1A8</c>. Use this when the bit-pattern is already known,
+        /// e.g. from <see cref="GetCameraAngleInt(CameraCardinalAngle)"/>.
+        /// </summary>
+        public void WriteCameraAngleInt(int angleIntValue)
+        {
+            ulong ptrAddr = _moduleBase + CameraPtrOffset;
+            ulong cameraBase = ReadPointer(ptrAddr);
+            if (cameraBase == 0) return;
+            WriteInt(cameraBase + (ulong)CameraAngleOffsetLocal, angleIntValue);
+        }
+
+        /// <summary>
+        /// Sets the camera horizontal yaw to a known cardinal direction by
+        /// writing its pre-computed exact bit-pattern. This bypasses any
+        /// float-to-int conversion rounding, so the result is exact.
+        /// </summary>
+        public void SetCameraAngle(CameraCardinalAngle angle)
+        {
+            WriteCameraAngleInt(GetCameraAngleInt(angle));
+        }
+
+        /// <summary>
+        /// Emits a one-line diagnostic log of the camera angle: raw 32-bit
+        /// integer at <c>+0x1A8</c>, hex representation, radians, degrees,
+        /// and degrees normalised to <c>[0, 360)</c>.
+        /// </summary>
+        public void LogCameraAngleDebug()
+        {
+            ulong ptrAddr = _moduleBase + CameraPtrOffset;
+            ulong cameraBase = ReadPointer(ptrAddr);
+            if (cameraBase == 0)
+            {
+                _log?.Invoke($"[CameraAngle] cameraBase=0 (pointer chain failed).");
+                return;
+            }
+
+            int raw = ReadInt(cameraBase + (ulong)CameraAngleOffsetLocal);
+            float radians = BitConverter.Int32BitsToSingle(raw);
+            float degrees = RadiansToDegrees(radians);
+            float normalized = NormalizeDegrees(degrees);
+
+            _log?.Invoke($"[CameraAngle] rawInt={raw}, hex=0x{raw:X8}, radians={radians:F6}, degrees={degrees:F3}, normalized={normalized:F3}");
+        }
+
+        // ── Unit-conversion helpers used by the camera-angle API ──
+
+        /// <summary>Wraps an angle in degrees into the <c>[0, 360)</c> range.</summary>
+        public static float NormalizeDegrees(float degrees)
+        {
+            degrees %= 360.0f;
+            if (degrees < 0.0f) degrees += 360.0f;
+            return degrees;
+        }
+
+        /// <summary>Wraps an angle in radians into the <c>[0, 2π)</c> range.</summary>
+        public static float NormalizeRadians(float radians)
+        {
+            float twoPi = (float)(2.0 * Math.PI);
+            if (float.IsNaN(radians) || float.IsInfinity(radians)) return 0f;
+            float normalized = radians % twoPi;
+            if (normalized < 0.0f) normalized += twoPi;
+            return normalized;
+        }
+
+        /// <summary>Converts radians to degrees.</summary>
+        public static float RadiansToDegrees(float radians) => radians * 180.0f / (float)Math.PI;
+
+        /// <summary>Converts degrees to radians.</summary>
+        public static float DegreesToRadians(float degrees) => degrees * (float)Math.PI / 180.0f;
+
+        /// <summary>Reinterprets a 32-bit bit-pattern as a <see cref="float"/>.</summary>
+        public static float IntBitsToFloat(int value) => BitConverter.Int32BitsToSingle(value);
+
+        /// <summary>Reinterprets a <see cref="float"/> as its 32-bit bit-pattern.</summary>
+        public static int FloatToIntBits(float value) => BitConverter.SingleToInt32Bits(value);
 
         /// <summary>
         /// Reads the raw unbounded vertical camera angle from memory (radians as 4-byte float).

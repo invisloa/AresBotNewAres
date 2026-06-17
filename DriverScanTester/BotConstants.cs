@@ -2,6 +2,8 @@
 //     Copyright (c) DriverScanTester. All rights reserved.
 // </copyright>
 
+using System;
+
 namespace DriverScanTester
 {
     // Buckerty blade BuckertyBlade 2530
@@ -51,6 +53,56 @@ namespace DriverScanTester
 
             /// <summary>Base freeze distance for heading lock near waypoints. Actual = max(reachThreshold*2, this).</summary>
             public const float HeadingFreezeDistanceBase = 10.0f;
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  CAMERA ANGLE — bit-patterns of the exact float radians stored at
+        //  [Ares.exe + 0x4704B0] + 0x1A8 for each cardinal direction.
+        //  These are the ONLY authoritative target values for writing the
+        //  camera angle via the int bit-pattern helper.
+        //  Source: exact measurement of full 4-byte float at +0x1A8.
+        //  Reading upper-2-bytes (+0x1AA) or partial-byte values like 16585
+        //  is incorrect — those are only fragments of the 32-bit float and
+        //  introduce multi-degree error and float corruption.
+        // ════════════════════════════════════════════════════════════════
+        public static class CameraAngleBits
+        {
+            /// <summary>0° (North) — 0x40C90FDB = 2π, normalised to 0°.</summary>
+            public const int North_0Deg   = 1086918619;
+
+            /// <summary>90° (East) — 0x40FB53D1 = 2π + π/2, normalised to 90°.</summary>
+            public const int East_90Deg   = 1090212817;
+
+            /// <summary>180° (South) — 0x4116CBE4 = 2π + π, normalised to 180°.</summary>
+            public const int South_180Deg = 1092013028;
+
+            /// <summary>270° (West) — 0x412FEDDF = 2π + 1.5π, normalised to 270°.</summary>
+            public const int West_270Deg  = 1093660127;
+
+            /// <summary>360° (full turn / North again) — 0x41490FDB = 4π, normalised to 360°.</summary>
+            public const int North_360Deg = 1095307227;
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  CARDINAL DIRECTIONS — exact float baselines for the math helper
+        //  that converts a bearing (degrees from North) into a camera-angle
+        //  radian float. N is the EXACT value at +0x1A8 for 0° (i.e. 2π).
+        //  E/S/W are derived using Math.PI — they line up with the
+        //  bit-patterns in CameraAngleBits above.
+        // ════════════════════════════════════════════════════════════════
+        public static class CardinalDirections
+        {
+            /// <summary>North baseline in game camera radians (exact 2π, derived from CameraAngleBits.North_0Deg).</summary>
+            public static readonly float N = BitConverter.Int32BitsToSingle(CameraAngleBits.North_0Deg);
+
+            /// <summary>East direction in game camera radians (N + π/2).</summary>
+            public static readonly float E = N + (float)(Math.PI / 2);
+
+            /// <summary>South direction in game camera radians (N + π).</summary>
+            public static readonly float S = N + (float)Math.PI;
+
+            /// <summary>West direction in game camera radians (N + 1.5π) — 270°, NOT 240°.</summary>
+            public static readonly float W = N + (float)(Math.PI * 1.5);
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -139,6 +191,18 @@ namespace DriverScanTester
 
             /// <summary>Default MovementPrecision for waypoints when not specified.</summary>
             public const int DefaultPrecision = 12; // Medium = 12
+
+            /// <summary>Maximum distance from a route segment for resync; beyond this, fallback to nearest waypoint.</summary>
+            public const float RouteResyncMaxSegmentDistance = 8.0f;
+
+            /// <summary>Distance threshold for considering player "near" a waypoint (used in non-loop final segment guard).</summary>
+            public const float RouteResyncNearWaypointDistance = 3.0f;
+
+            /// <summary>Segment-progress threshold above which the bot skips to the next segment (t >= this → skip).</summary>
+            public const float RouteResyncVeryCloseToSegmentEndT = 0.85f;
+
+            /// <summary>Distance epsilon for segment tie-breaking: if two segments have dist within this value, prefer the one closer to current target.</summary>
+            public const float RouteResyncTieDistanceEpsilon = 1.0f;
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -198,8 +262,14 @@ namespace DriverScanTester
             // Camera structure
             public const ulong CameraPtr = 0x4704B0;
             public const ulong CameraDistance = 0x1a6;
-            public const ulong CameraAngle = 0x1aa;
-            public const ulong CameraVerticalAngle = 0x1A8;
+            // Horizontal camera yaw (full 32-bit float) lives at +0x1A8.
+            // Do NOT read it from +0x1AA — that is only the upper 16 bits of
+            // the same float and produces partial/corrupt values.
+            public const ulong CameraAngle = 0x1A8;
+            // Legacy/placeholder — the true vertical pitch address is not
+            // verified in the new bot. Kept as a distinct value to avoid
+            // accidentally aliasing the horizontal yaw.
+            public const ulong CameraVerticalAngle = 0x1B0;
 
             // UI / Window
             public const ulong BaseNormalM = 0x471C88;

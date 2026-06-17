@@ -93,6 +93,9 @@ namespace DriverScanTester.Services
         private bool _isInitialized = false;
         private bool _goalReached = false;
 
+        // Route resync after combat
+        private bool _routeResyncPendingAfterCombat = false;
+
         // Temporary ghost waypoint tracking
         private readonly List<(float X, float Y)> _ghostWaypoints = new List<(float X, float Y)>();
         private const float GHOST_MATCH_EPSILON = BotConstants.Movement.GhostMatchEpsilon;
@@ -192,6 +195,18 @@ namespace DriverScanTester.Services
         private int _startMoveCount = 0;
         private int _stopMoveCount = 0;
         private static readonly Random _rng = new Random();
+
+        private enum RouteResyncResult
+        {
+            /// <summary>Queue was rebuilt with a new target.</summary>
+            Applied,
+            /// <summary>New target is the same as current queue peek — no change needed.</summary>
+            SameTarget,
+            /// <summary>Permanent condition — resync will never succeed (e.g. path too short).</summary>
+            TerminalSkip,
+            /// <summary>Temporary condition — resync may succeed later (e.g. unstuck active).</summary>
+            TemporarySkip
+        }
 
         private enum CombatRetargetCameraStage
         {
@@ -505,6 +520,14 @@ namespace DriverScanTester.Services
             {
                 _log($"[Tick {_tickCount}] Combat: {combatAction}");
             }
+
+            // If any combat action interrupts movement, mark route resync as pending
+            if (combatAction != CombatAction.None && !_routeResyncPendingAfterCombat)
+            {
+                _routeResyncPendingAfterCombat = true;
+                _log($"[RouteResync] pending set: reason={combatAction}");
+            }
+
             switch (combatAction)
             {
                 case CombatAction.TabTarget:
@@ -558,6 +581,23 @@ namespace DriverScanTester.Services
 
             // Combat is over — release skill 3 if held
             ReleaseSkillThree();
+
+            // ── Route resync after combat ──
+            if (_routeResyncPendingAfterCombat)
+            {
+                _log($"[RouteResync] executing: pos=({currX:F1},{currY:F1}) waypoints={_waypoints.Count}");
+                var resyncResult = RouteResyncFromCurrentPosition(currX, currY);
+
+                if (resyncResult != RouteResyncResult.TemporarySkip)
+                {
+                    _routeResyncPendingAfterCombat = false;
+                    _log($"[RouteResync] result={resyncResult} pendingCleared=True");
+                }
+                else
+                {
+                    _log($"[RouteResync] result={resyncResult} pendingKept=True");
+                }
+            }
 
             // ── Waypoint re-queue when empty (obstacle bypass) ──
             if (_waypoints.Count == 0 && !_goalReached)
@@ -1360,6 +1400,275 @@ namespace DriverScanTester.Services
                 targetCellX, targetCellY);
 
             _log($"[ActionStuck] Marked: source=({sourceCellX},{sourceCellY}) attempted=({attemptedCellX},{attemptedCellY}) dir=({attemptedDirX},{attemptedDirY}) bearing={attemptedBearing} reason={reason}");
+        }
+
+        // ========================================================================
+        //  ROUTE RESYNC AFTER COMBAT
+        // ========================================================================
+
+        /// <summary>
+        /// Finds the index of the current queue-peek waypoint within <see cref="_initialPath"/>.
+        /// Returns 0 if no match is found or the queue is empty.
+        /// </summary>
+        private int GetCurrentWaypointIndex()
+        {
+            if (_waypoints.Count == 0 || _initialPath.Count == 0)
+                return 0;
+
+            var current = _waypoints.Peek();
+            for (int i = 0; i < _initialPath.Count; i++)
+            {
+                if (GeometryUtils.Distance(current.X, current.Y, _initialPath[i].X, _initialPath[i].Y) < 0.5f)
+                    return i;
+            }
+            return 0;
+        }
+
+        /// <summary>
+        /// Finds the index of the nearest waypoint in <see cref="_initialPath"/>
+        /// to the given world position. Fallback when player is far from all segments.
+        /// </summary>
+        private int FindNearestWaypointIndex(float currX, float currY)
+        {
+            if (_initialPath.Count == 0) return 0;
+
+            int bestIdx = 0;
+            float bestDist = float.MaxValue;
+            for (int i = 0; i < _initialPath.Count; i++)
+            {
+                float d = GeometryUtils.Distance(currX, currY, _initialPath[i].X, _initialPath[i].Y);
+                if (d < bestDist)
+                {
+                    bestDist = d;
+                    bestIdx = i;
+                }
+            }
+            return bestIdx;
+        }
+
+        /// <summary>
+        /// Rebuilds <see cref="_waypoints"/> from <paramref name="startIndex"/> to the end of
+        /// <see cref="_initialPath"/>. Does nothing if the new target is effectively the same
+        /// as the current queue peek (within 0.5 distance). Clears relevant state on change.
+        /// </summary>
+        /// <returns>
+        /// <see cref="RouteResyncResult.TerminalSkip"/> if <paramref name="startIndex"/> is invalid;
+        /// <see cref="RouteResyncResult.SameTarget"/> if the new target equals the current queue peek;
+        /// <see cref="RouteResyncResult.Applied"/> if the queue was rebuilt.
+        /// </returns>
+        private RouteResyncResult RebuildWaypointQueueFromIndex(int startIndex, Waypoint oldTarget)
+        {
+            if (startIndex < 0 || startIndex >= _initialPath.Count)
+            {
+                _log($"[RouteResync] Rebuild skipped: invalid startIndex={startIndex}");
+                return RouteResyncResult.TerminalSkip;
+            }
+
+            // Check if new target is effectively the same as current target
+            if (_waypoints.Count > 0)
+            {
+                var currentTarget = _waypoints.Peek();
+                var newTarget = _initialPath[startIndex];
+                if (GeometryUtils.Distance(currentTarget.X, currentTarget.Y, newTarget.X, newTarget.Y) < 0.5f)
+                {
+                    _log($"[RouteResync] Rebuild skipped: same target (index={startIndex})");
+                    return RouteResyncResult.SameTarget;
+                }
+            }
+
+            int oldCount = _waypoints.Count;
+            _waypoints.Clear();
+
+            for (int i = startIndex; i < _initialPath.Count; i++)
+            {
+                _waypoints.Enqueue(_initialPath[i]);
+            }
+
+            _log($"[RouteResync] Queue rebuilt: oldCount={oldCount} newCount={_waypoints.Count} startIndex={startIndex}");
+
+            // Reset movement state since the target changed
+            ResetBearingState();
+            ResetActionStuckTracking();
+            ResetCombatStateForWaypointChange();
+            _consecutiveStuckAttempts = 0;
+
+            return RouteResyncResult.Applied;
+        }
+
+        /// <summary>
+        /// Called after combat ends. Synchronizes the movement queue with the player's
+        /// actual world position by finding the nearest route segment and updating the
+        /// next target accordingly.
+        /// </summary>
+        /// <returns>RouteResyncResult indicating whether the queue was changed or why it was skipped.</returns>
+        private RouteResyncResult RouteResyncFromCurrentPosition(float currX, float currY)
+        {
+            // ── Guard conditions ──
+            if (_initialPath.Count < 2)
+            {
+                _log("[RouteResync] skipped terminal: path-too-short (count < 2)");
+                return RouteResyncResult.TerminalSkip;
+            }
+            if (_isUnstuckRoutineActive)
+            {
+                _log("[RouteResync] skipped temporary: unstuck-active");
+                return RouteResyncResult.TemporarySkip;
+            }
+            if (_repotHelper.IsReportAndGoBackActive)
+            {
+                _log("[RouteResync] skipped temporary: report-and-go-back-active");
+                return RouteResyncResult.TemporarySkip;
+            }
+            if (_goalReached)
+            {
+                _log("[RouteResync] skipped terminal: goal-reached");
+                return RouteResyncResult.TerminalSkip;
+            }
+
+            var oldTarget = _waypoints.Count > 0
+                ? _waypoints.Peek()
+                : new Waypoint(0, 0, MovementPrecision.Medium, BotMode.OnlyMove);
+
+            int currentTargetIdx = _waypoints.Count > 0 ? GetCurrentWaypointIndex() : -1;
+
+            // ── Find the best (nearest) route segment ──
+            int bestSegmentStart = -1;
+            int bestSegmentEnd = -1;
+            float bestDist = float.MaxValue;
+            float bestT = 0f;
+
+            int normalSegmentCount = _initialPath.Count - 1;
+            int segmentCount = normalSegmentCount + (LoopPath ? 1 : 0);
+
+            for (int i = 0; i < segmentCount; i++)
+            {
+                int idxA = i;
+                int idxB = i + 1;
+
+                // Handle wrap-around segment for loop paths: last waypoint -> first waypoint
+                if (i >= normalSegmentCount)
+                {
+                    if (LoopPath)
+                    {
+                        idxA = _initialPath.Count - 1;
+                        idxB = 0;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+
+                var a = _initialPath[idxA];
+                var b = _initialPath[idxB];
+
+                var (_, _, t, dist) = GeometryUtils.ProjectPointOnSegment(
+                    currX, currY, a.X, a.Y, b.X, b.Y);
+
+                // Primary criterion: smallest distance to segment
+                const float tieEpsilon = BotConstants.Movement.RouteResyncTieDistanceEpsilon;
+                if (dist < bestDist - tieEpsilon)
+                {
+                    bestDist = dist;
+                    bestSegmentStart = idxA;
+                    bestSegmentEnd = idxB;
+                    bestT = t;
+                }
+                else if (dist <= bestDist + tieEpsilon && currentTargetIdx >= 0)
+                {
+                    // Tie-breaker: prefer segment whose end index is closer to the current queue target
+                    int segmentEndIdx = (LoopPath && idxA == _initialPath.Count - 1) ? 0 : idxA + 1;
+                    int bestEndIdx = (LoopPath && bestSegmentStart == _initialPath.Count - 1) ? 0 : bestSegmentStart + 1;
+
+                    int newDiff = Math.Abs(segmentEndIdx - currentTargetIdx);
+                    int bestDiff = Math.Abs(bestEndIdx - currentTargetIdx);
+
+                    if (newDiff < bestDiff)
+                    {
+                        bestDist = dist;
+                        bestSegmentStart = idxA;
+                        bestSegmentEnd = idxB;
+                        bestT = t;
+                    }
+                }
+            }
+
+            if (bestSegmentStart < 0)
+            {
+                _log("[RouteResync] skipped terminal: no-valid-segment");
+                return RouteResyncResult.TerminalSkip;
+            }
+
+            // ── Determine next waypoint index ──
+            string reason;
+            int nextWpIndex;
+
+            float maxSegDist = BotConstants.Movement.RouteResyncMaxSegmentDistance;
+
+            if (bestDist > maxSegDist)
+            {
+                // Fallback: player is far from all segments — go to nearest waypoint
+                nextWpIndex = FindNearestWaypointIndex(currX, currY);
+                reason = $"fallback-nearest-wp d={bestDist:F2}";
+            }
+            else if (bestT >= BotConstants.Movement.RouteResyncVeryCloseToSegmentEndT)
+            {
+                // Very close to the end of this segment — skip to the next segment
+                if (LoopPath && bestSegmentStart == _initialPath.Count - 1)
+                {
+                    // Wrap segment: last->first. End = 0, next after end = 1.
+                    nextWpIndex = 1;
+                }
+                else if (LoopPath && bestSegmentStart == _initialPath.Count - 2)
+                {
+                    // Last normal segment before wrap (N-2 -> N-1). Next after end wraps to 0.
+                    nextWpIndex = 0;
+                }
+                else
+                {
+                    nextWpIndex = bestSegmentStart + 2;
+                }
+
+                if (!LoopPath && nextWpIndex >= _initialPath.Count)
+                    nextWpIndex = _initialPath.Count - 1;
+
+                reason = "near-end-of-segment";
+            }
+            else
+            {
+                // In the middle or near the start — go to end of this segment
+                if (LoopPath && bestSegmentStart == _initialPath.Count - 1)
+                {
+                    // Wrap segment: last->first. End = 0.
+                    nextWpIndex = 0;
+                }
+                else
+                {
+                    nextWpIndex = bestSegmentStart + 1;
+                }
+
+                if (!LoopPath && nextWpIndex >= _initialPath.Count)
+                    nextWpIndex = _initialPath.Count - 1;
+
+                reason = "nearest-segment";
+            }
+
+            // ── Non-loop guard: if already near the last waypoint, let natural completion handle it ──
+            if (!LoopPath && nextWpIndex >= _initialPath.Count - 1)
+            {
+                float distToLast = GeometryUtils.Distance(currX, currY, _initialPath[^1].X, _initialPath[^1].Y);
+                if (distToLast <= BotConstants.Movement.RouteResyncNearWaypointDistance)
+                {
+                    _log($"[RouteResync] skipped terminal: already-near-last-waypoint d={distToLast:F2}");
+                    return RouteResyncResult.TerminalSkip;
+                }
+            }
+
+            // ── Log and apply ──
+            _log($"[RouteResync] bestSegment={bestSegmentStart}->{bestSegmentEnd} t={bestT:F2} dist={bestDist:F2} nextIndex={nextWpIndex} reason={reason}");
+            _log($"[RouteResync] oldTarget=({oldTarget.X:F1},{oldTarget.Y:F1}) newTarget=({_initialPath[nextWpIndex].X:F1},{_initialPath[nextWpIndex].Y:F1})");
+
+            return RebuildWaypointQueueFromIndex(nextWpIndex, oldTarget);
         }
 
         // ========================================================================
