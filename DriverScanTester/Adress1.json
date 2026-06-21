@@ -73,7 +73,7 @@
   },
   {
     "AddressText": "[Ares.exe \u002B 0x4704B0] \u002B 0x1A8",
-    "NameText": "C_CameraVertical",
+    "NameText": "C_CameraHorizontal",
     "ValueText": "16662",
     "ValueType": 1,
     "Priority": 2,
@@ -201,7 +201,7 @@
   },
   {
     "AddressText": "[Ares.exe \u002B 0x4704B0] \u002B 0x1BE",
-    "NameText": "C_CameraHorizontal",
+    "NameText": "C_CameraVertical",
     "ValueText": "16310",
     "ValueType": 1,
     "Priority": 2,

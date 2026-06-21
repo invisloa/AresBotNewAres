@@ -147,6 +147,7 @@
                         <TextBlock Text="Status:" VerticalAlignment="Center" Margin="10,0,5,0"/>
                         <TextBlock Text="{Binding IsLootBotRunning}" VerticalAlignment="Center" FontWeight="Bold"/>
                     </WrapPanel>
+                    <Button Content="Test Loot" Command="{Binding TestLootCommand}" Width="120" Margin="5,0,5,5" HorizontalAlignment="Left" Background="#FFF0D0FF"/>
                 </StackPanel>
             </GroupBox>
 

@@ -174,5 +174,17 @@ namespace DriverScanTester.Utils
             LeftClick();
             Thread.Sleep(delay);
         }
+
+        /// <summary>
+        /// Moves the mouse cursor to an absolute screen position WITHOUT adding
+        /// the window offset and WITHOUT clicking. Use this when the caller
+        /// already has true screen coordinates (e.g. derived from
+        /// GetClientRect + ClientToScreen) and just needs a move-only step.
+        /// </summary>
+        public static void SetCursorPositionAbsolute(int screenX, int screenY)
+        {
+            Log?.Invoke($"[Mouse] SetCursorPositionAbsolute -> screen ({screenX},{screenY}) [no offset, no click]");
+            SetCursorPos(screenX, screenY);
+        }
     }
 }

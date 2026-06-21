@@ -363,12 +363,14 @@ namespace DriverScanTester.ViewModels
         private void StartBotWithPath(List<DriverScanTester.Services.Waypoint> path, bool loop)
         {
             // 1. Stop existing
-            if (_isMovementBotRunning || _isHealManaBotRunning)
+            if (_isMovementBotRunning || _isHealManaBotRunning || _isLootBotRunning)
             {
                 _movementBotCts?.Cancel();
                 _healManaBotCts?.Cancel();
+                _lootBotCts?.Cancel();
                 _isMovementBotRunning = false;
                 _isHealManaBotRunning = false;
+                _isLootBotRunning = false;
             }
 
             // 2. Resolve base
@@ -401,6 +403,17 @@ namespace DriverScanTester.ViewModels
             _isHealManaBotRunning = true;
             var hmToken = _healManaBotCts.Token;
             Task.Run(() => HealManaBotLoop(hmToken), hmToken);
+
+            // 5. Start Loot
+            if (!_isLootBotRunning)
+            {
+                _lootSystem = new LootSystem(memoryService, AppendLog);
+                _lootBotCts = new CancellationTokenSource();
+                _isLootBotRunning = true;
+                var lootToken = _lootBotCts.Token;
+                Task.Run(() => LootBotLoop(lootToken), lootToken);
+                AppendLog("Loot Bot started.");
+            }
         }
 
         public void ShowSearchAddressWindow()
@@ -2831,6 +2844,41 @@ namespace DriverScanTester.ViewModels
                     ToggleMovementBot();
                 }
 
+                public void TestLootScan()
+                {
+                    if (!_isAttached) { AppendLog("Attach first."); return; }
+
+                    FocusGameWindow();
+
+                    ulong baseAddr = FindModuleInScanner("Ares.exe", false);
+                    if (baseAddr == 0)
+                    {
+                        _pointerScanner?.RefreshModules();
+                        baseAddr = FindModuleInScanner("Ares.exe", true);
+                    }
+                    if (baseAddr == 0)
+                    {
+                        AppendLog("Failed to resolve module base for Test Loot.");
+                        return;
+                    }
+
+                    try
+                    {
+                        AppendLog("=== Test Loot: Focusing window, scanning in 3 seconds... ===");
+                        System.Threading.Thread.Sleep(3000);
+
+                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
+                        var loot = new DriverScanTester.Services.LootSystem(memoryService, AppendLog);
+                        AppendLog("=== Test Loot: Starting single scan ===");
+                        loot.PerformSingleScan();
+                        AppendLog("=== Test Loot: Completed ===");
+                    }
+                    catch (Exception ex)
+                    {
+                        AppendLog($"=== Test Loot FAILED: {ex.Message} ===");
+                    }
+                }
+
                 public void TestSell(int profileOffsetX = 0, int profileOffsetY = 0)
                 {
                     if (!_isAttached) { AppendLog("Attach first."); return; }
@@ -2918,6 +2966,8 @@ namespace DriverScanTester.ViewModels
                     {
                         _movementBotCts?.Cancel();
                         _isMovementBotRunning = false;
+                        // Also stop loot bot when movement stops
+                        ToggleLootBot(false);
                         AppendLog("Movement Bot stopped.");
                     }
                     else
@@ -2942,6 +2992,12 @@ namespace DriverScanTester.ViewModels
                         var movementToken = _movementBotCts.Token;
                         Task.Run(() => MovementBotLoop(movementToken), movementToken);
                         AppendLog("Movement Bot started.");
+
+                        // Auto-start loot bot when movement starts
+                        if (!_isLootBotRunning)
+                        {
+                            ToggleLootBot(true);
+                        }
                     }
                 }
 

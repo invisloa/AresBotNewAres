@@ -1,6 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 using DriverScanTester.Models;
@@ -92,13 +95,24 @@ namespace DriverScanTester.Services
                 return;
             }
 
-            OpenShopWindow();
-            Thread.Sleep(700);
+            // ── NEW PRE-STEP: ensure the seller dialog is open ──
+            // 1. Force the known sell-view camera (distance 16720, vertical 16310)
+            //    so the shop NPC is in its expected on-screen position.
+            // 2. If the dialog is already open, skip scanning and continue.
+            // 3. Otherwise, scan the game window from center outward looking for
+            //    S_IsSellerPointed == 143850200 and right-click when found.
+            // 4. If after 5 full scans no seller mouseover is detected, take a
+            //    screenshot and stop gracefully — do not run the old sell logic.
+            SetSellCameraView();
 
             if (!_memory.IsShopOpen())
             {
-                _log("ItemSeller: Shop is not open after OpenShopWindow(). Skipping sell.");
-                return;
+                if (!TryOpenSellerDialogByScanning())
+                {
+                    CaptureSellFailureScreenshot();
+                    _log("ItemSeller: Seller mouseover (S_IsSellerPointed == 143850200) not found after 5 full window scans. Skipping sell.");
+                    return;
+                }
             }
 
             int noProgressPasses = 0;
@@ -173,17 +187,21 @@ namespace DriverScanTester.Services
             _howManyTries = 0;
             Thread.Sleep(50);
 
-            if (ItemsFromStorageListGenerate().Count != 0
-                && _memory.IsShopOpen()
-                && _memory.GetCurrentWeight() < MaxCollectWeightNormalValue)
+            // ── POST-SELL: high-value items left in inventory ──
+            // If more than 3 inventory slots still hold high-value items after
+            // the sell pass, the bot should make a trip to storage to bank them
+            // so they don't sit in the inventory at risk. The trip itself is
+            // not implemented yet — GoToStorage() is a stub.
+            int highValueSlotCount = CountHighValueItemsInInventory();
+            if (highValueSlotCount > 3)
             {
-                GameInput.PressKey(GameInput.VK_ESCAPE, GameInput.SCAN_ESCAPE);
-                MoveItemsFromStorage();
-                GameInput.PressKey(GameInput.VK_ESCAPE, GameInput.SCAN_ESCAPE);
-                GameInput.PressKey(GameInput.VK_ESCAPE, GameInput.SCAN_ESCAPE);
-                Thread.Sleep(500);
-                SellItemsByMouseMove();
+                _log($"ItemSeller: {highValueSlotCount} high-value item slots remain in inventory (> 3). Calling GoToStorage(city={_memory.GetCurrentMap()}).");
+                GoToStorage(_memory.GetCurrentMap());
             }
+
+            // Note: this method intentionally does NOT touch storage. The bot is
+            // configured to sell only inventory items; storage-to-inventory
+            // transfer is handled elsewhere (or not at all in this version).
         }
 
         public void SellSpecificSlot(int realSlot)
@@ -782,6 +800,75 @@ namespace DriverScanTester.Services
         }
 
         // ════════════════════════════════════════════════════════════════
+        //  POST-SELL HIGH-VALUE CHECK + STORAGE TRIP
+        //  CountHighValueItemsInInventory() — iterates both inventory tabs
+        //  and counts slots that contain at least one item flagged as
+        //  high-value by IsItemHighValue().
+        //
+        //  GoToStorage(int currentCityIntValue) — STUB. Called when more
+        //  than 3 high-value slots remain in inventory after the sell pass.
+        //  Intended to navigate the character to the city storage NPC and
+        //  bank the items. NOT IMPLEMENTED YET.
+        // ════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Threshold (exclusive) above which the post-sell logic decides to
+        /// call <see cref="GoToStorage"/>: if the count is strictly greater
+        /// than this, the storage trip is triggered.
+        /// </summary>
+        private const int HighValueSlotGoToStorageThreshold = 3;
+
+        /// <summary>
+        /// Counts how many inventory slots currently hold at least one item
+        /// that <see cref="IsItemHighValue"/> flags as high-value. Walks both
+        /// inventory tabs (real slots 6..35 and 36..71).
+        /// </summary>
+        private int CountHighValueItemsInInventory()
+        {
+            int highValueCount = 0;
+
+            for (int realSlot = FirstSellableRealSlotTab1; realSlot <= LastSellableRealSlotTab1; realSlot++)
+            {
+                int memorySlot = RealInventorySlotToMemorySlot(realSlot);
+                int count = _memory.TryGetSellSlotItemCount(memorySlot);
+                if (count > 0 && IsItemHighValue(realSlot, InventoryType.Inventory))
+                {
+                    highValueCount++;
+                }
+            }
+
+            for (int realSlot = FirstRealSlotTab2; realSlot <= LastRealSlotTab2; realSlot++)
+            {
+                int memorySlot = RealInventorySlotToMemorySlot(realSlot);
+                int count = _memory.TryGetSellSlotItemCount(memorySlot);
+                if (count > 0 && IsItemHighValue(realSlot, InventoryType.Inventory))
+                {
+                    highValueCount++;
+                }
+            }
+
+            return highValueCount;
+        }
+
+        /// <summary>
+        /// STUB. Intended to navigate the character to the city storage NPC
+        /// and bank the high-value items left in the inventory. Called from
+        /// <see cref="SellItemsByMouseMove"/> when more than
+        /// <see cref="HighValueSlotGoToStorageThreshold"/> high-value slots
+        /// remain after the sell pass. NOT IMPLEMENTED YET.
+        /// </summary>
+        /// <param name="currentCityIntValue">The current city / map id
+        /// (<c>_memory.GetCurrentMap()</c>) — the storage trip is expected
+        /// to use this to pick the right destination.</param>
+        private void GoToStorage(int currentCityIntValue)
+        {
+            _log($"ItemSeller: GoToStorage(currentCityIntValue={currentCityIntValue}) — STUB, not implemented yet.");
+            // TODO: implement the actual trip: path to storage NPC, open storage,
+            // move the high-value inventory slots into storage, return to the
+            // current city.
+        }
+
+        // ════════════════════════════════════════════════════════════════
         //  WEIGHT MANAGEMENT
         // ════════════════════════════════════════════════════════════════
 
@@ -804,6 +891,12 @@ namespace DriverScanTester.Services
         [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern nint FindWindow(string lpClassName, string lpWindowName);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool GetClientRect(nint hWnd, out RECT lpRect);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool ClientToScreen(nint hWnd, ref POINT lpPoint);
+
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT
         {
@@ -813,9 +906,17 @@ namespace DriverScanTester.Services
             public int Bottom;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT
+        {
+            public int X;
+            public int Y;
+        }
+
         private (int X, int Y) GetWindowOrigin()
         {
             nint hwnd = FindWindow(null, "Legend of Ares");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Ares");
             if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
             if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
 
@@ -924,6 +1025,311 @@ namespace DriverScanTester.Services
 
             _log($"[ItemSeller] OpenStorageWindow -> screen ({screenX},{screenY}) [relative (145,460) + window ({winX},{winY})]");
             MouseOperations.MoveAndLeftClickAbsolute(screenX, screenY, 200);
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  SELLER DIALOG OPEN (NEW PRE-STEP)
+        //  - SetSellCameraView()
+        //  - ReadIsSellerPointed()
+        //  - TryOpenSellerDialogByScanning()
+        //  - CaptureSellFailureScreenshot()
+        // These helpers gate SellItemsByMouseMove on the seller dialog
+        // actually being open before the existing sell logic runs.
+        // ════════════════════════════════════════════════════════════════
+
+        /// <summary>Expected value of S_IsSellerPointed when the mouse is over the seller NPC.</summary>
+        private const int SellerPointedValue = 143850200;
+
+        /// <summary>Step in pixels between scan points when sweeping the game window for the seller NPC.</summary>
+        private const int SellerScanStepPx = 40;
+
+        /// <summary>Number of full game-window scans attempted before giving up.</summary>
+        private const int SellerMaxFullScans = 1;
+
+        /// <summary>Per-point wait after moving the mouse (ms).</summary>
+        private const int SellerScanPointDelayMs = 100;
+
+        /// <summary>
+        /// Forces the camera to the known sell view: distance 16720 and vertical 16310.
+        /// This makes the seller NPC appear at its expected on-screen position so the
+        /// center-outward scan can find it.
+        /// </summary>
+        private void SetSellCameraView()
+        {
+            const short sellCameraDistance = 16720;
+
+            _log($"ItemSeller: Setting sell-view camera (distance={sellCameraDistance}, vertical={BotConstants.Camera.DefaultVerticalLock}).");
+            _memory.SetCameraDistance(sellCameraDistance);
+            _memory.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+        }
+
+        /// <summary>
+        /// Reads the seller-mouseover int at <c>[Ares.exe + 0x4704A8] + 0xC</c>.
+        /// 0 is treated as "not pointed" (also returned if the pointer chain fails).
+        /// </summary>
+        private int ReadIsSellerPointed()
+        {
+            return _memory.ReadIsSellerPointed();
+        }
+
+        /// <summary>
+        /// Tries to open the seller dialog by sweeping the mouse from the center of the
+        /// game window outward in a square spiral, looking for
+        /// <see cref="SellerPointedValue"/> from S_IsSellerPointed. When the value is
+        /// observed, the mouse is right-clicked and the existing IsShopOpen() check is
+        /// re-evaluated. Up to <see cref="SellerMaxFullScans"/> full window sweeps are
+        /// attempted. Returns true when IsShopOpen() becomes true at any point.
+        ///
+        /// All scan points use the actual game-window client rectangle so this works
+        /// regardless of window position or resolution.
+        /// </summary>
+        private bool TryOpenSellerDialogByScanning()
+        {
+            if (_memory.IsShopOpen())
+            {
+                _log("ItemSeller: Seller dialog already open before scan — skipping scan.");
+                return true;
+            }
+
+            if (!TryGetGameClientArea(out int clientOriginX, out int clientOriginY, out int clientWidth, out int clientHeight))
+            {
+                _log("ItemSeller: Could not resolve game client area for seller scan. Aborting scan.");
+                return false;
+            }
+
+            int centerClientX = clientWidth / 2;
+            int centerClientY = clientHeight / 2;
+            int step = Math.Max(1, SellerScanStepPx);
+            int maxRadius = Math.Max(clientWidth, clientHeight); // spiral upper bound
+
+            _log($"ItemSeller: Starting seller mouseover scan. client=({clientOriginX},{clientOriginY}) size=({clientWidth}x{clientHeight}), step={step}px.");
+
+            for (int scanIndex = 0; scanIndex < SellerMaxFullScans; scanIndex++)
+            {
+                if (_memory.IsShopOpen())
+                {
+                    _log($"ItemSeller: Seller dialog opened before scan #{scanIndex + 1} started.");
+                    return true;
+                }
+
+                _log($"ItemSeller: Seller scan #{scanIndex + 1}/{SellerMaxFullScans} — center-outward spiral.");
+
+                // Square spiral: start at center, then expand outward in concentric squares.
+                // A square spiral guarantees we cover the whole window when radius >= max dim.
+                // We sample on a step grid along the spiral path.
+                int pointsThisScan = 0;
+                bool sellerDetectedThisScan = false;
+
+                // Center first
+                if (ScanSellerAtClientPoint(centerClientX, centerClientY,
+                                            clientOriginX, clientOriginY,
+                                            clientWidth, clientHeight,
+                                            scanIndex, pointsThisScan++))
+                    return true;
+
+                for (int radius = step; radius <= maxRadius && !sellerDetectedThisScan; radius += step)
+                {
+                    // Top edge: from -radius to +radius
+                    for (int dx = -radius; dx <= radius; dx += step)
+                    {
+                        if (ScanSellerAtClientPoint(centerClientX + dx, centerClientY - radius,
+                                                    clientOriginX, clientOriginY,
+                                                    clientWidth, clientHeight,
+                                                    scanIndex, pointsThisScan++))
+                            return true;
+                    }
+                    // Right edge: from -radius+step to +radius-step
+                    for (int dy = -radius + step; dy <= radius; dy += step)
+                    {
+                        if (ScanSellerAtClientPoint(centerClientX + radius, centerClientY + dy,
+                                                    clientOriginX, clientOriginY,
+                                                    clientWidth, clientHeight,
+                                                    scanIndex, pointsThisScan++))
+                            return true;
+                    }
+                    // Bottom edge: from +radius-step down to -radius
+                    for (int dx = radius - step; dx >= -radius; dx -= step)
+                    {
+                        if (ScanSellerAtClientPoint(centerClientX + dx, centerClientY + radius,
+                                                    clientOriginX, clientOriginY,
+                                                    clientWidth, clientHeight,
+                                                    scanIndex, pointsThisScan++))
+                            return true;
+                    }
+                    // Left edge: from +radius-step up to -radius+step
+                    for (int dy = radius - step; dy >= -radius + step; dy -= step)
+                    {
+                        if (ScanSellerAtClientPoint(centerClientX - radius, centerClientY + dy,
+                                                    clientOriginX, clientOriginY,
+                                                    clientWidth, clientHeight,
+                                                    scanIndex, pointsThisScan++))
+                            return true;
+                    }
+                }
+
+                _log($"ItemSeller: Seller scan #{scanIndex + 1}/{SellerMaxFullScans} finished — no S_IsSellerPointed=={SellerPointedValue} match ({pointsThisScan} points checked).");
+            }
+
+            return _memory.IsShopOpen();
+        }
+
+        /// <summary>
+        /// Moves the mouse to one client-coordinate point, waits, reads
+        /// S_IsSellerPointed, and — if the seller is detected — right-clicks, then
+        /// clicks the "Shop" option in the seller context-menu dialog exactly like
+        /// the pre-refactor <c>OpenShopWindow()</c> did, and finally checks whether
+        /// the shop window actually opened. Returns true once the shop is open and
+        /// the scan should stop.
+        /// </summary>
+        private bool ScanSellerAtClientPoint(int clientX, int clientY,
+                                             int clientOriginX, int clientOriginY,
+                                             int clientWidth, int clientHeight,
+                                             int scanIndex, int pointIndex)
+        {
+            // Skip points outside the game window — the scan must not move the mouse
+            // beyond the actual game client rectangle.
+            if (clientX < 0 || clientY < 0 || clientX >= clientWidth || clientY >= clientHeight)
+                return false;
+
+            int screenX = clientOriginX + clientX;
+            int screenY = clientOriginY + clientY;
+
+            // Move and wait for the mouseover to update.
+            MouseOperations.SetCursorPositionAbsolute(screenX, screenY);
+            Thread.Sleep(SellerScanPointDelayMs);
+
+            int pointed = ReadIsSellerPointed();
+            if (pointed != SellerPointedValue)
+                return false;
+
+            _log($"ItemSeller: S_IsSellerPointed=={SellerPointedValue} detected at client ({clientX},{clientY}) screen ({screenX},{screenY}) [scan {scanIndex + 1}, point {pointIndex}]. Right-clicking to open seller dialog.");
+
+            // Right-click the seller NPC to open its context menu (Shop / Storage / etc.).
+            MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.RightDown);
+            Thread.Sleep(50);
+            MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.RightUp);
+            // Wait for the seller context-menu dialog to fully render before we try
+            // to click the "Shop" option — clicking too early hits nothing.
+            Thread.Sleep(1000);
+
+            // The right-click only opens the context menu — we still need to click the
+            // "Shop" option in that menu to actually open the shop window. This is the
+            // same click the pre-refactor OpenShopWindow() performed.
+            ClickShopOptionInDialog();
+
+            // Wait for the shop window to actually open.
+            int retry = 0;
+            while (!_memory.IsShopOpen() && retry < BotConstants.Repot.OpenShopRetries)
+            {
+                Thread.Sleep(BotConstants.Delays.OpenShopRetryMs);
+                retry++;
+            }
+
+            if (_memory.IsShopOpen())
+            {
+                // The shop window reports open before its item list has finished
+                // loading. Give the inventory an extra 500ms to populate so the
+                // existing sell logic doesn't click into an empty/half-loaded grid.
+                Thread.Sleep(500);
+                _log("ItemSeller: Shop window opened via mouseover scan + dialog click.");
+                return true;
+            }
+
+            _log("ItemSeller: Right-click + Shop-option click sent but shop window did not open — continuing scan.");
+            return false;
+        }
+
+        /// <summary>
+        /// Clicks the "Shop" option in the seller context-menu dialog at the same
+        /// window-relative position (145, 460) used by the pre-refactor
+        /// <c>OpenShopWindow()</c>. This is the click that actually opens the shop
+        /// window after the right-click on the seller NPC.
+        /// </summary>
+        private void ClickShopOptionInDialog()
+        {
+            const int shopRelX = 145;
+            const int shopRelY = 460;
+
+            var (winX, winY) = GetWindowOrigin();
+            int screenX = shopRelX + winX;
+            int screenY = shopRelY + winY;
+
+            _log($"[ItemSeller] ClickShopOptionInDialog -> screen ({screenX},{screenY}) [relative ({shopRelX},{shopRelY}) + window ({winX},{winY})]");
+            MouseOperations.MoveAndLeftClickAbsolute(screenX, screenY, 200);
+        }
+
+        /// <summary>
+        /// Resolves the game-window client area in screen coordinates. Returns false
+        /// when the game window cannot be located. The returned origin is the
+        /// top-left of the client area in absolute screen coordinates; width/height
+        /// are the client dimensions.
+        /// </summary>
+        private bool TryGetGameClientArea(out int originX, out int originY, out int width, out int height)
+        {
+            originX = 0; originY = 0; width = 0; height = 0;
+
+            nint hwnd = FindWindow(null, "Legend of Ares");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Ares");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
+            if (hwnd == nint.Zero) return false;
+
+            if (!GetClientRect(hwnd, out RECT clientRect))
+                return false;
+
+            POINT topLeft = new POINT { X = 0, Y = 0 };
+            if (!ClientToScreen(hwnd, ref topLeft))
+                return false;
+
+            originX = topLeft.X;
+            originY = topLeft.Y;
+            width = clientRect.Right - clientRect.Left;
+            height = clientRect.Bottom - clientRect.Top;
+            return width > 0 && height > 0;
+        }
+
+        /// <summary>
+        /// Captures a screenshot of the game client area into
+        /// <c>Screenshots/SellDialogScanFailed/&lt;timestamp&gt;.png</c> for debugging
+        /// when the seller dialog could not be opened. Errors are logged but never thrown.
+        /// </summary>
+        private void CaptureSellFailureScreenshot()
+        {
+            try
+            {
+                int captureX, captureY, captureW, captureH;
+                if (TryGetGameClientArea(out captureX, out captureY, out captureW, out captureH))
+                {
+                    // All good.
+                }
+                else
+                {
+                    captureX = 0;
+                    captureY = 0;
+                    captureW = BotConstants.Loot.BitmapWidth;
+                    captureH = BotConstants.Loot.BitmapHeight;
+                }
+
+                using (Bitmap bitmap = new Bitmap(captureW, captureH))
+                using (Graphics graphics = Graphics.FromImage(bitmap))
+                {
+                    graphics.CopyFromScreen(captureX, captureY, 0, 0, bitmap.Size);
+
+                    string screenshotsDir = Path.Combine(
+                        AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", "Screenshots", "SellDialogScanFailed");
+                    Directory.CreateDirectory(screenshotsDir);
+
+                    string fileName = $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.png";
+                    string filePath = Path.Combine(screenshotsDir, fileName);
+
+                    bitmap.Save(filePath, ImageFormat.Png);
+                    _log($"[ItemSeller] Seller-scan-failure screenshot saved: {filePath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                _log($"[ItemSeller] Failed to capture seller-scan-failure screenshot: {ex.Message}");
+            }
         }
 
         public enum InventoryType

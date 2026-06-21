@@ -114,6 +114,10 @@ namespace DriverScanTester.Services
         private const ulong IsNpcMousePointedPtrOffset = BotConstants.MemoryOffsets.IsNpcMousePointedPtr;
         private const ulong IsNpcMousePointedOffset = BotConstants.MemoryOffsets.IsNpcMousePointed;
 
+        // --- Offsets for S_IsSellerPointed (seller mouseover) ---
+        private const ulong IsSellerPointedPtrOffset = BotConstants.MemoryOffsets.IsSellerPointedPtr;
+        private const ulong IsSellerPointedOffset = BotConstants.MemoryOffsets.IsSellerPointed;
+
         public GameMemoryService(uint pid, ReadMemoryDelegate read, WriteMemoryDelegate write, ulong moduleBase, int pointerSize, Action<string> log)
         {
             _pid = pid;
@@ -448,6 +452,20 @@ namespace DriverScanTester.Services
             WriteShort(cameraBase + CameraDistanceOffset, distance);
         }
 
+        /// <summary>
+        /// Writes the camera vertical "lock" (16-bit) value used by the sell view,
+        /// e.g. 16310. The address is +0x1BE relative to the camera base, which
+        /// is distinct from the float vertical angle at +0x1B0 (CameraVerticalAngle).
+        /// </summary>
+        public void SetCameraVerticalLock(short value)
+        {
+            ulong ptrAddr = _moduleBase + CameraPtrOffset;
+            ulong cameraBase = ReadPointer(ptrAddr);
+            if (cameraBase == 0) return;
+
+            WriteShort(cameraBase + (ulong)BotConstants.MemoryOffsets.CameraVerticalLockOffset, value);
+        }
+
         public int GetAttackStatus()
         {
             // Using "Target selected working target" as indicator for attack readiness
@@ -495,6 +513,34 @@ namespace DriverScanTester.Services
             ulong baseAddr = ReadPointer(ptrAddr);
             if (baseAddr == 0) return false;
             return ReadByte(baseAddr + IsNpcMousePointedOffset) == 1;
+        }
+
+        /// <summary>
+        /// Reads the seller mouseover int from <c>[Ares.exe + 0x4704A8] + 0xC</c>.
+        /// Returns 0 when the pointer chain fails (treat 0 as "not pointed").
+        /// The expected value while the mouse is pointing at the seller/NPC is 143850200.
+        /// </summary>
+        public int ReadIsSellerPointed()
+        {
+            ulong ptrAddr = _moduleBase + IsSellerPointedPtrOffset;
+            ulong baseAddr = ReadPointer(ptrAddr);
+            if (baseAddr == 0) return 0;
+            return ReadInt(baseAddr + IsSellerPointedOffset);
+        }
+
+        /// <summary>
+        /// Checks whether a loot item is currently under the mouse cursor by reading
+        /// L_LootSelectedItem1 at <c>[Ares.exe + 0x4704A8] + 0xC</c> (same pointer as
+        /// seller mouseover but interpreted as a 16-bit value).
+        /// Returns true when the value equals <see cref="BotConstants.GameMagicValues.LootMouseOverValue"/> (10312).
+        /// </summary>
+        public bool IsLootMouseOver()
+        {
+            ulong ptrAddr = _moduleBase + IsSellerPointedPtrOffset;
+            ulong baseAddr = ReadPointer(ptrAddr);
+            if (baseAddr == 0) return false;
+            short value = ReadShort(baseAddr + IsSellerPointedOffset);
+            return value == BotConstants.GameMagicValues.LootMouseOverValue;
         }
 
         public short GetAttackSpeed()

@@ -1,0 +1,18 @@
+[
+  {
+    "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xC",
+    "NameText": "L_LootSelectedItem1",
+    "ValueText": "",
+    "ValueType": 1,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x470428] \u002B 0x164] - 0x352",
+    "NameText": "L_LootSelectedItem2",
+    "ValueText": "",
+    "ValueType": 1,
+    "Priority": 2,
+    "LockGroup": 0
+  }
+]

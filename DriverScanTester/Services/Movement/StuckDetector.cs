@@ -7,6 +7,7 @@ namespace DriverScanTester.Services
     ///
     /// Uses GetCurrentAction as the source of truth:
     /// - action 27 or 3 → running (not stuck)
+    /// - action 28      → being hit (not stuck)
     /// - action 25 or 1 → idle/stuck
     ///
     /// A single idle/stuck sample does NOT trigger — the detector requires
@@ -39,10 +40,10 @@ namespace DriverScanTester.Services
 
         // ── Static action helpers ──
 
-        /// <summary>Returns true if the action byte indicates the character is running / moving.</summary>
+        /// <summary>Returns true if the action byte indicates the character is running / moving / being hit (not stuck).</summary>
         public static bool IsActionRunning(byte currentAction)
         {
-            return currentAction == 27 || currentAction == 3;
+            return currentAction == 27 || currentAction == 3 || currentAction == 28;
         }
 
         /// <summary>Returns true if the action byte indicates the character is idle or stuck.</summary>
@@ -73,7 +74,7 @@ namespace DriverScanTester.Services
 
             byte currentAction = _memory.GetCurrentAction();
 
-            // Action running (27 or 3) → not stuck, reset everything
+            // Action running (27 or 3) or being hit (28) → not stuck, reset everything
             if (IsActionRunning(currentAction))
             {
                 ResetTracking();

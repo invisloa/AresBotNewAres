@@ -435,6 +435,7 @@ namespace DriverScanTester.Services
                 }
 
                 _memoryService.SetCameraDistance(cameraDistanceToApply);
+                _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
 
                 if (canUseCombatRetargetSearch && _combatRetargetCameraStage != CombatRetargetCameraStage.None)
                 {
@@ -479,6 +480,7 @@ namespace DriverScanTester.Services
                         _combatRetargetAwaitingSelection = false;
 
                         _memoryService.SetCameraDistance(CombatRetargetLowCameraDistance);
+                        _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
                         ReleaseSkillThree();
                         _log($"[CombatRetarget] Camera -> {CombatRetargetLowCameraDistance}, TAB");
                         await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
@@ -494,6 +496,7 @@ namespace DriverScanTester.Services
                         _combatRetargetAwaitingSelection = false;
 
                         _memoryService.SetCameraDistance(CombatRetargetMidCameraDistance);
+                        _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
                         ReleaseSkillThree();
                         _log($"[CombatRetarget] Camera -> {CombatRetargetMidCameraDistance}, TAB");
                         await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
@@ -506,6 +509,7 @@ namespace DriverScanTester.Services
                     {
                         _log($"[CombatRetarget] No mob selected at {CombatRetargetMidCameraDistance}. Restoring camera to {currentWaypoint.CameraDistanceLock}.");
                         _memoryService.SetCameraDistance(currentWaypoint.CameraDistanceLock);
+                        _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
                         ClearCombatRetargetSearch();
                         await Task.Delay(BotConstants.Delays.CombatAttackWaitMs, token);
                         return;
@@ -538,6 +542,7 @@ namespace DriverScanTester.Services
                         _log($"[CombatRetarget] Target lost after attack. Lowering camera to {CombatRetargetVeryLowCameraDistance}.");
                         StartCombatRetargetSearch();
                         _memoryService.SetCameraDistance(CombatRetargetVeryLowCameraDistance);
+                        _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
                         ReleaseSkillThree();
                         _log($"[CombatRetarget] Camera -> {CombatRetargetVeryLowCameraDistance}, TAB");
                         await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
@@ -651,6 +656,7 @@ namespace DriverScanTester.Services
 
                 var target = _waypoints.Peek();
                 _memoryService.SetCameraDistance(target.CameraDistanceLock);
+                _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
                 float distNow = GeometryUtils.Distance(currX, currY, target.X, target.Y);
                 float thresholdNow = GetEffectiveWaypointReachThreshold(target);
 

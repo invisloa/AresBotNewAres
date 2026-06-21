@@ -27,6 +27,9 @@ namespace DriverScanTester
             /// <summary>Default camera distance lock for waypoints and movement.</summary>
             public const short DefaultDistanceLock = 17020;
 
+            /// <summary>Default camera vertical lock value, matching the sell-view vertical (16310).</summary>
+            public const short DefaultVerticalLock = 16310;
+
             /// <summary>Very low (closest) camera distance used during combat retarget very-low-search phase.</summary>
             public const short CombatRetargetVeryLowDistance = 16880;
 
@@ -319,6 +322,16 @@ namespace DriverScanTester
             // Mouseover / NPC highlight
             public const ulong IsNpcMousePointedPtr = 0x471C84;
             public const ulong IsNpcMousePointed = 0x7C;
+
+            // Seller mouseover (S_IsSellerPointed)
+            // Pointer chain: [Ares.exe + <IsSellerPointedPtr>] + <IsSellerPointed>
+            // Expected value when the mouse is pointing at the seller/NPC: 143850200.
+            public const ulong IsSellerPointedPtr = 0x4704A8;
+            public const ulong IsSellerPointed = 0xC;
+
+            // Camera vertical "lock" used by the sell view (16-bit value, e.g. 16310).
+            // Distinct from the float vertical angle at +0x1B0 (CameraVerticalAngle).
+            public const ulong CameraVerticalLockOffset = 0x1BE;
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -341,10 +354,13 @@ namespace DriverScanTester
             /// <summary>Item types that should NOT be sold. (0 = empty slot)</summary>
             public static readonly int[] ItemsNotForSale = { 0, 246, 247, 1092, 1093, 1094, 1095, 3093 };
 
-            /// <summary>Item type identifier for SOD items.</summary>
+            /// <summary>Value of L_LootSelectedItem1 when a loot item is under the mouse cursor.</summary>
+            public const short LootMouseOverValue = 10312;
+
+            /// <summary>Item type identifier for SOD items (no longer readable — kept for reference).</summary>
             public const int Sod = -13799;
 
-            /// <summary>Item type identifier for SOP items.</summary>
+            /// <summary>Item type identifier for SOP items (no longer readable — kept for reference).</summary>
             public const int Sop = 32627;
 
             /// <summary>Item types that are event/snowman items (not to be sold).</summary>
@@ -433,6 +449,10 @@ namespace DriverScanTester
             // Escape key
             public const byte VkEscape = 0x1B;
             public const byte ScanEscape = 0x01;
+
+            // Space key
+            public const byte VkSpace = 0x20;
+            public const byte ScanSpace = 0x39;
 
             /// <summary>Delay in ms between key down and key up in PressKey().</summary>
             public const int PressKeyGapMs = 20;
@@ -524,6 +544,9 @@ namespace DriverScanTester
 
             /// <summary>Delay after left-click up (wait for animation).</summary>
             public const int CollectAnimationMs = 500;
+
+            /// <summary>Interval between spacebar presses for area loot.</summary>
+            public const int LootSpacePressMs = 300;
 
             // ── Teleport delays ──
             /// <summary>Delay after pressing teleport key.</summary>
@@ -678,13 +701,13 @@ namespace DriverScanTester
             public static readonly int[] SmallScanX = { 850, 1170 };
 
             /// <summary>Small scan region Y range.</summary>
-            public static readonly int[] SmallScanY = { 410, 730 };
+            public static readonly int[] SmallScanY = { 410, 660 };
 
             /// <summary>Big scan region X range.</summary>
             public static readonly int[] BigScanX = { 550, 1360 };
 
             /// <summary>Big scan region Y range.</summary>
-            public static readonly int[] BigScanY = { 290, 835 };
+            public static readonly int[] BigScanY = { 290, 760 };
 
             /// <summary>Character exclude zone — min X.</summary>
             public const int ExcludeXMin = 934;
