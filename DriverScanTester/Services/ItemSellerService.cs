@@ -1037,8 +1037,9 @@ namespace DriverScanTester.Services
         // actually being open before the existing sell logic runs.
         // ════════════════════════════════════════════════════════════════
 
-        /// <summary>Expected value of S_IsSellerPointed when the mouse is over the seller NPC.</summary>
-        private const int SellerPointedValue = 143850200;
+        /// <summary>Expected value of S_IsSellerPointed (read as clong / 32-bit) when the mouse is over the seller NPC.
+        /// Updated per user observation from 143850200 to 149110376.</summary>
+        private const int SellerPointedValue = 149110376;
 
         /// <summary>Step in pixels between scan points when sweeping the game window for the seller NPC.</summary>
         private const int SellerScanStepPx = 40;

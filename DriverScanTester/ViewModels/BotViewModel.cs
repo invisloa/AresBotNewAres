@@ -46,6 +46,7 @@ namespace DriverScanTester.ViewModels
             ToggleLootBotCommand = new RelayCommand(_ => ToggleLootBot(), _ => _main.IsAttached);
             OpenPathEditorCommand = new RelayCommand(_ => _main.OpenPathEditorInternal(), _ => _main.IsAttached);
             TestLootCommand = new RelayCommand(_ => _main.TestLootScan(), _ => _main.IsAttached);
+            TestScanAreaCommand = new RelayCommand(_ => _main.TestScanArea(), _ => _main.IsAttached);
             TestSellCommand = new RelayCommand(_ => {
                 int ox = 0, oy = 0;
                 if (!string.IsNullOrEmpty(SelectedProfileName))
@@ -195,6 +196,7 @@ namespace DriverScanTester.ViewModels
         public ICommand ToggleLootBotCommand { get; }
         public ICommand OpenPathEditorCommand { get; }
         public ICommand TestLootCommand { get; }
+        public ICommand TestScanAreaCommand { get; }
         public ICommand TestSellCommand { get; }
         public ICommand TestSellSpecificSlotCommand { get; }
         public ICommand ClearBotLogCommand { get; }

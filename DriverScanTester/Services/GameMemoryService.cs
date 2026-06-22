@@ -516,9 +516,9 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Reads the seller mouseover int from <c>[Ares.exe + 0x4704A8] + 0xC</c>.
+        /// Reads the seller mouseover int (clong / 32-bit) from <c>[Ares.exe + 0x4704A8] + 0xC</c>.
         /// Returns 0 when the pointer chain fails (treat 0 as "not pointed").
-        /// The expected value while the mouse is pointing at the seller/NPC is 143850200.
+        /// The expected value while the mouse is pointing at the seller/NPC is 149110376.
         /// </summary>
         public int ReadIsSellerPointed()
         {
@@ -531,15 +531,15 @@ namespace DriverScanTester.Services
         /// <summary>
         /// Checks whether a loot item is currently under the mouse cursor by reading
         /// L_LootSelectedItem1 at <c>[Ares.exe + 0x4704A8] + 0xC</c> (same pointer as
-        /// seller mouseover but interpreted as a 16-bit value).
-        /// Returns true when the value equals <see cref="BotConstants.GameMagicValues.LootMouseOverValue"/> (10312).
+        /// seller mouseover but interpreted as a 32-bit clong value).
+        /// Returns true when the value equals <see cref="BotConstants.GameMagicValues.LootMouseOverValue"/> (99448280).
         /// </summary>
         public bool IsLootMouseOver()
         {
             ulong ptrAddr = _moduleBase + IsSellerPointedPtrOffset;
             ulong baseAddr = ReadPointer(ptrAddr);
             if (baseAddr == 0) return false;
-            short value = ReadShort(baseAddr + IsSellerPointedOffset);
+            int value = ReadInt(baseAddr + IsSellerPointedOffset);
             return value == BotConstants.GameMagicValues.LootMouseOverValue;
         }
 
@@ -741,6 +741,33 @@ namespace DriverScanTester.Services
             if (slotBase == 0) return 0;
             ulong addr = slotBase + (ulong)(slotIndex * BotConstants.GameMagicValues.InventorySlotSize) + 6;
             return ReadByte(addr);
+        }
+
+        /// <summary>
+        /// Reads all inventory slot item types and returns a simple checksum (sum of non-zero item types).
+        /// Used to detect if items were collected after a spacebar press.
+        /// Reads in bulk for performance: 72 slots × 2 bytes = 144 bytes.
+        /// </summary>
+        public int ComputeInventoryChecksum()
+        {
+            ulong slotBase = TryGetInventorySlotBase();
+            if (slotBase == 0) return 0;
+
+            // Read all 72 slot item types in one bulk read (72 × 2 = 144 bytes).
+            byte[] buffer = new byte[BotConstants.GameMagicValues.TotalInventorySlots * 2];
+            if (_read(_pid, slotBase, buffer, out uint bytesRead) && bytesRead >= 2)
+            {
+                int checksum = 0;
+                int slotsToRead = Math.Min(BotConstants.GameMagicValues.TotalInventorySlots, (int)bytesRead / 2);
+                for (int i = 0; i < slotsToRead; i++)
+                {
+                    short itemType = BitConverter.ToInt16(buffer, i * 2);
+                    if (itemType != 0) 
+                        checksum += itemType;
+                }
+                return checksum;
+            }
+            return 0;
         }
 
         /// <summary>

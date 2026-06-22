@@ -354,8 +354,9 @@ namespace DriverScanTester
             /// <summary>Item types that should NOT be sold. (0 = empty slot)</summary>
             public static readonly int[] ItemsNotForSale = { 0, 246, 247, 1092, 1093, 1094, 1095, 3093 };
 
-            /// <summary>Value of L_LootSelectedItem1 when a loot item is under the mouse cursor.</summary>
-            public const short LootMouseOverValue = 10312;
+            /// <summary>Value of L_LootSelectedItem1 (read as clong / 32-bit) when a loot item is under the mouse cursor.
+            /// Updated from 16344 (16-bit) to 99448280 (32-bit) per user observation.</summary>
+            public const int LootMouseOverValue = 99448280;
 
             /// <summary>Item type identifier for SOD items (no longer readable — kept for reference).</summary>
             public const int Sod = -13799;
@@ -697,11 +698,13 @@ namespace DriverScanTester
         // ════════════════════════════════════════════════════════════════
         public static class Loot
         {
-            /// <summary>Small scan region X range.</summary>
-            public static readonly int[] SmallScanX = { 850, 1170 };
+            /// <summary>Small scan region X range. Centered on the character
+            /// (was previously shifted +50 to the right).</summary>
+            public static readonly int[] SmallScanX = { 800, 1120 };
 
-            /// <summary>Small scan region Y range.</summary>
-            public static readonly int[] SmallScanY = { 410, 660 };
+            /// <summary>Small scan region Y range. Centered on the character
+            /// at old-screen-abs (964, 503).</summary>
+            public static readonly int[] SmallScanY = { 378, 628 };
 
             /// <summary>Big scan region X range.</summary>
             public static readonly int[] BigScanX = { 550, 1360 };
@@ -709,17 +712,18 @@ namespace DriverScanTester
             /// <summary>Big scan region Y range.</summary>
             public static readonly int[] BigScanY = { 290, 760 };
 
-            /// <summary>Character exclude zone — min X.</summary>
-            public const int ExcludeXMin = 934;
+            /// <summary>Character exclude zone — min X. Centered on the character.</summary>
+            public const int ExcludeXMin = 880;
 
             /// <summary>Character exclude zone — max X.</summary>
-            public const int ExcludeXMax = 979;
+            public const int ExcludeXMax = 1040;
 
-            /// <summary>Character exclude zone — min Y.</summary>
-            public const int ExcludeYMin = 500;
+            /// <summary>Character exclude zone — min Y. Centered on the character
+            /// at old-screen-abs Y=503.</summary>
+            public const int ExcludeYMin = 418;
 
             /// <summary>Character exclude zone — max Y.</summary>
-            public const int ExcludeYMax = 538;
+            public const int ExcludeYMax = 588;
 
             /// <summary>Bitmap width for screen capture.</summary>
             public const int BitmapWidth = 1370;

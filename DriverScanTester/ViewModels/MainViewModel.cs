@@ -2879,6 +2879,40 @@ namespace DriverScanTester.ViewModels
                     }
                 }
 
+                public void TestScanArea()
+                {
+                    if (!_isAttached) { AppendLog("Attach first."); return; }
+
+                    FocusGameWindow();
+
+                    ulong baseAddr = FindModuleInScanner("Ares.exe", false);
+                    if (baseAddr == 0)
+                    {
+                        _pointerScanner?.RefreshModules();
+                        baseAddr = FindModuleInScanner("Ares.exe", true);
+                    }
+                    if (baseAddr == 0)
+                    {
+                        AppendLog("Failed to resolve module base for Test Scan Area.");
+                        return;
+                    }
+
+                    try
+                    {
+                        AppendLog("=== Test Scan Area: Focusing window, tracing in 3 seconds... ===");
+                        System.Threading.Thread.Sleep(3000);
+
+                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
+                        var loot = new DriverScanTester.Services.LootSystem(memoryService, AppendLog);
+                        loot.TestScanAreaVisualization();
+                        AppendLog("=== Test Scan Area: Completed ===");
+                    }
+                    catch (Exception ex)
+                    {
+                        AppendLog($"=== Test Scan Area FAILED: {ex.Message} ===");
+                    }
+                }
+
                 public void TestSell(int profileOffsetX = 0, int profileOffsetY = 0)
                 {
                     if (!_isAttached) { AppendLog("Attach first."); return; }
