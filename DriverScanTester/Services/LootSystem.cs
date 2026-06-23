@@ -424,6 +424,19 @@ namespace DriverScanTester.Services
                 return;
             }
 
+            // ── If in city, NEVER scan — cancel any loot in progress. ──
+            if (_memoryService.GetIsInCity())
+            {
+                StopScanSpacebarSpam();
+                if (_lootState != LootMachineState.Idle)
+                {
+                    _lootState = LootMachineState.Idle;
+                    _consecutiveEmptySpacePresses = 0;
+                }
+                await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                return;
+            }
+
             // ── Track mob selection to detect mob death ──
             bool isMobSelected = _memoryService.IsMobSelected();
 
@@ -438,7 +451,7 @@ namespace DriverScanTester.Services
                 _wasMobSelectedPrev = false;
             }
 
-            // ── If a mob is selected (combat), TOTALLY CANCEL any loot in progress. ──
+            // ── If a mob is selected, TOTALLY CANCEL any loot in progress. ──
             if (isMobSelected)
             {
                 _wasMobSelectedPrev = true;
@@ -516,10 +529,10 @@ namespace DriverScanTester.Services
                         // Check combat between each press so we cancel immediately
                         // if a mob gets selected during the presses.
                         GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
-                        if (_memoryService.IsMobSelected()) { _lootState = LootMachineState.Idle; break; }
+                        if (_memoryService.IsMobSelected() || _memoryService.GetIsInCity()) { _lootState = LootMachineState.Idle; break; }
                         Thread.Sleep(30);
                         GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
-                        if (_memoryService.IsMobSelected()) { _lootState = LootMachineState.Idle; break; }
+                        if (_memoryService.IsMobSelected() || _memoryService.GetIsInCity()) { _lootState = LootMachineState.Idle; break; }
                         Thread.Sleep(30);
                         GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                         _log("[Loot] Spacebar pressed x3 (area loot).");
@@ -698,9 +711,9 @@ namespace DriverScanTester.Services
                 for (int x = xStart; x < xEnd; x++)
                 {
                     // If a mob was selected during scan (combat started), abort immediately.
-                        if (_memoryService.IsMobSelected())
+                        if (_memoryService.IsMobSelected() || _memoryService.GetIsInCity())
                         {
-                            _log($"[Loot] {regionName}: mob selected during scan — aborting.");
+                            _log($"[Loot] {regionName}: combat/city detected during scan — aborting.");
                             return false;
                         }
 
@@ -766,9 +779,8 @@ namespace DriverScanTester.Services
         {
             WaitMouseInPosition(x, y);
 
-            // If a mob got selected by the mouse movement (mouse passed over a mob),
-            // abort immediately — don't click.
-            if (_memoryService.IsMobSelected())
+            // If a mob got selected or player entered city, abort immediately.
+            if (_memoryService.IsMobSelected() || _memoryService.GetIsInCity())
             {
                 return false;
             }
@@ -813,10 +825,10 @@ namespace DriverScanTester.Services
 
             while (true)
             {
-                // If a mob was selected during movement (combat started), abort immediately.
-                if (_memoryService.IsMobSelected())
+                // If a mob was selected or player entered city, abort immediately.
+                if (_memoryService.IsMobSelected() || _memoryService.GetIsInCity())
                 {
-                    _log("[Loot] Mob selected during collection — aborting spacebar spam.");
+                    _log("[Loot] Mob/city detected during collection — aborting spacebar spam.");
                     break;
                 }
 

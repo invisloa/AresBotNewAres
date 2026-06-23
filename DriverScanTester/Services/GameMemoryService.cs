@@ -477,11 +477,9 @@ namespace DriverScanTester.Services
 
         public bool IsMobSelected()
         {
-            ulong ptr = ReadPointer(_moduleBase + MobSelectedPtrOffset2);
-            if (ptr == 0) return false;
-            ulong sub = ReadPointer(ptr + MobSelectedSubOffset2);
-            if (sub == 0) return false;
-            int targetId = ReadInt(sub + MobSelectedOffset2);
+            ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
+            if (playerBase == 0) return false;
+            int targetId = ReadInt(playerBase + TargetSelectedOffset);
             // targetId > MaxMobTargetId indicates a player character — skip it
             return targetId != 0 && targetId < BotConstants.Combat.MaxMobTargetId;
         }
