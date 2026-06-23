@@ -532,7 +532,7 @@ namespace DriverScanTester.Services
         /// Checks whether a loot item is currently under the mouse cursor by reading
         /// L_LootSelectedItem1 at <c>[Ares.exe + 0x4704A8] + 0xC</c> (same pointer as
         /// seller mouseover but interpreted as a 32-bit clong value).
-        /// Returns true when the value equals <see cref="BotConstants.GameMagicValues.LootMouseOverValue"/> (99448280).
+        /// Returns true when the value equals <see cref="BotConstants.GameMagicValues.LootMouseOverValue"/>.
         /// </summary>
         public bool IsLootMouseOver()
         {

@@ -15,6 +15,6 @@ sc.exe start $drv
 sc.exe stop SexyDriver
 Copy-Item $src $dst -Force
 sc.exe start SexyDriver
-
+               
 
 

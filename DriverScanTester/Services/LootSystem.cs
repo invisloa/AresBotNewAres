@@ -30,18 +30,28 @@ namespace DriverScanTester.Services
         private Graphics _graphics;
         private bool _wasSodDetected = false;
 
+        // ── Scan-phase spacebar spam ──
+        // A background task spams spacebar while the pixel scan is running,
+        // collecting items under the character (the exclude zone) that the
+        // pixel scan skips.
+        private CancellationTokenSource? _scanSpacebarCts;
+
         // ── Loot state machine ──
         // Phases:
-        //   AreaLoot    → press spacebar, snapshot inventory, check after 100ms
+        //   PostMobTab  → after mob death, press TAB to check for more mobs
+        //   AreaLoot    → press spacebar x3, snapshot inventory, check after 100ms
         //   AreaLootWait→ compare inventory snapshot; if changed → keep spacebar-looting;
         //                  if no change after several tries → switch to Scan
         //   Scan        → pixel-scan for SOD/SOP white pixels and collect them
-        private enum LootMachineState { Idle, AreaLoot, AreaLootWait, Scan }
+        private enum LootMachineState { Idle, PostMobTab, PostMobTabWait, AreaLoot, AreaLootWait, Scan }
         private LootMachineState _lootState = LootMachineState.Idle;
         private DateTime _nextActionTime = DateTime.MinValue;
         private int _inventoryChecksumBefore;
         private int _consecutiveEmptySpacePresses;
         private const int MaxEmptySpacePressesBeforeScan = 3;
+
+        /// <summary>Previous tick's IsMobSelected value — used to detect mob death.</summary>
+        private bool _wasMobSelectedPrev = false;
 
         // ── Client-area tracking (window-position independent) ──
         private int _clientOriginX;
@@ -286,16 +296,28 @@ namespace DriverScanTester.Services
 
             // Keep rescanning until a scan returns no items, so multiple
             // visible items get collected in sequence.
+            // While scanning, spam spacebar on a background thread to collect
+            // items under the character (the pixel-scan exclude zone).
             int collectedCount = 0;
             int pass = 0;
             while (true)
             {
                 pass++;
                 _log($"[Loot] === Scan pass {pass} ===");
-                if (!PixelScan())
+
+                StartScanSpacebarSpam();
+                try
                 {
-                    break;
+                    if (!PixelScan())
+                    {
+                        break;
+                    }
                 }
+                finally
+                {
+                    StopScanSpacebarSpam();
+                }
+
                 collectedCount++;
                 _log($"[Loot] Pass {pass} collected an item, rescanning…");
             }
@@ -402,11 +424,46 @@ namespace DriverScanTester.Services
                 return;
             }
 
+            // ── Track mob selection to detect mob death ──
+            bool isMobSelected = _memoryService.IsMobSelected();
+
+            // Mob just died (was selected → no longer selected) → TAB first to
+            // check if there are more mobs to kill before starting loot.
+            if (_wasMobSelectedPrev && !isMobSelected)
+            {
+                _log("[Loot] Mob killed — pressing TAB to check for more mobs.");
+                _lootState = LootMachineState.PostMobTab;
+                _nextActionTime = DateTime.UtcNow;
+                _consecutiveEmptySpacePresses = 0;
+                _wasMobSelectedPrev = false;
+            }
+
+            // ── If a mob is selected (combat), TOTALLY CANCEL any loot in progress. ──
+            if (isMobSelected)
+            {
+                _wasMobSelectedPrev = true;
+
+                // Kill any running spacebar-spam background task from the Scan phase.
+                StopScanSpacebarSpam();
+
+                if (_lootState != LootMachineState.Idle)
+                {
+                    _log("[Loot] Mob selected — cancelling loot, returning to Idle.");
+                    _lootState = LootMachineState.Idle;
+                    _consecutiveEmptySpacePresses = 0;
+                }
+                await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                return;
+            }
+
             // ── Loot state machine ──
-            // AreaLoot → press space, snapshot inventory → AreaLootWait → compare →
+            // PostMobTab→ press TAB, wait, check if a new mob was targeted
+            //   (mob found) → Idle (let combat handle it)
+            //   (no mob)   → AreaLoot (start looting)
+            // AreaLoot → press spacebar x3, snapshot inventory → AreaLootWait → compare →
             //   (items collected) → AreaLoot again (keep spacebar-looting)
-            //   (no items after N tries) → Scan
-            // Scan → pixel-scan for items, collect them → back to AreaLoot
+            //   (no items after N tries) → Scan (with 200ms delay)
+            // Scan → pixel-scan for items (meanwhile spam spacebar), collect them → back to AreaLoot
             // ===================================================================
 
             switch (_lootState)
@@ -418,18 +475,54 @@ namespace DriverScanTester.Services
                     _consecutiveEmptySpacePresses = 0;
                     goto case LootMachineState.AreaLoot;
 
+                case LootMachineState.PostMobTab:
+                    if (DateTime.UtcNow >= _nextActionTime)
+                    {
+                        // Press TAB to try finding another mob to kill.
+                        GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
+                        _log("[Loot] TAB pressed — checking for more mobs.");
+
+                        // Wait for game to register the TAB target before checking.
+                        _nextActionTime = DateTime.UtcNow.AddMilliseconds(
+                            BotConstants.Delays.TabRetargetMs);
+                        _lootState = LootMachineState.PostMobTabWait;
+                    }
+                    break;
+
+                case LootMachineState.PostMobTabWait:
+                    if (DateTime.UtcNow >= _nextActionTime)
+                    {
+                        if (_memoryService.IsMobSelected())
+                        {
+                            _log("[Loot] New mob acquired after TAB — staying in Idle.");
+                            _lootState = LootMachineState.Idle;
+                        }
+                        else
+                        {
+                            _log("[Loot] No more mobs — starting area loot.");
+                            _lootState = LootMachineState.AreaLoot;
+                            _nextActionTime = DateTime.UtcNow;
+                        }
+                    }
+                    break;
+
                 case LootMachineState.AreaLoot:
                     if (DateTime.UtcNow >= _nextActionTime)
                     {
                         // Snapshot inventory before pressing spacebar.
                         _inventoryChecksumBefore = _memoryService.ComputeInventoryChecksum();
 
-                        // Press spacebar TWICE with 30ms gap — game sometimes needs a
-                        // double-press to register area-loot pickup properly.
+                        // Press spacebar THREE times with 30ms gap.
+                        // Check combat between each press so we cancel immediately
+                        // if a mob gets selected during the presses.
                         GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                        if (_memoryService.IsMobSelected()) { _lootState = LootMachineState.Idle; break; }
                         Thread.Sleep(30);
                         GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
-                        _log("[Loot] Spacebar pressed x2 (area loot).");
+                        if (_memoryService.IsMobSelected()) { _lootState = LootMachineState.Idle; break; }
+                        Thread.Sleep(30);
+                        GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                        _log("[Loot] Spacebar pressed x3 (area loot).");
 
                         // Wait ~100ms for the game to process the pickup,
                         // then check if anything was collected.
@@ -455,10 +548,11 @@ namespace DriverScanTester.Services
                             _consecutiveEmptySpacePresses++;
                             if (_consecutiveEmptySpacePresses >= MaxEmptySpacePressesBeforeScan)
                             {
-                                // No more items being picked up by spacebar → switch to scan.
-                                _log("[Loot] No more items via spacebar — switching to pixel scan.");
+                                // No more items via spacebar → switch to scan after 200ms delay.
+                                _log("[Loot] No more items via spacebar — switching to pixel scan in 200ms.");
                                 _consecutiveEmptySpacePresses = 0;
                                 _lootState = LootMachineState.Scan;
+                                _nextActionTime = DateTime.UtcNow.AddMilliseconds(200);
                             }
                             else
                             {
@@ -472,27 +566,82 @@ namespace DriverScanTester.Services
                     break;
 
                 case LootMachineState.Scan:
+                    // Wait 200ms delay before taking the screenshot (let game settle).
+                    if (DateTime.UtcNow < _nextActionTime)
+                        break;
+
                     // Keep rescanning until a scan returns with no items.
                     // Each successful scan loots one (or more) items, then we rescan
                     // to catch any other items that may be visible.
-                    if (PixelScan())
+                    //
+                    // While scanning, spam spacebar on a background thread so items
+                    // under the character (the pixel-scan exclude zone) are collected
+                    // via area-loot simultaneously.
+                    StartScanSpacebarSpam();
+                    try
                     {
-                        // Item was found and collected — rescan next tick to drain remaining items.
-                        _nextActionTime = DateTime.UtcNow.AddMilliseconds(50);
+                        if (PixelScan())
+                        {
+                            // Item was found and collected — rescan next tick to drain remaining items.
+                            _nextActionTime = DateTime.UtcNow.AddMilliseconds(50);
+                        }
+                        else
+                        {
+                            // No items found by scan — end the loot phase, restart with area-loot.
+                            _log("[Loot] Scan complete — no more visible items.");
+                            _lootState = LootMachineState.Idle;
+                            _nextActionTime = DateTime.UtcNow.AddMilliseconds(
+                                BotConstants.Delays.LootSpacePressMs);
+                            _consecutiveEmptySpacePresses = 0;
+                        }
                     }
-                    else
+                    finally
                     {
-                        // No items found by scan — end the loot phase, restart with area-loot.
-                        _log("[Loot] Scan complete — no more visible items.");
-                        _lootState = LootMachineState.Idle;
-                        _nextActionTime = DateTime.UtcNow.AddMilliseconds(
-                            BotConstants.Delays.LootSpacePressMs);
-                        _consecutiveEmptySpacePresses = 0;
+                        StopScanSpacebarSpam();
                     }
                     break;
             }
 
             await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+        }
+
+        /// <summary>
+        /// Starts a background task that spams spacebar (double-press every ~130ms)
+        /// while the pixel scan is active. This collects items under the character
+        /// (the exclude zone that the pixel scan skips) and any items reachable
+        /// via mouseover + spacebar area-loot.
+        /// </summary>
+        private void StartScanSpacebarSpam()
+        {
+            StopScanSpacebarSpam(); // Ensure any previous spam task is stopped.
+            _scanSpacebarCts = new CancellationTokenSource();
+            var token = _scanSpacebarCts.Token;
+
+            Task.Run(() =>
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    // Double-press spacebar with 30ms gap (same pattern as AreaLoot).
+                    GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                    Thread.Sleep(30);
+                    GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                    Thread.Sleep(100);
+                }
+            }, token);
+        }
+
+        /// <summary>
+        /// Stops the scan-phase spacebar spam task.
+        /// Safe to call even if no spam task is running.
+        /// </summary>
+        private void StopScanSpacebarSpam()
+        {
+            if (_scanSpacebarCts != null)
+            {
+                _scanSpacebarCts.Cancel();
+                _scanSpacebarCts.Dispose();
+                _scanSpacebarCts = null;
+            }
         }
 
         private bool PixelScan()
@@ -548,6 +697,13 @@ namespace DriverScanTester.Services
 
                 for (int x = xStart; x < xEnd; x++)
                 {
+                    // If a mob was selected during scan (combat started), abort immediately.
+                        if (_memoryService.IsMobSelected())
+                        {
+                            _log($"[Loot] {regionName}: mob selected during scan — aborting.");
+                            return false;
+                        }
+
                     for (int y = yStart; y < yEnd; y++)
                     {
                         Color pixelColor = _bitmap.GetPixel(x, y);
@@ -610,6 +766,13 @@ namespace DriverScanTester.Services
         {
             WaitMouseInPosition(x, y);
 
+            // If a mob got selected by the mouse movement (mouse passed over a mob),
+            // abort immediately — don't click.
+            if (_memoryService.IsMobSelected())
+            {
+                return false;
+            }
+
             // If the mouseover indicator shows an item is selected (value 10312),
             // treat it as SOD/SOP and collect regardless of the specific item type.
             if (_memoryService.IsLootMouseOver())
@@ -634,15 +797,29 @@ namespace DriverScanTester.Services
 
             MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.LeftUp);
 
-            // Spam spacebar while the character is moving to the item and after arrival
-            // — the character might pass by other items on the way. Press 2x (30ms gap)
-            // for consistency with AreaLoot, check inventory after each round, and
-            // keep spamming until items stop being collected or we timeout.
+            // Spam spacebar while the character auto-walks to the clicked item.
+            // There is NO hardcoded timeout — we track the player's X position
+            // to detect when the character starts moving (click registered) and
+            // when they stop (arrived at item).  Spacebar keeps pressing during
+            // the entire walk so the character also area-loots any other items
+            // it passes along the way.
             int checksumBefore = _memoryService.ComputeInventoryChecksum();
-            int movementStartTime = Environment.TickCount;
-            int movementTimeoutMs = 3000;
-            while (Environment.TickCount - movementStartTime < movementTimeoutMs)
+            int beforeX = positionBeforeClick;
+            int lastX = beforeX;
+            int stableChecks = 0;
+            const int stableRequired = 3;
+            int emptyRounds = 0;
+            const int maxEmptyRounds = 10;
+
+            while (true)
             {
+                // If a mob was selected during movement (combat started), abort immediately.
+                if (_memoryService.IsMobSelected())
+                {
+                    _log("[Loot] Mob selected during collection — aborting spacebar spam.");
+                    break;
+                }
+
                 GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                 Thread.Sleep(30);
                 GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
@@ -651,12 +828,40 @@ namespace DriverScanTester.Services
                 int checksumAfter = _memoryService.ComputeInventoryChecksum();
                 if (checksumAfter != checksumBefore)
                 {
-                    // Item collected — reset baseline, keep spamming.
+                    // Item collected along the way — reset baseline, keep spamming.
                     checksumBefore = checksumAfter;
+                    emptyRounds = 0;
                     continue;
                 }
-                // No item this round — no more items in path, stop spamming.
-                break;
+
+                emptyRounds++;
+
+                int currentX = GetPositionX();
+                bool hasMoved = currentX != beforeX;
+
+                if (hasMoved)
+                {
+                    if (currentX == lastX)
+                    {
+                        stableChecks++;
+                        if (stableChecks >= stableRequired)
+                        {
+                            // Character reached destination and stopped — done.
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        stableChecks = 0; // still walking
+                    }
+                    lastX = currentX;
+                }
+
+                // Safety exit: no movement at all or walking too long with no pickups.
+                if (emptyRounds >= maxEmptyRounds)
+                {
+                    break;
+                }
             }
 
             Thread.Sleep(BotConstants.Delays.CollectAnimationMs); // Wait for collection animation/movement

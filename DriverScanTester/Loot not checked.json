@@ -1,17 +1,73 @@
 [
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xC",
-    "NameText": "L_LootSelectedItem1",
+    "NameText": "80",
+    "ValueText": "",
+    "ValueType": 0,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xd",
+    "NameText": "21",
+    "ValueText": "",
+    "ValueType": 0,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xb",
+    "NameText": "20480 x2 od normal??",
     "ValueText": "",
     "ValueType": 1,
     "Priority": 2,
     "LockGroup": 0
   },
   {
-    "AddressText": "[[Ares.exe \u002B 0x470428] \u002B 0x164] - 0x352",
-    "NameText": "L_LootSelectedItem2",
+    "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xc",
+    "NameText": "5456",
     "ValueText": "",
     "ValueType": 1,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xd",
+    "NameText": "18197",
+    "ValueText": "",
+    "ValueType": 1,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xa",
+    "NameText": "357564537 ",
+    "ValueText": "",
+    "ValueType": 2,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xb",
+    "NameText": "1192579072",
+    "ValueText": "",
+    "ValueType": 2,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xc",
+    "NameText": "138876240",
+    "ValueText": "",
+    "ValueType": 2,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xd",
+    "NameText": "542485",
+    "ValueText": "",
+    "ValueType": 2,
     "Priority": 2,
     "LockGroup": 0
   }

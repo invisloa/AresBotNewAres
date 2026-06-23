@@ -355,8 +355,8 @@ namespace DriverScanTester
             public static readonly int[] ItemsNotForSale = { 0, 246, 247, 1092, 1093, 1094, 1095, 3093 };
 
             /// <summary>Value of L_LootSelectedItem1 (read as clong / 32-bit) when a loot item is under the mouse cursor.
-            /// Updated from 16344 (16-bit) to 99448280 (32-bit) per user observation.</summary>
-            public const int LootMouseOverValue = 99448280;
+            /// Updated from 16344 (16-bit) to 99448280 (32-bit) to 138876240 per user observation.</summary>
+            public const int LootMouseOverValue = 138876240;
 
             /// <summary>Item type identifier for SOD items (no longer readable — kept for reference).</summary>
             public const int Sod = -13799;
