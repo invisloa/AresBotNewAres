@@ -179,6 +179,18 @@ namespace DriverScanTester.Services
                 _wasAttacking = false;
                 _combatIdleStartTime = DateTime.MinValue;
 
+                // In loot mode (MoveAndAttackAndLoot) with no mob selected,
+                // do NOT TAB — the loot system needs uninterrupted time to
+                // scan for items after a kill.  The loot system handles its
+                // own PostMobTab (one TAB to check for more mobs) and then
+                // scans.  Only after loot finishes (returns to Idle) may the
+                // combat system TAB again.  Without this guard the combat TAB
+                // selects the next mob instantly, cancelling loot.
+                if (currentMode == BotMode.MoveAndAttackAndLoot && !memoryService.IsMobSelected())
+                {
+                    return CombatAction.None;
+                }
+
                 if ((DateTime.Now - _lastMoveModeTabTime).TotalSeconds >= MOVE_MODE_TAB_INTERVAL_SECONDS)
                 {
                     _log("[Key] TAB (target cycle — move mode)");

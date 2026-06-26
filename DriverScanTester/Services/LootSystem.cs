@@ -587,11 +587,11 @@ namespace DriverScanTester.Services
                             _consecutiveEmptySpacePresses++;
                             if (_consecutiveEmptySpacePresses >= MaxEmptySpacePressesBeforeScan)
                             {
-                                // No more items via spacebar → switch to scan after 200ms delay.
-                                _log("[Loot] No more items via spacebar — switching to pixel scan in 200ms.");
+                                // No more items via spacebar → switch to scan after 100ms delay.
+                                _log("[Loot] No more items via spacebar — switching to pixel scan in 100ms.");
                                 _consecutiveEmptySpacePresses = 0;
                                 _lootState = LootMachineState.Scan;
-                                _nextActionTime = DateTime.UtcNow.AddMilliseconds(200);
+                                _nextActionTime = DateTime.UtcNow.AddMilliseconds(100);
                             }
                             else
                             {
@@ -605,17 +605,26 @@ namespace DriverScanTester.Services
                     break;
 
                 case LootMachineState.Scan:
-                    // Wait 200ms delay before taking the screenshot (let game settle).
-                    if (DateTime.UtcNow < _nextActionTime)
-                        break;
+                    // ── Zoom camera in so ground items appear larger and their
+                    //    white highlights / name text become more detectable. ──
+                    _memoryService.SetCameraDistance(BotConstants.Camera.LootScanDistance);
 
-                    // Keep rescanning until a scan returns with no items.
-                    // Each successful scan loots one (or more) items, then we rescan
-                    // to catch any other items that may be visible.
-                    //
-                    // While scanning, spam spacebar on a background thread so items
-                    // under the character (the pixel-scan exclude zone) are collected
-                    // via area-loot simultaneously.
+                    // ── Wait 100ms before the pixel scan. During this wait,
+                    //    spam spacebar to opportunistically collect items that
+                    //    are already under / near the character via area-loot. ──
+                    if (DateTime.UtcNow < _nextActionTime)
+                    {
+                        GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                        Thread.Sleep(30);
+                        GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                        break;
+                    }
+
+                    // ── Pixel scan with spacebar spam on a background thread.
+                    //    Each successful scan loots one (or more) items, then we
+                    //    rescan to catch any other items that may be visible.
+                    //    Items under the character (exclude zone) get collected
+                    //    via the background spacebar spam simultaneously. ──
                     StartScanSpacebarSpam();
                     try
                     {
@@ -660,6 +669,11 @@ namespace DriverScanTester.Services
             {
                 while (!token.IsCancellationRequested)
                 {
+                    // If the game window lost focus, stop spamming to avoid
+                    // sending keypresses to whatever window is on top.
+                    if (GetForegroundWindow() != _hwnd)
+                        break;
+
                     // Double-press spacebar with 30ms gap (same pattern as AreaLoot).
                     GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                     Thread.Sleep(30);
@@ -685,6 +699,11 @@ namespace DriverScanTester.Services
 
         private bool PixelScan()
         {
+            // Zoom camera in during the pixel scan so ground items appear larger
+            // and their white highlights / name text become more detectable.
+            // The movement/combat system restores its own distance on the next tick.
+            _memoryService.SetCameraDistance(BotConstants.Camera.LootScanDistance);
+
             if (ScanRegion(smallX, smallY, "SmallScan"))
             {
                 return true;

@@ -106,6 +106,9 @@ namespace DriverScanTester.Services
         // Route resync after combat
         private bool _routeResyncPendingAfterCombat = false;
 
+        // Post-combat loot pause — prevents waypoint advancement while loot scans.
+        private DateTime _postCombatLootPauseUntil = DateTime.MinValue;
+
         // Temporary ghost waypoint tracking
         private readonly List<(float X, float Y)> _ghostWaypoints = new List<(float X, float Y)>();
         private const float GHOST_MATCH_EPSILON = BotConstants.Movement.GhostMatchEpsilon;
@@ -629,6 +632,44 @@ namespace DriverScanTester.Services
 
             // Combat is over — release skill 3 if held
             ReleaseSkillThree();
+
+            // ── Post-combat loot pause ──
+            // When in MoveAndAttackAndLoot mode and no mob is selected, wait a
+            // short time before advancing waypoints so the loot system (running
+            // in a parallel task) gets a chance to pixel-scan the area for items.
+            // Without this pause the character walks away before loot finishes,
+            // leaving drops on the ground.
+            if (currentMode == BotMode.MoveAndAttackAndLoot && !_memoryService.IsMobSelected())
+            {
+                bool isCombatStillActive = combatAction == CombatAction.Attack ||
+                                           combatAction == CombatAction.CombatWait ||
+                                           combatAction == CombatAction.TabTarget ||
+                                           combatAction == CombatAction.PotionsUsed;
+
+                if (!isCombatStillActive)
+                {
+                    if (_postCombatLootPauseUntil == DateTime.MinValue)
+                    {
+                        _postCombatLootPauseUntil = DateTime.UtcNow.AddMilliseconds(
+                            BotConstants.Delays.PostCombatLootWaitMs);
+                        _log($"[LootWait] Post-combat pause for loot scan ({BotConstants.Delays.PostCombatLootWaitMs}ms).");
+                    }
+
+                    if (DateTime.UtcNow < _postCombatLootPauseUntil)
+                    {
+                        await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                        return;
+                    }
+
+                    // Pause expired — clear flag so we can proceed.
+                    _postCombatLootPauseUntil = DateTime.MinValue;
+                }
+            }
+            else
+            {
+                // Mob selected or not in loot mode — no loot pause needed.
+                _postCombatLootPauseUntil = DateTime.MinValue;
+            }
 
             // If in standby mode, don't fall through to waypoint queue logic.
             if (_finalStandbyActive)

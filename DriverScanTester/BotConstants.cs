@@ -27,6 +27,10 @@ namespace DriverScanTester
             /// <summary>Default camera distance lock for waypoints and movement.</summary>
             public const short DefaultDistanceLock = 17020;
 
+            /// <summary>Camera distance used during loot pixel scan — zoomed in closer so
+            /// ground items appear larger and their white highlights are more detectable.</summary>
+            public const short LootScanDistance = 16800;
+
             /// <summary>Default camera vertical lock value, matching the sell-view vertical (16310).</summary>
             public const short DefaultVerticalLock = 16310;
 
@@ -542,6 +546,14 @@ namespace DriverScanTester
             // ── Loot delays ──
             /// <summary>Loot system update interval.</summary>
             public const int LootUpdateMs = 10;
+
+            /// <summary>
+            /// After killing a mob in MoveAndAttackAndLoot mode, the movement system
+            /// waits this long before advancing waypoints, giving the loot system time
+            /// to scan for items.  During this pause the loot system runs its pixel scan
+            /// and/or area-loot; the combat system may still attack if a new mob appears.
+            /// </summary>
+            public const int PostCombatLootWaitMs = 1500;
 
             /// <summary>Delay after left-click down during collection.</summary>
             public const int CollectClickHoldMs = 50;
