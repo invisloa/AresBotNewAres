@@ -43,12 +43,15 @@ namespace DriverScanTester.Services
         //   AreaLootWait→ compare inventory snapshot; if changed → keep spacebar-looting;
         //                  if no change after several tries → switch to Scan
         //   Scan        → pixel-scan for SOD/SOP white pixels and collect them
-        private enum LootMachineState { Idle, PostMobTab, PostMobTabWait, AreaLoot, AreaLootWait, Scan }
+        private enum LootMachineState { Idle, PostMobTab, AreaLoot, AreaLootWait, Scan }
         private LootMachineState _lootState = LootMachineState.Idle;
         private DateTime _nextActionTime = DateTime.MinValue;
         private int _inventoryChecksumBefore;
         private int _consecutiveEmptySpacePresses;
         private const int MaxEmptySpacePressesBeforeScan = 3;
+
+        /// <summary>Game window handle — stored during ResolveClientOrigin().</summary>
+        private nint _hwnd;
 
         /// <summary>Previous tick's IsMobSelected value — used to detect mob death.</summary>
         private bool _wasMobSelectedPrev = false;
@@ -120,6 +123,9 @@ namespace DriverScanTester.Services
         [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern nint FindWindow(string lpClassName, string lpWindowName);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern nint GetForegroundWindow();
+
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT
         {
@@ -144,12 +150,12 @@ namespace DriverScanTester.Services
         /// </summary>
         private void ResolveClientOrigin()
         {
-            nint hwnd = FindWindow(null, "Legend of Ares");
-            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Ares");
-            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
-            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
+            _hwnd = FindWindow(null, "Legend of Ares");
+            if (_hwnd == nint.Zero) _hwnd = FindWindow(null, "Ares");
+            if (_hwnd == nint.Zero) _hwnd = FindWindow(null, "Nostalgia");
+            if (_hwnd == nint.Zero) _hwnd = FindWindow(null, "Epic Of Ares Client");
 
-            if (hwnd == nint.Zero)
+            if (_hwnd == nint.Zero)
             {
                 _log("[LootSystem] Game window not found — falling back to screen origin (0,0).");
                 _clientOriginX = 0;
@@ -164,7 +170,7 @@ namespace DriverScanTester.Services
                 return;
             }
 
-            if (!GetClientRect(hwnd, out RECT clientRect))
+            if (!GetClientRect(_hwnd, out RECT clientRect))
             {
                 _log("[LootSystem] GetClientRect failed — falling back to screen origin (0,0).");
                 _clientOriginX = 0;
@@ -180,7 +186,7 @@ namespace DriverScanTester.Services
             }
 
             POINT topLeft = new POINT { X = 0, Y = 0 };
-            if (!ClientToScreen(hwnd, ref topLeft))
+            if (!ClientToScreen(_hwnd, ref topLeft))
             {
                 _log("[LootSystem] ClientToScreen failed — falling back to screen origin (0,0).");
                 _clientOriginX = 0;
@@ -236,7 +242,7 @@ namespace DriverScanTester.Services
             // coordOffsetX = windowRect.Left - ExpectedWindowX
             // coordOffsetY = windowRect.Top  - ExpectedWindowY
 
-            if (!GetWindowRect(hwnd, out RECT windowRect))
+            if (!GetWindowRect(_hwnd, out RECT windowRect))
             {
                 _log("[LootSystem] GetWindowRect failed — cannot compute reference offset. Falling back to raw client-relative.");
                 _referenceClientOriginX = 0;
@@ -267,12 +273,18 @@ namespace DriverScanTester.Services
         // from the old bot, designed for reference client origin (450, 103).
 
         /// <summary>
-        /// Converts a hardcoded-old-screen-absolute X or Y to bitmap-local coordinates
-        /// (relative to the current capture origin).  This is the index used for
-        /// GetPixel on the captured bitmap.
+        /// Converts a hardcoded-old-screen-absolute X to bitmap-local X coordinate
+        /// (relative to the current capture origin).
         /// </summary>
-        private int OldScreenToBitmapLocal(int oldScreenAbs) =>
-            oldScreenAbs - _referenceClientOriginX;
+        private int OldScreenXToBitmapLocal(int oldScreenAbsX) =>
+            oldScreenAbsX - _referenceClientOriginX;
+
+        /// <summary>
+        /// Converts a hardcoded-old-screen-absolute Y to bitmap-local Y coordinate
+        /// (relative to the current capture origin).
+        /// </summary>
+        private int OldScreenYToBitmapLocal(int oldScreenAbsY) =>
+            oldScreenAbsY - _referenceClientOriginY;
 
         /// <summary>
         /// Converts bitmap-local coordinates BACK to screen-absolute coordinates
@@ -286,12 +298,27 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// Checks whether the game window is the foreground (focused) window.
+        /// If it is not, the loot bot must NOT scan or click to avoid acting on other windows.
+        /// </summary>
+        private bool IsGameWindowFocused()
+        {
+            return GetForegroundWindow() == _hwnd;
+        }
+
+        /// <summary>
         /// Runs the pixel scan pass (for testing via the "Test Loot" button).
         /// Skips the startup delay and spacebar press, but keeps rescanning
         /// until a scan returns with no items, so multiple visible items get collected.
         /// </summary>
         public void PerformSingleScan()
         {
+            if (!IsGameWindowFocused())
+            {
+                _log("[Loot] Test scan aborted — game window is not in focus.");
+                return;
+            }
+
             LogScanArea();
 
             // Keep rescanning until a scan returns no items, so multiple
@@ -404,8 +431,8 @@ namespace DriverScanTester.Services
             int x1 = xRange[0], x2 = xRange[1];
             int y1 = yRange[0], y2 = yRange[1];
             // Convert hardcoded screen-absolute ranges → bitmap-local intervals
-            int bx1 = OldScreenToBitmapLocal(x1), bx2 = OldScreenToBitmapLocal(x2);
-            int by1 = OldScreenToBitmapLocal(y1), by2 = OldScreenToBitmapLocal(y2);
+            int bx1 = OldScreenXToBitmapLocal(x1), bx2 = OldScreenXToBitmapLocal(x2);
+            int by1 = OldScreenYToBitmapLocal(y1), by2 = OldScreenYToBitmapLocal(y2);
             // Convert bitmap-local → current screen
             var (sx1, sy1) = BitmapLocalToScreen(bx1, by1);
             var (sx2, sy2) = BitmapLocalToScreen(bx2, by2);
@@ -416,6 +443,22 @@ namespace DriverScanTester.Services
 
         public async Task Update(CancellationToken token)
         {
+            // ── Focus guard: if the game window is NOT the foreground window,
+            //    do NOT scan, click, or send any input.  Without this check the
+            //    loot bot would capture/click whatever window is on top (desktop,
+            //    folders, browser, etc.) and potentially cause damage. ──
+            if (!IsGameWindowFocused())
+            {
+                StopScanSpacebarSpam();
+                if (_lootState != LootMachineState.Idle)
+                {
+                    _lootState = LootMachineState.Idle;
+                    _consecutiveEmptySpacePresses = 0;
+                }
+                await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                return;
+            }
+
             // ── Startup guard: skip scans for the first 5 seconds so loot
             //    doesn't start before the movement bot begins moving. ──
             if ((DateTime.UtcNow - _createdAt).TotalSeconds < 5.0)
@@ -470,9 +513,8 @@ namespace DriverScanTester.Services
             }
 
             // ── Loot state machine ──
-            // PostMobTab→ press TAB, wait, check if a new mob was targeted
-            //   (mob found) → Idle (let combat handle it)
-            //   (no mob)   → AreaLoot (start looting)
+            // PostMobTab→ press TAB (best-effort), then immediately start loot
+            //   (combat bot's own targeting interrupts loot via IsMobSelected check)
             // AreaLoot → press spacebar x3, snapshot inventory → AreaLootWait → compare →
             //   (items collected) → AreaLoot again (keep spacebar-looting)
             //   (no items after N tries) → Scan (with 200ms delay)
@@ -491,31 +533,15 @@ namespace DriverScanTester.Services
                 case LootMachineState.PostMobTab:
                     if (DateTime.UtcNow >= _nextActionTime)
                     {
-                        // Press TAB to try finding another mob to kill.
+                        // Press TAB (best-effort to check for more mobs), then immediately
+                        // start area loot. If the combat bot acquires a new target, the
+                        // IsMobSelected check at the top of Update() will cancel loot.
+                        // Do NOT wait and check the result — that would conflict with
+                        // the combat bot's own TAB cycle and might keep loot stuck in Idle.
                         GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
-                        _log("[Loot] TAB pressed — checking for more mobs.");
-
-                        // Wait for game to register the TAB target before checking.
-                        _nextActionTime = DateTime.UtcNow.AddMilliseconds(
-                            BotConstants.Delays.TabRetargetMs);
-                        _lootState = LootMachineState.PostMobTabWait;
-                    }
-                    break;
-
-                case LootMachineState.PostMobTabWait:
-                    if (DateTime.UtcNow >= _nextActionTime)
-                    {
-                        if (_memoryService.IsMobSelected())
-                        {
-                            _log("[Loot] New mob acquired after TAB — staying in Idle.");
-                            _lootState = LootMachineState.Idle;
-                        }
-                        else
-                        {
-                            _log("[Loot] No more mobs — starting area loot.");
-                            _lootState = LootMachineState.AreaLoot;
-                            _nextActionTime = DateTime.UtcNow;
-                        }
+                        _log("[Loot] TAB pressed — starting area loot.");
+                        _lootState = LootMachineState.AreaLoot;
+                        _nextActionTime = DateTime.UtcNow;
                     }
                     break;
 
@@ -708,15 +734,18 @@ namespace DriverScanTester.Services
                 int whiteCount = 0;
                 int scanPixels = (xEnd - xStart) * (yEnd - yStart);
 
+                // Check once before starting the scan — if a mob is selected or we're in
+                // city, abort immediately.  During the scan the top-level Update() will
+                // cancel on the next tick if a new mob gets selected, so we don't need
+                // to check on every pixel.
+                if (_memoryService.IsMobSelected() || _memoryService.GetIsInCity())
+                {
+                    _log($"[Loot] {regionName}: combat/city detected before scan — aborting.");
+                    return false;
+                }
+
                 for (int x = xStart; x < xEnd; x++)
                 {
-                    // If a mob was selected during scan (combat started), abort immediately.
-                        if (_memoryService.IsMobSelected() || _memoryService.GetIsInCity())
-                        {
-                            _log($"[Loot] {regionName}: combat/city detected during scan — aborting.");
-                            return false;
-                        }
-
                     for (int y = yStart; y < yEnd; y++)
                     {
                         Color pixelColor = _bitmap.GetPixel(x, y);

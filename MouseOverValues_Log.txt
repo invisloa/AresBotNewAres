@@ -1,0 +1,60 @@
+================================================================================
+ MOUSEOVER ITEM VALUE LOG
+================================================================================
+
+Plik sluzy do rejestrowania wartosci spod adresu [Ares.exe + 0x4704A8] + 0xC
+odczytywanych jako 32-bitowa liczba calkowita (cl / int) podczas gdy kursor
+myszy znajduje sie nad przedmiotem (itemem) w grze Ares.
+
+Wartosc ta jest uzywana przez loot bota (LootSystem / GameMemoryService)
+do detekcji czy pod kursorem znajduje sie item do podniesienia. Dokladnie
+chodzi o stala `LootMouseOverValue` w `BotConstants.GameMagicValues`.
+
+DLACZEGO TE WARTOSCI SA ZAPISYWANE:
+- Adres bazowy: Ares.exe + 0x4704A8
+- Offset: +0xC (12 w systemie dziesietnym)
+- Pointer chain: [Ares.exe + 0x4704A8] -> odczytana wartosc wskaznika + 0xC
+- Sposob odczytu: 32-bit integer (cl / int / ReadInt32)
+- Wartosc zmienia sie przy kazdym restarcie gry (per-session seed).
+- Jesli loot bot przestanie wykrywac przedmioty, nalezy odczytac aktualna
+  wartosc (przy naprowadzonym kursorem na item) i zaktualizowac stala
+  `LootMouseOverValue` oraz dodac nowy wpis do tego pliku.
+
+ZALEZNOSCI MIEDZY ROZNYMI ODCZYTAMI Z TEGO SAMEGO OBSZARU PAMIECI:
+Adres bazowy: [Ares.exe + 0x4704A8]
+Obszar pamieci od offsetu +0xA do +0xF zawiera te same dane odczytywane
+w roznych formatach (byte, short, int). Oto mapping:
+
+  Offset  | Adres absolutny  |  cb (byte) | db (byte) | bs (short)  | cs (short)  | ds (short)  | al (int)       | bl (int)       | cl (int)       | dl (int)
+  --------+------------------+------------+-----------+-------------+-------------+-------------+----------------+----------------+----------------+----------------
+  +0xA    | 0x8A841A2       |            |           |             |             |             | 0x85A000A7     |                |                |
+  +0xB    | 0x8A841A3       |            |           | -24576      |             |             |                | 0x2385A000     |                |
+  +0xC    | 0x8A841A4       | 160 (0xA0) |           |             | -31328      |             |                |                | 0x072385A0     |
+  +0xD    | 0x8A841A5       |            | 133 (0x85)|             |             | 9093        |                |                |                | 0x00072385
+
+Wszystkie te wartosci pochodza z tego samego 6-bajtowego obszaru (+0xA do +0xF).
+Rozne interpreacje (byte, short, int) pozwalaja zrozumiec strukture danych.
+Loot bot uzywa wartosci 32-bitowej (int) z offsetu +0xC.
+
+BIEZACA SESJA:
+===============
+Data odczytu: 2026-06-26
+Pointer chain: [Ares.exe + 0x4704A8] + 0xC
+Wartosc (cl / 32-bit int): 119768480 (0x072385A0)
+
+Surowe bajty w okolicy (+0xA do +0xF):
+  +0xA: 0xA7
+  +0xB: 0x00
+  +0xC: 0xA0
+  +0xD: 0x85
+  +0xE: 0x23
+  +0xF: 0x07
+
+HISTORIA ZMIAN:
+===============
+- Sesja 1 (2026-06-26): LootMouseOverValue = 119768480 (0x072385A0)
+                         Poprzednia stala w kodzie: 298495304 (0x11C9B548)
+                         (wartosc z poprzedniej sesji/wczesniejszego builda)
+
+--- Dopisz kolejne wpisy ponizej, po kazdym restarcie gry ---
+================================================================================

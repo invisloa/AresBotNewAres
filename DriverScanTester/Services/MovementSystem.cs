@@ -93,6 +93,16 @@ namespace DriverScanTester.Services
         private bool _isInitialized = false;
         private bool _goalReached = false;
 
+        // ── Final-waypoint standby ──
+        // When the last waypoint is reached on a non-loop path, instead of stopping
+        // completely the bot enters standby.  For Attack/AttackAndLoot modes it keeps
+        // fighting/looting within the AtkDis boundary; for OnlyMove it just idles.
+        private bool _finalStandbyActive = false;
+        private float _finalStandbyX;
+        private float _finalStandbyY;
+        private BotMode _finalStandbyMode = BotMode.OnlyMove;
+        private short _finalStandbyAtkDis = 0;
+
         // Route resync after combat
         private bool _routeResyncPendingAfterCombat = false;
 
@@ -285,6 +295,8 @@ namespace DriverScanTester.Services
                 return;
             }
 
+
+
             token.ThrowIfCancellationRequested();
 
             // ── In-city stuck cooldown ──
@@ -397,6 +409,36 @@ namespace DriverScanTester.Services
 
             BotMode currentMode = BotMode.OnlyMove;
             float manhattanDistanceToTarget = 0f;
+
+            // ── Final-waypoint standby ──
+            // When the path is complete, the bot stays at the final waypoint.
+            // Attack modes keep fighting/looting within the AtkDis boundary.
+            if (_finalStandbyActive)
+            {
+                _localNavigationMap.SaveIfDirty();
+
+                if (_finalStandbyMode == BotMode.OnlyMove)
+                {
+                    if (_tickCount % _stateLogInterval == 0)
+                        _log($"[Tick {_tickCount}] Standby (OnlyMove) @ ({_finalStandbyX:F1},{_finalStandbyY:F1})");
+                    return;
+                }
+
+                // Attack mode: check AtkDis boundary. If outside → move back.
+                float distFromFinal = GeometryUtils.Distance(currX, currY, _finalStandbyX, _finalStandbyY);
+                if (distFromFinal > _finalStandbyAtkDis + 2f)
+                {
+                    _log($"[Standby] Outside AtkDis ({distFromFinal:F1} > {_finalStandbyAtkDis}) — returning to final waypoint.");
+                    MoveTowards(currX, currY, _finalStandbyX, _finalStandbyY);
+                    return;
+                }
+
+                // Inside boundary — run combat handler and return.
+                // The loot system (separate task) handles looting independently.
+                currentMode = _finalStandbyMode;
+                goto RUN_COMBAT_ONLY;
+            }
+
             if (_waypoints.Count > 0)
             {
                 var currentWaypoint = _waypoints.Peek();
@@ -519,6 +561,7 @@ namespace DriverScanTester.Services
             }
 
             // ── Combat mode handling ──
+        RUN_COMBAT_ONLY:
             var combatAction = _combatHandler.EvaluateCombatAction(_memoryService, currentMode, _isUnstuckRoutineActive);
             if (combatAction != CombatAction.None && combatAction != CombatAction.CombatWait)
             {
@@ -586,6 +629,14 @@ namespace DriverScanTester.Services
 
             // Combat is over — release skill 3 if held
             ReleaseSkillThree();
+
+            // If in standby mode, don't fall through to waypoint queue logic.
+            if (_finalStandbyActive)
+            {
+                if (_tickCount % _stateLogInterval == 0)
+                    _log($"[Tick {_tickCount}] Standby (combat idle) @ ({_finalStandbyX:F1},{_finalStandbyY:F1})");
+                return;
+            }
 
             // ── Route resync after combat ──
             if (_routeResyncPendingAfterCombat)
@@ -836,6 +887,14 @@ namespace DriverScanTester.Services
 
                 if (_waypoints.Count == 0)
                 {
+                    // Save the last waypoint's info BEFORE calling HandleEmpty,
+                    // so standby mode knows its position, mode and AtkDis.
+                    _finalStandbyX = target.X;
+                    _finalStandbyY = target.Y;
+                    _finalStandbyMode = target.Mode;
+                    _finalStandbyAtkDis = target.AttackDisengageDistance;
+                    _finalStandbyActive = true;
+
                     HandleEmptyWaypointQueueAfterAdvance();
                     if (_goalReached)
                         return true;
@@ -868,16 +927,21 @@ namespace DriverScanTester.Services
 
                 _log($"[WpQueue] Re-enqueued {_initialPath.Count} waypoints. Queue now has {_waypoints.Count} entries.");
 
+                // Reset standby flag — we are looping, not staying at the final waypoint.
+                _finalStandbyActive = false;
+
                 ResetBearingState();
                 ResetActionStuckTracking();
                 ResetCombatStateForWaypointChange();
             }
             else
             {
-                _log($"[WpQueue] Final goal reached. Stopping movement.");
+                // Don't stop — enter standby at the final waypoint for continued
+                // combat/loot operations within the AtkDis boundary.
+                // The last waypoint info was saved in _finalStandby fields.
                 StopMoving();
-                _goalReached = true;
-                _log("Final Goal Reached. Stopping.");
+                _log("[WpQueue] Final waypoint reached — entering standby mode.");
+                _log($"[WpQueue] Standby: mode={_finalStandbyMode}, pos=({_finalStandbyX:F1},{_finalStandbyY:F1}), AtkDis={_finalStandbyAtkDis}");
             }
         }
 

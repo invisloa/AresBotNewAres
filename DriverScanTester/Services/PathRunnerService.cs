@@ -66,13 +66,15 @@ namespace DriverScanTester.Services
                 _log("[PathRunner] Entering main loop.");
                 while (!token.IsCancellationRequested)
                 {
+                    await _movementSystem.Update(token);
+
+                    // Check for terminal stop AFTER update so standby mode keeps running.
                     if (_movementSystem.IsGoalReached)
                     {
-                        _log("[PathRunner] Path completed (goal reached).");
+                        _log("[PathRunner] Path completed (goal reached terminal).");
                         return true;
                     }
 
-                    await _movementSystem.Update(token);
                     await Task.Delay(BotConstants.Delays.PathRunnerTickMs, token);
                 }
                 _log("[PathRunner] Loop exited due to cancellation request.");

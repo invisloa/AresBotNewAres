@@ -354,9 +354,12 @@ namespace DriverScanTester
             /// <summary>Item types that should NOT be sold. (0 = empty slot)</summary>
             public static readonly int[] ItemsNotForSale = { 0, 246, 247, 1092, 1093, 1094, 1095, 3093 };
 
-            /// <summary>Value of L_LootSelectedItem1 (read as clong / 32-bit) when a loot item is under the mouse cursor.
-            /// Updated from 16344 (16-bit) to 99448280 (32-bit) to 138876240 per user observation.</summary>
-            public const int LootMouseOverValue = 138876240;
+            /// <summary>
+            /// Full 32-bit value of L_LootSelectedItem1 at [Ares.exe+0x4704A8]+0xC when a loot item is
+            /// under the mouse cursor.  WARNING: This value changes every game launch (per-session seed).
+            /// If loot stops detecting, re-read this address as cl (32-bit int) while hovering an item.
+            /// </summary>
+            public const int LootMouseOverValue = 119768480;
 
             /// <summary>Item type identifier for SOD items (no longer readable — kept for reference).</summary>
             public const int Sod = -13799;

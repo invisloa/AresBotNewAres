@@ -1,7 +1,7 @@
 [
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xC",
-    "NameText": "80",
+    "NameText": "cb",
     "ValueText": "",
     "ValueType": 0,
     "Priority": 2,
@@ -9,7 +9,7 @@
   },
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xd",
-    "NameText": "21",
+    "NameText": "db",
     "ValueText": "",
     "ValueType": 0,
     "Priority": 2,
@@ -17,7 +17,7 @@
   },
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xb",
-    "NameText": "20480 x2 od normal??",
+    "NameText": "bs",
     "ValueText": "",
     "ValueType": 1,
     "Priority": 2,
@@ -25,7 +25,7 @@
   },
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xc",
-    "NameText": "5456",
+    "NameText": "cs",
     "ValueText": "",
     "ValueType": 1,
     "Priority": 2,
@@ -33,7 +33,7 @@
   },
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xd",
-    "NameText": "18197",
+    "NameText": "ds",
     "ValueText": "",
     "ValueType": 1,
     "Priority": 2,
@@ -41,7 +41,7 @@
   },
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xa",
-    "NameText": "357564537 ",
+    "NameText": "al",
     "ValueText": "",
     "ValueType": 2,
     "Priority": 2,
@@ -49,7 +49,7 @@
   },
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xb",
-    "NameText": "1192579072",
+    "NameText": "bl",
     "ValueText": "",
     "ValueType": 2,
     "Priority": 2,
@@ -57,7 +57,7 @@
   },
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xc",
-    "NameText": "138876240",
+    "NameText": "cl",
     "ValueText": "",
     "ValueType": 2,
     "Priority": 2,
@@ -65,7 +65,7 @@
   },
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xd",
-    "NameText": "542485",
+    "NameText": "dl",
     "ValueText": "",
     "ValueType": 2,
     "Priority": 2,

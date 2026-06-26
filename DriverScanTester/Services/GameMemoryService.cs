@@ -481,7 +481,9 @@ namespace DriverScanTester.Services
             if (playerBase == 0) return false;
             int targetId = ReadInt(playerBase + TargetSelectedOffset);
             // targetId > MaxMobTargetId indicates a player character — skip it
-            return targetId != 0 && targetId < BotConstants.Combat.MaxMobTargetId;
+            // NOTE: targetId is -1 (0xFFFFFFFF) when NO mob is selected,
+            // so we must check targetId > 0, not targetId != 0.
+            return targetId > 0 && targetId < BotConstants.Combat.MaxMobTargetId;
         }
 
         /// <summary>
@@ -531,6 +533,7 @@ namespace DriverScanTester.Services
         /// L_LootSelectedItem1 at <c>[Ares.exe + 0x4704A8] + 0xC</c> (same pointer as
         /// seller mouseover but interpreted as a 32-bit clong value).
         /// Returns true when the value equals <see cref="BotConstants.GameMagicValues.LootMouseOverValue"/>.
+        /// WARNING: This value changes every game launch (per-session seed).
         /// </summary>
         public bool IsLootMouseOver()
         {
