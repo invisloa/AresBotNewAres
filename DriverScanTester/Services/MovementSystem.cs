@@ -103,6 +103,9 @@ namespace DriverScanTester.Services
         private BotMode _finalStandbyMode = BotMode.OnlyMove;
         private short _finalStandbyAtkDis = 0;
 
+        // Initial route resync (first tick — find nearest segment)
+        private bool _initialResyncDone = false;
+
         // Route resync after combat
         private bool _routeResyncPendingAfterCombat = false;
 
@@ -400,6 +403,24 @@ namespace DriverScanTester.Services
                 return;
             }
 
+            // ── Initial waypoint optimisation (first tick only) ──
+            // Instead of always targeting waypoint #1, find the closest route segment
+            // or waypoint to the player's actual position and start from there.
+            // This prevents the bot from going backwards when the player is already
+            // near the end of the path.
+            if (!_initialResyncDone && _waypoints.Count > 0 && _initialPath.Count >= 2)
+            {
+                _log($"[Tick {_tickCount}] Initial position=({currX:F1},{currY:F1}) — finding optimal starting waypoint...");
+                var result = RouteResyncFromCurrentPosition(currX, currY);
+                _log($"[Tick {_tickCount}] Initial waypoint optimisation result={result} queue={_waypoints.Count}");
+                _initialResyncDone = true;
+            }
+            else if (!_initialResyncDone)
+            {
+                // No path to optimise — mark as done anyway
+                _initialResyncDone = true;
+            }
+
             // Log position every 5 ticks
             if (_tickCount % 5 == 0)
             {
@@ -437,8 +458,13 @@ namespace DriverScanTester.Services
                 }
 
                 // Inside boundary — run combat handler and return.
-                // The loot system (separate task) handles looting independently.
-                currentMode = _finalStandbyMode;
+                // The loot system (separate task) handles looting independently,
+                // so strip AndLoot from the mode to prevent the combat handler
+                // from suppressing TAB (which would stop the bot from ever
+                // initiating combat on its own in standby).
+                currentMode = _finalStandbyMode == BotMode.MoveAndAttackAndLoot
+                    ? BotMode.MoveAndAttack
+                    : _finalStandbyMode;
                 goto RUN_COMBAT_ONLY;
             }
 
