@@ -362,8 +362,14 @@ namespace DriverScanTester
             /// Full 32-bit value of L_LootSelectedItem1 at [Ares.exe+0x4704A8]+0xC when a loot item is
             /// under the mouse cursor.  WARNING: This value changes every game launch (per-session seed).
             /// If loot stops detecting, re-read this address as cl (32-bit int) while hovering an item.
+            ///
+            /// NOTE: There is a stable relationship between NPC mouseover and item mouseover values:
+            ///   Item_cl = NPC_cl - 256
+            /// because the byte at +0xD (db) is always 1 less for item than for NPC (0xDB vs 0xDC).
+            /// Use <see cref="GameMemoryService.CalibrateLootMouseOverValue"/> to auto-set this from
+            /// an NPC hover instead of manually scanning for a loot item.
             /// </summary>
-            public const int LootMouseOverValue = 119768480;
+            public static int LootMouseOverValue = 138599240;
 
             /// <summary>Item type identifier for SOD items (no longer readable — kept for reference).</summary>
             public const int Sod = -13799;

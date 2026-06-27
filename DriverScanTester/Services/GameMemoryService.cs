@@ -544,6 +544,38 @@ namespace DriverScanTester.Services
             return value == BotConstants.GameMagicValues.LootMouseOverValue;
         }
 
+        /// <summary>
+        /// Calibrates <see cref="BotConstants.GameMagicValues.LootMouseOverValue"/> by reading
+        /// the current NPC mouseover value at <c>[Ares.exe + 0x4704A8] + 0xC</c> and subtracting 256.
+        ///
+        /// The relationship between NPC and item mouseover values is stable:
+        ///   Item_cl = NPC_cl - 256
+        /// because the byte at offset +0xD (db) is always exactly 1 less for item than for NPC.
+        ///
+        /// Call this method while the cursor is hovering over an NPC (not a loot item).
+        /// The computed item value will be used by <see cref="IsLootMouseOver"/> thereafter.
+        /// Returns the new LootMouseOverValue, or 0 if the pointer chain failed.
+        /// </summary>
+        public int CalibrateLootMouseOverValue()
+        {
+            ulong ptrAddr = _moduleBase + IsSellerPointedPtrOffset;
+            ulong baseAddr = ReadPointer(ptrAddr);
+            if (baseAddr == 0) return 0;
+
+            int npcValue = ReadInt(baseAddr + IsSellerPointedOffset);
+            if (npcValue == 0)
+            {
+                _log?.Invoke("[CalibrateLootMouseOverValue] No NPC hover detected (value=0). Hover over an NPC first.");
+                return 0;
+            }
+
+            int itemValue = npcValue - 256;
+            BotConstants.GameMagicValues.LootMouseOverValue = itemValue;
+
+            _log?.Invoke($"[CalibrateLootMouseOverValue] NPC cl={npcValue} (0x{(uint)npcValue:X8}), Item cl={itemValue} (0x{(uint)itemValue:X8}) [Item = NPC - 256]");
+            return itemValue;
+        }
+
         public short GetAttackSpeed()
         {
             ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);

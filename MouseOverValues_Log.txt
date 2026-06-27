@@ -1,12 +1,12 @@
 ================================================================================
- MOUSEOVER ITEM VALUE LOG
+ MOUSEOVER ITEM/NPC VALUE LOG
 ================================================================================
 
 Plik sluzy do rejestrowania wartosci spod adresu [Ares.exe + 0x4704A8] + 0xC
 odczytywanych jako 32-bitowa liczba calkowita (cl / int) podczas gdy kursor
-myszy znajduje sie nad przedmiotem (itemem) w grze Ares.
+myszy znajduje sie nad przedmiotem (itemem) lub NPC w grze Ares.
 
-Wartosc ta jest uzywana przez loot bota (LootSystem / GameMemoryService)
+Te wartosci sa uzywane przez loot bota (LootSystem / GameMemoryService)
 do detekcji czy pod kursorem znajduje sie item do podniesienia. Dokladnie
 chodzi o stala `LootMouseOverValue` w `BotConstants.GameMagicValues`.
 
@@ -20,41 +20,56 @@ DLACZEGO TE WARTOSCI SA ZAPISYWANE:
   wartosc (przy naprowadzonym kursorem na item) i zaktualizowac stala
   `LootMouseOverValue` oraz dodac nowy wpis do tego pliku.
 
-ZALEZNOSCI MIEDZY ROZNYMI ODCZYTAMI Z TEGO SAMEGO OBSZARU PAMIECI:
-Adres bazowy: [Ares.exe + 0x4704A8]
-Obszar pamieci od offsetu +0xA do +0xF zawiera te same dane odczytywane
-w roznych formatach (byte, short, int). Oto mapping:
+ZALEZNOSC MIEDZY ITEM A NPC:
+Adres [Ares.exe + 0x4704A8] + 0xC zwraca rozne wartosci w zaleznosci od tego
+czy kursor jest nad itemem (loot) czy nad NPC. Roznica polega na bajcie w
+offsccie +0xD (db):
+  - Item: db = 0xDB (219)
+  - NPC:  db = 0xDC (220)
+Bajt +0xD jest drugim bajtem w little-endian 32-bitowej wartosci cl (int)
+odczytywanej z +0xC, wiec zmiana o 1 w tym bajcie daje roznice 256.
 
-  Offset  | Adres absolutny  |  cb (byte) | db (byte) | bs (short)  | cs (short)  | ds (short)  | al (int)       | bl (int)       | cl (int)       | dl (int)
-  --------+------------------+------------+-----------+-------------+-------------+-------------+----------------+----------------+----------------+----------------
-  +0xA    | 0x8A841A2       |            |           |             |             |             | 0x85A000A7     |                |                |
-  +0xB    | 0x8A841A3       |            |           | -24576      |             |             |                | 0x2385A000     |                |
-  +0xC    | 0x8A841A4       | 160 (0xA0) |           |             | -31328      |             |                |                | 0x072385A0     |
-  +0xD    | 0x8A841A5       |            | 133 (0x85)|             |             | 9093        |                |                |                | 0x00072385
+ZALEZNOSC (stala miedzy sesjami):
+  Item_cl = NPC_cl - 256
+  NPC_cl  = Item_cl + 256
 
-Wszystkie te wartosci pochodza z tego samego 6-bajtowego obszaru (+0xA do +0xF).
-Rozne interpreacje (byte, short, int) pozwalaja zrozumiec strukture danych.
-Loot bot uzywa wartosci 32-bitowej (int) z offsetu +0xC.
+Dzieki temu wystarczy przy kazdym uruchomieniu odczytac wartosc dla NPC,
+a nastepnie odjac 256 aby otrzymac wartosc dla itemu.
 
-BIEZACA SESJA:
-===============
-Data odczytu: 2026-06-26
-Pointer chain: [Ares.exe + 0x4704A8] + 0xC
-Wartosc (cl / 32-bit int): 119768480 (0x072385A0)
+AKTUALNE WARTOSCI:
+================================================================================
+
+  Name | Address                       | Typ     | Item (decimal)   | Item (hex)     | NPC (decimal)    | NPC (hex)
+  -----+-------------------------------+---------+------------------+----------------+------------------+---------------
+  cb   | [Ares.exe + 0x4704A8] + 0xC  | byte    | 72               | 0x48           | 72               | 0x48
+  db   | [Ares.exe + 0x4704A8] + 0xD  | byte    | 219              | 0xDB           | 220              | 0xDC
+  bs   | [Ares.exe + 0x4704A8] + 0xB  | short   | 18432            | 0x4800         | 18432            | 0x4800
+  cs   | [Ares.exe + 0x4704A8] + 0xC  | short   | -9400            | 0xDB48         | -9080            | 0xDC48
+  ds   | [Ares.exe + 0x4704A8] + 0xD  | short   | 17115            | 0x42DB         | 17116            | 0x42DC
+  al   | [Ares.exe + 0x4704A8] + 0xA  | int     | -616038397       | 0xDB480003     | -602619901       | 0xDC480003
+  bl   | [Ares.exe + 0x4704A8] + 0xB  | int     | 1121667072       | 0x42DB4800     | 1121740800       | 0x42DC4800
+  cl   | [Ares.exe + 0x4704A8] + 0xC  | int     | 138599240        | 0x0842DB48     | 138599496        | 0x0842DC48
+  dl   | [Ares.exe + 0x4704A8] + 0xD  | int     | 541403           | 0x000842DB     | 541404           | 0x000842DC
 
 Surowe bajty w okolicy (+0xA do +0xF):
-  +0xA: 0xA7
-  +0xB: 0x00
-  +0xC: 0xA0
-  +0xD: 0x85
-  +0xE: 0x23
-  +0xF: 0x07
+  Offs  | Item     | NPC
+  ------+----------+----------
+  +0xA  | 0x03     | 0x03
+  +0xB  | 0x00     | 0x00
+  +0xC  | 0x48     | 0x48
+  +0xD  | 0xDB     | 0xDC  <-- jedyna roznica
+  +0xE  | 0x42     | 0x42
+  +0xF  | 0x08     | 0x08
 
 HISTORIA ZMIAN:
 ===============
 - Sesja 1 (2026-06-26): LootMouseOverValue = 119768480 (0x072385A0)
                          Poprzednia stala w kodzie: 298495304 (0x11C9B548)
                          (wartosc z poprzedniej sesji/wczesniejszego builda)
+
+- Sesja 2 (2026-06-28): LootMouseOverValue = 138599240 (0x0842DB48)
+                         Item db = 0xDB, NPC db = 0xDC
+                         Odkryta zaleznosc: Item_cl = NPC_cl - 256
 
 --- Dopisz kolejne wpisy ponizej, po kazdym restarcie gry ---
 ================================================================================

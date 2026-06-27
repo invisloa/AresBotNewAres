@@ -2939,6 +2939,9 @@ namespace DriverScanTester.ViewModels
                         AppendLog("=== Test Sell: Starting ===");
                         seller.SellItemsByMouseMove();
                         AppendLog("=== Test Sell: Completed ===");
+
+                        // ── Repot phase after successful sell ──
+                        RepotAfterSellForTest(15, memoryService, AppendLog);
                     }
                     catch (Exception ex)
                     {
@@ -2977,6 +2980,163 @@ namespace DriverScanTester.ViewModels
                     {
                         AppendLog($"=== Test Sell Specific Slot {realSlot} FAILED: {ex.Message} ===");
                     }
+                }
+
+                // ═══════════════════════════════════════════════════════════
+                //  REPOT AFTER SELL TEST
+                // ═══════════════════════════════════════════════════════════
+
+                private enum PotionType
+                {
+                    Hp,
+                    Mana,
+                    White,
+                    Red
+                }
+
+                private sealed class PotionShopClickPoint
+                {
+                    public PotionType PotionType { get; init; }
+                    public int RelativeX { get; init; }
+                    public int RelativeY { get; init; }
+                }
+
+                [DllImport("user32.dll", SetLastError = true)]
+                private static extern bool GetWindowRect(nint hWnd, out RECT lpRect);
+
+                [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+                private static extern nint FindWindow(string lpClassName, string lpWindowName);
+
+                [DllImport("user32.dll")]
+                private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+
+                private struct RECT
+                {
+                    public int Left;
+                    public int Top;
+                    public int Right;
+                    public int Bottom;
+                }
+
+                /// <summary>
+                /// Gets the game window rectangle in screen coordinates.
+                /// The seller/shop dialog is a child UI element within this window;
+                /// its position is derived from the game window rect.
+                /// Returns a zero rect when the game window cannot be found.
+                /// </summary>
+                private RECT GetSellerDialogRect()
+                {
+                    nint hwnd = FindWindow(null, "Legend of Ares");
+                    if (hwnd == nint.Zero) hwnd = FindWindow(null, "Ares");
+                    if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
+                    if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
+                    if (hwnd != nint.Zero && GetWindowRect(hwnd, out RECT rect))
+                        return rect;
+                    return new RECT { Left = 0, Top = 0, Right = 0, Bottom = 0 };
+                }
+
+                /// <summary>
+                /// After the Test Sell completes, buies each potion type up to <paramref name="targetCount"/>
+                /// using the already-open seller/shop dialog.
+                /// Hardcoded for this test: HP, Mana, White, Red potions, target 15 each.
+                /// </summary>
+                private void RepotAfterSellForTest(int targetCount, GameMemoryService memory, Action<string> log)
+                {
+                    log("Starting repot after sell test");
+
+                    // The seller/shop dialog must still be open after selling
+                    if (!memory.IsShopOpen())
+                    {
+                        log("Repot: Seller/shop dialog is not open after sell. Cannot buy potions.");
+                        return;
+                    }
+
+                    RECT shopRect = GetSellerDialogRect();
+                    if (shopRect.Right == 0 && shopRect.Bottom == 0)
+                    {
+                        log("Repot: Could not determine seller dialog rectangle. Cannot buy potions.");
+                        return;
+                    }
+
+                    // Potion shop click points — offsets relative to the game window.
+                    // Derived from old Ares bot absolute positions (reference window at 447,77):
+                    //   HP:    (995, 185) → relative (995-447=548, 185-77=108)
+                    //   Mana:  (995, 305) → relative (995-447=548, 305-77=228)
+                    //   White: (995, 380) → relative (995-447=548, 380-77=303)
+                    //   Red:   (995, 420) → relative (995-447=548, 420-77=343)
+                    var potionPoints = new PotionShopClickPoint[]
+                    {
+                        new() { PotionType = PotionType.Hp,    RelativeX = 548, RelativeY = 108 },
+                        new() { PotionType = PotionType.Mana,  RelativeX = 548, RelativeY = 228 },
+                        new() { PotionType = PotionType.White, RelativeX = 548, RelativeY = 303 },
+                        new() { PotionType = PotionType.Red,   RelativeX = 548, RelativeY = 343 },
+                    };
+
+                    // Quantity input click position (old absolute 1295,530 → relative 848,453)
+                    const int quantityInputRelX = 848;
+                    const int quantityInputRelY = 453;
+
+                    // OK button click position (old absolute 560,570 → relative 113,493)
+                    const int okButtonRelX = 113;
+                    const int okButtonRelY = 493;
+
+                    const int buyClickDelayMs = 200;
+                    const int buyPauseMs = 1000;
+
+                    foreach (var point in potionPoints)
+                    {
+                        if (!memory.IsShopOpen())
+                        {
+                            log("Repot: Shop dialog closed during potion buying. Stopping.");
+                            break;
+                        }
+
+                        int currentCount = point.PotionType switch
+                        {
+                            PotionType.Hp => memory.GetHpPotionCount(),
+                            PotionType.Mana => memory.GetManaPotionCount(),
+                            PotionType.White => memory.GetWhitePotionCount(),
+                            PotionType.Red => memory.GetRedPotionCount(),
+                            _ => 0
+                        };
+
+                        int amountToBuy = Math.Max(0, targetCount - currentCount);
+                        log($"Potion {point.PotionType}: current {currentCount}, target {targetCount}, buying {amountToBuy}");
+
+                        if (amountToBuy <= 0)
+                            continue;
+
+                        // 1. Left-click the shop potion item to open the buy dialog
+                        int shopScreenX = shopRect.Left + point.RelativeX;
+                        int shopScreenY = shopRect.Top + point.RelativeY;
+                        MouseOperations.MoveAndLeftClickAbsolute(shopScreenX, shopScreenY, buyClickDelayMs);
+
+                        // 2. Left-click the quantity input field
+                        int inputScreenX = shopRect.Left + quantityInputRelX;
+                        int inputScreenY = shopRect.Top + quantityInputRelY;
+                        MouseOperations.MoveAndLeftClickAbsolute(inputScreenX, inputScreenY, buyClickDelayMs);
+
+                        // 3. Type the quantity digits
+                        string amountStr = amountToBuy.ToString();
+                        foreach (char c in amountStr)
+                        {
+                            byte vk = (byte)(0x30 + (c - '0')); // VK_0..VK_9
+                            keybd_event(vk, 0, 0, 0);
+                            Thread.Sleep(50);
+                            keybd_event(vk, 0, KEYEVENTF_KEYUP, 0);
+                            Thread.Sleep(100);
+                        }
+
+                        // 4. Click OK to confirm purchase
+                        int okScreenX = shopRect.Left + okButtonRelX;
+                        int okScreenY = shopRect.Top + okButtonRelY;
+                        MouseOperations.MoveAndLeftClickAbsolute(okScreenX, okScreenY, buyClickDelayMs);
+
+                        // 5. Pause before next potion type
+                        Thread.Sleep(buyPauseMs);
+                    }
+
+                    log("Repot after sell test finished");
                 }
 
                 public void StopAllBotsInternal()

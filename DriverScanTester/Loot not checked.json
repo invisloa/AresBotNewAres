@@ -2,7 +2,7 @@
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xC",
     "NameText": "cb",
-    "ValueText": "",
+    "ValueText": "72 (0x48)",
     "ValueType": 0,
     "Priority": 2,
     "LockGroup": 0
@@ -10,7 +10,7 @@
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xd",
     "NameText": "db",
-    "ValueText": "",
+    "ValueText": "219 (0xDB)",
     "ValueType": 0,
     "Priority": 2,
     "LockGroup": 0
@@ -18,7 +18,7 @@
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xb",
     "NameText": "bs",
-    "ValueText": "",
+    "ValueText": "18432 (0x4800)",
     "ValueType": 1,
     "Priority": 2,
     "LockGroup": 0
@@ -26,7 +26,7 @@
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xc",
     "NameText": "cs",
-    "ValueText": "",
+    "ValueText": "-9400 (0xDB48)",
     "ValueType": 1,
     "Priority": 2,
     "LockGroup": 0
@@ -34,7 +34,7 @@
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xd",
     "NameText": "ds",
-    "ValueText": "",
+    "ValueText": "17115 (0x42DB)",
     "ValueType": 1,
     "Priority": 2,
     "LockGroup": 0
@@ -42,7 +42,7 @@
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xa",
     "NameText": "al",
-    "ValueText": "",
+    "ValueText": "-616038397 (0xDB480003)",
     "ValueType": 2,
     "Priority": 2,
     "LockGroup": 0
@@ -50,7 +50,7 @@
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xb",
     "NameText": "bl",
-    "ValueText": "",
+    "ValueText": "1121667072 (0x42DB4800)",
     "ValueType": 2,
     "Priority": 2,
     "LockGroup": 0
@@ -58,7 +58,7 @@
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xc",
     "NameText": "cl",
-    "ValueText": "",
+    "ValueText": "138599240 (0x0842DB48)",
     "ValueType": 2,
     "Priority": 2,
     "LockGroup": 0
@@ -66,7 +66,7 @@
   {
     "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xd",
     "NameText": "dl",
-    "ValueText": "",
+    "ValueText": "541403 (0x000842DB)",
     "ValueType": 2,
     "Priority": 2,
     "LockGroup": 0
