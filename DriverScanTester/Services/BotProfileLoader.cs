@@ -82,13 +82,14 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Saves a profile to disk. The file name is derived from profile.Name.
+        /// Returns true when the profile was written successfully, false otherwise.
         /// </summary>
-        public void SaveProfile(BotProfile profile)
+        public bool SaveProfile(BotProfile profile)
         {
             if (string.IsNullOrWhiteSpace(profile.Name))
             {
                 _log("[BotProfileLoader] Cannot save profile without a Name.");
-                return;
+                return false;
             }
 
             string fileName = profile.Name.Trim();
@@ -103,10 +104,12 @@ namespace DriverScanTester.Services
                 string json = JsonSerializer.Serialize(profile, options);
                 File.WriteAllText(path, json);
                 _log($"[BotProfileLoader] Saved profile '{profile.Name}' to {path}");
+                return true;
             }
             catch (Exception ex)
             {
                 _log($"[BotProfileLoader] Error saving profile: {ex.Message}");
+                return false;
             }
         }
 

@@ -65,6 +65,10 @@ namespace DriverScanTester.ViewModels
             set => SetProperty(ref _profileNames, value);
         }
 
+        // While true, SelectedProfileName changes from RefreshProfiles() must not trigger
+        // OnProfileSelectionChanged() (which would reload/discard the profile being edited).
+        private bool _isRefreshingProfiles;
+
         private string? _selectedProfileName;
         public string? SelectedProfileName
         {
@@ -73,7 +77,8 @@ namespace DriverScanTester.ViewModels
             {
                 if (SetProperty(ref _selectedProfileName, value))
                 {
-                    OnProfileSelectionChanged();
+                    if (!_isRefreshingProfiles)
+                        OnProfileSelectionChanged();
                     CommandManager.InvalidateRequerySuggested();
                 }
             }
@@ -362,10 +367,21 @@ namespace DriverScanTester.ViewModels
                 return;
             }
 
-            // 5. Save only after validation succeeds (via BotProfileLoader)
-            _profileLoader.SaveProfile(CurrentProfile);
+            // 5. Capture the profile name before any bound collection is refreshed.
+            string savedName = CurrentProfile.Name;
+
+            // 6. Save only after validation succeeds (via BotProfileLoader).
+            if (!_profileLoader.SaveProfile(CurrentProfile))
+            {
+                // A failed write must not refresh the list or report success.
+                StatusText = $"Failed to save profile '{savedName}' — check the log for details.";
+                return;
+            }
+
+            // 7. Success: refresh the profile list (preserves editor state) and report success
+            // using the captured name.
             RefreshProfiles();
-            StatusText = $"Saved profile '{CurrentProfile.Name}'.";
+            StatusText = $"Saved profile '{savedName}'.";
         }
 
         private void LoadSelectedProfile()
@@ -424,25 +440,87 @@ namespace DriverScanTester.ViewModels
 
         private void RefreshProfiles()
         {
-            ProfileNames.Clear();
-            foreach (var name in _profileLoader.ListProfiles())
+            // Capture the editor state before rebuilding the list.
+            string? previousSelectedName = SelectedProfileName;
+            BotProfile? editedProfile = CurrentProfile;
+            string? editedProfileName = editedProfile?.Name;
+
+            _isRefreshingProfiles = true;
+            try
             {
-                ProfileNames.Add(name);
+                ProfileNames.Clear();
+                foreach (var name in _profileLoader.ListProfiles())
+                {
+                    ProfileNames.Add(name);
+                }
+
+                // Restore the selection: prefer the edited profile's name, then the previous selection.
+                string? nameToSelect = null;
+                if (!string.IsNullOrEmpty(editedProfileName))
+                {
+                    nameToSelect = ProfileNames.FirstOrDefault(n =>
+                        string.Equals(n, editedProfileName, StringComparison.OrdinalIgnoreCase));
+                }
+                if (nameToSelect == null && !string.IsNullOrEmpty(previousSelectedName))
+                {
+                    nameToSelect = ProfileNames.FirstOrDefault(n =>
+                        string.Equals(n, previousSelectedName, StringComparison.OrdinalIgnoreCase));
+                }
+
+                if (nameToSelect != null)
+                {
+                    // The profile still exists: keep the current editor state, restore the
+                    // canonical spelling from the refreshed list.
+                    SelectedProfileName = nameToSelect;
+                }
+                else if (!string.IsNullOrEmpty(previousSelectedName) || editedProfile != null)
+                {
+                    // Neither the edited profile nor the previous selection exists anymore.
+                    SelectedProfileName = null;
+                    CurrentProfile = null;
+                }
             }
+            finally
+            {
+                _isRefreshingProfiles = false;
+            }
+
+            OnPropertyChanged(nameof(SelectedProfileName));
+            CommandManager.InvalidateRequerySuggested();
         }
 
         private void RefreshSegments()
         {
+            // Capture every configured route path before clearing the segment list.
+            // Clearing a bound ComboBox ItemsSource writes null back into the SelectedItem,
+            // so the paths must be restored after the collection has been repopulated.
+            string cityToRepotPath = CityToRepot.PathFile;
+            var huntPaths = HuntDefinitions
+                .Select(h => (Hunt: h,
+                              RepotToCityExit: h.RepotToCityExit.PathFile,
+                              CityExitToExp: h.CityExitToExp.PathFile,
+                              ExpLoop: h.ExpLoop.PathFile))
+                .ToList();
+
             AvailableSegments.Clear();
             if (!Directory.Exists(SEGMENT_DIR))
             {
                 Directory.CreateDirectory(SEGMENT_DIR);
-                return;
             }
 
             foreach (var f in Directory.GetFiles(SEGMENT_DIR, "*.json"))
             {
                 AvailableSegments.Add(Path.GetFileName(f));
+            }
+
+            // Restore the exact stored strings, including paths that no longer exist in
+            // SavedPaths, so validation can still report them.
+            CityToRepot.PathFile = cityToRepotPath;
+            foreach (var (hunt, repotToCityExit, cityExitToExp, expLoop) in huntPaths)
+            {
+                hunt.RepotToCityExit.PathFile = repotToCityExit;
+                hunt.CityExitToExp.PathFile = cityExitToExp;
+                hunt.ExpLoop.PathFile = expLoop;
             }
         }
 
