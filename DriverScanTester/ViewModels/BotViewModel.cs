@@ -75,7 +75,7 @@ namespace DriverScanTester.ViewModels
             }, _ => _main.IsAttached);
             ClearBotLogCommand = new RelayCommand(_ => BotLogText = "");
 
-            // 3-Phase Workflow commands
+            // Four-stage Workflow commands
             StartWorkflowCommand = new RelayCommand(_ => StartWorkflowWithProfile(), _ => _main.IsAttached && CanStartWorkflow);
             StopWorkflowCommand = new RelayCommand(_ => _main.StopWorkflow(), _ => _main.IsAttached);
             RefreshProfilesCommand = new RelayCommand(_ => RefreshProfiles(), _ => _main.IsAttached);
@@ -178,7 +178,7 @@ namespace DriverScanTester.ViewModels
 
         public bool IsAnyBotRunning => IsMovementBotRunning || IsHealManaBotRunning || IsLootBotRunning;
 
-        // --- 3-Phase Workflow properties ---
+        // Four-stage Workflow properties
         public bool IsWorkflowRunning
         {
             get => _isWorkflowRunning;
@@ -203,7 +203,7 @@ namespace DriverScanTester.ViewModels
         public ICommand TestSellSpecificSlotCommand { get; }
         public ICommand ClearBotLogCommand { get; }
 
-        // 3-Phase Workflow commands
+        // Four-stage Workflow commands
         public ICommand StartWorkflowCommand { get; }
         public ICommand StopWorkflowCommand { get; }
         public ICommand RefreshProfilesCommand { get; }
@@ -359,70 +359,59 @@ namespace DriverScanTester.ViewModels
 
         private void StartWorkflowWithProfile()
         {
-            BotProfile? profile = null;
-            HuntDefinition? activeHunt = null;
-
-            if (!string.IsNullOrEmpty(SelectedProfileName))
+            if (string.IsNullOrEmpty(SelectedProfileName))
             {
-                profile = _main.LoadProfile(SelectedProfileName);
-                if (profile == null)
-                {
-                    _appendLog($"Failed to load profile '{SelectedProfileName}'. Starting without profile.");
-                }
-                else
-                {
-                    // Resolve the selected hunt
-                    if (!string.IsNullOrEmpty(SelectedHuntName) && profile.HuntDefinitions != null)
-                        activeHunt = profile.HuntDefinitions.Find(h => h.Name == SelectedHuntName);
+                _appendLog("No profile selected. Workflow cannot start.");
+                ValidationText = "No profile selected.";
+                return;
+            }
 
-                    // If the selected hunt name doesn't exist, try DefaultHuntName or first hunt
-                    if (activeHunt == null && profile.HuntDefinitions != null && profile.HuntDefinitions.Count > 0)
-                    {
-                        if (!string.IsNullOrEmpty(profile.DefaultHuntName))
-                        {
-                            activeHunt = profile.HuntDefinitions.Find(h => h.Name == profile.DefaultHuntName);
-                            if (activeHunt != null)
-                                _appendLog($"Selected hunt '{SelectedHuntName}' not found; using DefaultHuntName '{activeHunt.Name}'.");
-                        }
+            var profile = _main.LoadProfile(SelectedProfileName);
+            if (profile == null)
+            {
+                _appendLog($"Failed to load profile '{SelectedProfileName}'.");
+                ValidationText = $"Failed to load profile '{SelectedProfileName}'.";
+                return;
+            }
 
-                        if (activeHunt == null)
-                        {
-                            activeHunt = profile.HuntDefinitions[0];
-                            _appendLog($"Selected hunt '{SelectedHuntName}' not found; using first hunt '{activeHunt.Name}'.");
-                        }
-                    }
+            if (string.IsNullOrEmpty(SelectedHuntName))
+            {
+                _appendLog("No hunt selected. Workflow cannot start.");
+                ValidationText = "No hunt selected.";
+                return;
+            }
 
-                    // Require active hunt when profile is loaded
-                    if (activeHunt == null)
-                    {
-                        _appendLog("No active hunt selected. Workflow cannot start.");
-                        ValidationText = "No active hunt selected.";
-                        return;
-                    }
+            // The explicitly selected hunt must resolve exactly; never silently pick another hunt.
+            var activeHunt = profile.HuntDefinitions?
+                .FirstOrDefault(h => string.Equals(h.Name, SelectedHuntName, StringComparison.OrdinalIgnoreCase));
+            if (activeHunt == null)
+            {
+                _appendLog($"Selected hunt '{SelectedHuntName}' does not exist in profile '{profile.Name}'. Workflow NOT started.");
+                ValidationText = $"Hunt '{SelectedHuntName}' not found in profile.";
+                return;
+            }
 
-                    // Validate before starting
-                    var errors = _main.ValidateProfile(profile);
-                    if (errors.Count > 0)
-                    {
-                        _appendLog("Profile validation failed:");
-                        foreach (var error in errors)
-                            _appendLog(" - " + error);
-                        _appendLog("Workflow NOT started. Fix profile errors first.");
-                        ValidationText = "Validation FAILED — check main log.";
-                        return;
-                    }
-                }
+            // Validate before starting
+            var errors = _main.ValidateProfile(profile);
+            if (errors.Count > 0)
+            {
+                _appendLog("Profile validation failed:");
+                foreach (var error in errors)
+                    _appendLog(" - " + error);
+                _appendLog("Workflow NOT started. Fix profile errors first.");
+                ValidationText = "Validation FAILED — check main log.";
+                return;
             }
 
             // Single call — profile+activeHunt are paired consistently
             _main.StartWorkflow(profile, activeHunt);
 
-            if (profile != null)
-                _appendLog($"Workflow started with profile '{profile.Name}'.");
-            else
-                _appendLog("Workflow started (no profile).");
-            if (activeHunt != null)
-                _appendLog($"Active hunt: '{activeHunt.Name}' (RepotToExpPath: '{activeHunt.RepotToExpPath}', ExpLoopPath: '{activeHunt.ExpLoopPath}')");
+            _appendLog($"Workflow started with profile '{profile.Name}'.");
+            _appendLog($"Active hunt: '{activeHunt.Name}'");
+            _appendLog($"  City → Repot:            '{profile.CityToRepot.PathFile}' (delay {profile.CityToRepot.StartDelayMs} ms)");
+            _appendLog($"  Repot → Outside City:    '{activeHunt.RepotToCityExit.PathFile}' (delay {activeHunt.RepotToCityExit.StartDelayMs} ms)");
+            _appendLog($"  Outside City → Exp Spot: '{activeHunt.CityExitToExp.PathFile}' (delay {activeHunt.CityExitToExp.StartDelayMs} ms)");
+            _appendLog($"  Exp Loop:                '{activeHunt.ExpLoop.PathFile}' (delay {activeHunt.ExpLoop.StartDelayMs} ms)");
         }
 
         public void SyncBotStates()

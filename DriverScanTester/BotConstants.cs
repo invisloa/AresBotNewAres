@@ -366,10 +366,13 @@ namespace DriverScanTester
             /// NOTE: There is a stable relationship between NPC mouseover and item mouseover values:
             ///   Item_cl = NPC_cl - 256
             /// because the byte at +0xD (db) is always 1 less for item than for NPC (0xDB vs 0xDC).
-            /// Use <see cref="GameMemoryService.CalibrateLootMouseOverValue"/> to auto-set this from
-            /// an NPC hover instead of manually scanning for a loot item.
+            /// WARNING (Sesja 3, 2026-08-03): this rule FAILED — Item=371473144 (0x16243AF8),
+            /// NPC=138599240 (0x0842DB48), diff=232873904. The value is likely the hovered
+            /// object's address/ID, not an item-vs-NPC flag. Calibrate by hovering the ITEM
+            /// directly; GameMemoryService.CalibrateLootMouseOverValue (NPC-256 based) is
+            /// now unreliable.
             /// </summary>
-            public static int LootMouseOverValue = 138599240;
+            public static int LootMouseOverValue = 371473144;
 
             /// <summary>Item type identifier for SOD items (no longer readable — kept for reference).</summary>
             public const int Sod = -13799;
@@ -799,19 +802,10 @@ namespace DriverScanTester
         }
 
         // ════════════════════════════════════════════════════════════════
-        //  BOT WORKFLOW — fallback path names, profile defaults
+        //  BOT WORKFLOW — profile defaults
         // ════════════════════════════════════════════════════════════════
         public static class Workflow
         {
-            /// <summary>Fallback city-to-repot path file name (no profile).</summary>
-            public const string FallbackCityToRepot = "Kharon_StartA_ToRepot.json";
-
-            /// <summary>Fallback repot-to-exp path file name (no profile).</summary>
-            public const string FallbackRepotToExp = "Kharon_Repot_To_Wolves.json";
-
-            /// <summary>Fallback exp-loop path file name (no profile).</summary>
-            public const string FallbackExpLoop = "Kharon_Wolves_ExpLoop.json";
-
             /// <summary>Default teleport key virtual-key code ('6').</summary>
             public const int DefaultTeleportKey = 0x36;
 

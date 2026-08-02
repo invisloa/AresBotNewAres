@@ -1,19 +1,23 @@
 namespace DriverScanTester.Models
 {
     /// <summary>
-    /// Defines a single hunt/exp spot — the pair of phase 2 (move to exp) and phase 3 (exp loop).
-    /// This ties RepotToExpPath and ExpLoopPath together as one inseparable definition,
-    /// so you cannot accidentally pair a move-to-exp path from one spot with an exp loop from another.
+    /// Defines a single hunt/exp spot with three route stages:
+    /// Repot → Outside City, Outside City → Exp Spot and the Exp Loop.
+    /// This ties the three stages together as one inseparable definition,
+    /// so you cannot accidentally pair paths from different spots.
     /// </summary>
     public class HuntDefinition
     {
         /// <summary>Human-readable name, e.g. "Wilki", "Szkielety", "Minotaur".</summary>
         public string Name { get; set; } = "";
 
-        /// <summary>Filename of the segment from repot NPC to the hunting area (phase 2).</summary>
-        public string RepotToExpPath { get; set; } = "";
+        /// <summary>Route from the repot NPC to a defined position outside the city (stage 2).</summary>
+        public BotRouteStep RepotToCityExit { get; set; } = new();
 
-        /// <summary>Filename of the exp loop segment (phase 3).</summary>
-        public string ExpLoopPath { get; set; } = "";
+        /// <summary>Route from outside the city to the exp/hunting spot (stage 3).</summary>
+        public BotRouteStep CityExitToExp { get; set; } = new();
+
+        /// <summary>The looping hunting route (stage 4).</summary>
+        public BotRouteStep ExpLoop { get; set; } = new();
     }
 }

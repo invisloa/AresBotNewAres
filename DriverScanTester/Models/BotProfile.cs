@@ -5,27 +5,21 @@ using System.Text.Json.Serialization;
 namespace DriverScanTester.Models
 {
     /// <summary>
-    /// A bot profile describes segment file names, start areas, and repot thresholds.
+    /// A bot profile describes segment file names and repot thresholds.
     /// It does NOT contain waypoint data — only references to SavedPaths/*.json files.
+    /// The profile has exactly one City → Repot route step; every hunt defines its own
+    /// Repot → Outside City, Outside City → Exp Spot and Exp Loop route steps.
     /// </summary>
     public class BotProfile
     {
         /// <summary>Display name for this profile.</summary>
         public string Name { get; set; } = "NewProfile";
 
-        /// <summary>Map number of the city this profile is for (informational / validation).</summary>
-        public int CityMapNumber { get; set; }
+        /// <summary>The single City → Repot route step (stage 1 of the workflow).</summary>
+        public BotRouteStep CityToRepot { get; set; } = new();
 
         /// <summary>
-        /// One or more start-area -> city-to-repot path mappings.
-        /// The first matching area (by current player position) will be used.
-        /// </summary>
-        public List<StartRoute> StartRoutes { get; set; } = new();
-
-        // --- Hunt definitions (phase 2 + phase 3 paired together) ---
-        /// <summary>
-        /// List of hunt/exp definitions. Each entry pairs a move-to-exp path (phase 2)
-        /// with an exp-loop path (phase 3) as one inseparable spot.
+        /// List of hunt/exp definitions. Each hunt defines the route stages 2-4 of the workflow.
         /// </summary>
         public List<HuntDefinition> HuntDefinitions { get; set; } = new();
 
@@ -41,16 +35,6 @@ namespace DriverScanTester.Models
         public HuntDefinition? DefaultHunt =>
             HuntDefinitions.FirstOrDefault(h => h.Name == DefaultHuntName)
             ?? HuntDefinitions.FirstOrDefault();
-
-        // --- Legacy fields (backward compatibility) ---
-        // Old profiles used separate RepotToExpPath / ExpLoopPath instead of HuntDefinitions.
-        // These fields are kept for deserialization of legacy profiles.
-        // BotProfileLoader will convert them into a single "Default" HuntDefinition on load.
-        /// <summary>Filename of the repot -> exp area segment (legacy, use HuntDefinitions instead).</summary>
-        public string RepotToExpPath { get; set; } = "";
-
-        /// <summary>Filename of the exp loop segment (legacy, use HuntDefinitions instead).</summary>
-        public string ExpLoopPath { get; set; } = "";
 
         // --- Repot thresholds (override RepotDetectorService defaults) ---
         /// <summary>Minimum HP potions before repot is needed.</summary>
@@ -94,21 +78,5 @@ namespace DriverScanTester.Models
         public int WindowOffsetX { get; set; } = 0;
         /// <summary>Y offset of the game client area on screen (0 = auto-detect).</summary>
         public int WindowOffsetY { get; set; } = 0;
-    }
-
-    /// <summary>
-    /// Maps a named start area (where the player can appear in the city)
-    /// to a specific city->repot path segment file.
-    /// </summary>
-    public class StartRoute
-    {
-        /// <summary>Human-readable name, e.g. "StartA", "Temple".</summary>
-        public string Name { get; set; } = "";
-
-        /// <summary>The area on the city map where this start route applies.</summary>
-        public StartArea Area { get; set; } = new();
-
-        /// <summary>Filename of the segment from this start point to the repot NPC.</summary>
-        public string PathFile { get; set; } = "";
     }
 }

@@ -1038,9 +1038,12 @@ namespace DriverScanTester.Services
         // ════════════════════════════════════════════════════════════════
 
         /// <summary>Expected value of S_IsSellerPointed (read as clong / 32-bit) when the mouse is over the seller NPC.
-        /// Updated per user observation from 143850200 to 149110376.
-        /// Can be auto-calibrated via <c>GameMemoryService.CalibrateLootMouseOverValue()</c> (NPC = Item + 256).</summary>
-        public static int SellerPointedValue = 149110376;
+        /// Updated per user observation: 143850200 → 149110376 → 138599240 (Sesja 3, 2026-08-03).
+        /// Can be auto-calibrated via <c>GameMemoryService.CalibrateLootMouseOverValue()</c> (NPC = Item + 256).
+        /// WARNING (Sesja 3): the NPC-256 rule failed — the value is likely the hovered object's
+        /// address/ID, so this constant may only match ONE specific NPC. If the seller scan stops
+        /// matching, re-read the value while hovering the ACTUAL seller NPC.</summary>
+        public static int SellerPointedValue = 138599240;
 
         /// <summary>Step in pixels between scan points when sweeping the game window for the seller NPC.</summary>
         private const int SellerScanStepPx = 40;

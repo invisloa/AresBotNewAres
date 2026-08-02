@@ -2593,7 +2593,7 @@ namespace DriverScanTester.ViewModels
         private HealManaSystem? _healManaSystem;
         private LootSystem? _lootSystem;
 
-        // --- 3-Phase Workflow Coordinator ---
+        // --- Four-stage Workflow Coordinator ---
         private BotWorkflowCoordinator? _workflowCoordinator;
         private Task? _workflowTask;
         private BotProfileLoader? _profileLoader;
@@ -2603,11 +2603,11 @@ namespace DriverScanTester.ViewModels
         public BotProfile? ActiveProfile => _workflowCoordinator?.ActiveProfile;
 
         /// <summary>
-        /// Starts the 3-phase workflow. If a profile is provided, uses profile-based constructor
-        /// with CityToRepotRouteSelector. Otherwise uses legacy hardcoded fallback paths.
-        /// The activeHunt ties phase 2 (move to exp) and phase 3 (exp loop) together.
+        /// Starts the four-stage route workflow (City → Repot, Repot → Outside City,
+        /// Outside City → Exp Spot, Exp Loop). Requires a non-null valid profile and
+        /// a non-null active hunt; there is no no-profile fallback mode.
         /// </summary>
-        public void StartWorkflow(BotProfile? profile = null, HuntDefinition? activeHunt = null)
+        public void StartWorkflow(BotProfile profile, HuntDefinition activeHunt)
         {
             if (!_isAttached) { AppendLog("Attach first."); return; }
             if (_workflowCoordinator?.IsRunning == true) { AppendLog("Workflow already running."); return; }
@@ -2615,8 +2615,8 @@ namespace DriverScanTester.ViewModels
             FocusGameWindow();
 
             // Detect window offset (auto or from profile)
-            int offsetX = profile?.WindowOffsetX ?? 0;
-            int offsetY = profile?.WindowOffsetY ?? 0;
+            int offsetX = profile.WindowOffsetX;
+            int offsetY = profile.WindowOffsetY;
             DetectAndSetWindowOffset(offsetX, offsetY);
 
             ulong baseAddr = FindModuleInScanner("Ares.exe", false);
@@ -2637,26 +2637,15 @@ namespace DriverScanTester.ViewModels
             var pathLoader = new SavedPathLoader(AppendLog);
             var pathRunner = new PathRunnerService(memoryService, AppendLog);
 
-            if (profile != null)
-            {
-                var routeSelector = new CityToRepotRouteSelector(AppendLog);
-                _workflowCoordinator = new BotWorkflowCoordinator(
-                    memoryService, repotSystem, repotDetector, pathLoader, pathRunner,
-                    profile, routeSelector, activeHunt, AppendLog, FocusGameWindow);
-                AppendLog($"Starting workflow with profile '{profile.Name}'.");
-            }
-            else
-            {
-                _workflowCoordinator = new BotWorkflowCoordinator(
-                    memoryService, repotSystem, repotDetector, pathLoader, pathRunner,
-                    AppendLog, FocusGameWindow);
-                AppendLog("Starting workflow without profile (hardcoded fallback paths).");
-            }
-
-            if (activeHunt != null)
-            {
-                AppendLog($"Active hunt: '{activeHunt.Name}' | RepotToExpPath: '{activeHunt.RepotToExpPath}' | ExpLoopPath: '{activeHunt.ExpLoopPath}'");
-            }
+            _workflowCoordinator = new BotWorkflowCoordinator(
+                memoryService, repotSystem, repotDetector, pathLoader, pathRunner,
+                profile, activeHunt, AppendLog, FocusGameWindow);
+            AppendLog($"Starting workflow with profile '{profile.Name}'.");
+            AppendLog($"Active hunt: '{activeHunt.Name}'");
+            AppendLog($"  City → Repot:            '{profile.CityToRepot.PathFile}' (delay {profile.CityToRepot.StartDelayMs} ms)");
+            AppendLog($"  Repot → Outside City:    '{activeHunt.RepotToCityExit.PathFile}' (delay {activeHunt.RepotToCityExit.StartDelayMs} ms)");
+            AppendLog($"  Outside City → Exp Spot: '{activeHunt.CityExitToExp.PathFile}' (delay {activeHunt.CityExitToExp.StartDelayMs} ms)");
+            AppendLog($"  Exp Loop:                '{activeHunt.ExpLoop.PathFile}' (delay {activeHunt.ExpLoop.StartDelayMs} ms)");
 
             _workflowCoordinator.OnPhaseChanged = phaseName =>
             {

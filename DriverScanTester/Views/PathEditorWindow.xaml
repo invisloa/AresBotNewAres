@@ -5,7 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:vm="clr-namespace:DriverScanTester.ViewModels"
         mc:Ignorable="d"
-        Title="Path &amp; Route Editor" Height="900" Width="800">
+        Title="Path &amp; Route Editor" Height="900" Width="1200" MinWidth="1050" MinHeight="700">
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="*"/>
@@ -13,14 +13,16 @@
         </Grid.RowDefinitions>
 
         <TabControl Grid.Row="0">
-            <!-- TAB 1: SEGMENT EDITOR -->
+            <!-- TAB 1: SEGMENT CREATOR -->
             <TabItem Header="Segment Creator">
                 <Grid Margin="5">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="2*"/>
-                        <ColumnDefinition Width="1.5*"/>
+                        <ColumnDefinition Width="1.4*"/>
+                        <ColumnDefinition Width="1.1*"/>
                     </Grid.ColumnDefinitions>
 
+                    <!-- A. Segment point editor -->
                     <GroupBox Header="Current Segment Points" Grid.Column="0">
                         <DataGrid ItemsSource="{Binding Points}" AutoGenerateColumns="False" 
                                   SelectedItem="{Binding SelectedPoint}" CanUserAddRows="False">
@@ -46,120 +48,99 @@
                         </DataGrid>
                     </GroupBox>
 
-                    <StackPanel Grid.Column="1" Margin="10,0,0,0">
-                        <Button Content="Capture Position (Bot)" Command="{Binding CapturePositionCommand}" Margin="0,0,0,10" Padding="8" Background="#FFE6F7FF" FontWeight="Bold"/>
-                        
-                        <Grid Margin="0,0,0,5">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <Button Grid.Column="0" Content="Add (0,0)" Command="{Binding AddPointCommand}" Margin="0,0,2,0"/>
-                            <Button Grid.Column="1" Content="Remove" Command="{Binding RemovePointCommand}" Margin="2,0,0,0"/>
+                    <!-- B. Segment settings and actions -->
+                    <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto">
+                        <StackPanel Margin="10,0,0,0">
+                            <Button Content="Capture Position (Bot)" Command="{Binding CapturePositionCommand}" Margin="0,0,0,10" Padding="8" Background="#FFE6F7FF" FontWeight="Bold"/>
+                            
+                            <Grid Margin="0,0,0,5">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Button Grid.Column="0" Content="Add (0,0)" Command="{Binding AddPointCommand}" Margin="0,0,2,0"/>
+                                <Button Grid.Column="1" Content="Remove" Command="{Binding RemovePointCommand}" Margin="2,0,0,0"/>
+                            </Grid>
+
+                            <Grid Margin="0,0,0,10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Button Grid.Column="0" Content="Move Up" Command="{Binding MovePointUpCommand}" Margin="0,0,2,0"/>
+                                <Button Grid.Column="1" Content="Move Down" Command="{Binding MovePointDownCommand}" Margin="2,0,0,0"/>
+                            </Grid>
+
+                            <Button Content="Clear All Points" Command="{Binding ClearPathCommand}" Margin="0,0,0,20"/>
+
+                            <CheckBox Content="Loop Path" IsChecked="{Binding LoopRoute}" Margin="0,0,0,10" ToolTip="Start over from first point when finished"/>
+
+                            <Label Content="Segment Name (Save As):"/>
+                            <TextBox Text="{Binding SegmentName, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,5" Padding="3"/>
+                            
+                            <Label Content="Precision for new points:"/>
+                            <ComboBox ItemsSource="{Binding Source={x:Static vm:EnumSources.MovementPrecisions}}"
+                                      SelectedItem="{Binding SegmentPrecision}"
+                                      Margin="0,0,0,10" Padding="3"
+                                      ToolTip="Default precision applied only when adding new points via Add/Capture. Each point in the grid can be edited individually."/>
+
+                            <Label Content="Bot mode for new points:"/>
+                            <ComboBox ItemsSource="{Binding Source={x:Static vm:EnumSources.BotModes}}"
+                                      SelectedItem="{Binding SegmentBotMode}"
+                                      Margin="0,0,0,10" Padding="3"
+                                      ToolTip="Default bot mode applied only when adding new points via Add/Capture. Each point in the grid can be edited individually."/>
+
+                            <Label Content="Zone restriction:"/>
+                            <ComboBox ItemsSource="{Binding Source={x:Static vm:EnumSources.ZoneRestrictions}}"
+                                      SelectedItem="{Binding SegmentZoneRestriction}"
+                                      Margin="0,0,0,10" Padding="3"
+                                      ToolTip="OutsideOnly = block movement in city. InCityOnly = block movement outside. Both = move anywhere."/>
+
+                            <Label Content="Camera distance lock for new points:"/>
+                            <TextBox Text="{Binding SegmentCameraDistanceLockText, UpdateSourceTrigger=PropertyChanged}"
+                                     Margin="0,0,0,10" Padding="3"
+                                     ToolTip="Default camera distance lock used when adding/capturing new points. The grid value can still be edited per point."/>
+
+                            <Label Content="Attack disengage distance for new points:"/>
+                            <TextBox Text="{Binding SegmentAttackDisengageDistanceText, UpdateSourceTrigger=PropertyChanged}"
+                                     Margin="0,0,0,10" Padding="3"
+                                     ToolTip="If the bot moves farther than this Manhattan distance from the current attack waypoint, it will stop attacking until the waypoint is reached again."/>
+
+                            <Button Content="Save Segment to Library" Command="{Binding SaveSegmentCommand}" Margin="0,0,0,20" Padding="5"/>
+
+                            <Separator Height="10"/>
+                            <TextBlock Text="To edit an existing segment, select it in the Saved Segment Library and click Load into Editor." TextWrapping="Wrap" Foreground="Gray" FontSize="10"/>
+                            
+                            <Button Content="RUN THIS SEGMENT ONLY" Command="{Binding RunCurrentSegmentCommand}" Margin="0,20,0,0" Padding="5" Background="#FFF0F0F0"/>
+                            <Button Content="STOP BOT" Command="{Binding StopBotCommand}" Margin="0,5,0,0" Padding="5" Background="#FFFFCCCC" FontWeight="Bold"/>
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <!-- C. Saved Segment Library -->
+                    <GroupBox Header="Saved Segment Library" Grid.Column="2" Margin="10,0,0,0">
+                        <Grid Margin="3">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <ListBox Grid.Row="0" ItemsSource="{Binding AvailableSegments}" SelectedItem="{Binding SelectedAvailableSegment}"/>
+
+                            <StackPanel Grid.Row="1" Margin="0,5,0,0">
+                                <Button Content="Refresh" Command="{Binding RefreshLibraryCommand}" Margin="0,0,0,5"/>
+                                <Button Content="Load into Editor" Command="{Binding LoadSegmentCommand}" Margin="0,0,0,5"
+                                        ToolTip="Load the selected segment into the Segment Creator for editing"/>
+                                <Button Content="Delete Segment" Command="{Binding DeleteSegmentCommand}" Margin="0,0,0,5"
+                                        Background="#FFFFE6E6" ToolTip="Permanently delete from disk"/>
+                                <Button Content="STOP BOT" Command="{Binding StopBotCommand}" Margin="0,5,0,0"
+                                        Padding="5" Background="#FFFFCCCC" FontWeight="Bold"/>
+                            </StackPanel>
                         </Grid>
-
-                        <Grid Margin="0,0,0,10">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <Button Grid.Column="0" Content="Move Up" Command="{Binding MovePointUpCommand}" Margin="0,0,2,0"/>
-                            <Button Grid.Column="1" Content="Move Down" Command="{Binding MovePointDownCommand}" Margin="2,0,0,0"/>
-                        </Grid>
-
-                        <Button Content="Clear All Points" Command="{Binding ClearPathCommand}" Margin="0,0,0,20"/>
-
-                        <CheckBox Content="Loop Path" IsChecked="{Binding LoopRoute}" Margin="0,0,0,10" ToolTip="Start over from first point when finished"/>
-
-                        <Label Content="Segment Name (Save As):"/>
-                        <TextBox Text="{Binding SegmentName, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,5" Padding="3"/>
-                        
-                        <Label Content="Precision for new points:"/>
-                        <ComboBox ItemsSource="{Binding Source={x:Static vm:EnumSources.MovementPrecisions}}"
-                                  SelectedItem="{Binding SegmentPrecision}"
-                                  Margin="0,0,0,10" Padding="3"
-                                  ToolTip="Default precision applied only when adding new points via Add/Capture. Each point in the grid can be edited individually."/>
-
-                        <Label Content="Bot mode for new points:"/>
-                        <ComboBox ItemsSource="{Binding Source={x:Static vm:EnumSources.BotModes}}"
-                                  SelectedItem="{Binding SegmentBotMode}"
-                                  Margin="0,0,0,10" Padding="3"
-                                  ToolTip="Default bot mode applied only when adding new points via Add/Capture. Each point in the grid can be edited individually."/>
-
-                        <Label Content="Zone restriction:"/>
-                        <ComboBox ItemsSource="{Binding Source={x:Static vm:EnumSources.ZoneRestrictions}}"
-                                  SelectedItem="{Binding SegmentZoneRestriction}"
-                                  Margin="0,0,0,10" Padding="3"
-                                  ToolTip="OutsideOnly = block movement in city. InCityOnly = block movement outside. Both = move anywhere."/>
-
-                        <Label Content="Camera distance lock for new points:"/>
-                        <TextBox Text="{Binding SegmentCameraDistanceLockText, UpdateSourceTrigger=PropertyChanged}"
-                                 Margin="0,0,0,10" Padding="3"
-                                 ToolTip="Default camera distance lock used when adding/capturing new points. The grid value can still be edited per point."/>
-
-                        <Label Content="Attack disengage distance for new points:"/>
-                        <TextBox Text="{Binding SegmentAttackDisengageDistanceText, UpdateSourceTrigger=PropertyChanged}"
-                                 Margin="0,0,0,10" Padding="3"
-                                 ToolTip="If the bot moves farther than this Manhattan distance from the current attack waypoint, it will stop attacking until the waypoint is reached again."/>
-
-                        <Button Content="Save Segment to Library" Command="{Binding SaveSegmentCommand}" Margin="0,0,0,20" Padding="5"/>
-
-                        <Separator Height="10"/>
-                        <TextBlock Text="To edit an existing segment, select it in Route Builder and click Load." TextWrapping="Wrap" Foreground="Gray" FontSize="10"/>
-                        
-                        <Button Content="RUN THIS SEGMENT ONLY" Command="{Binding RunCurrentSegmentCommand}" Margin="0,20,0,0" Padding="5" Background="#FFF0F0F0"/>
-                        <Button Content="STOP BOT" Command="{Binding StopBotCommand}" Margin="0,5,0,0" Padding="5" Background="#FFFFCCCC" FontWeight="Bold"/>
-                    </StackPanel>
+                    </GroupBox>
                 </Grid>
             </TabItem>
 
-            <!-- TAB 2: ROUTE BUILDER -->
-            <TabItem Header="Route Builder">
-                <Grid Margin="5">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="1*"/>
-                        <ColumnDefinition Width="50"/> <!-- Buttons -->
-                        <ColumnDefinition Width="1*"/>
-                        <ColumnDefinition Width="120"/> <!-- Controls -->
-                    </Grid.ColumnDefinitions>
-
-                    <!-- Library List -->
-                    <GroupBox Header="Library (SavedPaths)" Grid.Column="0">
-                        <ListBox ItemsSource="{Binding AvailableSegments}" SelectedItem="{Binding SelectedAvailableSegment}"/>
-                    </GroupBox>
-
-                    <!-- Middle Buttons -->
-                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                        <Button Content="&gt;&gt;" Command="{Binding AddToRouteCommand}" Margin="5" ToolTip="Add to Route"/>
-                        <Button Content="&lt;&lt;" Command="{Binding RemoveFromRouteCommand}" Margin="5" ToolTip="Remove from Route"/>
-                    </StackPanel>
-
-                    <!-- Route List -->
-                    <GroupBox Header="Current Route Sequence" Grid.Column="2">
-                        <ListBox ItemsSource="{Binding RouteSegments}" SelectedItem="{Binding SelectedRouteSegment}"/>
-                    </GroupBox>
-
-                    <!-- Right Controls -->
-                    <StackPanel Grid.Column="3" Margin="10,0,0,0">
-                        <Button Content="Refresh Lib" Command="{Binding RefreshLibraryCommand}" Margin="0,0,0,10"/>
-                        <Button Content="Load into Editor" Command="{Binding LoadSegmentCommand}" Margin="0,0,0,5" ToolTip="Edit selected Library item"/>
-                        <Button Content="Delete Segment" Command="{Binding DeleteSegmentCommand}" Margin="0,0,0,20" Background="#FFFFE6E6" ToolTip="Permanently delete from disk"/>
-                        
-                        <Label Content="Reorder:"/>
-                        <Button Content="Move Up" Command="{Binding MoveUpCommand}" Margin="0,0,0,5"/>
-                        <Button Content="Move Down" Command="{Binding MoveDownCommand}" Margin="0,0,0,20"/>
-
-                        <Button Content="Clear Route" Command="{Binding ClearRouteCommand}" Margin="0,0,0,20"/>
-
-                        <CheckBox Content="Loop Path" IsChecked="{Binding LoopRoute}" Margin="0,0,0,10" ToolTip="Start over from first point when finished"/>
-                        
-                        <Button Content="RUN FULL ROUTE" Command="{Binding RunFullRouteCommand}" Height="35" Background="#FFD4F4D4" FontWeight="Bold" />
-                        <Button Content="STOP BOT" Command="{Binding StopBotCommand}" Margin="0,5,0,0" Padding="5" Background="#FFFFCCCC" FontWeight="Bold"/>
-                    </StackPanel>
-                </Grid>
-            </TabItem>
-
-            <!-- TAB 3: PROFILE EDITOR -->
+            <!-- TAB 2: PROFILE EDITOR -->
             <TabItem Header="Profile Editor">
                 <Grid Margin="5" DataContext="{Binding ProfileEditor}">
                     <Grid.RowDefinitions>
@@ -177,35 +158,24 @@
                             <Button Content="New" Command="{Binding NewProfileCommand}" Width="50" Margin="2" Background="#FFE6FFE6" FontWeight="Bold"/>
                             <Button Content="Save" Command="{Binding SaveProfileCommand}" Width="50" Margin="2" Background="#FFE6F7FF" FontWeight="Bold"/>
                             <Button Content="Delete" Command="{Binding DeleteProfileCommand}" Width="55" Margin="2" Background="#FFFFE6E6"/>
-                            <Button Content="Refresh" Command="{Binding RefreshProfilesCommand}" Width="60" Margin="2"/>
+                            <Button Content="Refresh Profiles" Command="{Binding RefreshProfilesCommand}" Width="110" Margin="2"/>
                             <Separator Width="1" Margin="5,2" Background="LightGray"/>
                             <Button Content="Refresh Segments" Command="{Binding RefreshSegmentsCommand}" Width="120" Margin="2"/>
                         </WrapPanel>
                     </Border>
 
-                    <!-- Row 1: Main content -->
-                    <Grid Grid.Row="1">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
+                    <!-- Row 1: Scrollable workflow content -->
+                    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel Margin="0,0,5,0">
 
-                        <!-- Left column: Profile settings + Start Routes -->
-                        <Grid Grid.Column="0" Margin="0,0,5,0">
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
-                            </Grid.RowDefinitions>
-
-                            <!-- Profile Settings -->
-                            <GroupBox Header="Profile Settings" Grid.Row="0" Margin="0,0,0,5">
+                            <!-- General and repot settings -->
+                            <GroupBox Header="General and Repot Settings" Margin="0,0,0,8">
                                 <Grid Margin="3">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="Auto"/>
                                         <ColumnDefinition Width="*"/>
                                     </Grid.ColumnDefinitions>
                                     <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
@@ -250,107 +220,172 @@
                                     <TextBox Grid.Row="9" Grid.Column="1" Text="{Binding WhiteBuyTarget, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
 
                                     <CheckBox Grid.Row="10" Grid.Column="1" Content="Dry Run Repot" IsChecked="{Binding DryRunRepot}" Margin="2"/>
-
-                                    <Label Grid.Row="11" Grid.Column="0" Content="Default Hunt:"/>
-                                    <TextBox Grid.Row="11" Grid.Column="1" Text="{Binding DefaultHuntName, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
                                 </Grid>
                             </GroupBox>
 
-                            <!-- Start Routes -->
-                            <GroupBox Header="Start Routes (city → repot)" Grid.Row="1" Margin="0,5,0,0">
+                            <!-- Advanced workflow settings -->
+                            <GroupBox Header="Advanced Workflow Settings" Margin="0,0,0,8">
                                 <Grid Margin="3">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="*"/>
                                         <RowDefinition Height="Auto"/>
-                                    </Grid.RowDefinitions>
-
-                                    <DataGrid Grid.Row="0" ItemsSource="{Binding StartRoutes}" SelectedItem="{Binding SelectedStartRoute}"
-                                              AutoGenerateColumns="False" CanUserAddRows="False" MaxHeight="200" Margin="0,0,0,5">
-                                        <DataGrid.Columns>
-                                            <DataGridTextColumn Header="Name" Binding="{Binding Name, UpdateSourceTrigger=PropertyChanged}" Width="80"/>
-                                            <DataGridTextColumn Header="Map" Binding="{Binding MapNumber, UpdateSourceTrigger=PropertyChanged}" Width="40"/>
-                                            <DataGridTextColumn Header="MinX" Binding="{Binding MinX, UpdateSourceTrigger=PropertyChanged}" Width="50"/>
-                                            <DataGridTextColumn Header="MaxX" Binding="{Binding MaxX, UpdateSourceTrigger=PropertyChanged}" Width="50"/>
-                                            <DataGridTextColumn Header="MinY" Binding="{Binding MinY, UpdateSourceTrigger=PropertyChanged}" Width="50"/>
-                                            <DataGridTextColumn Header="MaxY" Binding="{Binding MaxY, UpdateSourceTrigger=PropertyChanged}" Width="50"/>
-                                            <DataGridTextColumn Header="PathFile" Binding="{Binding PathFile, UpdateSourceTrigger=PropertyChanged}" Width="*"/>
-                                        </DataGrid.Columns>
-                                    </DataGrid>
-
-                                    <WrapPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,5">
-                                        <TextBlock Text="Segment:" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                                        <ComboBox ItemsSource="{Binding AvailableSegments}" SelectedItem="{Binding SelectedStartRouteSegment}"
-                                                  Width="160" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                                        <Button Content="Add Start Route" Command="{Binding AddStartRouteCommand}" Width="110" Margin="2" Background="#FFE6F7FF"/>
-                                        <Button Content="Remove" Command="{Binding RemoveStartRouteCommand}" Width="70" Margin="2" Background="#FFFFE6E6"/>
-                                    </WrapPanel>
-                                </Grid>
-                            </GroupBox>
-                        </Grid>
-
-                        <!-- Right column: Hunt Definitions -->
-                        <Grid Grid.Column="1" Margin="5,0,0,0">
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="*"/>
-                                <RowDefinition Height="Auto"/>
-                            </Grid.RowDefinitions>
-
-                            <GroupBox Header="Hunt Definitions (repot → exp + exp loop)" Grid.Row="0">
-                                <Grid Margin="3">
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="*"/>
-                                        <RowDefinition Height="Auto"/>
-                                    </Grid.RowDefinitions>
-
-                                    <DataGrid Grid.Row="0" ItemsSource="{Binding HuntDefinitions}" SelectedItem="{Binding SelectedHunt}"
-                                              AutoGenerateColumns="False" CanUserAddRows="False" Margin="0,0,0,5">
-                                        <DataGrid.Columns>
-                                            <DataGridTextColumn Header="Hunt Name" Binding="{Binding Name, UpdateSourceTrigger=PropertyChanged}" Width="100"/>
-                                            <DataGridTextColumn Header="Repot→Exp Path" Binding="{Binding RepotToExpPath, UpdateSourceTrigger=PropertyChanged}" Width="*"/>
-                                            <DataGridTextColumn Header="Exp Loop Path" Binding="{Binding ExpLoopPath, UpdateSourceTrigger=PropertyChanged}" Width="*"/>
-                                        </DataGrid.Columns>
-                                    </DataGrid>
-
-                                    <WrapPanel Grid.Row="1" Orientation="Horizontal" Margin="0,5,0,0">
-                                        <Button Content="▲" Command="{Binding MoveHuntUpCommand}" Width="30" ToolTip="Move up"/>
-                                        <Button Content="▼" Command="{Binding MoveHuntDownCommand}" Width="30" Margin="2,0,10,0" ToolTip="Move down"/>
-                                        <Button Content="Remove Hunt" Command="{Binding RemoveHuntCommand}" Width="90" Background="#FFFFE6E6"/>
-                                    </WrapPanel>
-                                </Grid>
-                            </GroupBox>
-
-                            <!-- Add Hunt controls -->
-                            <GroupBox Header="Add New Hunt" Grid.Row="1" Margin="0,5,0,0">
-                                <Grid Margin="3">
-                                    <Grid.RowDefinitions>
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
                                     </Grid.RowDefinitions>
 
-                                    <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,5">
-                                        <TextBlock Text="Repot→Exp segment:" FontWeight="Bold" VerticalAlignment="Center" Width="130"/>
-                                        <ComboBox ItemsSource="{Binding AvailableSegments}" SelectedItem="{Binding SelectedRepotToExpSegment}"
-                                                  Width="180" VerticalAlignment="Center"/>
-                                    </WrapPanel>
+                                    <Label Grid.Row="0" Grid.Column="0" Content="Teleport Key:"/>
+                                    <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding TeleportKey, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
 
-                                    <WrapPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,5">
-                                        <TextBlock Text="Exp Loop segment:" FontWeight="Bold" VerticalAlignment="Center" Width="130"/>
-                                        <ComboBox ItemsSource="{Binding AvailableSegments}" SelectedItem="{Binding SelectedExpLoopSegment}"
-                                                  Width="180" VerticalAlignment="Center"/>
-                                    </WrapPanel>
+                                    <Label Grid.Row="1" Grid.Column="0" Content="Teleport Scan Code:"/>
+                                    <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding TeleportScanCode, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
 
-                                    <Button Grid.Row="2" Content="Add Hunt from Selected Segments" Command="{Binding AddHuntCommand}"
-                                            Width="250" HorizontalAlignment="Left" Background="#FFE6F7FF" FontWeight="Bold"/>
+                                    <Label Grid.Row="2" Grid.Column="0" Content="Max Teleport Retries:"/>
+                                    <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding MaxTeleportRetries, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
+
+                                    <Label Grid.Row="3" Grid.Column="0" Content="Window Offset X:"/>
+                                    <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding WindowOffsetX, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
+
+                                    <Label Grid.Row="4" Grid.Column="0" Content="Window Offset Y:"/>
+                                    <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding WindowOffsetY, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
                                 </Grid>
                             </GroupBox>
-                        </Grid>
-                    </Grid>
+
+                            <!-- Stage 1 card: City → Repot (profile-level) -->
+                            <GroupBox Header="Stage 1 — City → Repot (profile-level)" Margin="0,0,0,8" BorderBrush="#FF3399FF" BorderThickness="1">
+                                <StackPanel Margin="3">
+                                    <WrapPanel Orientation="Horizontal" Margin="0,0,0,5">
+                                        <TextBlock Text="Saved Path:" FontWeight="Bold" VerticalAlignment="Center" Width="90"/>
+                                        <ComboBox ItemsSource="{Binding AvailableSegments}" SelectedItem="{Binding CityToRepot.PathFile}"
+                                                  Width="300" VerticalAlignment="Center"/>
+                                    </WrapPanel>
+                                    <WrapPanel Orientation="Horizontal" Margin="0,0,0,5">
+                                        <TextBlock Text="Wait before start (ms):" FontWeight="Bold" VerticalAlignment="Center" Width="140"/>
+                                        <TextBox Text="{Binding CityToRepot.StartDelayMs, UpdateSourceTrigger=PropertyChanged}"
+                                                 Width="100" VerticalAlignment="Center"/>
+                                    </WrapPanel>
+                                    <TextBlock Text="Only one City → Repot path is supported for now. Additional city-to-repot path selection will be designed later."
+                                               TextWrapping="Wrap" Foreground="Gray" FontSize="10"/>
+                                </StackPanel>
+                            </GroupBox>
+
+                            <!-- Hunt selector (master-detail) -->
+                            <GroupBox Header="Hunts" Margin="0,0,0,8" BorderBrush="#FF3399FF" BorderThickness="1">
+                                <Grid Margin="3">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="230"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <!-- Master: hunt list -->
+                                    <Grid Grid.Column="0" Margin="0,0,8,0">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="*"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+
+                                        <ListBox Grid.Row="0" ItemsSource="{Binding HuntDefinitions}" SelectedItem="{Binding SelectedHunt}" Margin="0,0,0,5">
+                                            <ListBox.ItemTemplate>
+                                                <DataTemplate>
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="{Binding Name}"/>
+                                                        <TextBlock Text=" (default)" Foreground="#FF008000" FontWeight="Bold">
+                                                            <TextBlock.Style>
+                                                                <Style TargetType="TextBlock">
+                                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                                    <Style.Triggers>
+                                                                        <DataTrigger Binding="{Binding IsDefault}" Value="True">
+                                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </TextBlock.Style>
+                                                        </TextBlock>
+                                                    </StackPanel>
+                                                </DataTemplate>
+                                            </ListBox.ItemTemplate>
+                                        </ListBox>
+
+                                        <WrapPanel Grid.Row="1" Orientation="Horizontal">
+                                            <Button Content="Add Hunt" Command="{Binding AddHuntCommand}" Width="80" Margin="0,0,2,0" Background="#FFE6F7FF"/>
+                                            <Button Content="Remove" Command="{Binding RemoveHuntCommand}" Width="65" Margin="2,0,0,0" Background="#FFFFE6E6"/>
+                                            <Button Content="▲" Command="{Binding MoveHuntUpCommand}" Width="28" Margin="4,0,2,0" ToolTip="Move up"/>
+                                            <Button Content="▼" Command="{Binding MoveHuntDownCommand}" Width="28" Margin="0,0,4,0" ToolTip="Move down"/>
+                                            <Button Content="Set as Default" Command="{Binding SetDefaultHuntCommand}" Width="110" Margin="0,3,0,0" Background="#FFE6FFE6"/>
+                                        </WrapPanel>
+                                    </Grid>
+
+                                    <!-- Detail: selected hunt stages -->
+                                    <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                        <StackPanel>
+                                            <WrapPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                                <TextBlock Text="Hunt Name:" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                                <TextBox Text="{Binding SelectedHunt.Name, UpdateSourceTrigger=PropertyChanged}" Width="200" VerticalAlignment="Center" Padding="3"/>
+                                            </WrapPanel>
+
+                                            <!-- Stage 2 card -->
+                                            <GroupBox Header="Stage 2 — Repot → Outside City" Margin="0,0,0,8" BorderBrush="#FF66B2FF" BorderThickness="1">
+                                                <StackPanel Margin="3">
+                                                    <WrapPanel Orientation="Horizontal" Margin="0,0,0,5">
+                                                        <TextBlock Text="Saved Path:" FontWeight="Bold" VerticalAlignment="Center" Width="90"/>
+                                                        <ComboBox ItemsSource="{Binding AvailableSegments}" SelectedItem="{Binding SelectedHunt.RepotToCityExit.PathFile}"
+                                                                  Width="300" VerticalAlignment="Center"/>
+                                                    </WrapPanel>
+                                                    <WrapPanel Orientation="Horizontal">
+                                                        <TextBlock Text="Wait before start (ms):" FontWeight="Bold" VerticalAlignment="Center" Width="140"/>
+                                                        <TextBox Text="{Binding SelectedHunt.RepotToCityExit.StartDelayMs, UpdateSourceTrigger=PropertyChanged}"
+                                                                 Width="100" VerticalAlignment="Center"/>
+                                                    </WrapPanel>
+                                                </StackPanel>
+                                            </GroupBox>
+
+                                            <!-- Stage 3 card -->
+                                            <GroupBox Header="Stage 3 — Outside City → Exp Spot" Margin="0,0,0,8" BorderBrush="#FF66B2FF" BorderThickness="1">
+                                                <StackPanel Margin="3">
+                                                    <WrapPanel Orientation="Horizontal" Margin="0,0,0,5">
+                                                        <TextBlock Text="Saved Path:" FontWeight="Bold" VerticalAlignment="Center" Width="90"/>
+                                                        <ComboBox ItemsSource="{Binding AvailableSegments}" SelectedItem="{Binding SelectedHunt.CityExitToExp.PathFile}"
+                                                                  Width="300" VerticalAlignment="Center"/>
+                                                    </WrapPanel>
+                                                    <WrapPanel Orientation="Horizontal">
+                                                        <TextBlock Text="Wait before start (ms):" FontWeight="Bold" VerticalAlignment="Center" Width="140"/>
+                                                        <TextBox Text="{Binding SelectedHunt.CityExitToExp.StartDelayMs, UpdateSourceTrigger=PropertyChanged}"
+                                                                 Width="100" VerticalAlignment="Center"/>
+                                                    </WrapPanel>
+                                                </StackPanel>
+                                            </GroupBox>
+
+                                            <!-- Stage 4 card -->
+                                            <GroupBox Header="Stage 4 — Exp Loop" Margin="0,0,0,8" BorderBrush="#FF66B2FF" BorderThickness="1">
+                                                <StackPanel Margin="3">
+                                                    <WrapPanel Orientation="Horizontal" Margin="0,0,0,5">
+                                                        <TextBlock Text="Saved Path:" FontWeight="Bold" VerticalAlignment="Center" Width="90"/>
+                                                        <ComboBox ItemsSource="{Binding AvailableSegments}" SelectedItem="{Binding SelectedHunt.ExpLoop.PathFile}"
+                                                                  Width="300" VerticalAlignment="Center"/>
+                                                    </WrapPanel>
+                                                    <WrapPanel Orientation="Horizontal" Margin="0,0,0,5">
+                                                        <TextBlock Text="Wait before start (ms):" FontWeight="Bold" VerticalAlignment="Center" Width="140"/>
+                                                        <TextBox Text="{Binding SelectedHunt.ExpLoop.StartDelayMs, UpdateSourceTrigger=PropertyChanged}"
+                                                                 Width="100" VerticalAlignment="Center"/>
+                                                    </WrapPanel>
+                                                    <TextBlock Text="The selected path loops until repot is needed."
+                                                               TextWrapping="Wrap" Foreground="Gray" FontSize="10"/>
+                                                </StackPanel>
+                                            </GroupBox>
+                                        </StackPanel>
+                                    </ScrollViewer>
+                                </Grid>
+                            </GroupBox>
+                        </StackPanel>
+                    </ScrollViewer>
 
                     <!-- Row 2: Status -->
                     <Border Grid.Row="2" BorderBrush="LightGray" BorderThickness="0,1,0,0" Padding="5" Margin="0,5,0,0">
-                        <TextBlock Text="{Binding StatusText}" Foreground="Blue" FontWeight="SemiBold"/>
+                        <TextBlock Text="{Binding StatusText}" Foreground="Blue" FontWeight="SemiBold" TextWrapping="Wrap"/>
                     </Border>
                 </Grid>
             </TabItem>

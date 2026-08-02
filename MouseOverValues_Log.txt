@@ -36,30 +36,40 @@ ZALEZNOSC (stala miedzy sesjami):
 Dzieki temu wystarczy przy kazdym uruchomieniu odczytac wartosc dla NPC,
 a nastepnie odjac 256 aby otrzymac wartosc dla itemu.
 
+!!! UWAGA (Sesja 3, 2026-08-03): ta zaleznosc NIE zadzialala !
+    Item_cl = 371473144 (0x16243AF8), NPC_cl = 138599240 (0x0842DB48).
+    Roznica = 232873904 (0x0DE15FB0), a nie 256.
+    Prawdopodobne wyjasnienie: wartosc to ADRES obiektu pod kursorem
+    (alokacja heap), a roznica 256 w sesji 2 byla przypadkiem — item i NPC
+    lezaly obok siebie w pamieci (sasiednie sloty). Kalibracja "NPC - 256"
+    jest NIEZAWDODNA. Kalibruj naprowadzajac kursor BEZPOSREDNIO na item.
+
 AKTUALNE WARTOSCI:
 ================================================================================
 
   Name | Address                       | Typ     | Item (decimal)   | Item (hex)     | NPC (decimal)    | NPC (hex)
   -----+-------------------------------+---------+------------------+----------------+------------------+---------------
-  cb   | [Ares.exe + 0x4704A8] + 0xC  | byte    | 72               | 0x48           | 72               | 0x48
-  db   | [Ares.exe + 0x4704A8] + 0xD  | byte    | 219              | 0xDB           | 220              | 0xDC
-  bs   | [Ares.exe + 0x4704A8] + 0xB  | short   | 18432            | 0x4800         | 18432            | 0x4800
-  cs   | [Ares.exe + 0x4704A8] + 0xC  | short   | -9400            | 0xDB48         | -9080            | 0xDC48
-  ds   | [Ares.exe + 0x4704A8] + 0xD  | short   | 17115            | 0x42DB         | 17116            | 0x42DC
-  al   | [Ares.exe + 0x4704A8] + 0xA  | int     | -616038397       | 0xDB480003     | -602619901       | 0xDC480003
-  bl   | [Ares.exe + 0x4704A8] + 0xB  | int     | 1121667072       | 0x42DB4800     | 1121740800       | 0x42DC4800
-  cl   | [Ares.exe + 0x4704A8] + 0xC  | int     | 138599240        | 0x0842DB48     | 138599496        | 0x0842DC48
-  dl   | [Ares.exe + 0x4704A8] + 0xD  | int     | 541403           | 0x000842DB     | 541404           | 0x000842DC
+  cb   | [Ares.exe + 0x4704A8] + 0xC  | byte    | 248              | 0xF8           | 72               | 0x48
+  db   | [Ares.exe + 0x4704A8] + 0xD  | byte    | 58               | 0x3A           | 219              | 0xDB
+  bs   | [Ares.exe + 0x4704A8] + 0xB  | short   | -2048            | 0xF800         | 18432            | 0x4800
+  cs   | [Ares.exe + 0x4704A8] + 0xC  | short   | 15096            | 0x3AF8         | -9400            | 0xDB48
+  ds   | [Ares.exe + 0x4704A8] + 0xD  | short   | 9274             | 0x243A         | 17115            | 0x42DB
+  al   | [Ares.exe + 0x4704A8] + 0xA  | int     | 989331552        | 0x3AF80060     | -616038397       | 0xDB480003
+  bl   | [Ares.exe + 0x4704A8] + 0xB  | int     | 607844352        | 0x243AF800     | 1121667072       | 0x42DB4800
+  cl   | [Ares.exe + 0x4704A8] + 0xC  | int     | 371473144        | 0x16243AF8     | 138599240        | 0x0842DB48
+  dl   | [Ares.exe + 0x4704A8] + 0xD  | int     | 1451066          | 0x0016243A     | 541403           | 0x000842DB
 
-Surowe bajty w okolicy (+0xA do +0xF):
+Surowe bajty w okolicy (+0xA do +0xF) — SESJA 3 (2026-08-03):
   Offs  | Item     | NPC
   ------+----------+----------
-  +0xA  | 0x03     | 0x03
+  +0xA  | 0x60     | 0x03
   +0xB  | 0x00     | 0x00
-  +0xC  | 0x48     | 0x48
-  +0xD  | 0xDB     | 0xDC  <-- jedyna roznica
-  +0xE  | 0x42     | 0x42
-  +0xF  | 0x08     | 0x08
+  +0xC  | 0xF8     | 0x48
+  +0xD  | 0x3A     | 0xDB
+  +0xE  | 0x24     | 0x42
+  +0xF  | 0x16     | 0x08
+  UWAGA: w sesji 3 roznia sie WSZYSTKIE bajty (poza +0xB), wiec regula
+  "jedyna roznica to +0xD" z sesji 2 NIE jest uniwersalna.
 
 HISTORIA ZMIAN:
 ===============
@@ -70,6 +80,19 @@ HISTORIA ZMIAN:
 - Sesja 2 (2026-06-28): LootMouseOverValue = 138599240 (0x0842DB48)
                          Item db = 0xDB, NPC db = 0xDC
                          Odkryta zaleznosc: Item_cl = NPC_cl - 256
+
+- Sesja 3 (2026-08-03): LootMouseOverValue = 371473144 (0x16243AF8)
+                         NPC  = 138599240 (0x0842DB48)
+                         Zaleznosc Item = NPC - 256 NIE dziala
+                         (roznica = 232873904, nie 256).
+                         KRYTYCZNA obserwacja: wartosc NPC z sesji 3 jest
+                         DOKLADNIE rowna wartosci ITEM z sesji 2 (0x0842DB48).
+                         To wskazuje, ze wartosc to adres/ID obiektu pod
+                         kursorem (heap), a nie flaga item/NPC — slot pamieci
+                         0x0842DB48 byl w sesji 2 itemem, a w sesji 3 NPC-em
+                         (po restarcie gry te same sloty dostaja te same
+                         adresy). Konsekwencja: pojedyncza stala == dziala
+                         tylko dla JEDNEGO konkretnego obiektu.
 
 --- Dopisz kolejne wpisy ponizej, po kazdym restarcie gry ---
 ================================================================================

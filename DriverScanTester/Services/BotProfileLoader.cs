@@ -9,7 +9,8 @@ namespace DriverScanTester.Services
 {
     /// <summary>
     /// Loads, saves, lists and validates BotProfiles stored as JSON files
-    /// in the SavedBotProfiles/ directory.
+    /// in the SavedBotProfiles/ directory. This is the single persistence
+    /// service for profiles: listing, loading, saving and validating.
     /// </summary>
     public class BotProfileLoader
     {
@@ -44,8 +45,8 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Loads a profile by name (with or without .json extension).
-        /// Handles legacy profiles by auto-converting RepotToExpPath/ExpLoopPath
-        /// into a single HuntDefinition named "Default".
+        /// Old profiles that are missing the new route steps deserialize fine
+        /// (unknown properties are ignored); validation reports the missing stages.
         /// </summary>
         public BotProfile? LoadProfile(string profileName)
         {
@@ -69,24 +70,7 @@ namespace DriverScanTester.Services
                     return null;
                 }
 
-                // Backward compatibility: convert legacy RepotToExpPath/ExpLoopPath into HuntDefinitions
-                if ((profile.HuntDefinitions == null || profile.HuntDefinitions.Count == 0)
-                    && (!string.IsNullOrWhiteSpace(profile.RepotToExpPath) || !string.IsNullOrWhiteSpace(profile.ExpLoopPath)))
-                {
-                    profile.HuntDefinitions = new List<HuntDefinition>
-                    {
-                        new HuntDefinition
-                        {
-                            Name = "Default",
-                            RepotToExpPath = profile.RepotToExpPath ?? "",
-                            ExpLoopPath = profile.ExpLoopPath ?? ""
-                        }
-                    };
-                    profile.DefaultHuntName = "Default";
-                    _log($"[BotProfileLoader] Legacy profile converted: created HuntDefinition 'Default' from RepotToExpPath/ExpLoopPath.");
-                }
-
-                _log($"[BotProfileLoader] Loaded profile '{profile.Name}' ({profile.StartRoutes.Count} start routes, {profile.HuntDefinitions?.Count ?? 0} hunt(s)).");
+                _log($"[BotProfileLoader] Loaded profile '{profile.Name}' ({profile.HuntDefinitions?.Count ?? 0} hunt(s)).");
                 return profile;
             }
             catch (Exception ex)
@@ -129,8 +113,8 @@ namespace DriverScanTester.Services
         /// <summary>
         /// Validates a profile and returns a list of error messages.
         /// Returns an empty list if the profile is valid.
-        /// Validates HuntDefinitions as the primary source for phase 2+3 paths,
-        /// but also handles legacy profiles with RepotToExpPath/ExpLoopPath.
+        /// Every detected error is reported in one pass rather than stopping
+        /// at the first error.
         /// </summary>
         public List<string> ValidateProfile(BotProfile profile)
         {
@@ -142,116 +126,75 @@ namespace DriverScanTester.Services
                 return errors;
             }
 
+            // --- General ---
             if (string.IsNullOrWhiteSpace(profile.Name))
                 errors.Add("Profile Name is empty.");
 
-            if (profile.StartRoutes == null || profile.StartRoutes.Count == 0)
-                errors.Add("Profile has no StartRoutes defined.");
+            // --- Stage 1: City → Repot (profile-level) ---
+            if (profile.CityToRepot == null)
+            {
+                errors.Add("City → Repot: route step is missing. Configure stage 1 (City → Repot).");
+            }
             else
             {
-                for (int i = 0; i < profile.StartRoutes.Count; i++)
-                {
-                    var route = profile.StartRoutes[i];
-                    if (string.IsNullOrWhiteSpace(route.Name))
-                        errors.Add($"StartRoutes[{i}]: Name is empty.");
-                    if (route.Area == null)
-                        errors.Add($"StartRoutes[{i}] '{route.Name}': Area is null.");
-                    if (string.IsNullOrWhiteSpace(route.PathFile))
-                        errors.Add($"StartRoutes[{i}] '{route.Name}': PathFile is empty.");
-                    else
-                    {
-                        string segPath = Path.Combine(SAVE_DIR, route.PathFile);
-                        if (!segPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
-                            segPath += ".json";
-                        if (!File.Exists(segPath))
-                            errors.Add($"StartRoutes[{i}] '{route.Name}': PathFile '{route.PathFile}' not found in SavedPaths/.");
-                    }
-                }
+                ValidateRouteStep(errors, profile.CityToRepot, "City → Repot");
             }
 
-            // --- Validate HuntDefinitions (new format, preferred) ---
-            bool hasHuntDefinitions = profile.HuntDefinitions != null && profile.HuntDefinitions.Count > 0;
-
-            if (hasHuntDefinitions)
+            // --- Hunt definitions ---
+            if (profile.HuntDefinitions == null || profile.HuntDefinitions.Count == 0)
             {
-                // Check for duplicate names
+                errors.Add("Profile has no hunts. Add at least one hunt with all route stages configured.");
+            }
+            else
+            {
+                for (int i = 0; i < profile.HuntDefinitions.Count; i++)
+                {
+                    var hunt = profile.HuntDefinitions[i];
+                    string huntLabel = string.IsNullOrWhiteSpace(hunt.Name) ? $"Hunt[{i}]" : $"Hunt '{hunt.Name}'";
+
+                    if (string.IsNullOrWhiteSpace(hunt.Name))
+                        errors.Add($"HuntDefinitions[{i}]: Name is empty.");
+
+                    if (hunt.RepotToCityExit == null)
+                        errors.Add($"{huntLabel}, Repot → Outside City: route step is missing.");
+                    else
+                        ValidateRouteStep(errors, hunt.RepotToCityExit, $"{huntLabel}, Repot → Outside City");
+
+                    if (hunt.CityExitToExp == null)
+                        errors.Add($"{huntLabel}, Outside City → Exp Spot: route step is missing.");
+                    else
+                        ValidateRouteStep(errors, hunt.CityExitToExp, $"{huntLabel}, Outside City → Exp Spot");
+
+                    if (hunt.ExpLoop == null)
+                        errors.Add($"{huntLabel}, Exp Loop: route step is missing.");
+                    else
+                        ValidateRouteStep(errors, hunt.ExpLoop, $"{huntLabel}, Exp Loop");
+                }
+
+                // Duplicate hunt names (ordinal case-insensitive)
                 var duplicateNames = profile.HuntDefinitions
-                    .GroupBy(h => h.Name)
+                    .GroupBy(h => h.Name, StringComparer.OrdinalIgnoreCase)
                     .Where(g => g.Count() > 1)
                     .Select(g => g.Key)
                     .ToList();
                 foreach (var dup in duplicateNames)
-                    errors.Add($"HuntDefinitions: Duplicate hunt name '{dup}'.");
-
-                for (int i = 0; i < profile.HuntDefinitions.Count; i++)
-                {
-                    var hunt = profile.HuntDefinitions[i];
-                    if (string.IsNullOrWhiteSpace(hunt.Name))
-                        errors.Add($"HuntDefinitions[{i}]: Name is empty.");
-                    if (string.IsNullOrWhiteSpace(hunt.RepotToExpPath))
-                        errors.Add($"HuntDefinitions[{i}] '{hunt.Name}': RepotToExpPath is empty.");
-                    else
-                    {
-                        string path = hunt.RepotToExpPath;
-                        if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
-                            path += ".json";
-                        string fullPath = Path.Combine(SAVE_DIR, path);
-                        if (!File.Exists(fullPath))
-                            errors.Add($"HuntDefinitions[{i}] '{hunt.Name}': RepotToExpPath '{hunt.RepotToExpPath}' not found in SavedPaths/.");
-                    }
-                    if (string.IsNullOrWhiteSpace(hunt.ExpLoopPath))
-                        errors.Add($"HuntDefinitions[{i}] '{hunt.Name}': ExpLoopPath is empty.");
-                    else
-                    {
-                        string path = hunt.ExpLoopPath;
-                        if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
-                            path += ".json";
-                        string fullPath = Path.Combine(SAVE_DIR, path);
-                        if (!File.Exists(fullPath))
-                            errors.Add($"HuntDefinitions[{i}] '{hunt.Name}': ExpLoopPath '{hunt.ExpLoopPath}' not found in SavedPaths/.");
-                    }
-                }
+                    errors.Add($"Duplicate hunt name '{dup}' (names are compared case-insensitively).");
             }
-            else
+
+            // --- Default hunt ---
+            if (string.IsNullOrWhiteSpace(profile.DefaultHuntName))
             {
-                // --- Legacy fallback: validate RepotToExpPath / ExpLoopPath ---
-                bool hasLegacyRepot = !string.IsNullOrWhiteSpace(profile.RepotToExpPath);
-                bool hasLegacyExp = !string.IsNullOrWhiteSpace(profile.ExpLoopPath);
-
-                if (!hasLegacyRepot && !hasLegacyExp)
-                {
-                    errors.Add("Profile has no HuntDefinitions and no legacy RepotToExpPath/ExpLoopPath. Add at least one hunt.");
-                }
-                else
-                {
-                    _log("[BotProfileLoader] WARNING: Profile uses legacy RepotToExpPath/ExpLoopPath. Consider migrating to HuntDefinitions.");
-
-                    if (string.IsNullOrWhiteSpace(profile.RepotToExpPath))
-                        errors.Add("RepotToExpPath is empty (legacy fallback).");
-                    else
-                    {
-                        string path = profile.RepotToExpPath;
-                        if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
-                            path += ".json";
-                        string fullPath = Path.Combine(SAVE_DIR, path);
-                        if (!File.Exists(fullPath))
-                            errors.Add($"RepotToExpPath '{profile.RepotToExpPath}' not found in SavedPaths/ (legacy fallback).");
-                    }
-
-                    if (string.IsNullOrWhiteSpace(profile.ExpLoopPath))
-                        errors.Add("ExpLoopPath is empty (legacy fallback).");
-                    else
-                    {
-                        string path = profile.ExpLoopPath;
-                        if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
-                            path += ".json";
-                        string fullPath = Path.Combine(SAVE_DIR, path);
-                        if (!File.Exists(fullPath))
-                            errors.Add($"ExpLoopPath '{profile.ExpLoopPath}' not found in SavedPaths/ (legacy fallback).");
-                    }
-                }
+                errors.Add("DefaultHuntName is empty. Set a default hunt.");
+            }
+            else if (profile.HuntDefinitions != null)
+            {
+                int defaultMatches = profile.HuntDefinitions.Count(h =>
+                    string.Equals(h.Name, profile.DefaultHuntName, StringComparison.OrdinalIgnoreCase));
+                if (defaultMatches != 1)
+                    errors.Add($"DefaultHuntName '{profile.DefaultHuntName}' does not match exactly one hunt.");
             }
 
+            // --- Repot thresholds / weight / retries ---
             if (profile.MinHpPotions < 0)
                 errors.Add("MinHpPotions is negative.");
             if (profile.MinManaPotions < 0)
@@ -266,6 +209,43 @@ namespace DriverScanTester.Services
                 errors.Add("MaxTeleportRetries is negative.");
 
             return errors;
+        }
+
+        /// <summary>
+        /// Validates one route step: non-null step, non-empty PathFile, the referenced
+        /// segment existing in SavedPaths (with or without .json), and a nonnegative delay.
+        /// </summary>
+        private void ValidateRouteStep(List<string> errors, BotRouteStep step, string displayName)
+        {
+            if (step == null)
+            {
+                errors.Add($"{displayName}: route step is missing.");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(step.PathFile))
+            {
+                errors.Add($"{displayName}: PathFile is empty.");
+            }
+            else if (!SegmentFileExists(step.PathFile))
+            {
+                errors.Add($"{displayName}: segment '{step.PathFile}' was not found in SavedPaths.");
+            }
+
+            if (step.StartDelayMs < 0)
+                errors.Add($"{displayName}: StartDelayMs cannot be negative.");
+        }
+
+        /// <summary>
+        /// Returns true when a segment file exists in SavedPaths.
+        /// Segment names may be stored with or without the .json extension.
+        /// </summary>
+        private static bool SegmentFileExists(string segmentFileName)
+        {
+            string fileName = segmentFileName;
+            if (!fileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                fileName += ".json";
+            return File.Exists(Path.Combine(SAVE_DIR, fileName));
         }
     }
 }

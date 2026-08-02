@@ -7,13 +7,16 @@ using DriverScanTester.Models;
 namespace DriverScanTester.Services
 {
     /// <summary>
-    /// Central coordinator of the bot 3-phase workflow:
-    ///   1. City → Repot (sell items, buy potions)
-    ///   2. Repot → Exp area
-    ///   3. Exp loop (hunt, check for repot condition, teleport back)
+    /// Central coordinator of the bot four-stage route workflow:
+    ///   1. City → Repot (route stage 1)
+    ///      [repot operation: sell items, buy potions]
+    ///   2. Repot → Outside City (route stage 2)
+    ///   3. Outside City → Exp Spot (route stage 3)
+    ///   4. Exp Loop (route stage 4, loops until repot is needed)
     ///
     /// MovementSystem is used ONLY for movement. All phase decisions are made here.
-    /// Can work with a BotProfile (preferred) or with hardcoded fallback paths for testing.
+    /// A workflow requires a non-null valid BotProfile and a non-null active HuntDefinition;
+    /// there are no hardcoded fallback paths.
     /// </summary>
     public class BotWorkflowCoordinator
     {
@@ -34,25 +37,14 @@ namespace DriverScanTester.Services
         private readonly Action<string> _log;
         private readonly Action _focusGameWindow;
 
-        // Profile-based components (optional — null when using hardcoded fallback)
-        private readonly BotProfile? _profile;
-        private readonly CityToRepotRouteSelector? _routeSelector;
-
-        // Active hunt definition (ties phase 2 + phase 3 together)
-        private readonly HuntDefinition? _activeHunt;
+        private readonly BotProfile _profile;
+        private readonly HuntDefinition _activeHunt;
 
         private CancellationTokenSource? _cts;
         private bool _isRunning;
         private BotPhase _currentPhase = BotPhase.Idle;
 
-        // State set during DetectCityStart and consumed by MoveToRepot
-        private string _selectedCityToRepotPath = "";
         private int _teleportRetryCount;
-
-        // Hardcoded fallback path names (used when _profile is null)
-        public string FallbackCityToRepot { get; set; } = BotConstants.Workflow.FallbackCityToRepot;
-        public string FallbackRepotToExp { get; set; } = BotConstants.Workflow.FallbackRepotToExp;
-        public string FallbackExpLoop { get; set; } = BotConstants.Workflow.FallbackExpLoop;
 
         /// <summary>Current phase of the bot workflow.</summary>
         public BotPhase CurrentPhase
@@ -76,15 +68,15 @@ namespace DriverScanTester.Services
         /// <summary>Whether the coordinator is running.</summary>
         public bool IsRunning => _isRunning;
 
-        /// <summary>The active profile, if any.</summary>
-        public BotProfile? ActiveProfile => _profile;
+        /// <summary>The active profile.</summary>
+        public BotProfile ActiveProfile => _profile;
 
-        // ======================== Constructors ========================
+        // ======================== Constructor ========================
 
         /// <summary>
-        /// Profile-based constructor (preferred). Validates the profile before starting.
-        /// The activeHunt ties phase 2 (move to exp) and phase 3 (exp loop) together
-        /// so they always use a consistent pair of paths.
+        /// Profile-based constructor. The activeHunt ties stages 2-4 (Repot → Outside City,
+        /// Outside City → Exp Spot, Exp Loop) together so they always use a consistent
+        /// set of paths.
         /// </summary>
         public BotWorkflowCoordinator(
             GameMemoryService memoryService,
@@ -93,8 +85,7 @@ namespace DriverScanTester.Services
             SavedPathLoader pathLoader,
             PathRunnerService pathRunner,
             BotProfile profile,
-            CityToRepotRouteSelector routeSelector,
-            HuntDefinition? activeHunt,
+            HuntDefinition activeHunt,
             Action<string> log,
             Action focusGameWindow)
         {
@@ -104,7 +95,6 @@ namespace DriverScanTester.Services
             _pathLoader = pathLoader;
             _pathRunner = pathRunner;
             _profile = profile;
-            _routeSelector = routeSelector;
             _activeHunt = activeHunt;
             _log = log;
             _focusGameWindow = focusGameWindow;
@@ -121,27 +111,6 @@ namespace DriverScanTester.Services
             _repotSystem.ManaBuyTarget = profile.ManaBuyTarget;
             _repotSystem.RedBuyTarget = profile.RedBuyTarget;
             _repotSystem.WhiteBuyTarget = profile.WhiteBuyTarget;
-        }
-
-        /// <summary>
-        /// Legacy constructor without profile (uses hardcoded fallback paths).
-        /// </summary>
-        public BotWorkflowCoordinator(
-            GameMemoryService memoryService,
-            RepotSystem repotSystem,
-            RepotDetectorService repotDetector,
-            SavedPathLoader pathLoader,
-            PathRunnerService pathRunner,
-            Action<string> log,
-            Action focusGameWindow)
-        {
-            _memoryService = memoryService;
-            _repotSystem = repotSystem;
-            _repotDetector = repotDetector;
-            _pathLoader = pathLoader;
-            _pathRunner = pathRunner;
-            _log = log;
-            _focusGameWindow = focusGameWindow;
         }
 
         // ======================== Lifecycle ========================
@@ -163,23 +132,12 @@ namespace DriverScanTester.Services
 
             _focusGameWindow();
             _log("[Coordinator] Workflow started.");
-            if (_profile != null)
-                _log($"[Coordinator] Using profile: {_profile.Name}");
-
-            if (_activeHunt != null)
-            {
-                _log($"[Coordinator] Active hunt: '{_activeHunt.Name}'");
-                _log($"[Coordinator]   RepotToExpPath: '{_activeHunt.RepotToExpPath}'");
-                _log($"[Coordinator]   ExpLoopPath:    '{_activeHunt.ExpLoopPath}'");
-            }
-            else if (_profile != null)
-            {
-                _log("[Coordinator] ERROR: Profile workflow started without active hunt.");
-            }
-            else
-            {
-                _log("[Coordinator] No profile selected — using hardcoded fallback paths.");
-            }
+            _log($"[Coordinator] Using profile: {_profile.Name}");
+            _log($"[Coordinator] Active hunt: '{_activeHunt.Name}'");
+            _log($"[Coordinator]   City → Repot:            '{_profile.CityToRepot.PathFile}' (delay {_profile.CityToRepot.StartDelayMs} ms)");
+            _log($"[Coordinator]   Repot → Outside City:    '{_activeHunt.RepotToCityExit.PathFile}' (delay {_activeHunt.RepotToCityExit.StartDelayMs} ms)");
+            _log($"[Coordinator]   Outside City → Exp Spot: '{_activeHunt.CityExitToExp.PathFile}' (delay {_activeHunt.CityExitToExp.StartDelayMs} ms)");
+            _log($"[Coordinator]   Exp Loop:                '{_activeHunt.ExpLoop.PathFile}' (delay {_activeHunt.ExpLoop.StartDelayMs} ms)");
 
             try
             {
@@ -239,6 +197,9 @@ namespace DriverScanTester.Services
                     case BotPhase.Repot:
                         await PhaseRepot(token);
                         break;
+                    case BotPhase.MoveToCityExit:
+                        await PhaseMoveToCityExit(token);
+                        break;
                     case BotPhase.MoveToExp:
                         await PhaseMoveToExp(token);
                         break;
@@ -287,82 +248,40 @@ namespace DriverScanTester.Services
                 }
             }
 
-            // Determine which city→repot path to use
-            string? pathToRepot = ResolveCityToRepotPath(snapshot);
-            if (pathToRepot == null)
-            {
-                _log("[Phase] DetectCityStart: Could not determine city→repot path. Failing.");
-                CurrentPhase = BotPhase.Failed;
-                return;
-            }
-
-            _selectedCityToRepotPath = pathToRepot;
-            _log($"[Phase] Selected city→repot path: {_selectedCityToRepotPath}");
+            _log("[Phase] Player is in city. Moving to repot.");
             CurrentPhase = BotPhase.MoveToRepot;
             await Task.CompletedTask;
         }
 
-        /// <summary>
-        /// Resolves the city→repot segment filename.
-        /// With a profile, uses the route selector. Without, uses FallbackCityToRepot.
-        /// </summary>
-        private string? ResolveCityToRepotPath(GameSnapshot snapshot)
-        {
-            if (_profile != null && _routeSelector != null)
-            {
-                var route = _routeSelector.SelectRoute(_profile, snapshot);
-                if (route == null)
-                {
-                    _log($"[Phase] No matching StartRoute for Map={snapshot.MapNumber}, X={snapshot.X:F1}, Y={snapshot.Y:F1}");
-                    return null;
-                }
-                _log($"[Phase] Matched StartRoute '{route.Name}' -> path '{route.PathFile}'");
-                return route.PathFile;
-            }
-
-            // No profile — use hardcoded fallback
-            _log($"[Phase] No profile active; using fallback city→repot path: {FallbackCityToRepot}");
-            return FallbackCityToRepot;
-        }
-
         private async Task PhaseMoveToRepot(CancellationToken token)
         {
-            string pathName = _selectedCityToRepotPath;
-            if (string.IsNullOrEmpty(pathName))
-                pathName = FallbackCityToRepot;
-
-            _log($"[Phase] MoveToRepot — loading path '{pathName}'...");
-            var waypoints = _pathLoader.LoadSegment(pathName);
-            if (waypoints == null)
-            {
-                _log($"[Phase] MoveToRepot: Missing required segment '{pathName}'. Cannot proceed.");
-                CurrentPhase = BotPhase.Failed;
-                return;
-            }
-
-            bool completed = await _pathRunner.RunPathAsync(waypoints, loop: false, token);
-
+            var result = await RunRouteOnceAsync(_profile.CityToRepot, "City → Repot", token);
             if (token.IsCancellationRequested) return;
 
-            if (completed)
+            switch (result)
             {
-                _log("[Phase] MoveToRepot: Arrived at repot point.");
-                CurrentPhase = BotPhase.Repot;
-            }
-            else
-            {
-                _log("[Phase] MoveToRepot: Path did not complete. Retrying from start.");
-                CurrentPhase = BotPhase.DetectCityStart;
+                case RouteRunResult.MissingSegment:
+                    _log("[Phase] MoveToRepot: City → Repot path missing or invalid. Failing.");
+                    CurrentPhase = BotPhase.Failed;
+                    break;
+                case RouteRunResult.Completed:
+                    _log("[Phase] MoveToRepot: Arrived at repot point.");
+                    CurrentPhase = BotPhase.Repot;
+                    break;
+                default:
+                    _log("[Phase] MoveToRepot: Path did not complete. Retrying from start.");
+                    CurrentPhase = BotPhase.DetectCityStart;
+                    break;
             }
         }
 
         private async Task PhaseRepot(CancellationToken token)
         {
             // Dry-run check
-            if (_profile != null && _profile.DryRunRepot)
+            if (_profile.DryRunRepot)
             {
-                _log("[Phase] Repot: DryRunRepot=true — skipping actual repot. Moving to exp.");
-                CurrentPhase = BotPhase.MoveToExp;
+                _log("[Phase] Repot: DryRunRepot=true — skipping actual repot. Moving to city exit.");
+                CurrentPhase = BotPhase.MoveToCityExit;
                 return;
             }
 
@@ -383,84 +302,73 @@ namespace DriverScanTester.Services
             var snapshot = _memoryService.GetSnapshot();
             _log($"[Phase] Post-repot: HP Pots: {snapshot.HpPotions}, Mana Pots: {snapshot.ManaPotions}");
 
-            CurrentPhase = BotPhase.MoveToExp;
+            CurrentPhase = BotPhase.MoveToCityExit;
             await Task.CompletedTask;
+        }
+
+        private async Task PhaseMoveToCityExit(CancellationToken token)
+        {
+            var result = await RunRouteOnceAsync(_activeHunt.RepotToCityExit, "Repot → Outside City", token);
+            if (token.IsCancellationRequested) return;
+
+            switch (result)
+            {
+                case RouteRunResult.MissingSegment:
+                    _log("[Phase] MoveToCityExit: Repot → Outside City path missing or invalid. Failing.");
+                    CurrentPhase = BotPhase.Failed;
+                    break;
+                case RouteRunResult.Completed:
+                    _log("[Phase] MoveToCityExit: Arrived outside the city.");
+                    CurrentPhase = BotPhase.MoveToExp;
+                    break;
+                default:
+                    _log("[Phase] MoveToCityExit: Path did not complete. Retrying from start.");
+                    CurrentPhase = BotPhase.DetectCityStart;
+                    break;
+            }
         }
 
         private async Task PhaseMoveToExp(CancellationToken token)
         {
-            // Phase 2: MUST use active hunt's RepotToExpPath when profile is loaded.
-            // Fallback to hardcoded path only when _profile is null (no-profile mode).
-            string pathName;
-
-            if (_activeHunt != null && !string.IsNullOrWhiteSpace(_activeHunt.RepotToExpPath))
-            {
-                pathName = _activeHunt.RepotToExpPath;
-                _log($"[Phase] MoveToExp — using active hunt '{_activeHunt.Name}', path '{pathName}'...");
-            }
-            else if (_profile == null)
-            {
-                pathName = FallbackRepotToExp;
-                _log($"[Phase] MoveToExp — no profile, hardcoded fallback path '{pathName}'...");
-            }
-            else
-            {
-                _log($"[Phase] MoveToExp: Profile loaded but no active hunt or empty RepotToExpPath. Failing.");
-                CurrentPhase = BotPhase.Failed;
-                return;
-            }
-
-            var waypoints = _pathLoader.LoadSegment(pathName);
-            if (waypoints == null)
-            {
-                _log($"[Phase] MoveToExp: Missing required segment '{pathName}'. Cannot proceed.");
-                CurrentPhase = BotPhase.Failed;
-                return;
-            }
-
-            bool completed = await _pathRunner.RunPathAsync(waypoints, loop: false, token);
-
+            var result = await RunRouteOnceAsync(_activeHunt.CityExitToExp, "Outside City → Exp Spot", token);
             if (token.IsCancellationRequested) return;
 
-            if (completed)
+            switch (result)
             {
-                _log("[Phase] MoveToExp: Arrived at exp area.");
-                CurrentPhase = BotPhase.ExpLoop;
-            }
-            else
-            {
-                _log("[Phase] MoveToExp: Path did not complete. Retrying.");
-                CurrentPhase = BotPhase.DetectCityStart;
+                case RouteRunResult.MissingSegment:
+                    _log("[Phase] MoveToExp: Outside City → Exp Spot path missing or invalid. Failing.");
+                    CurrentPhase = BotPhase.Failed;
+                    break;
+                case RouteRunResult.Completed:
+                    _log("[Phase] MoveToExp: Arrived at exp area.");
+                    CurrentPhase = BotPhase.ExpLoop;
+                    break;
+                default:
+                    _log("[Phase] MoveToExp: Path did not complete. Retrying.");
+                    CurrentPhase = BotPhase.DetectCityStart;
+                    break;
             }
         }
 
         private async Task PhaseExpLoop(CancellationToken token)
         {
-            // Phase 3: MUST use active hunt's ExpLoopPath when profile is loaded.
-            // Fallback to hardcoded path only when _profile is null (no-profile mode).
-            string pathName;
-
-            if (_activeHunt != null && !string.IsNullOrWhiteSpace(_activeHunt.ExpLoopPath))
+            var loopStep = _activeHunt.ExpLoop;
+            if (loopStep == null || string.IsNullOrWhiteSpace(loopStep.PathFile))
             {
-                pathName = _activeHunt.ExpLoopPath;
-                _log($"[Phase] ExpLoop — using active hunt '{_activeHunt.Name}', path '{pathName}'...");
-            }
-            else if (_profile == null)
-            {
-                pathName = FallbackExpLoop;
-                _log($"[Phase] ExpLoop — no profile, hardcoded fallback path '{pathName}'...");
-            }
-            else
-            {
-                _log($"[Phase] ExpLoop: Profile loaded but no active hunt or empty ExpLoopPath. Failing.");
+                _log("[Phase] ExpLoop: Exp Loop path missing or invalid. Failing.");
                 CurrentPhase = BotPhase.Failed;
                 return;
             }
 
-            var waypoints = _pathLoader.LoadSegment(pathName);
+            // Wait once before starting the looping route (not on every cycle).
+            await WaitBeforeStepAsync(loopStep, "Exp Loop", token);
+            if (token.IsCancellationRequested) return;
+
+            _log($"[Phase] ExpLoop — loading path '{loopStep.PathFile}'...");
+            var waypoints = _pathLoader.LoadSegment(loopStep.PathFile);
             if (waypoints == null)
             {
-                _log($"[Phase] ExpLoop: Missing required segment '{pathName}'. Cannot proceed.");
+                _log($"[Phase] ExpLoop: Missing required segment '{loopStep.PathFile}'. Cannot proceed.");
                 CurrentPhase = BotPhase.Failed;
                 return;
             }
@@ -528,7 +436,7 @@ namespace DriverScanTester.Services
             }
             else
             {
-                int maxRetries = _profile?.MaxTeleportRetries ?? BotConstants.Repot.MaxTeleportRetries;
+                int maxRetries = _profile.MaxTeleportRetries;
                 _teleportRetryCount++;
                 if (_teleportRetryCount >= maxRetries)
                 {
@@ -546,21 +454,64 @@ namespace DriverScanTester.Services
 
         // ======================== Helpers ========================
 
+        private enum RouteRunResult
+        {
+            Completed,
+            MissingSegment,
+            Incomplete
+        }
+
+        /// <summary>
+        /// Waits the configured startup delay of a route step, if any.
+        /// Zero (or an invalid negative) delay returns immediately.
+        /// The wait is cancellable and happens every time the workflow enters the stage.
+        /// </summary>
+        private async Task WaitBeforeStepAsync(BotRouteStep step, string stepName, CancellationToken token)
+        {
+            if (step == null) return;
+            if (step.StartDelayMs <= 0) return;
+
+            _log($"[Coordinator] {stepName}: waiting {step.StartDelayMs} ms before start...");
+            await Task.Delay(step.StartDelayMs, token);
+        }
+
+        /// <summary>
+        /// Runs one non-loop route stage (stages 1-3): waits the configured startup delay,
+        /// loads the segment via SavedPathLoader and runs it once with loop: false.
+        /// Returns whether the path completed, or whether the segment is missing/invalid.
+        /// </summary>
+        private async Task<RouteRunResult> RunRouteOnceAsync(BotRouteStep step, string stageName, CancellationToken token)
+        {
+            if (step == null || string.IsNullOrWhiteSpace(step.PathFile))
+            {
+                _log($"[Phase] {stageName}: no path configured. Cannot proceed.");
+                return RouteRunResult.MissingSegment;
+            }
+
+            await WaitBeforeStepAsync(step, stageName, token);
+            if (token.IsCancellationRequested) return RouteRunResult.Incomplete;
+
+            _log($"[Phase] {stageName} — loading path '{step.PathFile}'...");
+            var waypoints = _pathLoader.LoadSegment(step.PathFile);
+            if (waypoints == null)
+            {
+                _log($"[Phase] {stageName}: Missing required segment '{step.PathFile}'. Cannot proceed.");
+                return RouteRunResult.MissingSegment;
+            }
+
+            bool completed = await _pathRunner.RunPathAsync(waypoints, loop: false, token);
+            if (completed)
+                _log($"[Phase] {stageName}: path completed.");
+            else
+                _log($"[Phase] {stageName}: path did not complete.");
+
+            return completed ? RouteRunResult.Completed : RouteRunResult.Incomplete;
+        }
+
         private async Task TeleportToCity(CancellationToken token)
         {
-            byte vk;
-            byte scan;
-
-            if (_profile != null)
-            {
-                vk = (byte)_profile.TeleportKey;
-                scan = (byte)_profile.TeleportScanCode;
-            }
-            else
-            {
-                vk = (byte)BotConstants.Workflow.DefaultTeleportKey; // '6'
-                scan = (byte)BotConstants.Workflow.DefaultTeleportScanCode;
-            }
+            byte vk = (byte)_profile.TeleportKey;
+            byte scan = (byte)_profile.TeleportScanCode;
 
             _log($"[Teleport] Pressing key (vk={vk}) for town teleport...");
             keybd_event(vk, scan, 0, 0);

@@ -10,7 +10,6 @@ using MessageBox = System.Windows.MessageBox;
 using DriverScanTester.Models;
 using DriverScanTester.Services;
 using DriverScanTester.Utils;
-using Microsoft.Win32;
 
 namespace DriverScanTester.ViewModels
 {
@@ -19,7 +18,7 @@ namespace DriverScanTester.ViewModels
         private static readonly string SAVE_DIR = Path.GetFullPath(
             Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "SavedPaths"));
 
-        // --- Profile Editor (Tab 3) ---
+        // --- Profile Editor (Tab 2) ---
         private ProfileEditorViewModel _profileEditor;
         public ProfileEditorViewModel ProfileEditor
         {
@@ -84,7 +83,7 @@ namespace DriverScanTester.ViewModels
             set => SetProperty(ref _segmentZoneRestriction, value);
         }
 
-        // --- Route Builder State (Tab 2) ---
+        // --- Saved Segment Library (Tab 1) ---
         private ObservableCollection<string> _availableSegments = new ObservableCollection<string>();
         public ObservableCollection<string> AvailableSegments
         {
@@ -97,20 +96,6 @@ namespace DriverScanTester.ViewModels
         {
             get => _selectedAvailableSegment;
             set => SetProperty(ref _selectedAvailableSegment, value);
-        }
-
-        private ObservableCollection<string> _routeSegments = new ObservableCollection<string>();
-        public ObservableCollection<string> RouteSegments
-        {
-            get => _routeSegments;
-            set => SetProperty(ref _routeSegments, value);
-        }
-
-        private string? _selectedRouteSegment;
-        public string? SelectedRouteSegment
-        {
-            get => _selectedRouteSegment;
-            set => SetProperty(ref _selectedRouteSegment, value);
         }
 
         private bool _loopRoute = false;
@@ -146,14 +131,8 @@ namespace DriverScanTester.ViewModels
         public ICommand DeleteSegmentCommand { get; }
         public ICommand RunCurrentSegmentCommand { get; }
 
-        // Route Builder
+        // Saved Segment Library
         public ICommand RefreshLibraryCommand { get; }
-        public ICommand AddToRouteCommand { get; }
-        public ICommand RemoveFromRouteCommand { get; }
-        public ICommand MoveUpCommand { get; }
-        public ICommand MoveDownCommand { get; }
-        public ICommand RunFullRouteCommand { get; }
-        public ICommand ClearRouteCommand { get; }
         public ICommand StopBotCommand { get; }
 
         public event Action<List<DriverScanTester.Services.Waypoint>, bool>? OnRunPath;
@@ -183,14 +162,8 @@ namespace DriverScanTester.ViewModels
             DeleteSegmentCommand = new RelayCommand(_ => DeleteSegment(), _ => !string.IsNullOrEmpty(SelectedAvailableSegment));
             RunCurrentSegmentCommand = new RelayCommand(_ => RunEditorPath(), _ => Points.Count > 0);
 
-            // Route Commands
+            // Library Commands
             RefreshLibraryCommand = new RelayCommand(_ => RefreshLibrary());
-            AddToRouteCommand = new RelayCommand(_ => AddToRoute(), _ => !string.IsNullOrEmpty(SelectedAvailableSegment));
-            RemoveFromRouteCommand = new RelayCommand(_ => RemoveFromRoute(), _ => SelectedRouteSegment != null);
-            MoveUpCommand = new RelayCommand(_ => MoveRouteItem(-1), _ => SelectedRouteSegment != null);
-            MoveDownCommand = new RelayCommand(_ => MoveRouteItem(1), _ => SelectedRouteSegment != null);
-            RunFullRouteCommand = new RelayCommand(_ => RunCombinedRoute(), _ => RouteSegments.Count > 0);
-            ClearRouteCommand = new RelayCommand(_ => RouteSegments.Clear());
             StopBotCommand = new RelayCommand(_ => OnStopBot?.Invoke());
 
             // Init
@@ -400,7 +373,7 @@ namespace DriverScanTester.ViewModels
             StatusText = "Running current editor segment...";
         }
 
-        // ========================== ROUTE BUILDER LOGIC ==========================
+        // ========================== SAVED SEGMENT LIBRARY LOGIC ==========================
 
         private void RefreshLibrary()
         {
@@ -418,76 +391,6 @@ namespace DriverScanTester.ViewModels
             catch (Exception ex)
             {
                 StatusText = "Library Error: " + ex.Message;
-            }
-        }
-
-        private void AddToRoute()
-        {
-            if (!string.IsNullOrEmpty(SelectedAvailableSegment))
-            {
-                RouteSegments.Add(SelectedAvailableSegment);
-            }
-        }
-
-        private void RemoveFromRoute()
-        {
-            if (SelectedRouteSegment != null)
-            {
-                RouteSegments.Remove(SelectedRouteSegment);
-            }
-        }
-
-        private void MoveRouteItem(int direction)
-        {
-            if (SelectedRouteSegment == null) return;
-            
-            int oldIndex = RouteSegments.IndexOf(SelectedRouteSegment);
-            int newIndex = oldIndex + direction;
-
-            if (newIndex >= 0 && newIndex < RouteSegments.Count)
-            {
-                RouteSegments.Move(oldIndex, newIndex);
-            }
-        }
-
-        private void RunCombinedRoute()
-        {
-            if (RouteSegments.Count == 0) return;
-
-            var combinedWaypoints = new List<DriverScanTester.Services.Waypoint>();
-            int segmentsLoaded = 0;
-
-            foreach (var segName in RouteSegments)
-            {
-                string path = Path.Combine(SAVE_DIR, segName);
-                if (File.Exists(path))
-                {
-                    try
-                    {
-                        string json = File.ReadAllText(path);
-                        var loaded = JsonSerializer.Deserialize<PathSegment>(json);
-                        if (loaded != null)
-                        {
-                            var loadedPoints = loaded.Points ?? new List<PathPoint>();
-                            combinedWaypoints.AddRange(loadedPoints.Select(p => new DriverScanTester.Services.Waypoint(p.X, p.Y, p.Precision, p.Mode, p.CameraDistanceLock, p.AttackDisengageDistance, p.ZoneRestriction)));
-                            segmentsLoaded++;
-                        }
-                    }
-                    catch 
-                    {
-                        StatusText = $"Error reading segment: {segName}";
-                    }
-                }
-            }
-
-            if (combinedWaypoints.Count > 0)
-            {
-                OnRunPath?.Invoke(combinedWaypoints, LoopRoute);
-                StatusText = $"Running Route: {segmentsLoaded} segments, {combinedWaypoints.Count} points total.";
-            }
-            else
-            {
-                StatusText = "Combined route resulted in 0 points.";
             }
         }
 
