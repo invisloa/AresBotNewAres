@@ -149,6 +149,7 @@
                     </WrapPanel>
                     <Button Content="Test Loot" Command="{Binding TestLootCommand}" Width="120" Margin="5,0,5,5" HorizontalAlignment="Left" Background="#FFF0D0FF"/>
                     <Button Content="Test Scan Area" Command="{Binding TestScanAreaCommand}" Width="120" Margin="5,0,5,5" HorizontalAlignment="Left" Background="#FFF0D0FF"/>
+                    <Button Content="Calibruj NPC->Item" Command="{Binding CalibrateLootMouseOverCommand}" Width="160" Margin="5,0,5,5" HorizontalAlignment="Left" Background="#FFE0E0FF" ToolTip="Najedz kursorem na NPC i kliknij. Wartosc dla itemu zostanie obliczona automatycznie (NPC - 256)."/>
                 </StackPanel>
             </GroupBox>
 

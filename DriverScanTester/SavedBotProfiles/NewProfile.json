@@ -1,0 +1,58 @@
+{
+  "Name": "NewProfile",
+  "CityMapNumber": 1,
+  "StartRoutes": [
+    {
+      "Name": "xxx",
+      "Area": {
+        "MapNumber": 1,
+        "MinX": 0,
+        "MaxX": 0,
+        "MinY": 0,
+        "MaxY": 0
+      },
+      "PathFile": "xxx.json"
+    },
+    {
+      "Name": "xxx (2)",
+      "Area": {
+        "MapNumber": 1,
+        "MinX": 0,
+        "MaxX": 0,
+        "MinY": 0,
+        "MaxY": 0
+      },
+      "PathFile": "xxx.json"
+    },
+    {
+      "Name": "HEAL Hershal Leader",
+      "Area": {
+        "MapNumber": 1,
+        "MinX": 0,
+        "MaxX": 0,
+        "MinY": 0,
+        "MaxY": 0
+      },
+      "PathFile": "HEAL Hershal Leader.json"
+    }
+  ],
+  "HuntDefinitions": [],
+  "DefaultHuntName": "qqq",
+  "RepotToExpPath": "",
+  "ExpLoopPath": "",
+  "MinHpPotions": 2,
+  "MinManaPotions": 2,
+  "MaxWeightRatio": 1,
+  "MinHp": 555,
+  "MinMana": 155,
+  "HpBuyTarget": 22,
+  "ManaBuyTarget": 35,
+  "RedBuyTarget": 5,
+  "WhiteBuyTarget": 5,
+  "DryRunRepot": false,
+  "TeleportKey": 54,
+  "TeleportScanCode": 7,
+  "MaxTeleportRetries": 3,
+  "WindowOffsetX": 0,
+  "WindowOffsetY": 0
+}

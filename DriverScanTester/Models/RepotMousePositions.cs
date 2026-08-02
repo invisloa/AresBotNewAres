@@ -44,6 +44,15 @@ namespace DriverScanTester.Models
             (995, 185)   //hp yarrow pot
         };
 
+        public static (int X, int Y)[] mousePositionsForEtanBuying =
+        {
+            (995, 570),  //mana pot (index 0)
+            (995, 410),  //red pot   (index 1)
+            (995, 370),  //white pot (index 2)
+            (995, 260),  //hp pot    (index 3)
+            (995, 330)   //SOR       (index 4)
+        };
+
         public static (int X, int Y)[] mousePositionsForStorageBuying =
         {
             (1015, 720),  //mana pot

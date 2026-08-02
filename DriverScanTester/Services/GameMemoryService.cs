@@ -545,7 +545,8 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Calibrates <see cref="BotConstants.GameMagicValues.LootMouseOverValue"/> by reading
+        /// Calibrates <see cref="BotConstants.GameMagicValues.LootMouseOverValue"/> and
+        /// <see cref="DriverScanTester.Services.ItemSellerService.SellerPointedValue"/> by reading
         /// the current NPC mouseover value at <c>[Ares.exe + 0x4704A8] + 0xC</c> and subtracting 256.
         ///
         /// The relationship between NPC and item mouseover values is stable:
@@ -571,8 +572,10 @@ namespace DriverScanTester.Services
 
             int itemValue = npcValue - 256;
             BotConstants.GameMagicValues.LootMouseOverValue = itemValue;
+            DriverScanTester.Services.ItemSellerService.SellerPointedValue = npcValue;
 
             _log?.Invoke($"[CalibrateLootMouseOverValue] NPC cl={npcValue} (0x{(uint)npcValue:X8}), Item cl={itemValue} (0x{(uint)itemValue:X8}) [Item = NPC - 256]");
+            _log?.Invoke($"[CalibrateLootMouseOverValue] SellerPointedValue={npcValue}, LootMouseOverValue={itemValue}");
             return itemValue;
         }
 

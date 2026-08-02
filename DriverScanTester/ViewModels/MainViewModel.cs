@@ -2576,6 +2576,7 @@ namespace DriverScanTester.ViewModels
         private const int VK_PRIOR = 0x21; // Page Up
         private const int VK_HOME = 0x24;  // Home
         private const int VK_END = 0x23;   // End
+        private const int VK_RETURN = 0x0D; // Enter
         private const int SW_RESTORE = 9;
         private const int KEYEVENTF_KEYUP = 0x0002;
 
@@ -2913,6 +2914,43 @@ namespace DriverScanTester.ViewModels
                     }
                 }
 
+                /// <summary>
+                /// Calibrates LootMouseOverValue by reading current NPC mouseover value
+                /// at [Ares.exe + 0x4704A8] + 0xC and subtracting 256 (stable relationship:
+                /// Item_cl = NPC_cl - 256).
+                /// Hover the cursor over an NPC before calling this.
+                /// </summary>
+                public void CalibrateLootMouseOver()
+                {
+                    if (!_isAttached) { AppendLog("Attach first."); return; }
+
+                    ulong baseAddr = FindModuleInScanner("Ares.exe", false);
+                    if (baseAddr == 0)
+                    {
+                        _pointerScanner?.RefreshModules();
+                        baseAddr = FindModuleInScanner("Ares.exe", true);
+                    }
+                    if (baseAddr == 0)
+                    {
+                        AppendLog("Failed to resolve module base for calibration.");
+                        return;
+                    }
+
+                    try
+                    {
+                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
+                        int result = memoryService.CalibrateLootMouseOverValue();
+                        if (result != 0)
+                            AppendLog($"=== Calibration OK: LootMouseOverValue={result} (0x{(uint)result:X8}), SellerPointedValue={result + 256} (0x{(uint)(result + 256):X8}) ===");
+                        else
+                            AppendLog("=== Calibration FAILED: No NPC hover detected (value=0). Hover over an NPC and try again. ===");
+                    }
+                    catch (Exception ex)
+                    {
+                        AppendLog($"=== Calibration FAILED: {ex.Message} ===");
+                    }
+                }
+
                 public void TestSell(int profileOffsetX = 0, int profileOffsetY = 0)
                 {
                     if (!_isAttached) { AppendLog("Attach first."); return; }
@@ -3059,26 +3097,24 @@ namespace DriverScanTester.ViewModels
                     }
 
                     // Potion shop click points — offsets relative to the game window.
-                    // Derived from old Ares bot absolute positions (reference window at 447,77):
-                    //   HP:    (995, 185) → relative (995-447=548, 185-77=108)
-                    //   Mana:  (995, 305) → relative (995-447=548, 305-77=228)
-                    //   White: (995, 380) → relative (995-447=548, 380-77=303)
-                    //   Red:   (995, 420) → relative (995-447=548, 420-77=343)
+                    // Etan absolute screen coordinates → relative (absolute - window 445,105):
+                    //   HP:    (995, 260) → relative (550, 155)
+                    //   Mana:  (995, 570) → relative (550, 465)
+                    //   Red:   (995, 410) → relative (550, 305)
+                    //   White: (995, 370) → relative (550, 265)
+                    //   SOR:   (995, 330) → relative (550, 225)
                     var potionPoints = new PotionShopClickPoint[]
                     {
-                        new() { PotionType = PotionType.Hp,    RelativeX = 548, RelativeY = 108 },
-                        new() { PotionType = PotionType.Mana,  RelativeX = 548, RelativeY = 228 },
-                        new() { PotionType = PotionType.White, RelativeX = 548, RelativeY = 303 },
-                        new() { PotionType = PotionType.Red,   RelativeX = 548, RelativeY = 343 },
+                        new() { PotionType = PotionType.Mana,  RelativeX = 550, RelativeY = 465 },
+                        new() { PotionType = PotionType.Red,   RelativeX = 550, RelativeY = 305 },
+                        new() { PotionType = PotionType.White, RelativeX = 550, RelativeY = 265 },
+                        new() { PotionType = PotionType.Hp,    RelativeX = 550, RelativeY = 155 },
+                        new() { PotionType = PotionType.Mana,  RelativeX = 550, RelativeY = 225 }, // SOR (Scroll of Return)
                     };
 
-                    // Quantity input click position (old absolute 1295,530 → relative 848,453)
-                    const int quantityInputRelX = 848;
-                    const int quantityInputRelY = 453;
-
-                    // OK button click position (old absolute 560,570 → relative 113,493)
-                    const int okButtonRelX = 113;
-                    const int okButtonRelY = 493;
+                    // Quantity input click position (old absolute 1295,530 → relative to window (445,105): 850,425)
+                    const int quantityInputRelX = 850;
+                    const int quantityInputRelY = 425;
 
                     const int buyClickDelayMs = 200;
                     const int buyPauseMs = 1000;
@@ -3091,7 +3127,9 @@ namespace DriverScanTester.ViewModels
                             break;
                         }
 
-                        int currentCount = point.PotionType switch
+                        // SOR entry (RelativeY=253) has no potion count check — always buy 5 scrolls
+                        bool isSor = point.RelativeY == 253;
+                        int currentCount = isSor ? 0 : point.PotionType switch
                         {
                             PotionType.Hp => memory.GetHpPotionCount(),
                             PotionType.Mana => memory.GetManaPotionCount(),
@@ -3100,8 +3138,10 @@ namespace DriverScanTester.ViewModels
                             _ => 0
                         };
 
-                        int amountToBuy = Math.Max(0, targetCount - currentCount);
-                        log($"Potion {point.PotionType}: current {currentCount}, target {targetCount}, buying {amountToBuy}");
+                        int amountToBuy = isSor ? 5 : Math.Max(0, targetCount - currentCount);
+                        log(isSor
+                            ? $"SOR: buying {amountToBuy}"
+                            : $"Potion {point.PotionType}: current {currentCount}, target {targetCount}, buying {amountToBuy}");
 
                         if (amountToBuy <= 0)
                             continue;
@@ -3127,10 +3167,12 @@ namespace DriverScanTester.ViewModels
                             Thread.Sleep(100);
                         }
 
-                        // 4. Click OK to confirm purchase
-                        int okScreenX = shopRect.Left + okButtonRelX;
-                        int okScreenY = shopRect.Top + okButtonRelY;
-                        MouseOperations.MoveAndLeftClickAbsolute(okScreenX, okScreenY, buyClickDelayMs);
+                        // 4. Press ENTER to confirm purchase (zamiast klikania myszka)
+                        Thread.Sleep(300);
+                        keybd_event(VK_RETURN, 0, 0, 0);
+                        Thread.Sleep(50);
+                        keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
+                        Thread.Sleep(500);
 
                         // 5. Pause before next potion type
                         Thread.Sleep(buyPauseMs);
