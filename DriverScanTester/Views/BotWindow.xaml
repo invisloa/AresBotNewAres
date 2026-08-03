@@ -143,7 +143,10 @@
                     </WrapPanel>
                     <Button Content="Test Loot" Command="{Binding TestLootCommand}" Width="120" Margin="5,0,5,5" HorizontalAlignment="Left" Background="#FFF0D0FF"/>
                     <Button Content="Test Scan Area" Command="{Binding TestScanAreaCommand}" Width="120" Margin="5,0,5,5" HorizontalAlignment="Left" Background="#FFF0D0FF"/>
-                    <Button Content="Calibruj NPC->Item" Command="{Binding CalibrateLootMouseOverCommand}" Width="160" Margin="5,0,5,5" HorizontalAlignment="Left" Background="#FFE0E0FF" ToolTip="Najedz kursorem na NPC i kliknij. Wartosc dla itemu zostanie obliczona automatycznie (NPC - 256)."/>
+                    <WrapPanel Orientation="Horizontal" Margin="5,0,5,5">
+                        <Button Content="Mouseover NPC" Command="{Binding CaptureNpcMouseOverCommand}" Width="120" Margin="0,0,5,0" Background="#FFE0E0FF" ToolTip="Najedz kursorem na NPC (sprzedawce, u ktorego bot ma sprzedawac) i kliknij. Zapisze pelny dump wartosci do MouseOverValues_Log.txt i ustawi SellerPointedValue."/>
+                        <Button Content="Mouseover Item" Command="{Binding CaptureItemMouseOverCommand}" Width="120" Margin="0" Background="#FFE0E0FF" ToolTip="Najedz kursorem na item (loot) i kliknij. Zapisze pelny dump wartosci do MouseOverValues_Log.txt i ustawi LootMouseOverValue."/>
+                    </WrapPanel>
                 </StackPanel>
             </GroupBox>
 

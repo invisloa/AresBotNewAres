@@ -19,7 +19,7 @@
     }
   ],
   "ExpLoop": {
-    "PathFile": "Kharon Go Wolves.json",
+    "PathFile": "Kharon Exp Wolves.json",
     "StartDelayMs": 444
   },
   "MinHpPotions": 5,

@@ -208,6 +208,12 @@ namespace DriverScanTester
             /// <summary>Segment-progress threshold above which the bot skips to the next segment (t >= this → skip).</summary>
             public const float RouteResyncVeryCloseToSegmentEndT = 0.85f;
 
+            /// <summary>Minimum displacement (game tiles) from the position where the last
+            /// stuck attempt started before the consecutive-stuck counter is reset.
+            /// Proximity to the waypoint alone must NOT reset it — otherwise a bot stuck
+            /// next to its target loops the recovery forever without ever escalating.</summary>
+            public const float StuckProgressResetDistance = 3.0f;
+
             /// <summary>Distance epsilon for segment tie-breaking: if two segments have dist within this value, prefer the one closer to current target.</summary>
             public const float RouteResyncTieDistanceEpsilon = 1.0f;
         }
@@ -368,9 +374,10 @@ namespace DriverScanTester
             /// because the byte at +0xD (db) is always 1 less for item than for NPC (0xDB vs 0xDC).
             /// WARNING (Sesja 3, 2026-08-03): this rule FAILED — Item=371473144 (0x16243AF8),
             /// NPC=138599240 (0x0842DB48), diff=232873904. The value is likely the hovered
-            /// object's address/ID, not an item-vs-NPC flag. Calibrate by hovering the ITEM
-            /// directly; GameMemoryService.CalibrateLootMouseOverValue (NPC-256 based) is
-            /// now unreliable.
+            /// object's address/ID, not an item-vs-NPC flag. Set this value by hovering the
+            /// ITEM directly via the 'Mouseover Item' button in the Bot window
+            /// (MainViewModel.CaptureItemMouseOver), which also saves the full mouseover
+            /// dump to MouseOverValues_Log.txt for analysis.
             ///
             /// Sesja 4 (2026-08-03): Item=302348960 (0x12057AA0), NPC=138599240 (0x0842DB48).
             ///
@@ -642,6 +649,15 @@ namespace DriverScanTester
             /// <summary>Interval in ms between repot condition checks during exp loop.</summary>
             public const int ExpLoopRepotCheckIntervalMs = 3000;
 
+            /// <summary>Number of consecutive in-city snapshot reads required before the exp
+            /// loop reacts to an unexpected city teleport (guards against flickering reads).</summary>
+            public const int InCityDetectionStableReads = 2;
+
+            /// <summary>Sustained zone-block duration in ms after which PathRunner aborts a
+            /// non-loop route (player is in a zone the current waypoints do not allow,
+            /// e.g. teleported to the city while the route expects the wilderness).</summary>
+            public const int ZoneBlockAbortMs = 10000;
+
             // ── Map transitions ──
             /// <summary>Poll interval in ms for map number during travel-route map transitions.</summary>
             public const int MapTransitionPollMs = 100;
@@ -769,20 +785,24 @@ namespace DriverScanTester
             /// <summary>Default Mana threshold for repot trigger.</summary>
             public const int DefaultMinMana = 100;
 
-            /// <summary>Mana potion target count (added to ItemCount1 base).</summary>
+            /// <summary>Mana potion target count (buy up to this many).</summary>
             public const int ManaBuyTarget = 99;
 
-            /// <summary>Red potion target count (added to ItemCount1 base).</summary>
+            /// <summary>Red potion target count (buy up to this many).</summary>
             public const int RedBuyTarget = 3;
 
-            /// <summary>White potion target count (added to ItemCount1 base).</summary>
+            /// <summary>White potion target count (buy up to this many).</summary>
             public const int WhiteBuyTarget = 3;
 
-            /// <summary>HP potion target count (added to ItemCount1 base).</summary>
+            /// <summary>HP potion target count (buy up to this many).</summary>
             public const int HpBuyTarget = 120;
 
             /// <summary>Maximum teleport retries before giving up.</summary>
             public const int MaxTeleportRetries = 3;
+
+            /// <summary>Maximum consecutive City → Repot route failures before the workflow
+            /// fails visibly (player likely stuck in the city and unable to move).</summary>
+            public const int MaxMoveToRepotRetries = 3;
 
             /// <summary>Maximum retries for opening shop window.</summary>
             public const int OpenShopRetries = 10;

@@ -19,7 +19,7 @@
     }
   ],
   "ExpLoop": {
-    "PathFile": "Kharon Go Wolves.json",
+    "PathFile": "Kharon Exp Wolves.json",
     "StartDelayMs": 444
   },
   "MinHpPotions": 5,
@@ -28,7 +28,7 @@
   "MinHp": 1444,
   "MinMana": 100,
   "HpBuyTarget": 25,
-  "ManaBuyTarget": 15,
+  "ManaBuyTarget": 35,
   "RedBuyTarget": 4,
   "WhiteBuyTarget": 4,
   "DryRunRepot": false,

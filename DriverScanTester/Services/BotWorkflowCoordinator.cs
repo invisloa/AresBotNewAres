@@ -45,6 +45,10 @@ namespace DriverScanTester.Services
 
         private int _teleportRetryCount;
 
+        /// <summary>Consecutive MoveToRepot route failures. After 3 the workflow fails
+        /// visibly instead of retrying forever (e.g. the player cannot move in the city).</summary>
+        private int _moveToRepotRetryCount;
+
         /// <summary>Current phase of the bot workflow.</summary>
         public BotPhase CurrentPhase
         {
@@ -125,6 +129,8 @@ namespace DriverScanTester.Services
             _isRunning = true;
             _cts = new CancellationTokenSource();
             var token = _cts.Token;
+            _teleportRetryCount = 0;
+            _moveToRepotRetryCount = 0;
 
             _focusGameWindow();
             _log("[Coordinator] Workflow started.");
@@ -267,12 +273,24 @@ namespace DriverScanTester.Services
                     CurrentPhase = BotPhase.Failed;
                     break;
                 case RouteRunResult.Completed:
+                    _moveToRepotRetryCount = 0;
                     _log("[Phase] MoveToRepot: Arrived at repot point.");
                     CurrentPhase = BotPhase.Repot;
                     break;
                 default:
-                    _log("[Phase] MoveToRepot: Path did not complete. Retrying from start.");
-                    CurrentPhase = BotPhase.DetectCityStart;
+                    // Incomplete (e.g. city-stuck escalation or zone-block abort).
+                    _moveToRepotRetryCount++;
+                    if (_moveToRepotRetryCount >= BotConstants.Repot.MaxMoveToRepotRetries)
+                    {
+                        _log($"[Phase] MoveToRepot: Failed {_moveToRepotRetryCount} times in a row (player likely stuck in the city). Giving up.");
+                        _moveToRepotRetryCount = 0;
+                        CurrentPhase = BotPhase.Failed;
+                    }
+                    else
+                    {
+                        _log($"[Phase] MoveToRepot: Path did not complete (attempt {_moveToRepotRetryCount}/{BotConstants.Repot.MaxMoveToRepotRetries}). Retrying from start.");
+                        CurrentPhase = BotPhase.DetectCityStart;
+                    }
                     break;
             }
         }
@@ -341,6 +359,16 @@ namespace DriverScanTester.Services
                     default:
                         // MissingSegment, ExpectedMapNotReached, UnexpectedMapReached, InvalidMapState
                         _log($"[Phase] MoveToExp: Route {i + 1}/{routes.Count} failed ({result}). Failing.");
+
+                        // If the player ended up in the city (e.g. teleported mid-route), do
+                        // not fail the whole workflow — restart from the repot flow instead.
+                        if (_memoryService.GetIsInCity())
+                        {
+                            _log("[Phase] MoveToExp: Player is in the city — restarting from repot flow.");
+                            CurrentPhase = BotPhase.DetectCityStart;
+                            return;
+                        }
+
                         CurrentPhase = BotPhase.Failed;
                         return;
                 }
@@ -379,6 +407,8 @@ namespace DriverScanTester.Services
             var pathTask = _pathRunner.RunPathAsync(waypoints, loop: true, expToken);
 
             bool repotNeeded = false;
+            bool cityDetected = false;
+            int inCityConsecutiveReads = 0;
             try
             {
                 while (!expToken.IsCancellationRequested)
@@ -386,6 +416,26 @@ namespace DriverScanTester.Services
                     await Task.Delay(BotConstants.Delays.ExpLoopRepotCheckIntervalMs, expToken);
 
                     var snapshot = _memoryService.GetSnapshot();
+
+                    // Unexpected city teleport (manual teleport, death, portal, ...) while
+                    // hunting: the player is in the city, so the bot must stop hunting and
+                    // go repot instead of fighting inside the city forever.
+                    if (snapshot.IsInCity)
+                    {
+                        inCityConsecutiveReads++;
+                        if (inCityConsecutiveReads >= BotConstants.Delays.InCityDetectionStableReads)
+                        {
+                            _log("[Phase] ExpLoop: Player detected in city — stopping exp loop.");
+                            cityDetected = true;
+                            expCts.Cancel();
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        inCityConsecutiveReads = 0;
+                    }
+
                     if (_repotDetector.NeedsRepot(snapshot))
                     {
                         _log("[Phase] ExpLoop: Repot condition detected. Stopping exp loop.");
@@ -409,7 +459,14 @@ namespace DriverScanTester.Services
             if (token.IsCancellationRequested)
                 return;
 
-            if (repotNeeded)
+            bool inCity = _memoryService.GetIsInCity();
+            if (inCity || cityDetected)
+            {
+                // Already in the city — no teleport needed, go straight to the repot flow.
+                _log("[Phase] ExpLoop: Player is in the city — going to repot (no teleport needed).");
+                CurrentPhase = BotPhase.DetectCityStart;
+            }
+            else if (repotNeeded)
             {
                 _log("[Phase] ExpLoop: Transitioning to NeedRepot.");
                 CurrentPhase = BotPhase.NeedRepot;
@@ -788,6 +845,10 @@ namespace DriverScanTester.Services
         {
             byte vk = (byte)_profile.TeleportKey;
             byte scan = (byte)_profile.TeleportScanCode;
+
+            // Make sure the game window is focused before injecting the teleport key,
+            // otherwise keybd_event may deliver the keypress to another window.
+            _focusGameWindow();
 
             _log($"[Teleport] Pressing key (vk={vk}) for town teleport...");
             keybd_event(vk, scan, 0, 0);

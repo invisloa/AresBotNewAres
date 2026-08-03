@@ -45,13 +45,13 @@ namespace DriverScanTester.Models
         public int MinMana { get; set; } = BotConstants.Repot.DefaultMinMana;
 
         // --- Potion buy targets (override RepotSystem defaults) ---
-        /// <summary>Target count for HP potions (added to ItemCount1 base).</summary>
+        /// <summary>Target count for HP potions (buy up to this many).</summary>
         public int HpBuyTarget { get; set; } = BotConstants.Repot.HpBuyTarget;
-        /// <summary>Target count for Mana potions (added to ItemCount1 base).</summary>
+        /// <summary>Target count for Mana potions (buy up to this many).</summary>
         public int ManaBuyTarget { get; set; } = BotConstants.Repot.ManaBuyTarget;
-        /// <summary>Target count for Red potions (added to ItemCount1 base).</summary>
+        /// <summary>Target count for Red potions (buy up to this many).</summary>
         public int RedBuyTarget { get; set; } = BotConstants.Repot.RedBuyTarget;
-        /// <summary>Target count for White potions (added to ItemCount1 base).</summary>
+        /// <summary>Target count for White potions (buy up to this many).</summary>
         public int WhiteBuyTarget { get; set; } = BotConstants.Repot.WhiteBuyTarget;
 
         // --- Workflow options ---

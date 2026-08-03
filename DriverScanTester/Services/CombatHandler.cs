@@ -108,8 +108,6 @@ namespace DriverScanTester.Services
                 _log($"[Combat] Player is being attacked (Anim: {anim1})");
             }
 
-            _log($"[Combat] Evaluate: anim1={anim1} attackVal={attackVal} currentAction={currentAction} mode={currentMode} isUnstuck={isUnstuckActive}");
-
             if (attackVal > 0)
             {
                 // ── Player character check: skip attacking other players ──

@@ -11,8 +11,10 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows;
 using System.Windows.Input;
 using System.Threading;
@@ -285,7 +287,30 @@ namespace DriverScanTester.ViewModels
             OpenBotWindowCommand = new RelayCommand(_ => OpenBotWindow(), _ => _isAttached);
             ClearLogCommand = new RelayCommand(_ => LogText = "", _ => true);
 
+            // Restore the last mouseover calibration ('Mouseover NPC' / 'Mouseover Item')
+            // from disk so the bot works without re-calibrating after an app restart.
+            LoadSavedMouseCalibration();
+
             StartHotkeyListener();
+        }
+
+        /// <summary>
+        /// Loads the mouseover calibration saved by <see cref="CaptureNpcMouseOver"/> /
+        /// <see cref="CaptureItemMouseOver"/> (SellerPointedValue / LootMouseOverValue)
+        /// and applies it to the running services. Re-calibration is only needed when
+        /// the saved value stops matching (e.g. the seller scan can no longer find the NPC).
+        /// </summary>
+        private void LoadSavedMouseCalibration()
+        {
+            if (!MouseCalibrationStore.Load(out int sellerValue, out int lootValue))
+                return;
+
+            if (sellerValue != 0)
+                ItemSellerService.SellerPointedValue = sellerValue;
+            if (lootValue != 0)
+                BotConstants.GameMagicValues.LootMouseOverValue = lootValue;
+
+            AppendLog($"[Calibration] Loaded saved mouseover calibration from {MouseCalibrationStore.FilePath}: SellerPointedValue={ItemSellerService.SellerPointedValue} (0x{(uint)ItemSellerService.SellerPointedValue:X8}), LootMouseOverValue={BotConstants.GameMagicValues.LootMouseOverValue} (0x{(uint)BotConstants.GameMagicValues.LootMouseOverValue:X8}). Re-calibrate only if the seller scan stops matching.");
         }
 
         public void OpenPathEditorInternal() => OpenPathEditor();
@@ -2923,12 +2948,16 @@ namespace DriverScanTester.ViewModels
                 }
 
                 /// <summary>
-                /// Calibrates LootMouseOverValue by reading current NPC mouseover value
-                /// at [Ares.exe + 0x4704A8] + 0xC and subtracting 256 (stable relationship:
-                /// Item_cl = NPC_cl - 256).
-                /// Hover the cursor over an NPC before calling this.
+                /// Captures the full mouseover dump while the cursor hovers an NPC.
+                /// Saves the dump to MouseOverValues_Log.txt for later analysis and sets
+                /// ItemSellerService.SellerPointedValue to the NPC's cl value (used by the
+                /// seller scan in ItemSellerService). Hover the ACTUAL seller NPC before
+                /// calling — the value is the hovered object's heap address/ID and changes
+                /// every game launch, so it only matches the NPC you hovered.
+                /// The captured value is also persisted to MouseCalibration.json and
+                /// restored automatically on the next app start.
                 /// </summary>
-                public void CalibrateLootMouseOver()
+                public void CaptureNpcMouseOver()
                 {
                     if (!_isAttached) { AppendLog("Attach first."); return; }
 
@@ -2940,22 +2969,121 @@ namespace DriverScanTester.ViewModels
                     }
                     if (baseAddr == 0)
                     {
-                        AppendLog("Failed to resolve module base for calibration.");
+                        AppendLog("Failed to resolve module base for mouseover capture.");
                         return;
                     }
 
                     try
                     {
                         var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
-                        int result = memoryService.CalibrateLootMouseOverValue();
-                        if (result != 0)
-                            AppendLog($"=== Calibration OK: LootMouseOverValue={result} (0x{(uint)result:X8}), SellerPointedValue={result + 256} (0x{(uint)(result + 256):X8}) ===");
-                        else
-                            AppendLog("=== Calibration FAILED: No NPC hover detected (value=0). Hover over an NPC and try again. ===");
+                        var dump = memoryService.ReadMouseOverDump();
+                        if (!dump.Success || dump.Cl == 0)
+                        {
+                            AppendLog("=== Mouseover NPC FAILED: pointer chain broken or no hover (cl=0). Hover over an NPC and try again. ===");
+                            return;
+                        }
+
+                        ItemSellerService.SellerPointedValue = dump.Cl;
+                        AppendLog($"=== Mouseover NPC: SellerPointedValue={dump.Cl} (0x{(uint)dump.Cl:X8}) [obiekt: 0x{dump.Pointer48:X12}] ===");
+                        SaveMouseOverDump("NPC", dump);
+                        SaveMouseCalibration("NPC");
                     }
                     catch (Exception ex)
                     {
-                        AppendLog($"=== Calibration FAILED: {ex.Message} ===");
+                        AppendLog($"=== Mouseover NPC FAILED: {ex.Message} ===");
+                    }
+                }
+
+                /// <summary>
+                /// Captures the full mouseover dump while the cursor hovers a loot item.
+                /// Saves the dump to MouseOverValues_Log.txt for later analysis and sets
+                /// BotConstants.GameMagicValues.LootMouseOverValue to the item's cl value
+                /// (kept for reference only — live loot detection in
+                /// GameMemoryService.IsLootMouseOver() is structural and does not use it).
+                /// The captured value is also persisted to MouseCalibration.json and
+                /// restored automatically on the next app start.
+                /// </summary>
+                public void CaptureItemMouseOver()
+                {
+                    if (!_isAttached) { AppendLog("Attach first."); return; }
+
+                    ulong baseAddr = FindModuleInScanner("Ares.exe", false);
+                    if (baseAddr == 0)
+                    {
+                        _pointerScanner?.RefreshModules();
+                        baseAddr = FindModuleInScanner("Ares.exe", true);
+                    }
+                    if (baseAddr == 0)
+                    {
+                        AppendLog("Failed to resolve module base for mouseover capture.");
+                        return;
+                    }
+
+                    try
+                    {
+                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
+                        var dump = memoryService.ReadMouseOverDump();
+                        if (!dump.Success || dump.Cl == 0)
+                        {
+                            AppendLog("=== Mouseover Item FAILED: pointer chain broken or no hover (cl=0). Hover over an item and try again. ===");
+                            return;
+                        }
+
+                        BotConstants.GameMagicValues.LootMouseOverValue = dump.Cl;
+                        AppendLog($"=== Mouseover Item: LootMouseOverValue={dump.Cl} (0x{(uint)dump.Cl:X8}) [obiekt: 0x{dump.Pointer48:X12}] ===");
+                        SaveMouseOverDump("ITEM", dump);
+                        SaveMouseCalibration("ITEM");
+                    }
+                    catch (Exception ex)
+                    {
+                        AppendLog($"=== Mouseover Item FAILED: {ex.Message} ===");
+                    }
+                }
+
+                /// <summary>
+                /// Persists the current mouseover calibration values
+                /// (SellerPointedValue + LootMouseOverValue) to MouseCalibration.json
+                /// so they survive an app restart.
+                /// </summary>
+                private void SaveMouseCalibration(string hoverType)
+                {
+                    if (MouseCalibrationStore.Save(ItemSellerService.SellerPointedValue, BotConstants.GameMagicValues.LootMouseOverValue))
+                    {
+                        AppendLog($"=== Mouseover {hoverType}: calibration saved to {MouseCalibrationStore.FilePath} — bot will reuse it after restart. ===");
+                    }
+                    else
+                    {
+                        AppendLog($"=== Mouseover {hoverType}: could not save calibration to {MouseCalibrationStore.FilePath}. ===");
+                    }
+                }
+
+                /// <summary>
+                /// Logs the mouseover dump to the UI log and appends it to
+                /// MouseOverValues_Log.txt (next to the exe) for later cross-session
+                /// analysis of whether NPC/item detection can be automated.
+                /// </summary>
+                private void SaveMouseOverDump(string hoverType, MouseOverDumpData dump)
+                {
+                    string report = dump.FormatDump(hoverType);
+                    AppendLog(report.TrimEnd('\r', '\n'));
+
+                    try
+                    {
+                        string path = Path.Combine(AppContext.BaseDirectory, "MouseOverValues_Log.txt");
+                        var sb = new StringBuilder();
+                        string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                        sb.AppendLine($"=== {timestamp} | Hover: {hoverType} | Session refs: LootMouseOverValue={BotConstants.GameMagicValues.LootMouseOverValue} (0x{(uint)BotConstants.GameMagicValues.LootMouseOverValue:X8}), SellerPointedValue={ItemSellerService.SellerPointedValue} (0x{(uint)ItemSellerService.SellerPointedValue:X8}) ===");
+                        sb.Append(report);
+                        sb.Append(dump.FormatSummary(hoverType, timestamp));
+                        sb.AppendLine();
+                        sb.AppendLine();
+
+                        File.AppendAllText(path, sb.ToString());
+                        AppendLog($"Mouseover dump ({hoverType}) saved to {path}");
+                    }
+                    catch (Exception ex)
+                    {
+                        AppendLog($"Could not save mouseover dump to file: {ex.Message}");
                     }
                 }
 
@@ -3330,6 +3458,23 @@ namespace DriverScanTester.ViewModels
                         while (!token.IsCancellationRequested && _isAttached && _movementSystem != null)
                         {
                             await _movementSystem.Update(token);
+
+                            // Zone-block watchdog (same as PathRunnerService): if the player
+                            // ends up in a zone the current path forbids (e.g. teleported to
+                            // the city while the path expects the wilderness), the bot would
+                            // otherwise stand idle forever. Stop it with a clear message so
+                            // the user can react (e.g. start the profile workflow, which
+                            // auto-repots and resumes).
+                            if (_movementSystem.IsZoneBlocked &&
+                                _movementSystem.ZoneBlockedDuration.TotalMilliseconds >= BotConstants.Delays.ZoneBlockAbortMs)
+                            {
+                                AppendLog(
+                                    $"[MovementBot] Player is in the wrong zone for this path " +
+                                    $"(zone-blocked for {_movementSystem.ZoneBlockedDuration.TotalSeconds:F0}s — likely teleported to the city). " +
+                                    $"Stopping the bot. Start the profile workflow to auto-repot and resume.");
+                                break;
+                            }
+
                             await Task.Delay(100, token); // Update rate
                         }
                     }

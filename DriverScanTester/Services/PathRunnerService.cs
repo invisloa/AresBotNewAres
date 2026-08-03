@@ -85,6 +85,27 @@ namespace DriverScanTester.Services
                         return true;
                     }
 
+                    // Zone-block watchdog: when the player is in a zone the current waypoints
+                    // forbid (e.g. teleported to the city while the route expects the
+                    // wilderness), the movement system stops and would idle here forever.
+                    // Abort after a sustained block so the coordinator can restart from the
+                    // city (go repot → travel back out).
+                    if (_movementSystem.IsZoneBlocked &&
+                        _movementSystem.ZoneBlockedDuration.TotalMilliseconds >= BotConstants.Delays.ZoneBlockAbortMs)
+                    {
+                        _log($"[PathRunner] Zone-blocked for {_movementSystem.ZoneBlockedDuration.TotalSeconds:F0}s — aborting path (player likely in the wrong zone).");
+                        return false;
+                    }
+
+                    // City-stuck watchdog: in workflow mode the in-city stuck escalation
+                    // signals a route that cannot complete. Abort so the coordinator retries
+                    // from the city instead of idling for 10 minutes.
+                    if (_movementSystem.IsCityStuckFatal)
+                    {
+                        _log("[PathRunner] City-stuck escalation fired — aborting path (coordinator will retry from the city).");
+                        return false;
+                    }
+
                     await Task.Delay(BotConstants.Delays.PathRunnerTickMs, token);
                 }
                 _log("[PathRunner] Loop exited due to cancellation request.");

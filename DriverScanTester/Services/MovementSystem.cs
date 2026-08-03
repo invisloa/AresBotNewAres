@@ -92,6 +92,24 @@ namespace DriverScanTester.Services
         /// </summary>
         public bool IsFinalStandbyActive => _finalStandbyActive;
 
+        /// <summary>
+        /// True while movement is blocked because the player is in a zone the current
+        /// waypoint does not allow (e.g. teleported to the city while the route expects
+        /// the wilderness). Used by PathRunner to abort routes after a sustained block.
+        /// </summary>
+        public bool IsZoneBlocked => _zoneBlockedSince != DateTime.MinValue;
+
+        /// <summary>How long the bot has been continuously zone-blocked (TimeSpan.Zero when not blocked).</summary>
+        public TimeSpan ZoneBlockedDuration =>
+            _zoneBlockedSince == DateTime.MinValue ? TimeSpan.Zero : DateTime.Now - _zoneBlockedSince;
+
+        /// <summary>
+        /// True when the in-city stuck escalation fired while running in workflow mode
+        /// (InternalRepotEnabled=false). The route cannot complete — PathRunner aborts it so the
+        /// coordinator can retry from the city instead of standing idle for 10 minutes.
+        /// </summary>
+        public bool IsCityStuckFatal => _isCityStuckFatal;
+
         // Obstacle
         private (float X, float Y) Waypoint2;
 
@@ -162,8 +180,22 @@ namespace DriverScanTester.Services
         private const int STUCK_MAX_ATTEMPTS_IN_CITY = 3;
         private int _consecutiveStuckAttempts = 0;
 
+        /// <summary>Player position when the last reverse-diagonal recovery started.
+        /// Used to decide whether the consecutive-stuck counter should reset (real progress).</summary>
+        private (float X, float Y)? _lastStuckAttemptPos = null;
+
         // When stuck in city triggers teleport, wait this long before resuming.
         private DateTime _inCityStuckCooldownUntil = DateTime.MinValue;
+
+        /// <summary>Timestamp when the player first became zone-blocked (in a zone the current
+        /// waypoint does not allow). MinValue = not blocked. Exposed to PathRunner so routes can
+        /// be aborted when the player is stuck in the wrong zone (e.g. teleported to the city).</summary>
+        private DateTime _zoneBlockedSince = DateTime.MinValue;
+
+        /// <summary>True when the in-city stuck escalation fired while running in workflow mode
+        /// (InternalRepotEnabled=false). The route cannot complete — PathRunner aborts it so the
+        /// coordinator can retry from the city instead of pressing 6 and idling for 10 minutes.</summary>
+        private bool _isCityStuckFatal = false;
 
         private readonly ReverseDiagonalRecovery _reverseDiagonalRecovery;
         private readonly StuckDetector _stuckDetector;
@@ -209,7 +241,6 @@ namespace DriverScanTester.Services
         // Input
         private readonly object _inputLock = new object();
 
-        private int _moveLogCounter = 0;
         private int _tickCount = 0;
         private int _stateLogInterval = 5; // Log periodic state every N ticks
 
@@ -323,7 +354,8 @@ namespace DriverScanTester.Services
                     ReleaseSkillThree();
                 }
 
-                _log($"[Tick {_tickCount}] In-city stuck cooldown — waiting {(_inCityStuckCooldownUntil - DateTime.Now).TotalMinutes:F1} min more.");
+                if (_tickCount % _stateLogInterval == 0)
+                    _log($"[Tick {_tickCount}] In-city stuck cooldown — waiting {(_inCityStuckCooldownUntil - DateTime.Now).TotalMinutes:F1} min more.");
                 return;
             }
 
@@ -343,7 +375,15 @@ namespace DriverScanTester.Services
 
                 if (zoneBlocked)
                 {
-                    _log($"[Tick {_tickCount}] Zone blocked (inCity={inCity}, restriction={currentRestriction}, waypoints={_waypoints.Count}) — stopping movement.");
+                    // Log only on the transition into the blocked state, not every tick.
+                    if (_zoneBlockedSince == DateTime.MinValue)
+                    {
+                        _zoneBlockedSince = DateTime.Now;
+                        string hint = (inCity && currentRestriction == ZoneRestriction.OutsideOnly)
+                            ? " (player likely teleported to the city)"
+                            : "";
+                        _log($"[Tick {_tickCount}] Zone blocked (inCity={inCity}, restriction={currentRestriction}, waypoints={_waypoints.Count}) — stopping movement{hint}.");
+                    }
 
                     if (_isMovingForward || _isSkillThreeHeld)
                     {
@@ -355,6 +395,9 @@ namespace DriverScanTester.Services
                     return;
                 }
             }
+
+            // Not zone-blocked (or report-and-go-back active) — clear the block timer.
+            _zoneBlockedSince = DateTime.MinValue;
 
             // ── Periodic state dump ──
             if (_tickCount % _stateLogInterval == 0)
@@ -786,11 +829,19 @@ namespace DriverScanTester.Services
                 float distNow = GeometryUtils.Distance(currX, currY, target.X, target.Y);
                 float thresholdNow = GetEffectiveWaypointReachThreshold(target);
 
-                // Reset stuck counter when close to target (within 15 units) — bot is making progress
-                if (_consecutiveStuckAttempts > 0 && distNow <= 15f)
+                // Reset stuck counter only when the player has actually moved away from the
+                // position where the last stuck attempt began (real progress). Proximity to
+                // the target alone must NOT reset it — otherwise a bot stuck right next to its
+                // waypoint loops the reverse-diagonal recovery forever without escalating.
+                if (_consecutiveStuckAttempts > 0 && _lastStuckAttemptPos.HasValue)
                 {
-                    _consecutiveStuckAttempts = 0;
-                    _log($"[Unstuck] Reset counter — within 15 of target ({distNow:F1}).");
+                    float movedSinceStuck = GeometryUtils.Distance(currX, currY, _lastStuckAttemptPos.Value.X, _lastStuckAttemptPos.Value.Y);
+                    if (movedSinceStuck > BotConstants.Movement.StuckProgressResetDistance)
+                    {
+                        _consecutiveStuckAttempts = 0;
+                        _lastStuckAttemptPos = null;
+                        _log($"[Unstuck] Reset counter — moved {movedSinceStuck:F1} units since last stuck attempt.");
+                    }
                 }
 
                 // ── Active ReverseDiagonalRecovery ──
@@ -816,10 +867,13 @@ namespace DriverScanTester.Services
                     }
                 }
 
-                if (_stuckDetector.IsActionStuck(currX, currY, target, _isMovingForward))
+                // Action-stuck detection is ignored during the start grace period so a
+                // freshly pressed W key never triggers a false stuck recovery.
+                if (DateTime.Now >= _ignoreStuckUntil &&
+                    _stuckDetector.IsActionStuck(currX, currY, target, _isMovingForward))
                 {
                     _log($"[ActionStuck] Action={currentAction} while moving. Starting ReverseDiagonalRecovery.");
-                    StartReverseDiagonalRecovery(currX, currY, target, "");
+                    StartReverseDiagonalRecovery(currX, currY, target);
                     return;
                 }
 
@@ -838,7 +892,6 @@ namespace DriverScanTester.Services
                     _lastHealthyMoveTime = DateTime.Now;
                 }
 
-                _log($"[Tick {_tickCount}] → ({target.X:F1},{target.Y:F1}) d:{distNow:F2} Cam:{_memoryService.GetCameraAngle()}");
                 MoveTowards(currX, currY, target.X, target.Y);
             }
             else
@@ -944,7 +997,6 @@ namespace DriverScanTester.Services
 
                 if (dist > threshold)
                 {
-                    _log($"[AdvWp] #{wpIndex} ({target.X:F1},{target.Y:F1}) d:{dist:F2} > {threshold:F2}");
                     break;
                 }
 
@@ -954,6 +1006,7 @@ namespace DriverScanTester.Services
                 _waypoints.Dequeue();
                 _log($"[AdvWp] #{wpIndex} ({target.X:F1},{target.Y:F1}) reached{ghostTag} ✓ | Queue: {_waypoints.Count}");
                 _consecutiveStuckAttempts = 0; // reset stuck counter — we made progress
+                _lastStuckAttemptPos = null;
                 ResetBearingState();
                 ResetActionStuckTracking();
                 ResetCombatStateForWaypointChange();
@@ -1069,17 +1122,13 @@ namespace DriverScanTester.Services
             _hasLastGameAngle = true;
 
             // ── Camera update filter ──
-            if (ShouldUpdateCamera(cameraRadians, isFreshSegment, out string? skipReason))
+            if (ShouldUpdateCamera(cameraRadians, isFreshSegment, out _))
             {
                 _log($"[Camera] Apply target={cameraRadians:F4}rad last={_cameraLastAppliedAngle:F4}rad diff={CircularGameAngleDiff(cameraRadians, _cameraLastAppliedAngle):F4}");
                 _memoryService.SetCameraAngle(cameraRadians);
                 _cameraLastAppliedAngle = cameraRadians;
                 _lastCameraUpdateTime = DateTime.Now;
                 _hasCameraHysteresisCandidate = false;
-            }
-            else
-            {
-                _log($"[Camera] Skip target={cameraRadians:F4}rad last={_cameraLastAppliedAngle:F4}rad diff={CircularGameAngleDiff(cameraRadians, _cameraLastAppliedAngle):F4} reason={skipReason}");
             }
 
             StartMoving();
@@ -1099,17 +1148,13 @@ namespace DriverScanTester.Services
             bool isFreshSegment = !_hasLastGameAngle;
             _hasLastGameAngle = true;
 
-            if (ShouldUpdateCamera(cameraRadians, isFreshSegment, out string? skipReason))
+            if (ShouldUpdateCamera(cameraRadians, isFreshSegment, out _))
             {
                 _log($"[Camera] Apply target={cameraRadians:F4}rad last={_cameraLastAppliedAngle:F4}rad diff={CircularGameAngleDiff(cameraRadians, _cameraLastAppliedAngle):F4}");
                 _memoryService.SetCameraAngle(cameraRadians);
                 _cameraLastAppliedAngle = cameraRadians;
                 _lastCameraUpdateTime = DateTime.Now;
                 _hasCameraHysteresisCandidate = false;
-            }
-            else
-            {
-                _log($"[Camera] Skip target={cameraRadians:F4}rad last={_cameraLastAppliedAngle:F4}rad diff={CircularGameAngleDiff(cameraRadians, _cameraLastAppliedAngle):F4} reason={skipReason}");
             }
             // NOTE: W is NOT pressed here — callers that need W use ApplySteeringBearing instead.
         }
@@ -1208,8 +1253,6 @@ namespace DriverScanTester.Services
         private void MoveTowards(float currX, float currY, float targetX, float targetY)
         {
             float targetBearingDeg = GeometryUtils.GetBearingToTargetDeg(currX, currY, targetX, targetY);
-            ++_moveLogCounter;
-            _log($"[Move] Bearing:{targetBearingDeg:F1} Target:({targetX:F1},{targetY:F1})");
 
             // ── Heading freeze near waypoint ──
             // When close to the current waypoint, the bearing-to-target oscillates
@@ -1225,7 +1268,6 @@ namespace DriverScanTester.Services
 
                 if (dist <= freezeThreshold)
                 {
-                    _log($"[Camera] Freeze near waypoint d={dist:F1} keep={_cameraLastAppliedAngle} th={freezeThreshold:F1}");
                     StartMoving();
                     return;
                 }
@@ -1262,9 +1304,10 @@ namespace DriverScanTester.Services
         /// <summary>
         /// Starts ReverseDiagonalRecovery and applies the initial camera bearing + W key.
         /// </summary>
-        private void StartReverseDiagonalRecovery(float currX, float currY, Waypoint target, string logSuffix)
+        private void StartReverseDiagonalRecovery(float currX, float currY, Waypoint target)
         {
             _consecutiveStuckAttempts++;
+            _lastStuckAttemptPos = (currX, currY);
             bool inCity = _memoryService.GetIsInCity();
             int maxAttempts = inCity ? STUCK_MAX_ATTEMPTS_IN_CITY : STUCK_MAX_ATTEMPTS_OUTSIDE;
             _log($"[Unstuck] Consecutive stuck attempts: {_consecutiveStuckAttempts}/{maxAttempts} ({(inCity ? "in city" : "outside")})");
@@ -1272,15 +1315,31 @@ namespace DriverScanTester.Services
             if (_consecutiveStuckAttempts >= maxAttempts)
             {
                 _consecutiveStuckAttempts = 0;
+                _lastStuckAttemptPos = null;
                 CaptureStuckScreenshot();
                 _reverseDiagonalRecovery.Stop();
 
                 if (inCity)
                 {
-                    _log($"[Unstuck] Reached {maxAttempts} stuck attempts in city — pressing 6 and waiting 10 minutes.");
-                    StopMoving();
-                    GameInput.PressKey(GameInput.VK_6, GameInput.SCAN_6);
-                    _inCityStuckCooldownUntil = DateTime.Now.AddMinutes(10);
+                    if (InternalRepotEnabled)
+                    {
+                        // Legacy mode: no external repot flow — press the town teleport and
+                        // wait before retrying.
+                        _log($"[Unstuck] Reached {maxAttempts} stuck attempts in city — pressing 6 and waiting 10 minutes.");
+                        StopMoving();
+                        GameInput.PressKey(GameInput.VK_6, GameInput.SCAN_6);
+                        _inCityStuckCooldownUntil = DateTime.Now.AddMinutes(10);
+                    }
+                    else
+                    {
+                        // Workflow mode: the coordinator handles repot, so do NOT press the
+                        // teleport key / idle for 10 minutes here. Signal a fatal city-stuck
+                        // state so PathRunner aborts the route and the coordinator retries
+                        // (and eventually fails visibly instead of standing silently).
+                        _log($"[Unstuck] Reached {maxAttempts} stuck attempts in city (workflow) — aborting path so the coordinator can retry from the city.");
+                        _isCityStuckFatal = true;
+                        StopMoving();
+                    }
                 }
                 else
                 {
@@ -1294,9 +1353,7 @@ namespace DriverScanTester.Services
             _reverseDiagonalRecovery.Start(currX, currY, target.X, target.Y,
                 _lastHealthyMoveBearingDeg != UnsetBearing ? _lastHealthyMoveBearingDeg : (float?)null,
                 _lastHealthyMoveTime);
-            float bearingDeg = _reverseDiagonalRecovery.CurrentBearingDeg;
-            ApplyCameraBearing(bearingDeg); // camera only — Recovery controls W
-            _log($"[ReverseDiagonal] begin{logSuffix}. Bearing={bearingDeg:F1}°");
+            ApplyCameraBearing(_reverseDiagonalRecovery.CurrentBearingDeg); // camera only — Recovery controls W
         }
 
         [DllImport("user32.dll", SetLastError = true)]
@@ -1373,7 +1430,6 @@ namespace DriverScanTester.Services
             {
                 if (_isMovingForward)
                 {
-                    _log($"[Input] StartMoving called but already moving (call #{_startMoveCount + 1}) — skipping.");
                     return;
                 }
 
@@ -1418,10 +1474,14 @@ namespace DriverScanTester.Services
         {
             lock (_inputLock)
             {
-                _isMovingForward = false;
-                _stopMoveCount++;
-
-                _log($"[Input] W up (StopMoving) — call #{_stopMoveCount}. Tick:{_tickCount}");
+                // Log only on a real transition — repeated StopMoving calls (multiple
+                // callers per tick) used to flood the log with identical W-up lines.
+                if (_isMovingForward)
+                {
+                    _isMovingForward = false;
+                    _stopMoveCount++;
+                    _log($"[Input] W up (StopMoving) — call #{_stopMoveCount}. Tick:{_tickCount}");
+                }
 
                 GameInput.keybd_event(GameInput.VK_W, GameInput.SCAN_W, (uint)GameInput.KEYEVENTF_KEYUP, 0);
             }
@@ -1636,6 +1696,7 @@ namespace DriverScanTester.Services
             ResetActionStuckTracking();
             ResetCombatStateForWaypointChange();
             _consecutiveStuckAttempts = 0;
+            _lastStuckAttemptPos = null;
 
             return RouteResyncResult.Applied;
         }

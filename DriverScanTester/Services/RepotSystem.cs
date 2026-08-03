@@ -21,13 +21,13 @@ namespace DriverScanTester.Services
         }
 
         // --- Potion buy targets (can be overridden per-profile) ---
-        /// <summary>Target count for HP potions (added to ItemCount1 base). Default = BotConstants.Repot.HpBuyTarget.</summary>
+        /// <summary>Target count for HP potions (buy up to this many). Default = BotConstants.Repot.HpBuyTarget.</summary>
         public int HpBuyTarget { get; set; } = BotConstants.Repot.HpBuyTarget;
-        /// <summary>Target count for Mana potions (added to ItemCount1 base). Default = BotConstants.Repot.ManaBuyTarget.</summary>
+        /// <summary>Target count for Mana potions (buy up to this many). Default = BotConstants.Repot.ManaBuyTarget.</summary>
         public int ManaBuyTarget { get; set; } = BotConstants.Repot.ManaBuyTarget;
-        /// <summary>Target count for Red potions (added to ItemCount1 base). Default = BotConstants.Repot.RedBuyTarget.</summary>
+        /// <summary>Target count for Red potions (buy up to this many). Default = BotConstants.Repot.RedBuyTarget.</summary>
         public int RedBuyTarget { get; set; } = BotConstants.Repot.RedBuyTarget;
-        /// <summary>Target count for White potions (added to ItemCount1 base). Default = BotConstants.Repot.WhiteBuyTarget.</summary>
+        /// <summary>Target count for White potions (buy up to this many). Default = BotConstants.Repot.WhiteBuyTarget.</summary>
         public int WhiteBuyTarget { get; set; } = BotConstants.Repot.WhiteBuyTarget;
 
         #region State Checks
@@ -132,35 +132,44 @@ namespace DriverScanTester.Services
                 Thread.Sleep(1000);
 
                 // Mana Potions (Index 0)
-                if (i == 0 && GetManaPotionCount() < BotConstants.GameMagicValues.ItemCount1 + ManaBuyTarget)
+                if (i == 0 && GetManaPotionCount() < ManaBuyTarget)
                 {
                     ClickCalibrated(positions[i].X, positions[i].Y, 150);
-                    HowManyPotionsToBuy(i);
+                    HowManyPotionsToBuy(ManaBuyTarget - GetManaPotionCount());
                 }
                 // Red Potions (Index 1)
-                else if (i == 1 && GetRedPotionCount() < BotConstants.GameMagicValues.ItemCount1 + RedBuyTarget)
+                else if (i == 1 && GetRedPotionCount() < RedBuyTarget)
                 {
                     ClickCalibrated(positions[i].X, positions[i].Y, 150);
-                    HowManyPotionsToBuy(i);
+                    HowManyPotionsToBuy(RedBuyTarget - GetRedPotionCount());
                 }
                 // White Potions (Index 2)
-                else if (i == 2 && GetWhitePotionCount() < BotConstants.GameMagicValues.ItemCount1 + WhiteBuyTarget)
+                else if (i == 2 && GetWhitePotionCount() < WhiteBuyTarget)
                 {
                     ClickCalibrated(positions[i].X, positions[i].Y, 150);
-                    HowManyPotionsToBuy(i);
+                    HowManyPotionsToBuy(WhiteBuyTarget - GetWhitePotionCount());
                 }
                 // HP Potions (Index 3)
-                else if (i == 3 && GetHpPotionCount() < BotConstants.GameMagicValues.ItemCount1 + HpBuyTarget)
+                else if (i == 3 && GetHpPotionCount() < HpBuyTarget)
                 {
                     ClickCalibrated(positions[i].X, positions[i].Y, 150);
-                    HowManyPotionsToBuy(i);
+                    HowManyPotionsToBuy(HpBuyTarget - GetHpPotionCount());
                 }
             }
         }
 
-        private void HowManyPotionsToBuy(int potionIndex)
+        /// <summary>
+        /// Types the given amount of potions into the shop quantity field and confirms.
+        /// The amount is the difference between the profile target and the current
+        /// potion count, so the profile values are honored exactly (no more hardcoded
+        /// quantities or MAX buys).
+        /// </summary>
+        private void HowManyPotionsToBuy(int amountToBuy)
         {
-            // Logic from HowManyPotionsToBuyExp
+            if (amountToBuy <= 0) return;
+
+            _log($"Buying {amountToBuy} potions (profile target minus current count).");
+
             // Move to the quantity input field (calibrated absolute 1295,530 at
             // reference window 445,105), wait for the dialog, then click once.
             MoveCalibrated(1295, 530);
@@ -168,40 +177,13 @@ namespace DriverScanTester.Services
             MouseOperations.LeftClick(); // Down/Up with delay
             Thread.Sleep(500);
 
-            if (potionIndex == 0) // Mana
+            // Type the amount as digits (max 3 digits, same as the old bot).
+            int digits = Math.Min(amountToBuy, 999);
+            string amountStr = digits.ToString();
+            foreach (char c in amountStr)
             {
-                PressKey(0x31); // 1
-                PressKey(0x35); // 5
-                PressKey(0x35); // 5
-                Thread.Sleep(500);
-                ClickOkWhenBuying();
+                PressKey((byte)(0x30 + (c - '0'))); // VK_0..VK_9
             }
-            else if (potionIndex == 1) // Red
-            {
-                PressKey(0x35); // 5
-                Thread.Sleep(500);
-                ClickOkWhenBuying();
-            }
-            else if (potionIndex == 2) // White
-            {
-                PressKey(0x35); // 5
-                Thread.Sleep(500);
-                ClickOkWhenBuying();
-            }
-            else if (potionIndex == 3) // HP
-            {
-                BuyingHpPotionsMax();
-            }
-        }
-
-        private void BuyingHpPotionsMax()
-        {
-            MoveCalibrated(1300, 550);
-            MouseOperations.LeftClick();
-            Thread.Sleep(500);
-            MoveCalibrated(560, 520);
-            Thread.Sleep(500);
-            MouseOperations.LeftClick();
             Thread.Sleep(500);
             ClickOkWhenBuying();
         }

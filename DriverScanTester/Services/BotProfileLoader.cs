@@ -298,6 +298,27 @@ namespace DriverScanTester.Services
             else
             {
                 ValidatePathStep(errors, profile.ExpLoop, "Stage 3 — EXP Path");
+
+                // Guard: the EXP Path is the looping hunting route. Reusing one of the
+                // Go to EXP travel paths here makes the bot run the travel route forever
+                // instead of hunting the camp (e.g. looping the road to the wolves instead
+                // of the wolves camp itself).
+                if (!string.IsNullOrWhiteSpace(profile.ExpLoop.PathFile) &&
+                    profile.TravelToExpRoutes != null)
+                {
+                    string expLoopFile = NormalizePathFileName(profile.ExpLoop.PathFile);
+                    foreach (var route in profile.TravelToExpRoutes)
+                    {
+                        if (route != null &&
+                            !string.IsNullOrWhiteSpace(route.PathFile) &&
+                            string.Equals(expLoopFile, NormalizePathFileName(route.PathFile),
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            errors.Add($"Stage 3 — EXP Path: '{profile.ExpLoop.PathFile}' is also used as a Go to EXP travel path. The EXP Path must be the looping hunting path, not a travel route.");
+                            break;
+                        }
+                    }
+                }
             }
 
             // --- Repot thresholds / weight / retries ---
@@ -352,6 +373,19 @@ namespace DriverScanTester.Services
             if (!fileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
                 fileName += ".json";
             return File.Exists(Path.Combine(SAVE_DIR, fileName));
+        }
+
+        /// <summary>
+        /// Normalizes a saved-path reference to a comparable form (file name
+        /// without the .json extension) so two references can be compared even
+        /// when one was stored with the extension and the other without.
+        /// </summary>
+        private static string NormalizePathFileName(string pathFileName)
+        {
+            string name = pathFileName.Trim();
+            if (name.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                name = name.Substring(0, name.Length - ".json".Length);
+            return name;
         }
     }
 }

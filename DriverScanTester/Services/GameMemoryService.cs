@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Diagnostics;
+using System.Text;
 using DriverScanTester.Models;
 
 namespace DriverScanTester.Services
@@ -559,38 +560,45 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Calibrates <see cref="BotConstants.GameMagicValues.LootMouseOverValue"/> and
-        /// <see cref="DriverScanTester.Services.ItemSellerService.SellerPointedValue"/> by reading
-        /// the current NPC mouseover value at <c>[Ares.exe + 0x4704A8] + 0xC</c> and subtracting 256.
+        /// Captures the FULL mouseover value dump at <c>[Ares.exe + 0x4704A8] + 0xA..+0xF</c>
+        /// (bytes, shorts, ints) plus the NPC-highlight flag (<c>[Ares.exe + 0x471C84] + 0x7C</c>).
         ///
-        /// The relationship between NPC and item mouseover values is stable:
-        ///   Item_cl = NPC_cl - 256
-        /// because the byte at offset +0xD (db) is always exactly 1 less for item than for NPC.
-        ///
-        /// Call this method while the cursor is hovering over an NPC (not a loot item).
-        /// The computed item value will be used by <see cref="IsLootMouseOver"/> thereafter.
-        /// Returns the new LootMouseOverValue, or 0 if the pointer chain failed.
+        /// The cl int at +0xC is the hovered object's heap address/ID (48-bit pointer in
+        /// bytes +0xA..+0xF) — it changes every game launch and per object, so it cannot be
+        /// used as a flag. This dump exists so NPC vs item hovers can be compared across
+        /// sessions to decide whether detection can be automated structurally.
+        /// Returns a dump with <see cref="MouseOverDumpData.Success"/> = false when the
+        /// pointer chain fails (treat as "no hover").
         /// </summary>
-        public int CalibrateLootMouseOverValue()
+        public MouseOverDumpData ReadMouseOverDump()
         {
+            var dump = new MouseOverDumpData();
             ulong ptrAddr = _moduleBase + IsSellerPointedPtrOffset;
             ulong baseAddr = ReadPointer(ptrAddr);
-            if (baseAddr == 0) return 0;
-
-            int npcValue = ReadInt(baseAddr + IsSellerPointedOffset);
-            if (npcValue == 0)
+            if (baseAddr == 0)
             {
-                _log?.Invoke("[CalibrateLootMouseOverValue] No NPC hover detected (value=0). Hover over an NPC first.");
-                return 0;
+                dump.Success = false;
+                return dump;
             }
 
-            int itemValue = npcValue - 256;
-            BotConstants.GameMagicValues.LootMouseOverValue = itemValue;
-            DriverScanTester.Services.ItemSellerService.SellerPointedValue = npcValue;
-
-            _log?.Invoke($"[CalibrateLootMouseOverValue] NPC cl={npcValue} (0x{(uint)npcValue:X8}), Item cl={itemValue} (0x{(uint)itemValue:X8}) [Item = NPC - 256]");
-            _log?.Invoke($"[CalibrateLootMouseOverValue] SellerPointedValue={npcValue}, LootMouseOverValue={itemValue}");
-            return itemValue;
+            dump.Success = true;
+            dump.BufferAddress = baseAddr;
+            dump.A = ReadByte(baseAddr + 0xA);
+            dump.B = ReadByte(baseAddr + 0xB);
+            dump.C = ReadByte(baseAddr + 0xC);
+            dump.D = ReadByte(baseAddr + 0xD);
+            dump.E = ReadByte(baseAddr + 0xE);
+            dump.F = ReadByte(baseAddr + 0xF);
+            dump.As = ReadShort(baseAddr + 0xA);
+            dump.Bs = ReadShort(baseAddr + 0xB);
+            dump.Cs = ReadShort(baseAddr + 0xC);
+            dump.Ds = ReadShort(baseAddr + 0xD);
+            dump.Al = ReadInt(baseAddr + 0xA);
+            dump.Bl = ReadInt(baseAddr + 0xB);
+            dump.Cl = ReadInt(baseAddr + 0xC);
+            dump.Dl = ReadInt(baseAddr + 0xD);
+            dump.NpcFlag = IsNpcMousePointed();
+            return dump;
         }
 
         public short GetAttackSpeed()
@@ -1052,5 +1060,104 @@ namespace DriverScanTester.Services
         }
 
         #endregion
+    }
+
+    /// <summary>
+    /// Full mouseover value dump captured at <c>[Ares.exe + 0x4704A8] + 0xA..+0xF</c>
+    /// plus the NPC-highlight flag (<c>[Ares.exe + 0x471C84] + 0x7C</c>).
+    /// Read via <see cref="GameMemoryService.ReadMouseOverDump"/>. Used to compare
+    /// NPC vs item hovers across sessions (see MouseOverValues_Log.txt) so detection
+    /// can be automated structurally.
+    /// </summary>
+    public sealed class MouseOverDumpData
+    {
+        /// <summary>False when the pointer chain [Ares.exe + 0x4704A8] failed (no buffer).</summary>
+        public bool Success;
+
+        /// <summary>Address of the buffer ([Ares.exe + 0x4704A8] value).</summary>
+        public ulong BufferAddress;
+
+        /// <summary>Byte at +0xA.</summary>
+        public byte A;
+
+        /// <summary>Byte at +0xB (observed 0x00 consistently).</summary>
+        public byte B;
+
+        /// <summary>Byte at +0xC (cb).</summary>
+        public byte C;
+
+        /// <summary>Byte at +0xD (db).</summary>
+        public byte D;
+
+        /// <summary>Byte at +0xE (5th byte of the 48-bit pointer at +0xA..+0xF).</summary>
+        public byte E;
+
+        /// <summary>Byte at +0xF (6th byte of the 48-bit pointer at +0xA..+0xF).</summary>
+        public byte F;
+
+        /// <summary>Short at +0xA (as).</summary>
+        public short As;
+
+        /// <summary>Short at +0xB (bs).</summary>
+        public short Bs;
+
+        /// <summary>Short at +0xC (cs).</summary>
+        public short Cs;
+
+        /// <summary>Short at +0xD (ds).</summary>
+        public short Ds;
+
+        /// <summary>Int at +0xA (al).</summary>
+        public int Al;
+
+        /// <summary>Int at +0xB (bl).</summary>
+        public int Bl;
+
+        /// <summary>Int at +0xC (cl) — low 32 bits of the hovered object's address/ID (48-bit pointer in bytes +0xA..+0xF).</summary>
+        public int Cl;
+
+        /// <summary>Int at +0xD (dl).</summary>
+        public int Dl;
+
+        /// <summary>NPC-highlight flag ([Ares.exe + 0x471C84] + 0x7C == 1).</summary>
+        public bool NpcFlag;
+
+        /// <summary>
+        /// The 48-bit pointer stored at +0xA..+0xF (hovered object address/ID).
+        /// Little-endian: byte +0xA is the least significant byte, +0xF the most significant.
+        /// </summary>
+        public ulong Pointer48 => A | ((ulong)B << 8) | ((ulong)C << 16) | ((ulong)D << 24) | ((ulong)E << 32) | ((ulong)F << 40);
+
+        /// <summary>
+        /// Formats the dump as multi-line report (dec + hex), same layout as the manual
+        /// Cheat-Engine dumps in MouseOverValues_Log.txt.
+        /// </summary>
+        public string FormatDump(string hoverType)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"--- Mouseover dump ({hoverType}) ---");
+            sb.AppendLine($"  buffer  [Ares.exe + 0x4704A8] = 0x{BufferAddress:X8}    IsNpcMousePointed = {NpcFlag}");
+            sb.AppendLine($"  cb      [Ares.exe + 0x4704A8] + 0xC  0x{BufferAddress + 0xC:X8}  {C} (0x{C:X2})");
+            sb.AppendLine($"  db      [Ares.exe + 0x4704A8] + 0xD  0x{BufferAddress + 0xD:X8}  {D} (0x{D:X2})");
+            sb.AppendLine($"  eb      [Ares.exe + 0x4704A8] + 0xE  0x{BufferAddress + 0xE:X8}  {E} (0x{E:X2})");
+            sb.AppendLine($"  fb      [Ares.exe + 0x4704A8] + 0xF  0x{BufferAddress + 0xF:X8}  {F} (0x{F:X2})");
+            sb.AppendLine($"  bs      [Ares.exe + 0x4704A8] + 0xB  0x{BufferAddress + 0xB:X8}  {Bs} (0x{(ushort)Bs:X4})");
+            sb.AppendLine($"  cs      [Ares.exe + 0x4704A8] + 0xC  0x{BufferAddress + 0xC:X8}  {Cs} (0x{(ushort)Cs:X4})");
+            sb.AppendLine($"  ds      [Ares.exe + 0x4704A8] + 0xD  0x{BufferAddress + 0xD:X8}  {Ds} (0x{(ushort)Ds:X4})");
+            sb.AppendLine($"  al      [Ares.exe + 0x4704A8] + 0xA  0x{BufferAddress + 0xA:X8}  {Al} (0x{(uint)Al:X8})");
+            sb.AppendLine($"  bl      [Ares.exe + 0x4704A8] + 0xB  0x{BufferAddress + 0xB:X8}  {Bl} (0x{(uint)Bl:X8})");
+            sb.AppendLine($"  cl      [Ares.exe + 0x4704A8] + 0xC  0x{BufferAddress + 0xC:X8}  {Cl} (0x{(uint)Cl:X8})");
+            sb.AppendLine($"  dl      [Ares.exe + 0x4704A8] + 0xD  0x{BufferAddress + 0xD:X8}  {Dl} (0x{(uint)Dl:X8})");
+            sb.AppendLine($"  ptr48   bytes +0xA..+0xF = 0x{Pointer48:X12} (hovered object address/ID)");
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Single-line summary for easy per-session diffing (pipe-separated).
+        /// </summary>
+        public string FormatSummary(string hoverType, string timestamp)
+        {
+            return $"SUMMARY|{hoverType}|{timestamp}|cb={C}|db={D}|eb={E}|fb={F}|bs={Bs}|cs={Cs}|ds={Ds}|al={Al}|bl={Bl}|cl={Cl}|dl={Dl}|npcFlag={NpcFlag}|ptr48=0x{Pointer48:X12}";
+        }
     }
 }
