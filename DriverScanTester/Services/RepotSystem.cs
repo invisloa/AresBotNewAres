@@ -75,6 +75,9 @@ namespace DriverScanTester.Services
         // With window at (541,91), shop click should be at (685,550).
         // Relative to window: (685-541, 550-91) = (144, 459).
         // Calibrated to give screen (590,565) at window (445,105).
+        // NOTE: kept as a fallback only — the primary open path is the
+        // seller mouseover scan (see OpenShop), which locates the NPC by
+        // sweeping the view until the mouse points at it.
         private const int ShopRelX = 145;
         private const int ShopRelY = 460;
 
@@ -89,7 +92,17 @@ namespace DriverScanTester.Services
             _log("Opening Shop Window...");
             Thread.Sleep(BotConstants.Delays.OpenShopInitialMs);
 
-            // Calculate shop click position using actual window position (absolute screen coords)
+            // Primary path: zoom the camera to the known sell view, then scan the
+            // game window from the center outward until the mouse hovers the seller
+            // NPC (S_IsSellerPointed), right-click it, click the Shop option and
+            // verify the shop window actually opened.
+            if (_itemSeller.OpenSellerDialog())
+            {
+                _log("Shop Window Opened.");
+                return;
+            }
+
+            // Fallback: single fixed-position click (window-relative calibration).
             (int clickX, int clickY) = GetShopClickPosition();
             _log($"Shop click absolute: ({clickX}, {clickY})");
             MouseOperations.MoveAndLeftClickAbsolute(clickX, clickY, 200);
@@ -108,9 +121,11 @@ namespace DriverScanTester.Services
         public void BuyPotions()
         {
             _log("Buying Potions...");
-            // Logic from BuyPotionsFromShopNormalEXP/BuyPotionsFromShopSell
-            // Assuming we use Hershal positions as default or pass them
-            var positions = RepotMousePositions.mousePositionsForHershalBuying; // Defaulting to Hershal
+            // City-specific buy positions: Kharon has its own shop layout; everything
+            // else falls back to the Hershal positions.
+            var positions = _memoryService.GetCurrentMap() == ItemSellerService.MapKharon
+                ? RepotMousePositions.mousePositionsForKharonBuying
+                : RepotMousePositions.mousePositionsForHershalBuying;
 
             for (int i = 0; i < positions.Length; i++)
             {
@@ -119,25 +134,25 @@ namespace DriverScanTester.Services
                 // Mana Potions (Index 0)
                 if (i == 0 && GetManaPotionCount() < BotConstants.GameMagicValues.ItemCount1 + ManaBuyTarget)
                 {
-                    MouseOperations.MoveAndLeftClick(positions[i].X, positions[i].Y, 150);
+                    ClickCalibrated(positions[i].X, positions[i].Y, 150);
                     HowManyPotionsToBuy(i);
                 }
                 // Red Potions (Index 1)
                 else if (i == 1 && GetRedPotionCount() < BotConstants.GameMagicValues.ItemCount1 + RedBuyTarget)
                 {
-                    MouseOperations.MoveAndLeftClick(positions[i].X, positions[i].Y, 150);
+                    ClickCalibrated(positions[i].X, positions[i].Y, 150);
                     HowManyPotionsToBuy(i);
                 }
                 // White Potions (Index 2)
                 else if (i == 2 && GetWhitePotionCount() < BotConstants.GameMagicValues.ItemCount1 + WhiteBuyTarget)
                 {
-                    MouseOperations.MoveAndLeftClick(positions[i].X, positions[i].Y, 150);
+                    ClickCalibrated(positions[i].X, positions[i].Y, 150);
                     HowManyPotionsToBuy(i);
                 }
                 // HP Potions (Index 3)
                 else if (i == 3 && GetHpPotionCount() < BotConstants.GameMagicValues.ItemCount1 + HpBuyTarget)
                 {
-                    MouseOperations.MoveAndLeftClick(positions[i].X, positions[i].Y, 150);
+                    ClickCalibrated(positions[i].X, positions[i].Y, 150);
                     HowManyPotionsToBuy(i);
                 }
             }
@@ -146,7 +161,9 @@ namespace DriverScanTester.Services
         private void HowManyPotionsToBuy(int potionIndex)
         {
             // Logic from HowManyPotionsToBuyExp
-            MouseOperations.SetCursorPosition(1295, 530);  // Position for second slot item
+            // Move to the quantity input field (calibrated absolute 1295,530 at
+            // reference window 445,105), wait for the dialog, then click once.
+            MoveCalibrated(1295, 530);
             Thread.Sleep(1000);
             MouseOperations.LeftClick(); // Down/Up with delay
             Thread.Sleep(500);
@@ -179,10 +196,10 @@ namespace DriverScanTester.Services
 
         private void BuyingHpPotionsMax()
         {
-            MouseOperations.SetCursorPosition(1300, 550);
+            MoveCalibrated(1300, 550);
             MouseOperations.LeftClick();
             Thread.Sleep(500);
-            MouseOperations.SetCursorPosition(560, 520);
+            MoveCalibrated(560, 520);
             Thread.Sleep(500);
             MouseOperations.LeftClick();
             Thread.Sleep(500);
@@ -192,9 +209,59 @@ namespace DriverScanTester.Services
         private void ClickOkWhenBuying()
         {
             Thread.Sleep(300);
-            MouseOperations.SetCursorPosition(560, 570);
+            MoveCalibrated(560, 570);
             MouseOperations.LeftClick();
             Thread.Sleep(500);
+        }
+
+        /// <summary>
+        /// Reference window origin at which the shop coordinates were calibrated.
+        /// All calibrated shop positions are ABSOLUTE screen coords measured with the
+        /// game window at (445,105) — same convention as Test Sell All.
+        /// </summary>
+        private const int RefWindowX = 445;
+        private const int RefWindowY = 105;
+
+        /// <summary>
+        /// Converts a calibrated absolute screen position (measured at reference window
+        /// 445,105) to the current game-window position and moves the cursor there
+        /// WITHOUT clicking (no window offset applied — same as the working Test Sell All flow).
+        /// </summary>
+        private void MoveCalibrated(int calibratedX, int calibratedY)
+        {
+            var (screenX, screenY) = CalibratedToScreen(calibratedX, calibratedY);
+            MouseOperations.SetCursorPositionAbsolute(screenX, screenY);
+        }
+
+        /// <summary>
+        /// Converts a calibrated absolute screen position (measured at reference window
+        /// 445,105) to the current game-window position and left-clicks it absolutely
+        /// (no window offset applied — same as the working Test Sell All flow).
+        /// </summary>
+        private void ClickCalibrated(int calibratedX, int calibratedY, int delay = 200)
+        {
+            var (screenX, screenY) = CalibratedToScreen(calibratedX, calibratedY);
+            MouseOperations.MoveAndLeftClickAbsolute(screenX, screenY, delay);
+        }
+
+        /// <summary>
+        /// Converts a calibrated absolute screen position (measured at reference window
+        /// 445,105) into current screen coordinates using the live game-window rect.
+        /// Falls back to the calibrated position when the window cannot be found.
+        /// </summary>
+        private (int X, int Y) CalibratedToScreen(int calibratedX, int calibratedY)
+        {
+            nint hwnd = FindWindowByProcess();
+            if (hwnd != nint.Zero && GetWindowRect(hwnd, out RECT rect))
+            {
+                int screenX = rect.Left + (calibratedX - RefWindowX);
+                int screenY = rect.Top + (calibratedY - RefWindowY);
+                _log($"[ShopPos] Calibrated ({calibratedX},{calibratedY}) → screen ({screenX},{screenY}) [window ({rect.Left},{rect.Top})]");
+                return (screenX, screenY);
+            }
+
+            _log("[ShopPos] Could not get window rect — using calibrated position as-is.");
+            return (calibratedX, calibratedY);
         }
 
         /// <summary>
@@ -262,23 +329,31 @@ namespace DriverScanTester.Services
         {
             _log("Starting Repot Sequence...");
 
-            // 1. Move to shop (Optional / Placeholder)
-            // MoveToRepot(RepotMousePositions.HershalRepotMovePositions); // If needed
+            // Give the character a moment to settle at the repot waypoint before
+            // any mouse input (2s per user requirement).
+            Thread.Sleep(BotConstants.Delays.RepotArrivalWaitMs);
 
-            // 2. Open Shop
+            // 1. Open Shop: zoom the camera to the known sell view, then scan the
+            //    view until the mouse points at the seller NPC (S_IsSellerPointed),
+            //    right-click it and click the Shop option.
             OpenShop();
 
-            if (IsShopOpen())
+            if (!IsShopOpen())
             {
-                // 3. Sell Items (using new ItemSellerService)
-                SellItems();
-
-                // 4. Buy Potions
-                BuyPotions();
-
-                // Close Shop (Escape key)
-                GameInput.PressKey(GameInput.VK_ESCAPE, GameInput.SCAN_ESCAPE);
+                // Fail loudly instead of silently continuing to the next path —
+                // a failed repot must not look like a successful one.
+                throw new InvalidOperationException(
+                    "Shop window did not open at the repot point (seller NPC not found or click missed).");
             }
+
+            // 2. Sell Items (using new ItemSellerService)
+            SellItems();
+
+            // 3. Buy Potions
+            BuyPotions();
+
+            // Close Shop (Escape key)
+            GameInput.PressKey(GameInput.VK_ESCAPE, GameInput.SCAN_ESCAPE);
         }
 
         #endregion

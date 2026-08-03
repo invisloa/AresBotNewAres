@@ -1,0 +1,40 @@
+{
+  "Name": "Kharon LOOT",
+  "CityToRepot": {
+    "PathFile": "Kharon Repot.json",
+    "StartDelayMs": 3333
+  },
+  "TravelToExpRoutes": [
+    {
+      "PathFile": "Kharon Go Out.json",
+      "StartDelayMs": 5555,
+      "CompletionMode": 1,
+      "ExpectedDestinationMapNumber": 45
+    },
+    {
+      "PathFile": "Kharon Go Wolves.json",
+      "StartDelayMs": 15000,
+      "CompletionMode": 0,
+      "ExpectedDestinationMapNumber": 0
+    }
+  ],
+  "ExpLoop": {
+    "PathFile": "Kharon Go Wolves.json",
+    "StartDelayMs": 444
+  },
+  "MinHpPotions": 5,
+  "MinManaPotions": 3,
+  "MaxWeightRatio": 0.9,
+  "MinHp": 1444,
+  "MinMana": 100,
+  "HpBuyTarget": 25,
+  "ManaBuyTarget": 15,
+  "RedBuyTarget": 4,
+  "WhiteBuyTarget": 4,
+  "DryRunRepot": false,
+  "TeleportKey": 54,
+  "TeleportScanCode": 7,
+  "MaxTeleportRetries": 3,
+  "WindowOffsetX": 0,
+  "WindowOffsetY": 0
+}

@@ -371,8 +371,17 @@ namespace DriverScanTester
             /// object's address/ID, not an item-vs-NPC flag. Calibrate by hovering the ITEM
             /// directly; GameMemoryService.CalibrateLootMouseOverValue (NPC-256 based) is
             /// now unreliable.
+            ///
+            /// Sesja 4 (2026-08-03): Item=302348960 (0x12057AA0), NPC=138599240 (0x0842DB48).
+            ///
+            /// KEPT FOR REFERENCE ONLY — since Sesja 4 the loot detection in
+            /// <c>GameMemoryService.IsLootMouseOver()</c> is STRUCTURAL
+            /// (value != 0 && !IsNpcMousePointed()) and no longer compares against
+            /// this constant. Item addresses differ per session; the NPC seller value
+            /// (138599240) is stable across sessions and lives in
+            /// <see cref="DriverScanTester.Services.ItemSellerService.SellerPointedValue"/>.
             /// </summary>
-            public static int LootMouseOverValue = 371473144;
+            public static int LootMouseOverValue = 302348960;
 
             /// <summary>Item type identifier for SOD items (no longer readable — kept for reference).</summary>
             public const int Sod = -13799;
@@ -394,6 +403,49 @@ namespace DriverScanTester
 
             /// <summary>Total storage slots.</summary>
             public const int TotalStorageSlots = 98;
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  NPC MOUSEOVER VALUES — current per-session values read while the
+        //  mouse cursor hovers the NPC (seller).
+        //  Pointer chain: [Ares.exe + 0x4704A8] + 0xA..0xD
+        //  WARNING: these values change every game launch (per-session seed)
+        //  and are likely the hovered object's address/ID (heap), so they may
+        //  only match ONE specific NPC. Re-read the dump when detection fails.
+        //  Source: Sesja 4 (2026-08-03) — NPC column of the mouseover dump.
+        // ════════════════════════════════════════════════════════════════
+        public static class NpcMouseOverValues
+        {
+            /// <summary>Byte at +0xC (cb) — same offset as SellerPointedValue/cl.</summary>
+            public const byte Cb = 72;            // 0x48
+
+            /// <summary>Byte at +0xD (db).</summary>
+            public const byte Db = 219;           // 0xDB
+
+            /// <summary>Short at +0xB (bs).</summary>
+            public const short Bs = 18432;        // 0x4800
+
+            /// <summary>Short at +0xC (cs).</summary>
+            public const short Cs = -9400;        // 0xDB48
+
+            /// <summary>Short at +0xD (ds).</summary>
+            public const short Ds = 17115;        // 0x42DB
+
+            /// <summary>Int at +0xA (al).</summary>
+            public const int Al = -616038397;     // 0xDB480003
+
+            /// <summary>Int at +0xB (bl).</summary>
+            public const int Bl = 1121667072;     // 0x42DB4800
+
+            /// <summary>Int at +0xC (cl) — equals ItemSellerService.SellerPointedValue.</summary>
+            public const int Cl = 138599240;      // 0x0842DB48
+
+            /// <summary>Int at +0xD (dl).</summary>
+            public const int Dl = 541403;         // 0x000842DB
+
+            /// <summary>Camera vertical angle (short at [Ares.exe + 0x4704B0] + 0x1BE)
+            /// observed while hovering the NPC.</summary>
+            public const short CameraVerticalAngle = 16320; // 0x3FB6
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -516,6 +568,9 @@ namespace DriverScanTester
             public const int DefaultPhaseMs = 100;
 
             // ── Repot delays ──
+            /// <summary>Wait after reaching the repot waypoint before starting the repot sequence.</summary>
+            public const int RepotArrivalWaitMs = 2000;
+
             /// <summary>Initial delay before opening shop.</summary>
             public const int OpenShopInitialMs = 1000;
 

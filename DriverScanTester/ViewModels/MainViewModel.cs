@@ -3045,6 +3045,8 @@ namespace DriverScanTester.ViewModels
                     public PotionType PotionType { get; init; }
                     public int RelativeX { get; init; }
                     public int RelativeY { get; init; }
+                    /// <summary>Scroll of Return entry: no potion-count check, always buys 5.</summary>
+                    public bool IsSor { get; init; }
                 }
 
                 [DllImport("user32.dll", SetLastError = true)]
@@ -3105,19 +3107,20 @@ namespace DriverScanTester.ViewModels
                     }
 
                     // Potion shop click points — offsets relative to the game window.
-                    // Etan absolute screen coordinates → relative (absolute - window 445,105):
-                    //   HP:    (995, 260) → relative (550, 155)
-                    //   Mana:  (995, 570) → relative (550, 465)
-                    //   Red:   (995, 410) → relative (550, 305)
-                    //   White: (995, 370) → relative (550, 265)
-                    //   SOR:   (995, 330) → relative (550, 225)
+                    // Kharon absolute screen coordinates → relative (absolute - window 445,105),
+                    // user-calibrated (2026-08-03):
+                    //   HP:    (990, 185) → relative (545, 80)
+                    //   Mana:  (990, 300) → relative (545, 195)
+                    //   White: (990, 375) → relative (545, 270)
+                    //   Red:   (990, 415) → relative (545, 310)
+                    //   SOR:   (990, 490) → relative (545, 385)
                     var potionPoints = new PotionShopClickPoint[]
                     {
-                        new() { PotionType = PotionType.Mana,  RelativeX = 550, RelativeY = 465 },
-                        new() { PotionType = PotionType.Red,   RelativeX = 550, RelativeY = 305 },
-                        new() { PotionType = PotionType.White, RelativeX = 550, RelativeY = 265 },
-                        new() { PotionType = PotionType.Hp,    RelativeX = 550, RelativeY = 155 },
-                        new() { PotionType = PotionType.Mana,  RelativeX = 550, RelativeY = 225 }, // SOR (Scroll of Return)
+                        new() { PotionType = PotionType.Mana,  RelativeX = 545, RelativeY = 195 },
+                        new() { PotionType = PotionType.Red,   RelativeX = 545, RelativeY = 310 },
+                        new() { PotionType = PotionType.White, RelativeX = 545, RelativeY = 270 },
+                        new() { PotionType = PotionType.Hp,    RelativeX = 545, RelativeY = 80 },
+                        new() { PotionType = PotionType.Mana,  RelativeX = 545, RelativeY = 385, IsSor = true }, // SOR (Scroll of Return)
                     };
 
                     // Quantity input click position (old absolute 1295,530 → relative to window (445,105): 850,425)
@@ -3135,8 +3138,11 @@ namespace DriverScanTester.ViewModels
                             break;
                         }
 
-                        // SOR entry (RelativeY=253) has no potion count check — always buy 5 scrolls
-                        bool isSor = point.RelativeY == 253;
+                        // SOR entry has no potion count check — always buy 5 scrolls.
+                        // (Flagged explicitly instead of the old broken RelativeY==253 check,
+                        // which never matched the actual SOR point and would have treated it
+                        // as a Mana purchase.)
+                        bool isSor = point.IsSor;
                         int currentCount = isSor ? 0 : point.PotionType switch
                         {
                             PotionType.Hp => memory.GetHpPotionCount(),

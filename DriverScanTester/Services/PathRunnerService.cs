@@ -75,6 +75,16 @@ namespace DriverScanTester.Services
                         return true;
                     }
 
+                    // Non-loop routes in workflow mode never set the internal goal flag
+                    // (InternalRepotEnabled=false); entering final-waypoint standby IS the
+                    // completion signal for them. Loop paths never keep standby active
+                    // (they re-enqueue), so this only fires for non-loop routes.
+                    if (!loop && _movementSystem.IsFinalStandbyActive)
+                    {
+                        _log("[PathRunner] Path completed (final waypoint standby).");
+                        return true;
+                    }
+
                     await Task.Delay(BotConstants.Delays.PathRunnerTickMs, token);
                 }
                 _log("[PathRunner] Loop exited due to cancellation request.");

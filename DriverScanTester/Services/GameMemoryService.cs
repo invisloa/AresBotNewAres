@@ -518,7 +518,9 @@ namespace DriverScanTester.Services
         /// <summary>
         /// Reads the seller mouseover int (clong / 32-bit) from <c>[Ares.exe + 0x4704A8] + 0xC</c>.
         /// Returns 0 when the pointer chain fails (treat 0 as "not pointed").
-        /// The expected value while the mouse is pointing at the seller/NPC is 149110376.
+        /// The expected value while the mouse is pointing at the seller/NPC is 138599240
+        /// (0x0842DB48) — stable across sessions (Sesja 2-4, see MouseOverValues_Log.txt),
+        /// because the game allocates the same NPC at the same address every launch.
         /// </summary>
         public int ReadIsSellerPointed()
         {
@@ -532,8 +534,20 @@ namespace DriverScanTester.Services
         /// Checks whether a loot item is currently under the mouse cursor by reading
         /// L_LootSelectedItem1 at <c>[Ares.exe + 0x4704A8] + 0xC</c> (same pointer as
         /// seller mouseover but interpreted as a 32-bit clong value).
-        /// Returns true when the value equals <see cref="BotConstants.GameMagicValues.LootMouseOverValue"/>.
-        /// WARNING: This value changes every game launch (per-session seed).
+        ///
+        /// STRUCTURAL check — no per-session hardcoding needed:
+        /// The value is the hovered entity's object address/ID (48-bit pointer in
+        /// bytes +0xA..+0xF). 0 means nothing hovered; any non-zero value while the
+        /// NPC-pointer flag is NOT set means a ground item (loot) is under the cursor.
+        ///
+        /// Session analysis (Sesja 1-4, see MouseOverValues_Log.txt) proved that
+        /// item values change every game launch (different object instance each
+        /// time), so exact matching against
+        /// <see cref="BotConstants.GameMagicValues.LootMouseOverValue"/> is unreliable.
+        /// The NPC seller value (0x0842DB48 = 138599240) IS stable across sessions,
+        /// which is why <see cref="DriverScanTester.Services.ItemSellerService.SellerPointedValue"/>
+        /// still works as a constant — and why the NPC flag here correctly filters
+        /// NPCs/mobs out of loot detection.
         /// </summary>
         public bool IsLootMouseOver()
         {
@@ -541,7 +555,7 @@ namespace DriverScanTester.Services
             ulong baseAddr = ReadPointer(ptrAddr);
             if (baseAddr == 0) return false;
             int value = ReadInt(baseAddr + IsSellerPointedOffset);
-            return value == BotConstants.GameMagicValues.LootMouseOverValue;
+            return value != 0 && !IsNpcMousePointed();
         }
 
         /// <summary>
@@ -619,7 +633,13 @@ namespace DriverScanTester.Services
         {
             ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
             if (playerBase == 0) return 0;
-            return ReadShort(playerBase + MapNumberOffset);
+
+            // NOTE: the original MapNumber read (short at 0x5F0) always returned 0 in
+            // this game build, which broke every map-transition route (WaitForValidMapAsync
+            // never saw a nonzero map). The working map value is the int at CurrentMap
+            // (0x5F8) — same numbering as the old bot's int read (Kharon=44, Plateau=45),
+            // and it matches the profile's ExpectedDestinationMapNumber. Read that instead.
+            return ReadInt(playerBase + CurrentMapOffset);
         }
 
         public int GetCurrentMap()

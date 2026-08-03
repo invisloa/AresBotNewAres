@@ -36,12 +36,19 @@ namespace DriverScanTester.Models
             (995, 185),  //hp pot Sage
         };
 
+        /// <summary>
+        /// Kharon shop potion positions. ABSOLUTE screen coordinates calibrated with the
+        /// game window at reference origin (445,105) — same values as the Test Sell All
+        /// calibration (user-calibrated 2026-08-03). RepotSystem converts them to the
+        /// current window rect at runtime.
+        /// Index order: 0=mana, 1=red, 2=white, 3=hp.
+        /// </summary>
         public static (int X, int Y)[] mousePositionsForKharonBuying =
         {
-            (995, 305),  //mana pot
-            (995, 420),  //red pot
-            (995, 380),  //white pot
-            (995, 185)   //hp yarrow pot
+            (990, 300),  //mana pot
+            (990, 415),  //red pot
+            (990, 375),  //white pot
+            (990, 185)   //hp yarrow pot
         };
 
         public static (int X, int Y)[] mousePositionsForEtanBuying =

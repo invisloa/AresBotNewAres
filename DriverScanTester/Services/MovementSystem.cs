@@ -84,6 +84,14 @@ namespace DriverScanTester.Services
         /// <summary>Returns true when the final goal waypoint has been reached (non-loop path).</summary>
         public bool IsGoalReached => _goalReached;
 
+        /// <summary>
+        /// Returns true when a non-loop path has consumed all waypoints and entered
+        /// final-waypoint standby. In workflow mode (InternalRepotEnabled=false) the
+        /// goal flag is never set by the internal repot helper, so standby is the
+        /// completion signal for non-loop routes.
+        /// </summary>
+        public bool IsFinalStandbyActive => _finalStandbyActive;
+
         // Obstacle
         private (float X, float Y) Waypoint2;
 

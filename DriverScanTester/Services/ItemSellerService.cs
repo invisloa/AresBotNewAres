@@ -85,6 +85,37 @@ namespace DriverScanTester.Services
         //  PUBLIC ENTRY POINT
         // ════════════════════════════════════════════════════════════════
 
+        /// <summary>
+        /// Opens the seller/shop dialog the same way the old bot did:
+        /// 1. Zoom the camera to the known sell view (distance 16720, vertical 16310)
+        ///    so the shop NPC is in its expected on-screen position.
+        /// 2. Scan the game window from the center outward, moving the mouse until
+        ///    S_IsSellerPointed == SellerPointedValue (the mouse is over the NPC),
+        ///    then right-click the NPC, click the "Shop" option and verify the shop
+        ///    window actually opened.
+        /// Returns true when the shop window is open.
+        /// </summary>
+        public bool OpenSellerDialog()
+        {
+            SetSellCameraView();
+
+            if (_memory.IsShopOpen())
+            {
+                _log("ItemSeller: Seller dialog already open.");
+                return true;
+            }
+
+            if (TryOpenSellerDialogByScanning())
+            {
+                _log("ItemSeller: Seller dialog opened via mouseover scan.");
+                return true;
+            }
+
+            CaptureSellFailureScreenshot();
+            _log("ItemSeller: Seller mouseover (S_IsSellerPointed == 143850200) not found after scanning. Seller dialog NOT opened.");
+            return false;
+        }
+
         public void SellItemsByMouseMove()
         {
             AssignWeight();
@@ -1049,7 +1080,7 @@ namespace DriverScanTester.Services
         private const int SellerScanStepPx = 40;
 
         /// <summary>Number of full game-window scans attempted before giving up.</summary>
-        private const int SellerMaxFullScans = 1;
+        private const int SellerMaxFullScans = 5;
 
         /// <summary>Per-point wait after moving the mouse (ms).</summary>
         private const int SellerScanPointDelayMs = 100;

@@ -44,32 +44,39 @@ a nastepnie odjac 256 aby otrzymac wartosc dla itemu.
     lezaly obok siebie w pamieci (sasiednie sloty). Kalibracja "NPC - 256"
     jest NIEZAWDODNA. Kalibruj naprowadzajac kursor BEZPOSREDNIO na item.
 
-AKTUALNE WARTOSCI:
+AKTUALNE WARTOSCI (SESJA 4, 2026-08-03):
 ================================================================================
 
   Name | Address                       | Typ     | Item (decimal)   | Item (hex)     | NPC (decimal)    | NPC (hex)
   -----+-------------------------------+---------+------------------+----------------+------------------+---------------
-  cb   | [Ares.exe + 0x4704A8] + 0xC  | byte    | 248              | 0xF8           | 72               | 0x48
-  db   | [Ares.exe + 0x4704A8] + 0xD  | byte    | 58               | 0x3A           | 219              | 0xDB
-  bs   | [Ares.exe + 0x4704A8] + 0xB  | short   | -2048            | 0xF800         | 18432            | 0x4800
-  cs   | [Ares.exe + 0x4704A8] + 0xC  | short   | 15096            | 0x3AF8         | -9400            | 0xDB48
-  ds   | [Ares.exe + 0x4704A8] + 0xD  | short   | 9274             | 0x243A         | 17115            | 0x42DB
-  al   | [Ares.exe + 0x4704A8] + 0xA  | int     | 989331552        | 0x3AF80060     | -616038397       | 0xDB480003
-  bl   | [Ares.exe + 0x4704A8] + 0xB  | int     | 607844352        | 0x243AF800     | 1121667072       | 0x42DB4800
-  cl   | [Ares.exe + 0x4704A8] + 0xC  | int     | 371473144        | 0x16243AF8     | 138599240        | 0x0842DB48
-  dl   | [Ares.exe + 0x4704A8] + 0xD  | int     | 1451066          | 0x0016243A     | 541403           | 0x000842DB
+  cb   | [Ares.exe + 0x4704A8] + 0xC  | byte    | 160              | 0xA0           | 72               | 0x48
+  db   | [Ares.exe + 0x4704A8] + 0xD  | byte    | 122              | 0x7A           | 219              | 0xDB
+  bs   | [Ares.exe + 0x4704A8] + 0xB  | short   | -24576           | 0xA000         | 18432            | 0x4800
+  cs   | [Ares.exe + 0x4704A8] + 0xC  | short   | 31392            | 0x7AA0         | -9400            | 0xDB48
+  ds   | [Ares.exe + 0x4704A8] + 0xD  | short   | 1402             | 0x057A         | 17115            | 0x42DB
+  al   | [Ares.exe + 0x4704A8] + 0xA  | int     | 2057306356       | 0x7AA000F4     | -616038397       | 0xDB480003
+  bl   | [Ares.exe + 0x4704A8] + 0xB  | int     | 91922432         | 0x057AA000     | 1121667072       | 0x42DB4800
+  cl   | [Ares.exe + 0x4704A8] + 0xC  | int     | 302348960        | 0x12057AA0     | 138599240        | 0x0842DB48
+  dl   | [Ares.exe + 0x4704A8] + 0xD  | int     | 1181050          | 0x0012057A     | 541403           | 0x000842DB
 
-Surowe bajty w okolicy (+0xA do +0xF) — SESJA 3 (2026-08-03):
+  Camera Vertical Angle [Ares.exe + 0x4704B0] + 0x1BE: 16310 (0x3FB6) przed
+  naprowadzeniem na NPC / 16320 podczas naprowadzenia na NPC.
+  (Zakodowane: BotConstants.NpcMouseOverValues.CameraVerticalAngle = 16320,
+  BotConstants.Camera.DefaultVerticalLock = 16310.)
+
+Surowe bajty w okolicy (+0xA do +0xF) — SESJA 4 (2026-08-03):
   Offs  | Item     | NPC
   ------+----------+----------
-  +0xA  | 0x60     | 0x03
+  +0xA  | 0xF4     | 0x03
   +0xB  | 0x00     | 0x00
-  +0xC  | 0xF8     | 0x48
-  +0xD  | 0x3A     | 0xDB
-  +0xE  | 0x24     | 0x42
-  +0xF  | 0x16     | 0x08
-  UWAGA: w sesji 3 roznia sie WSZYSTKIE bajty (poza +0xB), wiec regula
-  "jedyna roznica to +0xD" z sesji 2 NIE jest uniwersalna.
+  +0xC  | 0xA0     | 0x48
+  +0xD  | 0x7A     | 0xDB
+  +0xE  | 0x05     | 0x42
+  +0xF  | 0x12     | 0x08
+  UWAGA: bajt +0xD (db) NPC = 0xDB tak samo jak w sesji 3 — NPC cl
+  (0x0842DB48 = 138599240) jest identyczny jak w sesji 3 (ten sam slot
+  pamieci/sklepu). Wartosc ITEM (cl = 0x12057AA0 = 302348960) jest nowa —
+  obiekt pod kursorem jest inny niz w sesji 3.
 
 HISTORIA ZMIAN:
 ===============
@@ -93,6 +100,52 @@ HISTORIA ZMIAN:
                          (po restarcie gry te same sloty dostaja te same
                          adresy). Konsekwencja: pojedyncza stala == dziala
                          tylko dla JEDNEGO konkretnego obiektu.
+
+- Sesja 4 (2026-08-03): LootMouseOverValue = 302348960 (0x12057AA0) [ITEM]
+                         NPC  = 138599240 (0x0842DB48) — identyczny jak
+                         w sesji 3 (NPC cl sie nie zmienil).
+                         ZAKODOWANE w kodzie:
+                           - BotConstants.GameMagicValues.LootMouseOverValue
+                             = 302348960 (nowa wartosc itemu)
+                           - ItemSellerService.SellerPointedValue = 138599240
+                             (bez zmian — NPC ten sam co w sesji 3)
+                           - BotConstants.NpcMouseOverValues (pelny dump:
+                             cb=72, db=219, bs=18432, cs=-9400, ds=17115,
+                             al=-616038397, bl=1121667072, cl=138599240,
+                             dl=541403)
+                           - NpcMouseOverValues.CameraVerticalAngle = 16320
+                             ([Ares.exe+0x4704B0]+0x1BE podczas naprowadzenia
+                             na NPC; poza naprowadzeniem = 16310 ==
+                             Camera.DefaultVerticalLock)
+
+WNIOSKI Z ANALIZY (SESJE 1-4) — CZY WARTOSCI MAJA LOGIKE? TAK:
+================================================================================
+1. Wartosc pod [Ares.exe + 0x4704A8] + 0xA..0xF to ADRES/ID obiektu pod
+   kursorem (48-bitowy wskaznik: bajty +0xA..+0xF, np. NPC = 03 00 48 DB 42 08).
+   To NIE jest flaga item/NPC.
+
+2. NPC SELLER JEST STABILNY MIEDZY SESJAMI:
+     Sesja 2 (item): 0x0842DB48   Sesja 3 (NPC): 0x0842DB48
+     Sesja 4 (NPC):  0x0842DB48   (surowe bajty 03 00 48 DB 42 08 identyczne
+     w sesjach 3 i 4)
+   Przyczyna: gra alokuje obiekty deterministycznie (brak ASLR) — ten sam NPC
+   w tym samym miejscu dostaje ten sam adres przy kazdym starcie.
+   => Stala ItemSellerService.SellerPointedValue = 138599240 JEST WAZNA
+      NA ZAWSZE (dla tego builda gry i tego NPC) — nie wymaga re-kodowania.
+
+3. ITEMY (loot) MAJA ZAWSZE INNA WARTOSC:
+     0x072385A0 -> 0x0842DB48 -> 0x16243AF8 -> 0x12057AA0
+   To adres konkretnego egzemplarza przedmiotu — kazdy item to inny obiekt.
+   => Porownywanie lootu do jednej stalej jest z gruntu zawodne.
+      ZAMIENIONE (Sesja 4) na sprawdzenie STRUKTURALNE w
+      GameMemoryService.IsLootMouseOver():
+        value != 0  (cokolwiek pod kursorem; 0 = nic)
+        && !IsNpcMousePointed()  (flaga [Ares.exe+0x471C84]+0x7C == 1,
+                                  niezalezna od sesji, odsiewa NPC/moby)
+      Kalibracja nie jest juz potrzebna do lootu.
+
+4. Zasada "Item_cl = NPC_cl - 256" (Sesja 2) byla przypadkowa — dzialala
+   tylko gdy item i NPC lezaly w sasiednich slotach. Nie uzywac.
 
 --- Dopisz kolejne wpisy ponizej, po kazdym restarcie gry ---
 ================================================================================
