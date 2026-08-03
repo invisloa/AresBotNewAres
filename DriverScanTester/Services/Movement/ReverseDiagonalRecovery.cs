@@ -11,9 +11,11 @@ namespace DriverScanTester.Services
     ///   2. Wait 200ms (camera settle)
     ///   3. Press W
     ///   4. Wait 200ms (movement attempt)
-    ///   5. Check current action:
-    ///      - If still stuck (25/1) → stop W, try next angle
-    ///      - If running (27/3) → wait 300ms cooldown, then success
+    ///   5. Check real displacement:
+    ///      - Moved ≥ SuccessDisplacement → success (regardless of the action byte)
+    ///      - Still idle/stuck (25/1) → stop W, try next angle
+    ///      - Action claims running but no displacement (ghost-walk stuck spot) →
+    ///        treated as failed, try next angle
     ///
     /// Thread.Sleep / blocking is NOT used — the caller invokes Tick() each
     /// movement update cycle.
@@ -70,6 +72,11 @@ namespace DriverScanTester.Services
         private float _baseBearing;
         private (float X, float Y) _target;
         private float _currentBearing;
+
+        /// <summary>Player position when the current attempt started pressing W.
+        /// Success is decided by real displacement from this point, not the action byte —
+        /// in ghost-walk stuck spots the animation keeps playing while the player stands still.</summary>
+        private (float X, float Y)? _attemptStartPos;
 
         /// <summary>Whether the recovery sequence is currently running.</summary>
         public bool IsActive => _active;
@@ -148,6 +155,7 @@ namespace DriverScanTester.Services
                         _startMoving();
                         _stage = AttemptStage.Moving;
                         _stageStartTime = DateTime.Now;
+                        _attemptStartPos = (currX, currY);
 
                         _log($"[ReverseDiagonal] Attempt {_attemptIndex + 1}/{MaxAttempts}: " +
                              $"offset={AttemptOffsets[_attemptIndex]:F0}° bearing={_currentBearing:F1} — W pressed");
@@ -158,44 +166,52 @@ namespace DriverScanTester.Services
                     if (elapsedMs < MoveAttemptMs)
                         return RecoveryResult.InProgress;
 
-                    // Movement window elapsed — check if still stuck
+                    // Movement window elapsed — evaluate REAL progress. Success is decided
+                    // by actual displacement, not just the action byte: in some stuck spots
+                    // the walk animation keeps playing (action stays "running") while the
+                    // player is pushing against an obstacle and standing still.
                     byte currentAction = _memory.GetCurrentAction();
+                    float movedSinceAttempt = _attemptStartPos.HasValue
+                        ? GeometryUtils.Distance(currX, currY, _attemptStartPos.Value.X, _attemptStartPos.Value.Y)
+                        : 0f;
 
-                    if (StuckDetector.IsActionIdleOrStuck(currentAction))
+                    if (movedSinceAttempt >= BotConstants.ReverseDiagonal.SuccessDisplacement)
                     {
-                        // Still stuck — this attempt failed
-                        _stopMoving();
-                        _log($"[ReverseDiagonal] FAIL attempt {_attemptIndex + 1}. Action={currentAction} still stuck.");
-
-                        _attemptIndex++;
-
-                        if (_attemptIndex >= MaxAttempts)
-                        {
-                            _log($"[ReverseDiagonal] All {MaxAttempts} attempts failed.");
-                            _active = false;
-                            _stopMoving();
-                            return RecoveryResult.Failed;
-                        }
-
-                        // Start next attempt
-                        float offset = AttemptOffsets[_attemptIndex];
-                        _currentBearing = GeometryUtils.NormalizeBearingDeg(_baseBearing + offset);
-                        _stage = AttemptStage.CameraSettle;
-                        _stageStartTime = DateTime.Now;
-                        _stopMoving(); // ensure W is released for camera settle
-
-                        _log($"[ReverseDiagonal] Next attempt {_attemptIndex + 1}/{MaxAttempts}: " +
-                             $"offset={offset:F0}° bearing={_currentBearing:F1}");
-                        return RecoveryResult.InProgress; // caller should apply new camera bearing
-                    }
-                    else
-                    {
-                        // Character is running — success! Enter cooldown.
-                        _log($"[ReverseDiagonal] Attempt {_attemptIndex + 1} succeeded. Action={currentAction} running. Cooldown {SuccessCooldownMs}ms.");
+                        // Real displacement — success regardless of what the action byte claims.
+                        _log($"[ReverseDiagonal] Attempt {_attemptIndex + 1} succeeded. Moved {movedSinceAttempt:F2} units. Cooldown {SuccessCooldownMs}ms.");
                         _stage = AttemptStage.SuccessCooldown;
                         _stageStartTime = DateTime.Now;
                         return RecoveryResult.InProgress;
                     }
+
+                    // No real displacement — the attempt failed. Distinguish the classic
+                    // idle-stuck from the ghost-walk stuck (action claims running) for the log.
+                    bool actionClaimsRunning = !StuckDetector.IsActionIdleOrStuck(currentAction);
+                    _stopMoving();
+                    _log(actionClaimsRunning
+                        ? $"[ReverseDiagonal] FAIL attempt {_attemptIndex + 1}. Action={currentAction} running but moved only {movedSinceAttempt:F2} units — ghost-walk stuck."
+                        : $"[ReverseDiagonal] FAIL attempt {_attemptIndex + 1}. Action={currentAction} still stuck.");
+
+                    _attemptIndex++;
+                    _attemptStartPos = null;
+
+                    if (_attemptIndex >= MaxAttempts)
+                    {
+                        _log($"[ReverseDiagonal] All {MaxAttempts} attempts failed.");
+                        _active = false;
+                        return RecoveryResult.Failed;
+                    }
+
+                    // Start next attempt
+                    float offset = AttemptOffsets[_attemptIndex];
+                    _currentBearing = GeometryUtils.NormalizeBearingDeg(_baseBearing + offset);
+                    _stage = AttemptStage.CameraSettle;
+                    _stageStartTime = DateTime.Now;
+                    _stopMoving(); // ensure W is released for camera settle
+
+                    _log($"[ReverseDiagonal] Next attempt {_attemptIndex + 1}/{MaxAttempts}: " +
+                         $"offset={offset:F0}° bearing={_currentBearing:F1}");
+                    return RecoveryResult.InProgress; // caller should apply new camera bearing
 
                 case AttemptStage.SuccessCooldown:
                     if (elapsedMs >= SuccessCooldownMs)

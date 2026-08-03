@@ -433,6 +433,8 @@ namespace DriverScanTester.ViewModels
             if (!_isLootBotRunning)
             {
                 _lootSystem = new LootSystem(memoryService, AppendLog);
+                if (_movementSystem != null)
+                    _movementSystem.LootSystemRef = _lootSystem;
                 _lootBotCts = new CancellationTokenSource();
                 _isLootBotRunning = true;
                 var lootToken = _lootBotCts.Token;
@@ -3439,6 +3441,8 @@ namespace DriverScanTester.ViewModels
 
                         var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
                         _lootSystem = new LootSystem(memoryService, AppendLog);
+                        if (_movementSystem != null)
+                            _movementSystem.LootSystemRef = _lootSystem;
                         _lootBotCts = new CancellationTokenSource();
                         _isLootBotRunning = true;
                         var lootToken = _lootBotCts.Token;

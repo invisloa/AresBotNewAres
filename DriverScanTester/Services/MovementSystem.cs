@@ -135,8 +135,37 @@ namespace DriverScanTester.Services
         // Route resync after combat
         private bool _routeResyncPendingAfterCombat = false;
 
-        // Post-combat loot pause — prevents waypoint advancement while loot scans.
-        private DateTime _postCombatLootPauseUntil = DateTime.MinValue;
+        // ── Post-combat loot wait ──
+        // After a kill in MoveAndAttackAndLoot mode the bot holds movement until the
+        // loot system (parallel task) completes a full scan pass with no confirmed
+        // items. The wait only arms right after combat; during normal walking the
+        // loot cycle runs in parallel without blocking movement.
+        /// <summary>Last time combat was active (mob selected / combat action) — used to arm the loot wait.</summary>
+        private DateTime _lastCombatSeenAt = DateTime.MinValue;
+        /// <summary>True while the movement system is holding for the loot scan to finish.</summary>
+        private bool _lootWaitActive = false;
+        /// <summary>Safety deadline for the current loot wait session.</summary>
+        private DateTime _lootWaitDeadline = DateTime.MinValue;
+
+        /// <summary>
+        /// Optional reference to the running LootSystem (set by the host — workflow
+        /// coordinator or MainViewModel). Used to hold movement until a full loot scan
+        /// pass completes after a kill. Null means no loot system is running.
+        /// </summary>
+        public LootSystem? LootSystemRef { get; set; }
+
+        /// <summary>
+        /// Loot-priority mode (profile flag "Loot Priority"): looting outranks combat
+        /// and waypoint movement. While the loot system is in its pixel-scan state
+        /// (scanning for, clicking and walking to ground items), ALL attack actions and
+        /// movement toward the next waypoint are suspended — the character stands still
+        /// and every item gets collected. Combat/movement resume when the loot machine
+        /// reports a full empty scan pass (ScanComplete).
+        /// </summary>
+        public bool LootPriorityMode { get; set; } = false;
+
+        /// <summary>True while the loot-priority hold is active (prevents log spam).</summary>
+        private bool _lootPriorityHoldActive = false;
 
         // Temporary ghost waypoint tracking
         private readonly List<(float X, float Y)> _ghostWaypoints = new List<(float X, float Y)>();
@@ -183,6 +212,13 @@ namespace DriverScanTester.Services
         /// <summary>Player position when the last reverse-diagonal recovery started.
         /// Used to decide whether the consecutive-stuck counter should reset (real progress).</summary>
         private (float X, float Y)? _lastStuckAttemptPos = null;
+
+        // Position-based no-progress stuck detection (ghost-walk stuck spots): the walk
+        // animation keeps playing while the player is actually pushing against an obstacle,
+        // so the action byte never reads idle and the action-based detector cannot fire.
+        // Baseline position + time while W is held; zero displacement for the timeout = stuck.
+        private (float X, float Y)? _lastMoveProgressPos = null;
+        private DateTime _lastMoveProgressTime = DateTime.MinValue;
 
         // When stuck in city triggers teleport, wait this long before resuming.
         private DateTime _inCityStuckCooldownUntil = DateTime.MinValue;
@@ -425,6 +461,29 @@ namespace DriverScanTester.Services
                 return;
             }
 
+            // ── Loot-priority mode (profile flag "Loot Priority") ──
+            // Looting outranks combat and waypoint movement. While the loot system is
+            // in its pixel-scan state it is actively looking for, clicking and walking
+            // to ground items; during that time ALL attack actions and movement toward
+            // the next waypoint are suspended so the character stands still and every
+            // item gets collected. Combat and movement resume as soon as the loot
+            // machine reports a full empty scan pass (ScanComplete → IsScanActive false).
+            if (LootPriorityMode && LootSystemRef != null && LootSystemRef.IsScanActive)
+            {
+                if (!_lootPriorityHoldActive)
+                {
+                    _lootPriorityHoldActive = true;
+                    _combatHandler.ResetState();
+                    _log($"[Tick {_tickCount}] Loot priority — loot scan active, suspending combat and waypoint movement.");
+                }
+                ReleaseSkillThree();
+                StopMoving();
+                ClearCombatRetargetSearch();
+                await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                return;
+            }
+            _lootPriorityHoldActive = false;
+
             // ── Map change detection ──
             // Each game map has its own navigation file. If the player changed maps,
             // save the current map's data and load the new map's data.
@@ -556,8 +615,20 @@ namespace DriverScanTester.Services
                     cameraDistanceToApply = GetCombatRetargetCameraDistance();
                 }
 
-                _memoryService.SetCameraDistance(cameraDistanceToApply);
-                _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+                // While the loot system is mid-cycle (MoveAndAttackAndLoot), do NOT
+                // override the camera — the pixel scan needs its zoomed view
+                // (LootScanDistance) to detect ground items. Without this the movement
+                // reverts the camera every tick and the live scan misses everything that
+                // the "Test Loot" scan (which runs without movement) detects. The
+                // movement restores its own camera distance once the loot cycle finishes.
+                bool lootScanning = currentMode == BotMode.MoveAndAttackAndLoot &&
+                                    LootSystemRef != null &&
+                                    LootSystemRef.IsLootCycleActive;
+                if (!lootScanning)
+                {
+                    _memoryService.SetCameraDistance(cameraDistanceToApply);
+                    _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+                }
 
                 if (canUseCombatRetargetSearch && _combatRetargetCameraStage != CombatRetargetCameraStage.None)
                 {
@@ -642,7 +713,7 @@ namespace DriverScanTester.Services
 
             // ── Combat mode handling ──
         RUN_COMBAT_ONLY:
-            var combatAction = _combatHandler.EvaluateCombatAction(_memoryService, currentMode, _isUnstuckRoutineActive);
+            var combatAction = _combatHandler.EvaluateCombatAction(_memoryService, currentMode, _isUnstuckRoutineActive, currX, currY);
             if (combatAction != CombatAction.None && combatAction != CombatAction.CombatWait)
             {
                 _log($"[Tick {_tickCount}] Combat: {combatAction}");
@@ -700,6 +771,14 @@ namespace DriverScanTester.Services
                     await Task.Delay(BotConstants.Delays.CombatAttackWaitMs, token);
                     return;
 
+                case CombatAction.Unstuck:
+                    // The selected mob is unreachable/not dying (combat watchdog fired).
+                    // Perform the STANDARD unstuck action so the player really walks away
+                    // from the stuck spot. Combat is suppressed while the recovery is
+                    // active (_isUnstuckRoutineActive), so TAB/attack cannot interrupt it.
+                    StartCombatUnstuck(currX, currY);
+                    return;
+
                 case CombatAction.PotionsUsed:
                     ReleaseSkillThree();
                     _log($"[Tick {_tickCount}] Potions used — brief delay.");
@@ -710,42 +789,95 @@ namespace DriverScanTester.Services
             // Combat is over — release skill 3 if held
             ReleaseSkillThree();
 
-            // ── Post-combat loot pause ──
-            // When in MoveAndAttackAndLoot mode and no mob is selected, wait a
-            // short time before advancing waypoints so the loot system (running
-            // in a parallel task) gets a chance to pixel-scan the area for items.
-            // Without this pause the character walks away before loot finishes,
-            // leaving drops on the ground.
-            if (currentMode == BotMode.MoveAndAttackAndLoot && !_memoryService.IsMobSelected())
+            // ── Post-combat loot wait ──
+            // In MoveAndAttackAndLoot mode the bot must NOT walk away while the loot
+            // system (running in a parallel task) is still collecting. Wait until a full
+            // scan pass completes with no confirmed items (LootSystem.IsLootCycleActive
+            // becomes false) or until a safety timeout. The wait only arms right after
+            // combat — during normal walking the loot cycle runs without blocking.
+            // Skipped entirely while the unstuck routine is active — the recovery runs
+            // uninterrupted in the movement section below.
+            if (currentMode == BotMode.MoveAndAttackAndLoot && !_isUnstuckRoutineActive)
             {
                 bool isCombatStillActive = combatAction == CombatAction.Attack ||
                                            combatAction == CombatAction.CombatWait ||
                                            combatAction == CombatAction.TabTarget ||
                                            combatAction == CombatAction.PotionsUsed;
+                bool mobSelectedNow = _memoryService.IsMobSelected();
 
-                if (!isCombatStillActive)
+                if (isCombatStillActive || mobSelectedNow)
                 {
-                    if (_postCombatLootPauseUntil == DateTime.MinValue)
-                    {
-                        _postCombatLootPauseUntil = DateTime.UtcNow.AddMilliseconds(
-                            BotConstants.Delays.PostCombatLootWaitMs);
-                        _log($"[LootWait] Post-combat pause for loot scan ({BotConstants.Delays.PostCombatLootWaitMs}ms).");
-                    }
+                    // Combat active — remember it so the loot wait can arm when it ends,
+                    // and drop any wait session in progress (it re-arms after this combat).
+                    _lastCombatSeenAt = DateTime.UtcNow;
+                    _lootWaitActive = false;
+                    _lootWaitDeadline = DateTime.MinValue;
+                }
+                else
+                {
+                    // No combat, no mob selected — possibly waiting for loot after a kill.
+                    bool lootDone = LootSystemRef == null || !LootSystemRef.IsLootCycleActive;
 
-                    if (DateTime.UtcNow < _postCombatLootPauseUntil)
+                    if (lootDone)
                     {
+                        // Full scan passed with no confirmed items (or no loot system) —
+                        // free to move on.
+                        _lootWaitActive = false;
+                        _lootWaitDeadline = DateTime.MinValue;
+                    }
+                    else if (_lootWaitActive)
+                    {
+                        // Wait session in progress — hold movement until the loot scan
+                        // completes or the safety deadline expires.
+                        if (DateTime.UtcNow < _lootWaitDeadline)
+                        {
+                            await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                            return;
+                        }
+
+                        // The deadline expired — but if the loot system is still actively
+                        // collecting (an item was picked up recently), extend the wait
+                        // instead of walking away with drops still on the ground.
+                        if (LootSystemRef != null &&
+                            LootSystemRef.TimeSinceLastItemCollected <
+                            TimeSpan.FromMilliseconds(BotConstants.Delays.LootWaitProgressGraceMs))
+                        {
+                            _lootWaitDeadline = DateTime.UtcNow.AddMilliseconds(BotConstants.Delays.MaxLootWaitMs);
+                            _log($"[LootWait] Loot still collecting items — extending wait ({BotConstants.Delays.MaxLootWaitMs}ms).");
+                            await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                            return;
+                        }
+
+                        _log("[LootWait] Loot wait timeout — moving on.");
+                        _lootWaitActive = false;
+                        _lootWaitDeadline = DateTime.MinValue;
+                    }
+                    else if ((DateTime.UtcNow - _lastCombatSeenAt).TotalMilliseconds <=
+                             BotConstants.Delays.LootWaitArmWindowMs)
+                    {
+                        // Combat just ended and the loot system is still collecting —
+                        // start waiting so every item gets picked up before the bot
+                        // walks to the next waypoint.
+                        _lootWaitActive = true;
+                        _lootWaitDeadline = DateTime.UtcNow.AddMilliseconds(BotConstants.Delays.MaxLootWaitMs);
+                        _log($"[LootWait] Waiting for loot scan to finish (up to {BotConstants.Delays.MaxLootWaitMs}ms)...");
                         await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
                         return;
                     }
-
-                    // Pause expired — clear flag so we can proceed.
-                    _postCombatLootPauseUntil = DateTime.MinValue;
+                    else
+                    {
+                        // Normal walking (no recent combat) — the loot cycle runs in
+                        // parallel, do not block movement.
+                        _lootWaitActive = false;
+                        _lootWaitDeadline = DateTime.MinValue;
+                    }
                 }
             }
             else
             {
-                // Mob selected or not in loot mode — no loot pause needed.
-                _postCombatLootPauseUntil = DateTime.MinValue;
+                // Not in loot mode — no loot wait.
+                _lootWaitActive = false;
+                _lootWaitDeadline = DateTime.MinValue;
             }
 
             // If in standby mode, don't fall through to waypoint queue logic.
@@ -855,10 +987,12 @@ namespace DriverScanTester.Services
                         case RecoveryResult.InProgress:
                             return;
                         case RecoveryResult.Recovered:
+                            _isUnstuckRoutineActive = false;
                             _log($"[ReverseDiagonal] recovered.");
                             ResetActionStuckTracking();
                             return;
                         case RecoveryResult.Failed:
+                            _isUnstuckRoutineActive = false;
                             _log($"[ReverseDiagonal] failed - all attempts exhausted.");
                             _log($"[ActionStuck] Action={currentAction} while moving. Stuck confirmed by action.");
                             MarkObstacleFromActionStuck(currX, currY, target);
@@ -875,6 +1009,51 @@ namespace DriverScanTester.Services
                     _log($"[ActionStuck] Action={currentAction} while moving. Starting ReverseDiagonalRecovery.");
                     StartReverseDiagonalRecovery(currX, currY, target);
                     return;
+                }
+
+                // ── Position-based no-progress stuck detection ──
+                // Some stuck spots keep the walk animation playing (action byte stays
+                // "running") while the player is actually pushing against an obstacle and
+                // standing still — the action-based detector above can never fire there.
+                // Track real displacement while W is held; zero progress for the timeout
+                // is treated as stuck, regardless of what the animation claims.
+                if (_isMovingForward && !_reverseDiagonalRecovery.IsActive &&
+                    DateTime.Now >= _ignoreStuckUntil &&
+                    distNow > thresholdNow + BotConstants.Movement.NoProgressNearTargetExtra)
+                {
+                    if (_lastMoveProgressPos.HasValue && _lastMoveProgressTime != DateTime.MinValue)
+                    {
+                        float movedSince = GeometryUtils.Distance(currX, currY, _lastMoveProgressPos.Value.X, _lastMoveProgressPos.Value.Y);
+                        if (movedSince < BotConstants.Movement.NoProgressMinDistance)
+                        {
+                            if ((DateTime.Now - _lastMoveProgressTime).TotalMilliseconds >= BotConstants.Movement.NoProgressTimeoutMs)
+                            {
+                                _log($"[NoProgress] Moved {movedSince:F2} units in {BotConstants.Movement.NoProgressTimeoutMs} ms while W held (action={currentAction}) — treating as stuck.");
+                                _lastMoveProgressPos = null;
+                                _lastMoveProgressTime = DateTime.MinValue;
+                                StartReverseDiagonalRecovery(currX, currY, target);
+                                return;
+                            }
+                        }
+                        else
+                        {
+                            // Real progress — restart the measurement window.
+                            _lastMoveProgressPos = (currX, currY);
+                            _lastMoveProgressTime = DateTime.Now;
+                        }
+                    }
+                    else
+                    {
+                        _lastMoveProgressPos = (currX, currY);
+                        _lastMoveProgressTime = DateTime.Now;
+                    }
+                }
+                else
+                {
+                    // Not moving forward / near target / grace period / recovery active —
+                    // no progress baseline.
+                    _lastMoveProgressPos = null;
+                    _lastMoveProgressTime = DateTime.MinValue;
                 }
 
                 // Log route info periodically
@@ -1318,6 +1497,7 @@ namespace DriverScanTester.Services
                 _lastStuckAttemptPos = null;
                 CaptureStuckScreenshot();
                 _reverseDiagonalRecovery.Stop();
+                _isUnstuckRoutineActive = false;
 
                 if (inCity)
                 {
@@ -1354,6 +1534,28 @@ namespace DriverScanTester.Services
                 _lastHealthyMoveBearingDeg != UnsetBearing ? _lastHealthyMoveBearingDeg : (float?)null,
                 _lastHealthyMoveTime);
             ApplyCameraBearing(_reverseDiagonalRecovery.CurrentBearingDeg); // camera only — Recovery controls W
+
+            // Mark the unstuck routine as active: while it runs, the combat handler
+            // returns None (no TAB / no attack) and the route resync is skipped, so the
+            // recovery is never interrupted and the player really walks away from the
+            // stuck spot.
+            _isUnstuckRoutineActive = true;
+        }
+
+        /// <summary>
+        /// Standard unstuck for the combat case: an unreachable / not-dying mob triggers
+        /// the same reverse-diagonal recovery as a movement stuck, so the player really
+        /// walks away from the spot instead of just TABbing. The recovery runs
+        /// uninterrupted (combat is suppressed via <see cref="_isUnstuckRoutineActive"/>).
+        /// </summary>
+        private void StartCombatUnstuck(float currX, float currY)
+        {
+            ReleaseSkillThree();
+            Waypoint target = _waypoints.Count > 0
+                ? _waypoints.Peek()
+                : new Waypoint(Waypoint2.X, Waypoint2.Y, GlobalPrecision, BotMode.OnlyMove);
+            _log("[Combat] Unreachable mob — starting standard unstuck (reverse-diagonal recovery).");
+            StartReverseDiagonalRecovery(currX, currY, target);
         }
 
         [DllImport("user32.dll", SetLastError = true)]

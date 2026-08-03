@@ -19,10 +19,18 @@ namespace DriverScanTester.Services
         /// <summary>Weight ratio threshold (current/max) above which repot is needed.</summary>
         public float MaxWeightRatio { get; set; } = BotConstants.Repot.DefaultMaxWeightRatio;
 
-        /// <summary>If HP is at or below this value, repot is triggered.</summary>
+        /// <summary>
+        /// HP floor. While HP potions are available the heal/mana bot drinks them to
+        /// stay above this value; repot is only triggered at/below this value once the
+        /// HP potion stock is exhausted (the potion-count check above already fires then).
+        /// </summary>
         public int MinHp { get; set; } = BotConstants.Repot.DefaultMinHp;
 
-        /// <summary>If Mana is at or below this value, repot is triggered.</summary>
+        /// <summary>
+        /// Mana floor. While mana potions are available the heal/mana bot drinks them to
+        /// stay above this value; repot is only triggered at/below this value once the
+        /// mana potion stock is exhausted (the potion-count check above already fires then).
+        /// </summary>
         public int MinMana { get; set; } = BotConstants.Repot.DefaultMinMana;
 
         public RepotDetectorService(Action<string> log)
@@ -57,15 +65,19 @@ namespace DriverScanTester.Services
                 }
             }
 
-            if (snapshot.Hp <= MinHp)
+            // Low current HP/Mana triggers a repot only when the corresponding potion
+            // stock is exhausted. While potions are available the heal/mana bot restores
+            // them automatically — teleporting home on a low-mana sample with 35 potions
+            // in the inventory is exactly the false trigger we want to avoid.
+            if (snapshot.HpPotions <= MinHpPotions && snapshot.Hp <= MinHp)
             {
-                _log($"[RepotDetector] HP is {snapshot.Hp} <= {MinHp}");
+                _log($"[RepotDetector] HP is {snapshot.Hp} <= {MinHp} and HP potions are low ({snapshot.HpPotions} <= {MinHpPotions})");
                 return true;
             }
 
-            if (snapshot.Mana <= MinMana)
+            if (snapshot.ManaPotions <= MinManaPotions && snapshot.Mana <= MinMana)
             {
-                _log($"[RepotDetector] Mana is {snapshot.Mana} <= {MinMana}");
+                _log($"[RepotDetector] Mana is {snapshot.Mana} <= {MinMana} and mana potions are low ({snapshot.ManaPotions} <= {MinManaPotions})");
                 return true;
             }
 

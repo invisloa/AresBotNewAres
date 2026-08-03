@@ -345,6 +345,11 @@
                             <!-- ─────────── Stage 3: EXP PATH ─────────── -->
                             <GroupBox Header="3. EXP PATH" Margin="0,0,0,10" BorderBrush="#FF3399FF" BorderThickness="2" Padding="4">
                                 <StackPanel Margin="3">
+                                    <WrapPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                        <CheckBox Content="Loot Priority (loot over attack)" IsChecked="{Binding LootPriority}"
+                                                  FontWeight="Bold" VerticalAlignment="Center"
+                                                  ToolTip="Loot-priority profile: the bot scans for ground loot even while attacking a mob. When a loot item is found the bot loots it first and, while walking to loot, performs NO attack actions and NO movement to the next waypoint — looting all items is the top priority."/>
+                                    </WrapPanel>
                                     <WrapPanel Orientation="Horizontal" Margin="0,0,0,5">
                                         <TextBlock Text="Path:" FontWeight="Bold" VerticalAlignment="Center" Width="120"/>
                                         <ComboBox ItemsSource="{Binding AvailablePaths}" SelectedItem="{Binding ExpLoop.PathFile}"

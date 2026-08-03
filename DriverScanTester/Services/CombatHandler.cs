@@ -22,7 +22,14 @@ namespace DriverScanTester.Services
         /// <summary>Waiting during combat (attack cooldown) — skip movement entirely.</summary>
         CombatWait,
         /// <summary>Potion keys were pressed — caller should delay briefly.</summary>
-        PotionsUsed
+        PotionsUsed,
+        /// <summary>
+        /// The selected mob is unreachable/not dying (combat watchdog fired) — the caller
+        /// must perform the STANDARD unstuck action (reverse-diagonal recovery) so the
+        /// player really walks away from the stuck spot. Combat is suppressed while the
+        /// unstuck routine is active so TAB/attack cannot interrupt it.
+        /// </summary>
+        Unstuck
     }
 
     /// <summary>
@@ -38,6 +45,8 @@ namespace DriverScanTester.Services
         // ── Timings ──
         private const double IDLE_TIMEOUT_SECONDS = BotConstants.Combat.IdleTimeoutSeconds;
         private const double MOVE_MODE_TAB_INTERVAL_SECONDS = BotConstants.Combat.MoveModeTabIntervalSeconds;
+        private const double COMBAT_STUCK_TIMEOUT_MS = BotConstants.Combat.CombatStuckTimeoutMs;
+        private const float COMBAT_STUCK_POS_EPSILON = BotConstants.Combat.CombatStuckPosEpsilon;
 
         // ── State ──
         private bool _wasAttacking;
@@ -45,6 +54,21 @@ namespace DriverScanTester.Services
         private DateTime _lastMoveModeTabTime = DateTime.MinValue;
         private DateTime _lastAttackSpeedCheck = DateTime.MinValue;
         private DateTime _combatIdleStartTime = DateTime.MinValue;
+
+        // ── Combat stuck detection (mana + position based) ──
+        // A real attack consumes mana (skill 3), and standing still is the normal combat
+        // posture — so a static position alone proves nothing. But position AND mana both
+        // unchanged for the timeout means the player is NOT actually fighting (unreachable
+        // mob / attack not connecting, while the animation may still play). That triggers
+        // the standard unstuck action.
+        /// <summary>Last time the mana value changed while a mob was selected (MinValue = not yet sampled).</summary>
+        private DateTime _lastManaChangeAt = DateTime.MinValue;
+        /// <summary>Previous mana sample (for change detection).</summary>
+        private int _lastManaValue = int.MinValue;
+        /// <summary>Last time the player position changed while a mob was selected.</summary>
+        private DateTime _lastCombatPosChangeAt = DateTime.MinValue;
+        /// <summary>Previous position sample (for change detection).</summary>
+        private (float X, float Y)? _lastCombatPos = null;
 
         /// <summary>
         /// Minimum ms of continuous idle action (0/25/1) while a target is still selected
@@ -83,11 +107,15 @@ namespace DriverScanTester.Services
         /// <param name="memoryService">Game memory service for reading state.</param>
         /// <param name="currentMode">The bot mode of the current waypoint.</param>
         /// <param name="isUnstuckActive">Whether the unstuck routine is currently active.</param>
+        /// <param name="currX">Current player X (used by the mana+position stuck detection).</param>
+        /// <param name="currY">Current player Y (used by the mana+position stuck detection).</param>
         /// <returns>A <see cref="CombatAction"/> describing what input to perform next.</returns>
         public CombatAction EvaluateCombatAction(
             GameMemoryService memoryService,
             BotMode currentMode,
-            bool isUnstuckActive)
+            bool isUnstuckActive,
+            float currX,
+            float currY)
         {
             if (currentMode != BotMode.MoveAndAttack && currentMode != BotMode.MoveAndAttackAndLoot)
             {
@@ -126,6 +154,13 @@ namespace DriverScanTester.Services
                     _wasAttacking = true;
                     _lastNonIdleActionTime = DateTime.Now;
                     _combatIdleStartTime = DateTime.MinValue;
+
+                    // Start the mana+position stuck-detection baseline at attack start:
+                    // if NEITHER changes for the timeout, the attack is not connecting.
+                    _lastManaChangeAt = DateTime.Now;
+                    _lastCombatPosChangeAt = DateTime.Now;
+                    _lastManaValue = int.MinValue;
+                    _lastCombatPos = (currX, currY);
                     return CombatAction.Attack;
                 }
 
@@ -162,6 +197,40 @@ namespace DriverScanTester.Services
                 // Any non-idle action, or no mob selected, resets the idle timer
                 _combatIdleStartTime = DateTime.MinValue;
 
+                // ── Combat stuck detection: mana + position unchanged ──
+                // When the player REALLY attacks, the skill consumes mana. Standing still
+                // is the normal combat posture, so a static position alone proves nothing —
+                // but position AND mana both unchanged for the timeout means the player is
+                // NOT actually fighting (unreachable mob / attack not connecting, while the
+                // animation may still play). Trigger the STANDARD unstuck action so the
+                // player really walks away from the stuck spot.
+                var healMana = memoryService.GetHealManaValues();
+                if (healMana.value2.HasValue)
+                {
+                    int mana = healMana.value2.Value;
+                    if (_lastManaValue != int.MinValue && mana != _lastManaValue)
+                    {
+                        _lastManaChangeAt = DateTime.Now;
+                    }
+                    _lastManaValue = mana;
+                }
+
+                if (_lastCombatPos.HasValue &&
+                    GeometryUtils.Distance(currX, currY, _lastCombatPos.Value.X, _lastCombatPos.Value.Y) > COMBAT_STUCK_POS_EPSILON)
+                {
+                    _lastCombatPosChangeAt = DateTime.Now;
+                }
+                _lastCombatPos = (currX, currY);
+
+                if (_lastManaChangeAt != DateTime.MinValue &&
+                    _lastCombatPosChangeAt != DateTime.MinValue &&
+                    (DateTime.Now - _lastManaChangeAt).TotalMilliseconds >= COMBAT_STUCK_TIMEOUT_MS &&
+                    (DateTime.Now - _lastCombatPosChangeAt).TotalMilliseconds >= COMBAT_STUCK_TIMEOUT_MS)
+                {
+                    _log($"[Combat] Position and mana unchanged for {COMBAT_STUCK_TIMEOUT_MS:F0}ms while a mob is selected — attack not consuming mana, player is stuck. Starting standard unstuck.");
+                    return CombatAction.Unstuck;
+                }
+
                 // ── Update non-idle timestamp for running/attacking actions ──
                 if (currentAction == 27 || currentAction == 3 || currentAction == 28 || currentAction == 39)
                 {
@@ -177,18 +246,18 @@ namespace DriverScanTester.Services
                 _wasAttacking = false;
                 _combatIdleStartTime = DateTime.MinValue;
 
-                // In loot mode (MoveAndAttackAndLoot) with no mob selected,
-                // do NOT TAB — the loot system needs uninterrupted time to
-                // scan for items after a kill.  The loot system handles its
-                // own PostMobTab (one TAB to check for more mobs) and then
-                // scans.  Only after loot finishes (returns to Idle) may the
-                // combat system TAB again.  Without this guard the combat TAB
-                // selects the next mob instantly, cancelling loot.
-                if (currentMode == BotMode.MoveAndAttackAndLoot && !memoryService.IsMobSelected())
-                {
-                    return CombatAction.None;
-                }
+                // Reset the combat stuck detection — no combat in progress.
+                _lastManaValue = int.MinValue;
+                _lastCombatPos = null;
+                _lastManaChangeAt = DateTime.MinValue;
+                _lastCombatPosChangeAt = DateTime.MinValue;
 
+                // Loot mode (MoveAndAttackAndLoot) with no mob selected: keep cycling
+                // targets on the normal interval. Attacking always has priority — the
+                // loot system runs in a parallel task and cancels itself the moment a
+                // mob gets selected, and the post-combat loot pause in MovementSystem
+                // gives the loot scan its window after a kill. Suppressing TAB here
+                // entirely would leave the bot with no way to ever acquire a target.
                 if ((DateTime.Now - _lastMoveModeTabTime).TotalSeconds >= MOVE_MODE_TAB_INTERVAL_SECONDS)
                 {
                     _log("[Key] TAB (target cycle — move mode)");
@@ -274,6 +343,10 @@ namespace DriverScanTester.Services
         {
             _wasAttacking = false;
             _combatIdleStartTime = DateTime.MinValue;
+            _lastManaValue = int.MinValue;
+            _lastCombatPos = null;
+            _lastManaChangeAt = DateTime.MinValue;
+            _lastCombatPosChangeAt = DateTime.MinValue;
         }
     }
 }

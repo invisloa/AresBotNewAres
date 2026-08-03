@@ -13,14 +13,14 @@
     },
     {
       "PathFile": "Kharon Go Wolves.json",
-      "StartDelayMs": 15000,
+      "StartDelayMs": 10000,
       "CompletionMode": 0,
       "ExpectedDestinationMapNumber": 0
     }
   ],
   "ExpLoop": {
     "PathFile": "Kharon Exp Wolves.json",
-    "StartDelayMs": 444
+    "StartDelayMs": 111
   },
   "MinHpPotions": 5,
   "MinManaPotions": 3,
@@ -32,6 +32,7 @@
   "RedBuyTarget": 4,
   "WhiteBuyTarget": 4,
   "DryRunRepot": false,
+  "LootPriority": true,
   "TeleportKey": 54,
   "TeleportScanCode": 7,
   "MaxTeleportRetries": 3,

@@ -144,6 +144,20 @@ namespace DriverScanTester
             /// <summary>Minimum interval in seconds between TAB presses while in move+attack mode.</summary>
             public const double MoveModeTabIntervalSeconds = 0.8;
 
+            /// <summary>
+            /// Combat stuck detection: when a mob is selected and the player's POSITION and
+            /// MANA are both unchanged for this long, the player is considered stuck — a real
+            /// attack consumes mana (skill), so static mana means the attack is not connecting
+            /// (unreachable mob / obstacle). Triggers the standard unstuck action.
+            /// </summary>
+            public const double CombatStuckTimeoutMs = 10000;
+
+            /// <summary>
+            /// Displacement (game tiles) above which the player position counts as "changed"
+            /// for the combat stuck detection (ignores float jitter while standing).
+            /// </summary>
+            public const float CombatStuckPosEpsilon = 0.5f;
+
             /// <summary>Default distance at which the bot disengages attack from a waypoint.</summary>
             public const short DefaultAttackDisengageDistance = 60;
 
@@ -213,6 +227,23 @@ namespace DriverScanTester
             /// Proximity to the waypoint alone must NOT reset it — otherwise a bot stuck
             /// next to its target loops the recovery forever without ever escalating.</summary>
             public const float StuckProgressResetDistance = 3.0f;
+
+            /// <summary>
+            /// Minimum displacement (game tiles) within <see cref="NoProgressTimeoutMs"/>
+            /// while W is held before the position-based stuck detector fires. Handles stuck
+            /// spots where the walk animation keeps playing (action byte stays "running")
+            /// but the player is actually pushing against an obstacle and standing still.
+            /// </summary>
+            public const float NoProgressMinDistance = 1.0f;
+
+            /// <summary>Time window for the position-based no-progress stuck detection.</summary>
+            public const int NoProgressTimeoutMs = 2000;
+
+            /// <summary>
+            /// Extra distance beyond the waypoint reach threshold inside which the
+            /// position-based stuck detector is suppressed (waypoint advance handles it).
+            /// </summary>
+            public const float NoProgressNearTargetExtra = 1.0f;
 
             /// <summary>Distance epsilon for segment tie-breaking: if two segments have dist within this value, prefer the one closer to current target.</summary>
             public const float RouteResyncTieDistanceEpsilon = 1.0f;
@@ -362,33 +393,26 @@ namespace DriverScanTester
             public const int RedPotionsCountValue = 16777222;
 
             /// <summary>Item types that should NOT be sold. (0 = empty slot)</summary>
-            public static readonly int[] ItemsNotForSale = { 0, 246, 247, 1092, 1093, 1094, 1095, 3093 };
+            /// <remarks>9049 = Kharon Crystal, 9050 = Kharon Vial (event type items — not meant to be sold).</remarks>
+            public static readonly int[] ItemsNotForSale = { 0, 246, 247, 1092, 1093, 1094, 1095, 3093, 9049, 9050 };
 
             /// <summary>
             /// Full 32-bit value of L_LootSelectedItem1 at [Ares.exe+0x4704A8]+0xC when a loot item is
             /// under the mouse cursor.  WARNING: This value changes every game launch (per-session seed).
-            /// If loot stops detecting, re-read this address as cl (32-bit int) while hovering an item.
+            /// If loot stops detecting, re-read this address as cl (32-bit int) while hovering an item
+            /// via the 'Mouseover Item' button in the Bot window (MainViewModel.CaptureItemMouseOver),
+            /// which also saves the value to MouseCalibration.json for the next launch.
             ///
-            /// NOTE: There is a stable relationship between NPC mouseover and item mouseover values:
-            ///   Item_cl = NPC_cl - 256
-            /// because the byte at +0xD (db) is always 1 less for item than for NPC (0xDB vs 0xDC).
-            /// WARNING (Sesja 3, 2026-08-03): this rule FAILED — Item=371473144 (0x16243AF8),
-            /// NPC=138599240 (0x0842DB48), diff=232873904. The value is likely the hovered
-            /// object's address/ID, not an item-vs-NPC flag. Set this value by hovering the
-            /// ITEM directly via the 'Mouseover Item' button in the Bot window
-            /// (MainViewModel.CaptureItemMouseOver), which also saves the full mouseover
-            /// dump to MouseOverValues_Log.txt for analysis.
+            /// VALUE-BASED loot detection: IsLootMouseOver() compares the hovered cl value against this
+            /// constant. A MOB or NPC under the cursor produces a DIFFERENT cl value, so exact matching
+            /// cleanly separates ground items from mobs/NPCs (the old structural check — value != 0 &&
+            /// !IsNpcMousePointed() — mistook mobs for items, because mobs do not set the NPC flag).
             ///
-            /// Sesja 4 (2026-08-03): Item=302348960 (0x12057AA0), NPC=138599240 (0x0842DB48).
-            ///
-            /// KEPT FOR REFERENCE ONLY — since Sesja 4 the loot detection in
-            /// <c>GameMemoryService.IsLootMouseOver()</c> is STRUCTURAL
-            /// (value != 0 && !IsNpcMousePointed()) and no longer compares against
-            /// this constant. Item addresses differ per session; the NPC seller value
-            /// (138599240) is stable across sessions and lives in
-            /// <see cref="DriverScanTester.Services.ItemSellerService.SellerPointedValue"/>.
+            /// Reference values (hover dump 2026-08-04):
+            ///   ITEM: cl = 121498128 (0x073DEA10), db(+0xD) = 234 (0xEA), bs(+0xB) = 4096 (0x1000)
+            ///   NPC : cl = 138599240 (0x0842DB48), db(+0xD) = 219 (0xDB), bs(+0xB) = 18432 (0x4800)
             /// </summary>
-            public static int LootMouseOverValue = 302348960;
+            public static int LootMouseOverValue = 121498128;
 
             /// <summary>Item type identifier for SOD items (no longer readable — kept for reference).</summary>
             public const int Sod = -13799;
@@ -619,12 +643,33 @@ namespace DriverScanTester
             public const int LootUpdateMs = 10;
 
             /// <summary>
-            /// After killing a mob in MoveAndAttackAndLoot mode, the movement system
-            /// waits this long before advancing waypoints, giving the loot system time
-            /// to scan for items.  During this pause the loot system runs its pixel scan
-            /// and/or area-loot; the combat system may still attack if a new mob appears.
+            /// Safety cap for how long the movement system waits after a kill for the
+            /// loot system to finish a full scan pass (no confirmed items). The wait
+            /// normally ends earlier, as soon as the loot system reports ScanComplete.
             /// </summary>
-            public const int PostCombatLootWaitMs = 1500;
+            public const int MaxLootWaitMs = 10000;
+
+            /// <summary>
+            /// While the loot wait is active, the deadline is extended when the loot
+            /// system collected an item within this grace period — so a big pile of
+            /// drops is fully drained instead of the bot walking away mid-collection.
+            /// </summary>
+            public const int LootWaitProgressGraceMs = 3000;
+
+            /// <summary>
+            /// After combat ends (no mob selected) in MoveAndAttackAndLoot mode, the
+            /// movement system arms the loot wait only within this window. Outside it
+            /// (normal walking between waypoints) the loot cycle runs in parallel
+            /// without blocking movement.
+            /// </summary>
+            public const int LootWaitArmWindowMs = 3000;
+
+            /// <summary>
+            /// How long the loot system holds the ScanComplete state after a full scan
+            /// pass found no items, before restarting its area-loot cycle. Gives the
+            /// movement system time to walk away from the cleared spot.
+            /// </summary>
+            public const int LootScanCompleteHoldMs = 2500;
 
             /// <summary>Delay after left-click down during collection.</summary>
             public const int CollectClickHoldMs = 50;
@@ -644,6 +689,14 @@ namespace DriverScanTester
 
             /// <summary>Number of teleport-wait iterations (~20 seconds total).</summary>
             public const int TeleportWaitIterations = 40;
+
+            /// <summary>
+            /// Wait after the town teleport before starting any movement. The game UI
+            /// (loading screen / world render) needs time to finish after the in-city
+            /// flag becomes readable; moving immediately makes the client ignore input
+            /// and the bot misreads the still-loading state as stuck.
+            /// </summary>
+            public const int PostTeleportUiLoadMs = 10000;
 
             // ── Exp loop ──
             /// <summary>Interval in ms between repot condition checks during exp loop.</summary>

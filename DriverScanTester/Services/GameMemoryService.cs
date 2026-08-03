@@ -536,19 +536,16 @@ namespace DriverScanTester.Services
         /// L_LootSelectedItem1 at <c>[Ares.exe + 0x4704A8] + 0xC</c> (same pointer as
         /// seller mouseover but interpreted as a 32-bit clong value).
         ///
-        /// STRUCTURAL check — no per-session hardcoding needed:
-        /// The value is the hovered entity's object address/ID (48-bit pointer in
-        /// bytes +0xA..+0xF). 0 means nothing hovered; any non-zero value while the
-        /// NPC-pointer flag is NOT set means a ground item (loot) is under the cursor.
+        /// VALUE-BASED check against <see cref="BotConstants.GameMagicValues.LootMouseOverValue"/>:
+        /// the item value is captured per session via the 'Mouseover Item' calibrate button
+        /// (MainViewModel.CaptureItemMouseOver, persisted in MouseCalibration.json) and equals
+        /// the hovered object's cl int (e.g. 0x073DEA10 = 121498128 for an item vs
+        /// 0x0842DB48 = 138599240 for the seller NPC, hover dump 2026-08-04).
         ///
-        /// Session analysis (Sesja 1-4, see MouseOverValues_Log.txt) proved that
-        /// item values change every game launch (different object instance each
-        /// time), so exact matching against
-        /// <see cref="BotConstants.GameMagicValues.LootMouseOverValue"/> is unreliable.
-        /// The NPC seller value (0x0842DB48 = 138599240) IS stable across sessions,
-        /// which is why <see cref="DriverScanTester.Services.ItemSellerService.SellerPointedValue"/>
-        /// still works as a constant — and why the NPC flag here correctly filters
-        /// NPCs/mobs out of loot detection.
+        /// A MOB or NPC under the cursor produces a DIFFERENT cl value, so exact matching
+        /// cleanly separates ground items from mobs/NPCs. The previous STRUCTURAL check
+        /// (value != 0 && !IsNpcMousePointed()) mistook mobs for items, because mobs do
+        /// not set the NPC-highlight flag ([Ares.exe + 0x471C84] + 0x7C).
         /// </summary>
         public bool IsLootMouseOver()
         {
@@ -556,8 +553,25 @@ namespace DriverScanTester.Services
             ulong baseAddr = ReadPointer(ptrAddr);
             if (baseAddr == 0) return false;
             int value = ReadInt(baseAddr + IsSellerPointedOffset);
-            return value != 0 && !IsNpcMousePointed();
+
+            int itemValue = BotConstants.GameMagicValues.LootMouseOverValue;
+            if (itemValue == 0)
+            {
+                // No calibration captured yet this session — warn once so the user
+                // knows to hover an item and press 'Mouseover Item'.
+                if (!_warnedNoLootCalibration)
+                {
+                    _warnedNoLootCalibration = true;
+                    _log?.Invoke("[Loot] No item mouseover calibration (LootMouseOverValue=0) — hover a loot item and press the 'Mouseover Item' button in the Bot window to calibrate.");
+                }
+                return false;
+            }
+
+            return value != 0 && value == itemValue && !IsNpcMousePointed();
         }
+
+        /// <summary>One-time warning flag for a missing item mouseover calibration.</summary>
+        private static bool _warnedNoLootCalibration = false;
 
         /// <summary>
         /// Captures the FULL mouseover value dump at <c>[Ares.exe + 0x4704A8] + 0xA..+0xF</c>

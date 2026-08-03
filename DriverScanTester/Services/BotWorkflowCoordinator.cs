@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -150,8 +151,37 @@ namespace DriverScanTester.Services
 
             _log($"[Coordinator]   Stage 3 — EXP Path: '{_profile.ExpLoop.PathFile}' (wait {_profile.ExpLoop.StartDelayMs} ms)");
 
+            // ── Auto potion drinking ──
+            // The workflow previously never drank HP/mana potions (HealManaSystem only
+            // ran in the UI flow). Without it the player's mana drains during hunting
+            // and the repot detector teleports to the city on a low-mana sample even
+            // with a full potion stock. Drink automatically for the whole workflow,
+            // using the profile's MinHp/MinMana as the drink thresholds.
+            var healSystem = new HealManaSystem(_memoryService, _log);
+            HealManaSystem.Threshold1 = (short)Math.Clamp(_profile.MinHp, 0, short.MaxValue);
+            HealManaSystem.Threshold2 = (short)Math.Clamp(_profile.MinMana, 0, short.MaxValue);
+            _log($"[HealMana] Auto-drink enabled: HP < {HealManaSystem.Threshold1} → key 1, Mana < {HealManaSystem.Threshold2} → key 2.");
+
+            Task? healTask = null;
             try
             {
+                healTask = Task.Run(async () =>
+                {
+                    try
+                    {
+                        while (!token.IsCancellationRequested && healSystem != null)
+                        {
+                            await healSystem.Update(token);
+                            await Task.Delay(100, token); // Update rate for heal/mana
+                        }
+                    }
+                    catch (OperationCanceledException) { }
+                    catch (Exception ex)
+                    {
+                        _log($"[HealMana] Error: {ex.Message}");
+                    }
+                }, token);
+
                 await RunWorkflowLoop(token);
             }
             catch (OperationCanceledException)
@@ -166,6 +196,14 @@ namespace DriverScanTester.Services
             finally
             {
                 _pathRunner.Stop();
+                if (healTask != null)
+                {
+                    try
+                    {
+                        await healTask;
+                    }
+                    catch (OperationCanceledException) { }
+                }
                 _isRunning = false;
                 if (CurrentPhase != BotPhase.Failed && CurrentPhase != BotPhase.Stopping)
                     CurrentPhase = BotPhase.Idle;
@@ -406,6 +444,49 @@ namespace DriverScanTester.Services
 
             var pathTask = _pathRunner.RunPathAsync(waypoints, loop: true, expToken);
 
+            // The EXP route is a hunting route (MoveAndAttackAndLoot): run the loot
+            // system in parallel so drops are collected while walking and after kills.
+            // It shares the movement system's memory service and cancels itself the
+            // moment a mob gets selected. Without it the bot would never loot at all —
+            // the loot bot was previously only started from the UI, not the workflow.
+            LootSystem? lootSystem = null;
+            Task? lootTask = null;
+            if (waypoints.Any(w => w.Mode == BotMode.MoveAndAttackAndLoot))
+            {
+                lootSystem = new LootSystem(_memoryService, _log)
+                {
+                    LootPriorityMode = _profile.LootPriority
+                };
+
+                // Give the movement system a reference to the loot system so it can hold
+                // waypoint advancement until a full loot scan pass finishes after a kill.
+                if (_pathRunner.CurrentMovement != null)
+                {
+                    _pathRunner.CurrentMovement.LootSystemRef = lootSystem;
+                    _pathRunner.CurrentMovement.LootPriorityMode = _profile.LootPriority;
+                }
+
+                lootTask = Task.Run(async () =>
+                {
+                    try
+                    {
+                        while (!expToken.IsCancellationRequested && lootSystem != null)
+                        {
+                            await lootSystem.Update(expToken);
+                            await Task.Delay(BotConstants.Delays.LootUpdateMs, expToken);
+                        }
+                    }
+                    catch (OperationCanceledException) { }
+                    catch (Exception ex)
+                    {
+                        _log($"[Phase] ExpLoop: Loot system error: {ex.Message}");
+                    }
+                }, expToken);
+                _log("[Phase] ExpLoop: Loot system started (MoveAndAttackAndLoot route).");
+                if (_profile.LootPriority)
+                    _log("[Phase] ExpLoop: LOOT PRIORITY MODE ON — looting outranks combat; attack and waypoint movement are suspended while loot is being scanned/collected.");
+            }
+
             bool repotNeeded = false;
             bool cityDetected = false;
             int inCityConsecutiveReads = 0;
@@ -452,6 +533,18 @@ namespace DriverScanTester.Services
                 await pathTask;
             }
             catch (OperationCanceledException) { }
+
+            // Stop the loot loop with the phase — it must not run during repot/teleport.
+            if (!expCts.IsCancellationRequested)
+                expCts.Cancel();
+            if (lootTask != null)
+            {
+                try
+                {
+                    await lootTask;
+                }
+                catch (OperationCanceledException) { }
+            }
 
             _pathRunner.Stop();
             _log("[Phase] ExpLoop: Exp hunting loop ended.");
@@ -855,17 +948,27 @@ namespace DriverScanTester.Services
             await Task.Delay(BotConstants.Delays.TeleportKeyDownMs, token);
             keybd_event(vk, scan, KEYEVENTF_KEYUP, 0);
 
+            bool arrived = false;
             for (int i = 0; i < BotConstants.Delays.TeleportWaitIterations; i++)
             {
                 await Task.Delay(BotConstants.Delays.TeleportWaitIterationMs, token);
                 if (_memoryService.GetIsInCity())
                 {
                     _log("[Teleport] Arrived in city.");
-                    return;
+                    arrived = true;
+                    break;
                 }
             }
 
-            _log("[Teleport] Teleport wait timeout — proceeding anyway.");
+            if (!arrived)
+                _log("[Teleport] Teleport wait timeout — proceeding anyway.");
+
+            // The game UI (loading screen → world render) needs time to finish after the
+            // in-city flag becomes readable. Starting to move immediately makes the client
+            // ignore input and the bot misreads the still-loading state as stuck (action=1).
+            // Wait for the UI to settle before the repot path is started.
+            _log($"[Teleport] Waiting {BotConstants.Delays.PostTeleportUiLoadMs} ms for the game UI to load...");
+            await Task.Delay(BotConstants.Delays.PostTeleportUiLoadMs, token);
         }
     }
 }

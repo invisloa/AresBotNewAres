@@ -39,9 +39,11 @@ namespace DriverScanTester.Models
         public int MinManaPotions { get; set; } = BotConstants.Repot.DefaultMinManaPotions;
         /// <summary>Weight ratio (current/max) above which repot is triggered.</summary>
         public float MaxWeightRatio { get; set; } = BotConstants.Repot.DefaultMaxWeightRatio;
-        /// <summary>If HP is at or below this value, repot is triggered.</summary>
+        /// <summary>HP floor: the heal bot drinks an HP potion when HP drops below this.
+        /// Repot is only triggered at/below this value when HP potions are exhausted.</summary>
         public int MinHp { get; set; } = BotConstants.Repot.DefaultMinHp;
-        /// <summary>If Mana is at or below this value, repot is triggered.</summary>
+        /// <summary>Mana floor: the heal bot drinks a mana potion when mana drops below this.
+        /// Repot is only triggered at/below this value when mana potions are exhausted.</summary>
         public int MinMana { get; set; } = BotConstants.Repot.DefaultMinMana;
 
         // --- Potion buy targets (override RepotSystem defaults) ---
@@ -57,6 +59,16 @@ namespace DriverScanTester.Models
         // --- Workflow options ---
         /// <summary>If true, skip actual RepotSystem.Repot() and just log "dry run".</summary>
         public bool DryRunRepot { get; set; } = false;
+
+        // --- Loot priority mode ---
+        /// <summary>
+        /// When true, this profile is a loot-priority profile: looting outranks combat
+        /// and waypoint movement. The bot scans for ground loot even while a mob is
+        /// selected / being attacked; as soon as a loot item is found the bot goes to
+        /// loot it, and while the bot walks to loot it performs NO attack actions and
+        /// NO movement toward the next waypoint. Looting all items is the top priority.
+        /// </summary>
+        public bool LootPriority { get; set; } = false;
 
         /// <summary>Virtual-key code for town teleport (default 0x36 = '6').</summary>
         public int TeleportKey { get; set; } = BotConstants.Workflow.DefaultTeleportKey;

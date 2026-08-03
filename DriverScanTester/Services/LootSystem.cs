@@ -43,15 +43,61 @@ namespace DriverScanTester.Services
         //   AreaLootWait→ compare inventory snapshot; if changed → keep spacebar-looting;
         //                  if no change after several tries → switch to Scan
         //   Scan        → pixel-scan for SOD/SOP white pixels and collect them
-        private enum LootMachineState { Idle, PostMobTab, AreaLoot, AreaLootWait, Scan }
+        //   ScanComplete→ a full scan pass found no items; hold briefly so the movement
+        //                  system can walk away, then restart the cycle from Idle
+        private enum LootMachineState { Idle, PostMobTab, AreaLoot, AreaLootWait, Scan, ScanComplete }
         private LootMachineState _lootState = LootMachineState.Idle;
         private DateTime _nextActionTime = DateTime.MinValue;
         private int _inventoryChecksumBefore;
         private int _consecutiveEmptySpacePresses;
         private const int MaxEmptySpacePressesBeforeScan = 3;
 
+        /// <summary>Until this time the ScanComplete state holds (no area-loot/scan).</summary>
+        private DateTime _scanCompleteUntil = DateTime.MinValue;
+
+        /// <summary>Last time an item was actually collected (spacebar pickup or pixel-scan click).</summary>
+        private DateTime _lastItemCollectedAt = DateTime.MinValue;
+
+        /// <summary>
+        /// Time since the last item was collected. Used by the movement system to extend
+        /// its post-combat loot wait while the loot system is still making progress
+        /// (TimeSpan.MaxValue when nothing was collected yet this session).
+        /// </summary>
+        public TimeSpan TimeSinceLastItemCollected =>
+            _lastItemCollectedAt == DateTime.MinValue
+                ? TimeSpan.MaxValue
+                : DateTime.UtcNow - _lastItemCollectedAt;
+
+        /// <summary>
+        /// True while the loot machine is actively collecting (area-loot / pixel scan).
+        /// False when idle or after a full scan pass completed with no confirmed items.
+        /// The movement system waits for this to become false after a kill, so it does
+        /// not walk away before all drops are collected.
+        /// </summary>
+        public bool IsLootCycleActive =>
+            _lootState == LootMachineState.PostMobTab ||
+            _lootState == LootMachineState.AreaLoot ||
+            _lootState == LootMachineState.AreaLootWait ||
+            _lootState == LootMachineState.Scan;
+
         /// <summary>Game window handle — stored during ResolveClientOrigin().</summary>
         private nint _hwnd;
+
+        /// <summary>
+        /// Loot-priority mode (profile flag "Loot Priority"): looting outranks combat.
+        /// When true the loot machine does NOT cancel itself when a mob gets selected —
+        /// it keeps scanning for and collecting ground items even during the attack
+        /// phase. The movement system (LootPriorityMode) suspends attack actions and
+        /// waypoint movement while the scan is active so every item gets picked up.
+        /// </summary>
+        public bool LootPriorityMode { get; set; } = false;
+
+        /// <summary>
+        /// True while the loot machine is in the pixel-scan state (Scan): it is actively
+        /// looking for, clicking and walking to ground items. In loot-priority mode the
+        /// movement system suspends combat and waypoint movement while this is true.
+        /// </summary>
+        public bool IsScanActive => _lootState == LootMachineState.Scan;
 
         /// <summary>Previous tick's IsMobSelected value — used to detect mob death.</summary>
         private bool _wasMobSelectedPrev = false;
@@ -483,19 +529,35 @@ namespace DriverScanTester.Services
             // ── Track mob selection to detect mob death ──
             bool isMobSelected = _memoryService.IsMobSelected();
 
-            // Mob just died (was selected → no longer selected) → TAB first to
-            // check if there are more mobs to kill before starting loot.
+            // Mob just died (was selected → no longer selected) → normally TAB first to
+            // check if there are more mobs to kill before starting loot. In loot-priority
+            // mode the TAB check is skipped — looting comes first, so area loot starts
+            // immediately.
             if (_wasMobSelectedPrev && !isMobSelected)
             {
-                _log("[Loot] Mob killed — pressing TAB to check for more mobs.");
-                _lootState = LootMachineState.PostMobTab;
-                _nextActionTime = DateTime.UtcNow;
-                _consecutiveEmptySpacePresses = 0;
                 _wasMobSelectedPrev = false;
+                if (LootPriorityMode)
+                {
+                    _log("[Loot] Mob killed (loot priority) — starting area loot directly.");
+                    _lootState = LootMachineState.AreaLoot;
+                    _nextActionTime = DateTime.UtcNow;
+                    _consecutiveEmptySpacePresses = 0;
+                }
+                else
+                {
+                    _log("[Loot] Mob killed — pressing TAB to check for more mobs.");
+                    _lootState = LootMachineState.PostMobTab;
+                    _nextActionTime = DateTime.UtcNow;
+                    _consecutiveEmptySpacePresses = 0;
+                }
             }
 
             // ── If a mob is selected, TOTALLY CANCEL any loot in progress. ──
-            if (isMobSelected)
+            // EXCEPT in loot-priority mode (LootPriorityMode), where looting outranks
+            // combat: the machine keeps scanning/collecting even while a mob is selected
+            // (the movement system suspends attack while the scan runs, see
+            // MovementSystem.LootPriorityMode).
+            if (isMobSelected && !LootPriorityMode)
             {
                 _wasMobSelectedPrev = true;
 
@@ -512,9 +574,17 @@ namespace DriverScanTester.Services
                 return;
             }
 
+            if (isMobSelected)
+            {
+                // Loot-priority mode: remember the selection for mob-death detection
+                // and keep the loot cycle running.
+                _wasMobSelectedPrev = true;
+            }
+
             // ── Loot state machine ──
             // PostMobTab→ press TAB (best-effort), then immediately start loot
-            //   (combat bot's own targeting interrupts loot via IsMobSelected check)
+            //   (combat bot's own targeting interrupts loot via IsMobSelected check;
+            //   in loot-priority mode loot never interrupts)
             // AreaLoot → press spacebar x3, snapshot inventory → AreaLootWait → compare →
             //   (items collected) → AreaLoot again (keep spacebar-looting)
             //   (no items after N tries) → Scan (with 200ms delay)
@@ -553,12 +623,13 @@ namespace DriverScanTester.Services
 
                         // Press spacebar THREE times with 30ms gap.
                         // Check combat between each press so we cancel immediately
-                        // if a mob gets selected during the presses.
+                        // if a mob gets selected during the presses (unless loot
+                        // priority mode, where looting outranks combat).
                         GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
-                        if (_memoryService.IsMobSelected() || _memoryService.GetIsInCity()) { _lootState = LootMachineState.Idle; break; }
+                        if (ShouldAbortLoot()) { _lootState = LootMachineState.Idle; break; }
                         Thread.Sleep(30);
                         GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
-                        if (_memoryService.IsMobSelected() || _memoryService.GetIsInCity()) { _lootState = LootMachineState.Idle; break; }
+                        if (ShouldAbortLoot()) { _lootState = LootMachineState.Idle; break; }
                         Thread.Sleep(30);
                         GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                         _log("[Loot] Spacebar pressed x3 (area loot).");
@@ -578,6 +649,7 @@ namespace DriverScanTester.Services
                         {
                             // Items were collected — press spacebar again soon.
                             _log("[Loot] Items collected — repeating spacebar.");
+                            _lastItemCollectedAt = DateTime.UtcNow;
                             _consecutiveEmptySpacePresses = 0;
                             _nextActionTime = DateTime.UtcNow.AddMilliseconds(50);
                             _lootState = LootMachineState.AreaLoot;
@@ -631,21 +703,35 @@ namespace DriverScanTester.Services
                         if (PixelScan())
                         {
                             // Item was found and collected — rescan next tick to drain remaining items.
+                            _lastItemCollectedAt = DateTime.UtcNow;
                             _nextActionTime = DateTime.UtcNow.AddMilliseconds(50);
                         }
                         else
                         {
-                            // No items found by scan — end the loot phase, restart with area-loot.
+                            // Full scan pass finished with no items — enter ScanComplete and
+                            // hold briefly so the movement system can walk away before the
+                            // next area-loot cycle restarts.
                             _log("[Loot] Scan complete — no more visible items.");
-                            _lootState = LootMachineState.Idle;
-                            _nextActionTime = DateTime.UtcNow.AddMilliseconds(
-                                BotConstants.Delays.LootSpacePressMs);
+                            _lootState = LootMachineState.ScanComplete;
+                            _scanCompleteUntil = DateTime.UtcNow.AddMilliseconds(
+                                BotConstants.Delays.LootScanCompleteHoldMs);
                             _consecutiveEmptySpacePresses = 0;
                         }
                     }
                     finally
                     {
                         StopScanSpacebarSpam();
+                    }
+                    break;
+
+                case LootMachineState.ScanComplete:
+                    // Full scan found nothing. Hold (no spacebar spam / no captures) until
+                    // the hold expires, then restart the cycle from Idle.
+                    if (DateTime.UtcNow >= _scanCompleteUntil)
+                    {
+                        _lootState = LootMachineState.Idle;
+                        _nextActionTime = DateTime.UtcNow;
+                        _consecutiveEmptySpacePresses = 0;
                     }
                     break;
             }
@@ -696,6 +782,15 @@ namespace DriverScanTester.Services
                 _scanSpacebarCts = null;
             }
         }
+
+        /// <summary>
+        /// True when the loot machine must abort its current action immediately:
+        /// the player entered the city, or — outside loot-priority mode — a mob got
+        /// selected (combat interrupts loot). In loot-priority mode (LootPriorityMode)
+        /// a mob selection never aborts loot: looting outranks combat.
+        /// </summary>
+        private bool ShouldAbortLoot() =>
+            _memoryService.GetIsInCity() || (!LootPriorityMode && _memoryService.IsMobSelected());
 
         private bool PixelScan()
         {
@@ -753,13 +848,15 @@ namespace DriverScanTester.Services
                 int whiteCount = 0;
                 int scanPixels = (xEnd - xStart) * (yEnd - yStart);
 
-                // Check once before starting the scan — if a mob is selected or we're in
-                // city, abort immediately.  During the scan the top-level Update() will
-                // cancel on the next tick if a new mob gets selected, so we don't need
-                // to check on every pixel.
-                if (_memoryService.IsMobSelected() || _memoryService.GetIsInCity())
+                // Check once before starting the scan — if we're in city, abort
+                // immediately. A mob being selected only aborts the scan outside
+                // loot-priority mode; in priority mode the scan keeps running even
+                // during the attack phase. During the scan the top-level Update()
+                // will cancel on the next tick if the city is entered, so we don't
+                // need to check on every pixel.
+                if (ShouldAbortLoot())
                 {
-                    _log($"[Loot] {regionName}: combat/city detected before scan — aborting.");
+                    _log($"[Loot] {regionName}: city/combat detected before scan — aborting.");
                     return false;
                 }
 
@@ -827,14 +924,17 @@ namespace DriverScanTester.Services
         {
             WaitMouseInPosition(x, y);
 
-            // If a mob got selected or player entered city, abort immediately.
-            if (_memoryService.IsMobSelected() || _memoryService.GetIsInCity())
+            // If the player entered city, abort immediately. A mob being selected
+            // only aborts outside loot-priority mode.
+            if (ShouldAbortLoot())
             {
                 return false;
             }
 
-            // If the mouseover indicator shows an item is selected (value 10312),
+            // If the mouseover value matches the calibrated item value
+            // (LootMouseOverValue, captured via the 'Mouseover Item' button),
             // treat it as SOD/SOP and collect regardless of the specific item type.
+            // Mobs/NPCs produce a different cl value and are NOT collected.
             if (_memoryService.IsLootMouseOver())
             {
                 _wasSodDetected = true;
@@ -873,10 +973,12 @@ namespace DriverScanTester.Services
 
             while (true)
             {
-                // If a mob was selected or player entered city, abort immediately.
-                if (_memoryService.IsMobSelected() || _memoryService.GetIsInCity())
+                // If the player entered city, abort immediately. A mob being selected
+                // only aborts the spacebar spam outside loot-priority mode — in
+                // priority mode the walk to the clicked loot item must finish.
+                if (ShouldAbortLoot())
                 {
-                    _log("[Loot] Mob/city detected during collection — aborting spacebar spam.");
+                    _log("[Loot] City/combat detected during collection — aborting spacebar spam.");
                     break;
                 }
 

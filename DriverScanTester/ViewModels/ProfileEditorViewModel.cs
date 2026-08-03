@@ -114,6 +114,7 @@ namespace DriverScanTester.ViewModels
                     OnPropertyChanged(nameof(RedBuyTarget));
                     OnPropertyChanged(nameof(WhiteBuyTarget));
                     OnPropertyChanged(nameof(DryRunRepot));
+                    OnPropertyChanged(nameof(LootPriority));
                     OnPropertyChanged(nameof(TeleportKey));
                     OnPropertyChanged(nameof(TeleportScanCode));
                     OnPropertyChanged(nameof(MaxTeleportRetries));
@@ -201,6 +202,17 @@ namespace DriverScanTester.ViewModels
         {
             get => CurrentProfile?.DryRunRepot ?? false;
             set { if (CurrentProfile != null) { CurrentProfile.DryRunRepot = value; OnPropertyChanged(); } }
+        }
+
+        /// <summary>
+        /// Loot-priority mode: when enabled, looting outranks combat and waypoint
+        /// movement — the bot scans for loot even while attacking a mob and suspends
+        /// attack/movement while it walks to loot.
+        /// </summary>
+        public bool LootPriority
+        {
+            get => CurrentProfile?.LootPriority ?? false;
+            set { if (CurrentProfile != null) { CurrentProfile.LootPriority = value; OnPropertyChanged(); } }
         }
 
         public int TeleportKey
@@ -299,6 +311,7 @@ namespace DriverScanTester.ViewModels
                 RedBuyTarget = BotConstants.Repot.RedBuyTarget,
                 WhiteBuyTarget = BotConstants.Repot.WhiteBuyTarget,
                 DryRunRepot = false,
+                LootPriority = false,
                 TeleportKey = BotConstants.Workflow.DefaultTeleportKey,
                 TeleportScanCode = BotConstants.Workflow.DefaultTeleportScanCode,
                 MaxTeleportRetries = BotConstants.Repot.MaxTeleportRetries,
