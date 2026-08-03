@@ -621,11 +621,19 @@ namespace DriverScanTester.Services
 
             _log($"[MoveToExp] Route {routeIndex}/{routeCount}: source map {sourceMap}.");
 
-            // Already on the destination map: the route is already complete, do not start its path.
+            // Already on the destination map: do not start its path, but still require
+            // the destination map and player position to settle before the next route starts.
             if (sourceMap == expectedMap)
             {
-                _log($"[MoveToExp] Route {routeIndex}/{routeCount}: already on destination map {expectedMap}. Route considered complete.");
-                return TravelRouteRunResult.Completed;
+                _log(
+                    $"[MoveToExp] Route {routeIndex}/{routeCount}: " +
+                    $"already on destination map {expectedMap}. Verifying settlement.");
+
+                return await WaitForMapSettlementAsync(
+                    expectedMap,
+                    routeIndex,
+                    routeCount,
+                    token);
             }
 
             using var routeCts = CancellationTokenSource.CreateLinkedTokenSource(token);

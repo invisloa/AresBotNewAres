@@ -816,7 +816,17 @@ namespace DriverScanTester.ViewModels
         public TravelRouteCompletionMode CompletionMode
         {
             get => _completionMode;
-            set => SetProperty(ref _completionMode, value);
+            set
+            {
+                if (!SetProperty(ref _completionMode, value))
+                    return;
+
+                if (value == TravelRouteCompletionMode.FinalWaypoint &&
+                    ExpectedDestinationMapNumber != 0)
+                {
+                    ExpectedDestinationMapNumber = 0;
+                }
+            }
         }
 
         private int _expectedDestinationMapNumber = 0;
