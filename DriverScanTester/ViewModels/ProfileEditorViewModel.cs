@@ -13,9 +13,9 @@ namespace DriverScanTester.ViewModels
 {
     /// <summary>
     /// ViewModel for the Profile Editor tab in PathEditorWindow.
-    /// Allows creating/editing BotProfiles with the four-stage route workflow:
-    /// Stage 1 (City → Repot, profile-level) and per-hunt stages 2-4
-    /// (Repot → Outside City, Outside City → Exp Spot, Exp Loop).
+    /// Allows creating/editing BotProfiles with the route workflow:
+    /// Stage 1 (City → Repot, profile-level) and per-hunt stages 2-3
+    /// (Travel Routes Repot → EXP chain, Exp Loop).
     /// Uses BotProfileLoader as the single persistence and validation service.
     /// </summary>
     public class ProfileEditorViewModel : BaseViewModel
@@ -50,6 +50,11 @@ namespace DriverScanTester.ViewModels
             MoveHuntUpCommand = new RelayCommand(_ => MoveHunt(-1), _ => SelectedHunt != null);
             MoveHuntDownCommand = new RelayCommand(_ => MoveHunt(1), _ => SelectedHunt != null);
             SetDefaultHuntCommand = new RelayCommand(_ => SetDefaultHunt(), _ => SelectedHunt != null);
+
+            AddTravelRouteCommand = new RelayCommand(_ => AddTravelRoute(), _ => SelectedHunt != null);
+            RemoveTravelRouteCommand = new RelayCommand(_ => RemoveTravelRoute(), _ => SelectedHunt?.SelectedTravelRoute != null);
+            MoveTravelRouteUpCommand = new RelayCommand(_ => MoveTravelRoute(-1), _ => SelectedHunt?.SelectedTravelRoute != null);
+            MoveTravelRouteDownCommand = new RelayCommand(_ => MoveTravelRoute(1), _ => SelectedHunt?.SelectedTravelRoute != null);
 
             // Initial loads
             RefreshProfiles();
@@ -279,6 +284,10 @@ namespace DriverScanTester.ViewModels
         public ICommand MoveHuntUpCommand { get; }
         public ICommand MoveHuntDownCommand { get; }
         public ICommand SetDefaultHuntCommand { get; }
+        public ICommand AddTravelRouteCommand { get; }
+        public ICommand RemoveTravelRouteCommand { get; }
+        public ICommand MoveTravelRouteUpCommand { get; }
+        public ICommand MoveTravelRouteDownCommand { get; }
 
         // ──────────────────── Implementation ────────────────────
 
@@ -306,7 +315,14 @@ namespace DriverScanTester.ViewModels
                 WindowOffsetX = 0,
                 WindowOffsetY = 0,
                 CityToRepot = new BotRouteStep(),
-                HuntDefinitions = new List<HuntDefinition> { new HuntDefinition { Name = "Default" } },
+                HuntDefinitions = new List<HuntDefinition>
+                {
+                    new HuntDefinition
+                    {
+                        Name = "Default",
+                        TravelToExpRoutes = new List<TravelRouteStep> { new TravelRouteStep() }
+                    }
+                },
                 DefaultHuntName = "Default"
             };
             StatusText = "Created new profile with hunt 'Default'. Fill in the fields and click Save.";
@@ -335,16 +351,15 @@ namespace DriverScanTester.ViewModels
                 .Select(h => new HuntDefinition
                 {
                     Name = h.Name,
-                    RepotToCityExit = new BotRouteStep
-                    {
-                        PathFile = h.RepotToCityExit.PathFile,
-                        StartDelayMs = h.RepotToCityExit.StartDelayMs
-                    },
-                    CityExitToExp = new BotRouteStep
-                    {
-                        PathFile = h.CityExitToExp.PathFile,
-                        StartDelayMs = h.CityExitToExp.StartDelayMs
-                    },
+                    TravelToExpRoutes = (h.TravelToExpRoutes ?? new ObservableCollection<TravelRouteStepViewModel>())
+                        .Select(r => new TravelRouteStep
+                        {
+                            PathFile = r.PathFile,
+                            StartDelayMs = r.StartDelayMs,
+                            CompletionMode = r.CompletionMode,
+                            ExpectedDestinationMapNumber = r.ExpectedDestinationMapNumber
+                        })
+                        .ToList(),
                     ExpLoop = new BotRouteStep
                     {
                         PathFile = h.ExpLoop.PathFile,
@@ -491,15 +506,19 @@ namespace DriverScanTester.ViewModels
 
         private void RefreshSegments()
         {
-            // Capture every configured route path before clearing the segment list.
+            // Capture every configured route path and selection before clearing the segment list.
             // Clearing a bound ComboBox ItemsSource writes null back into the SelectedItem,
-            // so the paths must be restored after the collection has been repopulated.
+            // so the paths and selections must be restored after the collection has been repopulated.
             string cityToRepotPath = CityToRepot.PathFile;
-            var huntPaths = HuntDefinitions
-                .Select(h => (Hunt: h,
-                              RepotToCityExit: h.RepotToCityExit.PathFile,
-                              CityExitToExp: h.CityExitToExp.PathFile,
-                              ExpLoop: h.ExpLoop.PathFile))
+            HuntDefinitionViewModel? selectedHunt = SelectedHunt;
+            var huntStates = HuntDefinitions
+                .Select(h => new
+                {
+                    Hunt = h,
+                    SelectedRoute = h.SelectedTravelRoute,
+                    ExpLoopPath = h.ExpLoop.PathFile,
+                    RoutePaths = h.TravelToExpRoutes.Select(r => r.PathFile).ToList()
+                })
                 .ToList();
 
             AvailableSegments.Clear();
@@ -516,12 +535,16 @@ namespace DriverScanTester.ViewModels
             // Restore the exact stored strings, including paths that no longer exist in
             // SavedPaths, so validation can still report them.
             CityToRepot.PathFile = cityToRepotPath;
-            foreach (var (hunt, repotToCityExit, cityExitToExp, expLoop) in huntPaths)
+            foreach (var state in huntStates)
             {
-                hunt.RepotToCityExit.PathFile = repotToCityExit;
-                hunt.CityExitToExp.PathFile = cityExitToExp;
-                hunt.ExpLoop.PathFile = expLoop;
+                for (int i = 0; i < state.RoutePaths.Count && i < state.Hunt.TravelToExpRoutes.Count; i++)
+                    state.Hunt.TravelToExpRoutes[i].PathFile = state.RoutePaths[i];
+
+                state.Hunt.ExpLoop.PathFile = state.ExpLoopPath;
+                state.Hunt.SelectedTravelRoute = state.SelectedRoute;
             }
+
+            SelectedHunt = selectedHunt;
         }
 
         private void OnProfileSelectionChanged()
@@ -553,10 +576,20 @@ namespace DriverScanTester.ViewModels
             foreach (var h in CurrentProfile.HuntDefinitions ?? new List<HuntDefinition>())
             {
                 var vm = new HuntDefinitionViewModel { Name = h.Name };
-                vm.RepotToCityExit.PathFile = h.RepotToCityExit?.PathFile ?? "";
-                vm.RepotToCityExit.StartDelayMs = h.RepotToCityExit?.StartDelayMs ?? 0;
-                vm.CityExitToExp.PathFile = h.CityExitToExp?.PathFile ?? "";
-                vm.CityExitToExp.StartDelayMs = h.CityExitToExp?.StartDelayMs ?? 0;
+
+                foreach (var r in h.TravelToExpRoutes ?? new List<TravelRouteStep>())
+                {
+                    vm.TravelToExpRoutes.Add(new TravelRouteStepViewModel
+                    {
+                        PathFile = r.PathFile ?? "",
+                        StartDelayMs = r.StartDelayMs,
+                        CompletionMode = r.CompletionMode,
+                        ExpectedDestinationMapNumber = r.ExpectedDestinationMapNumber
+                    });
+                }
+                // Loading selects the first travel route.
+                vm.SelectedTravelRoute = vm.TravelToExpRoutes.FirstOrDefault();
+
                 vm.ExpLoop.PathFile = h.ExpLoop?.PathFile ?? "";
                 vm.ExpLoop.StartDelayMs = h.ExpLoop?.StartDelayMs ?? 0;
                 AttachHunt(vm);
@@ -589,6 +622,13 @@ namespace DriverScanTester.ViewModels
                 huntName = $"{baseName} {counter++}";
 
             var hunt = new HuntDefinitionViewModel { Name = huntName };
+            hunt.TravelToExpRoutes.Add(new TravelRouteStepViewModel
+            {
+                CompletionMode = TravelRouteCompletionMode.FinalWaypoint,
+                StartDelayMs = 0,
+                ExpectedDestinationMapNumber = 0
+            });
+            hunt.SelectedTravelRoute = hunt.TravelToExpRoutes[0];
             AttachHunt(hunt);
             HuntDefinitions.Add(hunt);
             SelectedHunt = hunt;
@@ -651,6 +691,56 @@ namespace DriverScanTester.ViewModels
                 h.IsDefault = string.Equals(h.Name, defaultName, StringComparison.OrdinalIgnoreCase);
         }
 
+        // ── Travel route management (within the selected hunt) ──
+
+        private void AddTravelRoute()
+        {
+            if (SelectedHunt == null) return;
+
+            var route = new TravelRouteStepViewModel
+            {
+                CompletionMode = TravelRouteCompletionMode.FinalWaypoint,
+                StartDelayMs = 0,
+                ExpectedDestinationMapNumber = 0
+            };
+            SelectedHunt.TravelToExpRoutes.Add(route);
+            SelectedHunt.SelectedTravelRoute = route;
+            StatusText = $"Added travel route {SelectedHunt.TravelToExpRoutes.Count} for hunt '{SelectedHunt.Name}'.";
+        }
+
+        private void RemoveTravelRoute()
+        {
+            var hunt = SelectedHunt;
+            var route = hunt?.SelectedTravelRoute;
+            if (hunt == null || route == null) return;
+
+            int index = hunt.TravelToExpRoutes.IndexOf(route);
+            hunt.TravelToExpRoutes.Remove(route);
+
+            // Select the nearest remaining route.
+            if (hunt.TravelToExpRoutes.Count > 0)
+                hunt.SelectedTravelRoute = hunt.TravelToExpRoutes[Math.Min(index, hunt.TravelToExpRoutes.Count - 1)];
+            else
+                hunt.SelectedTravelRoute = null;
+
+            StatusText = $"Removed travel route {index + 1} from hunt '{hunt.Name}'.";
+        }
+
+        private void MoveTravelRoute(int direction)
+        {
+            var hunt = SelectedHunt;
+            var route = hunt?.SelectedTravelRoute;
+            if (hunt == null || route == null) return;
+
+            int oldIndex = hunt.TravelToExpRoutes.IndexOf(route);
+            int newIndex = oldIndex + direction;
+            if (newIndex >= 0 && newIndex < hunt.TravelToExpRoutes.Count)
+            {
+                // The item reference is preserved, so the selection stays on the same route.
+                hunt.TravelToExpRoutes.Move(oldIndex, newIndex);
+            }
+        }
+
         // ── Hunt rename sync (keep DefaultHuntName pointing at the default hunt) ──
 
         private void AttachHunt(HuntDefinitionViewModel hunt) => hunt.PropertyChanged += OnHuntPropertyChanged;
@@ -702,6 +792,41 @@ namespace DriverScanTester.ViewModels
         }
     }
 
+    /// <summary>
+    /// Editor representation of one travel route leg: a saved path segment reference,
+    /// a startup delay, the completion mode and the expected destination map.
+    /// </summary>
+    public sealed class TravelRouteStepViewModel : BaseViewModel
+    {
+        private string _pathFile = "";
+        public string PathFile
+        {
+            get => _pathFile;
+            set => SetProperty(ref _pathFile, value);
+        }
+
+        private int _startDelayMs = 0;
+        public int StartDelayMs
+        {
+            get => _startDelayMs;
+            set => SetProperty(ref _startDelayMs, value);
+        }
+
+        private TravelRouteCompletionMode _completionMode = TravelRouteCompletionMode.FinalWaypoint;
+        public TravelRouteCompletionMode CompletionMode
+        {
+            get => _completionMode;
+            set => SetProperty(ref _completionMode, value);
+        }
+
+        private int _expectedDestinationMapNumber = 0;
+        public int ExpectedDestinationMapNumber
+        {
+            get => _expectedDestinationMapNumber;
+            set => SetProperty(ref _expectedDestinationMapNumber, value);
+        }
+    }
+
     public class HuntDefinitionViewModel : BaseViewModel
     {
         private string _name = "";
@@ -722,8 +847,16 @@ namespace DriverScanTester.ViewModels
         /// <summary>Name before the last rename (used to keep DefaultHuntName in sync).</summary>
         public string PreviousName => _previousName;
 
-        public BotRouteStepViewModel RepotToCityExit { get; } = new();
-        public BotRouteStepViewModel CityExitToExp { get; } = new();
+        /// <summary>Ordered travel-route chain from the repot location to the EXP position.</summary>
+        public ObservableCollection<TravelRouteStepViewModel> TravelToExpRoutes { get; } = new();
+
+        private TravelRouteStepViewModel? _selectedTravelRoute;
+        public TravelRouteStepViewModel? SelectedTravelRoute
+        {
+            get => _selectedTravelRoute;
+            set => SetProperty(ref _selectedTravelRoute, value);
+        }
+
         public BotRouteStepViewModel ExpLoop { get; } = new();
 
         private bool _isDefault;

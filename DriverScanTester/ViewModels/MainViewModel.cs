@@ -2593,7 +2593,7 @@ namespace DriverScanTester.ViewModels
         private HealManaSystem? _healManaSystem;
         private LootSystem? _lootSystem;
 
-        // --- Four-stage Workflow Coordinator ---
+        // --- Route Workflow Coordinator ---
         private BotWorkflowCoordinator? _workflowCoordinator;
         private Task? _workflowTask;
         private BotProfileLoader? _profileLoader;
@@ -2603,9 +2603,9 @@ namespace DriverScanTester.ViewModels
         public BotProfile? ActiveProfile => _workflowCoordinator?.ActiveProfile;
 
         /// <summary>
-        /// Starts the four-stage route workflow (City → Repot, Repot → Outside City,
-        /// Outside City → Exp Spot, Exp Loop). Requires a non-null valid profile and
-        /// a non-null active hunt; there is no no-profile fallback mode.
+        /// Starts the route workflow (City → Repot, Travel Routes Repot → EXP chain,
+        /// Exp Loop). Requires a non-null valid profile and a non-null active hunt;
+        /// there is no no-profile fallback mode.
         /// </summary>
         public void StartWorkflow(BotProfile profile, HuntDefinition activeHunt)
         {
@@ -2642,10 +2642,20 @@ namespace DriverScanTester.ViewModels
                 profile, activeHunt, AppendLog, FocusGameWindow);
             AppendLog($"Starting workflow with profile '{profile.Name}'.");
             AppendLog($"Active hunt: '{activeHunt.Name}'");
-            AppendLog($"  City → Repot:            '{profile.CityToRepot.PathFile}' (delay {profile.CityToRepot.StartDelayMs} ms)");
-            AppendLog($"  Repot → Outside City:    '{activeHunt.RepotToCityExit.PathFile}' (delay {activeHunt.RepotToCityExit.StartDelayMs} ms)");
-            AppendLog($"  Outside City → Exp Spot: '{activeHunt.CityExitToExp.PathFile}' (delay {activeHunt.CityExitToExp.StartDelayMs} ms)");
-            AppendLog($"  Exp Loop:                '{activeHunt.ExpLoop.PathFile}' (delay {activeHunt.ExpLoop.StartDelayMs} ms)");
+            AppendLog($"  City → Repot: '{profile.CityToRepot.PathFile}' (delay {profile.CityToRepot.StartDelayMs} ms)");
+
+            var travelRoutes = activeHunt.TravelToExpRoutes ?? new List<TravelRouteStep>();
+            for (int i = 0; i < travelRoutes.Count; i++)
+            {
+                var route = travelRoutes[i];
+                if (route == null) continue;
+                string mapInfo = route.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached
+                    ? $", map {route.ExpectedDestinationMapNumber}"
+                    : "";
+                AppendLog($"  Travel route {i + 1}/{travelRoutes.Count}: '{route.PathFile}' (delay {route.StartDelayMs} ms, {route.CompletionMode}{mapInfo})");
+            }
+
+            AppendLog($"  EXP loop: '{activeHunt.ExpLoop.PathFile}' (delay {activeHunt.ExpLoop.StartDelayMs} ms)");
 
             _workflowCoordinator.OnPhaseChanged = phaseName =>
             {

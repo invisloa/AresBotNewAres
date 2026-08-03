@@ -75,7 +75,7 @@ namespace DriverScanTester.ViewModels
             }, _ => _main.IsAttached);
             ClearBotLogCommand = new RelayCommand(_ => BotLogText = "");
 
-            // Four-stage Workflow commands
+            // Route Workflow commands
             StartWorkflowCommand = new RelayCommand(_ => StartWorkflowWithProfile(), _ => _main.IsAttached && CanStartWorkflow);
             StopWorkflowCommand = new RelayCommand(_ => _main.StopWorkflow(), _ => _main.IsAttached);
             RefreshProfilesCommand = new RelayCommand(_ => RefreshProfiles(), _ => _main.IsAttached);
@@ -178,7 +178,7 @@ namespace DriverScanTester.ViewModels
 
         public bool IsAnyBotRunning => IsMovementBotRunning || IsHealManaBotRunning || IsLootBotRunning;
 
-        // Four-stage Workflow properties
+        // Route Workflow properties
         public bool IsWorkflowRunning
         {
             get => _isWorkflowRunning;
@@ -203,7 +203,7 @@ namespace DriverScanTester.ViewModels
         public ICommand TestSellSpecificSlotCommand { get; }
         public ICommand ClearBotLogCommand { get; }
 
-        // Four-stage Workflow commands
+        // Route Workflow commands
         public ICommand StartWorkflowCommand { get; }
         public ICommand StopWorkflowCommand { get; }
         public ICommand RefreshProfilesCommand { get; }
@@ -408,10 +408,20 @@ namespace DriverScanTester.ViewModels
 
             _appendLog($"Workflow started with profile '{profile.Name}'.");
             _appendLog($"Active hunt: '{activeHunt.Name}'");
-            _appendLog($"  City → Repot:            '{profile.CityToRepot.PathFile}' (delay {profile.CityToRepot.StartDelayMs} ms)");
-            _appendLog($"  Repot → Outside City:    '{activeHunt.RepotToCityExit.PathFile}' (delay {activeHunt.RepotToCityExit.StartDelayMs} ms)");
-            _appendLog($"  Outside City → Exp Spot: '{activeHunt.CityExitToExp.PathFile}' (delay {activeHunt.CityExitToExp.StartDelayMs} ms)");
-            _appendLog($"  Exp Loop:                '{activeHunt.ExpLoop.PathFile}' (delay {activeHunt.ExpLoop.StartDelayMs} ms)");
+            _appendLog($"  City → Repot: '{profile.CityToRepot.PathFile}' (delay {profile.CityToRepot.StartDelayMs} ms)");
+
+            var travelRoutes = activeHunt.TravelToExpRoutes ?? new List<TravelRouteStep>();
+            for (int i = 0; i < travelRoutes.Count; i++)
+            {
+                var route = travelRoutes[i];
+                if (route == null) continue;
+                string mapInfo = route.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached
+                    ? $", map {route.ExpectedDestinationMapNumber}"
+                    : "";
+                _appendLog($"  Travel route {i + 1}/{travelRoutes.Count}: '{route.PathFile}' (delay {route.StartDelayMs} ms, {route.CompletionMode}{mapInfo})");
+            }
+
+            _appendLog($"  EXP loop: '{activeHunt.ExpLoop.PathFile}' (delay {activeHunt.ExpLoop.StartDelayMs} ms)");
         }
 
         public void SyncBotStates()

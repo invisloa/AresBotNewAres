@@ -587,6 +587,22 @@ namespace DriverScanTester
             /// <summary>Interval in ms between repot condition checks during exp loop.</summary>
             public const int ExpLoopRepotCheckIntervalMs = 3000;
 
+            // ── Map transitions ──
+            /// <summary>Poll interval in ms for map number during travel-route map transitions.</summary>
+            public const int MapTransitionPollMs = 100;
+
+            /// <summary>Number of consecutive stable reads required to accept a map change.</summary>
+            public const int MapTransitionStableReadCount = 2;
+
+            /// <summary>Grace period in ms after a path finishes before a portal transition must appear.</summary>
+            public const int MapTransitionGraceAfterPathMs = 3000;
+
+            /// <summary>Timeout in ms for destination-map / player-position settlement after a map change.</summary>
+            public const int MapTransitionSettleTimeoutMs = 5000;
+
+            /// <summary>Timeout in ms for reading a valid (nonzero) map number before starting a map route.</summary>
+            public const int ValidMapReadTimeoutMs = 5000;
+
             // ── Misc ──
             /// <summary>Key press gap for heal/mana system.</summary>
             public const int HealManaKeyPressMs = 50;

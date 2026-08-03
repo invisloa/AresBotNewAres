@@ -1,4 +1,5 @@
-﻿using DriverScanTester.Services;
+﻿using DriverScanTester.Models;
+using DriverScanTester.Services;
 
 namespace DriverScanTester.ViewModels
 {
@@ -21,5 +22,8 @@ namespace DriverScanTester.ViewModels
 
         public static System.Array ZoneRestrictions { get; } =
             System.Enum.GetValues(typeof(ZoneRestriction));
+
+        public static System.Array TravelRouteCompletionModes { get; } =
+            System.Enum.GetValues(typeof(TravelRouteCompletionMode));
     }
 }

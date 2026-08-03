@@ -8,7 +8,7 @@ namespace DriverScanTester.Models
     /// A bot profile describes segment file names and repot thresholds.
     /// It does NOT contain waypoint data — only references to SavedPaths/*.json files.
     /// The profile has exactly one City → Repot route step; every hunt defines its own
-    /// Repot → Outside City, Outside City → Exp Spot and Exp Loop route steps.
+    /// Travel Routes (Repot → EXP chain) and Exp Loop route steps.
     /// </summary>
     public class BotProfile
     {

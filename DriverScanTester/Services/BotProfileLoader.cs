@@ -45,8 +45,9 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Loads a profile by name (with or without .json extension).
-        /// Old profiles that are missing the new route steps deserialize fine
-        /// (unknown properties are ignored); validation reports the missing stages.
+        /// Profiles created by the immediately previous schema (fixed RepotToCityExit /
+        /// CityExitToExp hunt routes) are migrated in memory to the TravelToExpRoutes chain.
+        /// Saving the profile writes only the new schema.
         /// </summary>
         public BotProfile? LoadProfile(string profileName)
         {
@@ -70,6 +71,8 @@ namespace DriverScanTester.Services
                     return null;
                 }
 
+                MigrateLegacyHuntRoutes(profile, json);
+
                 _log($"[BotProfileLoader] Loaded profile '{profile.Name}' ({profile.HuntDefinitions?.Count ?? 0} hunt(s)).");
                 return profile;
             }
@@ -77,6 +80,65 @@ namespace DriverScanTester.Services
             {
                 _log($"[BotProfileLoader] Error loading profile '{profileName}': {ex.Message}");
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// One-time in-memory migration for the immediately previous profile schema.
+        /// When a hunt's JSON has no TravelToExpRoutes but contains the old
+        /// RepotToCityExit / CityExitToExp steps, converts them in that order into
+        /// FinalWaypoint travel routes, preserving PathFile and StartDelayMs.
+        /// </summary>
+        private void MigrateLegacyHuntRoutes(BotProfile profile, string json)
+        {
+            if (profile.HuntDefinitions == null || profile.HuntDefinitions.Count == 0)
+                return;
+
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("HuntDefinitions", out var huntsElement) ||
+                huntsElement.ValueKind != JsonValueKind.Array)
+            {
+                return;
+            }
+
+            int index = 0;
+            foreach (var huntElement in huntsElement.EnumerateArray())
+            {
+                if (index >= profile.HuntDefinitions.Count)
+                    break;
+
+                var hunt = profile.HuntDefinitions[index++];
+                bool alreadyHasRoutes = hunt.TravelToExpRoutes != null && hunt.TravelToExpRoutes.Count > 0;
+                if (alreadyHasRoutes)
+                    continue;
+
+                bool hasLegacyRoutes =
+                    huntElement.TryGetProperty("RepotToCityExit", out _) ||
+                    huntElement.TryGetProperty("CityExitToExp", out _);
+                if (!hasLegacyRoutes)
+                    continue;
+
+                var routes = new List<TravelRouteStep>();
+                foreach (var propertyName in new[] { "RepotToCityExit", "CityExitToExp" })
+                {
+                    if (!huntElement.TryGetProperty(propertyName, out var stepElement))
+                        continue;
+
+                    var step = stepElement.Deserialize<BotRouteStep>();
+                    if (step == null)
+                        continue;
+
+                    routes.Add(new TravelRouteStep
+                    {
+                        PathFile = step.PathFile ?? "",
+                        StartDelayMs = step.StartDelayMs,
+                        CompletionMode = TravelRouteCompletionMode.FinalWaypoint,
+                        ExpectedDestinationMapNumber = 0
+                    });
+                }
+
+                hunt.TravelToExpRoutes = routes;
+                _log($"[BotProfileLoader] Migrated hunt '{hunt.Name}' in memory: converted RepotToCityExit/CityExitToExp to {routes.Count} TravelToExpRoutes (FinalWaypoint).");
             }
         }
 
@@ -158,15 +220,52 @@ namespace DriverScanTester.Services
                     if (string.IsNullOrWhiteSpace(hunt.Name))
                         errors.Add($"HuntDefinitions[{i}]: Name is empty.");
 
-                    if (hunt.RepotToCityExit == null)
-                        errors.Add($"{huntLabel}, Repot → Outside City: route step is missing.");
+                    // Travel route chain (Repot → EXP)
+                    if (hunt.TravelToExpRoutes == null)
+                    {
+                        errors.Add($"{huntLabel}: TravelToExpRoutes is null. Add at least one travel route.");
+                    }
+                    else if (hunt.TravelToExpRoutes.Count == 0)
+                    {
+                        errors.Add($"{huntLabel}: TravelToExpRoutes is empty. Add at least one travel route.");
+                    }
                     else
-                        ValidateRouteStep(errors, hunt.RepotToCityExit, $"{huntLabel}, Repot → Outside City");
+                    {
+                        for (int r = 0; r < hunt.TravelToExpRoutes.Count; r++)
+                        {
+                            var route = hunt.TravelToExpRoutes[r];
+                            string routeLabel = $"{huntLabel}, travel route {r + 1}";
 
-                    if (hunt.CityExitToExp == null)
-                        errors.Add($"{huntLabel}, Outside City → Exp Spot: route step is missing.");
-                    else
-                        ValidateRouteStep(errors, hunt.CityExitToExp, $"{huntLabel}, Outside City → Exp Spot");
+                            if (route == null)
+                            {
+                                errors.Add($"{routeLabel}: route step is missing.");
+                                continue;
+                            }
+
+                            if (string.IsNullOrWhiteSpace(route.PathFile))
+                                errors.Add($"{routeLabel}: PathFile is empty.");
+                            else if (!SegmentFileExists(route.PathFile))
+                                errors.Add($"{routeLabel}: segment '{route.PathFile}' was not found in SavedPaths.");
+
+                            if (route.StartDelayMs < 0)
+                                errors.Add($"{routeLabel}: StartDelayMs cannot be negative.");
+
+                            if (!Enum.IsDefined(typeof(TravelRouteCompletionMode), route.CompletionMode))
+                                errors.Add($"{routeLabel}: CompletionMode '{route.CompletionMode}' is not a defined value.");
+
+                            switch (route.CompletionMode)
+                            {
+                                case TravelRouteCompletionMode.FinalWaypoint:
+                                    if (route.ExpectedDestinationMapNumber != 0)
+                                        errors.Add($"{routeLabel}: ExpectedDestinationMapNumber must be 0 for FinalWaypoint.");
+                                    break;
+                                case TravelRouteCompletionMode.ExpectedMapReached:
+                                    if (route.ExpectedDestinationMapNumber <= 0)
+                                        errors.Add($"{routeLabel}: ExpectedDestinationMapNumber must be greater than 0 for ExpectedMapReached.");
+                                    break;
+                            }
+                        }
+                    }
 
                     if (hunt.ExpLoop == null)
                         errors.Add($"{huntLabel}, Exp Loop: route step is missing.");

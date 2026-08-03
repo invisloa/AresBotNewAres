@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -7,12 +8,12 @@ using DriverScanTester.Models;
 namespace DriverScanTester.Services
 {
     /// <summary>
-    /// Central coordinator of the bot four-stage route workflow:
+    /// Central coordinator of the bot route workflow:
     ///   1. City → Repot (route stage 1)
     ///      [repot operation: sell items, buy potions]
-    ///   2. Repot → Outside City (route stage 2)
-    ///   3. Outside City → Exp Spot (route stage 3)
-    ///   4. Exp Loop (route stage 4, loops until repot is needed)
+    ///   2. Travel Routes: Repot → EXP (ordered chain; each leg completes by final
+    ///      waypoint or by reaching its expected destination map, e.g. through portals)
+    ///   3. Exp Loop (loops until repot is needed)
     ///
     /// MovementSystem is used ONLY for movement. All phase decisions are made here.
     /// A workflow requires a non-null valid BotProfile and a non-null active HuntDefinition;
@@ -74,8 +75,8 @@ namespace DriverScanTester.Services
         // ======================== Constructor ========================
 
         /// <summary>
-        /// Profile-based constructor. The activeHunt ties stages 2-4 (Repot → Outside City,
-        /// Outside City → Exp Spot, Exp Loop) together so they always use a consistent
+        /// Profile-based constructor. The activeHunt ties the travel-route chain
+        /// (Repot → EXP) and the exp loop together so they always use a consistent
         /// set of paths.
         /// </summary>
         public BotWorkflowCoordinator(
@@ -134,10 +135,20 @@ namespace DriverScanTester.Services
             _log("[Coordinator] Workflow started.");
             _log($"[Coordinator] Using profile: {_profile.Name}");
             _log($"[Coordinator] Active hunt: '{_activeHunt.Name}'");
-            _log($"[Coordinator]   City → Repot:            '{_profile.CityToRepot.PathFile}' (delay {_profile.CityToRepot.StartDelayMs} ms)");
-            _log($"[Coordinator]   Repot → Outside City:    '{_activeHunt.RepotToCityExit.PathFile}' (delay {_activeHunt.RepotToCityExit.StartDelayMs} ms)");
-            _log($"[Coordinator]   Outside City → Exp Spot: '{_activeHunt.CityExitToExp.PathFile}' (delay {_activeHunt.CityExitToExp.StartDelayMs} ms)");
-            _log($"[Coordinator]   Exp Loop:                '{_activeHunt.ExpLoop.PathFile}' (delay {_activeHunt.ExpLoop.StartDelayMs} ms)");
+            _log($"[Coordinator]   City → Repot: '{_profile.CityToRepot.PathFile}' (delay {_profile.CityToRepot.StartDelayMs} ms)");
+
+            int routeCount = _activeHunt.TravelToExpRoutes?.Count ?? 0;
+            for (int i = 0; i < routeCount; i++)
+            {
+                var route = _activeHunt.TravelToExpRoutes[i];
+                if (route == null) continue;
+                string mapInfo = route.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached
+                    ? $", map {route.ExpectedDestinationMapNumber}"
+                    : "";
+                _log($"[Coordinator]   Travel route {i + 1}/{routeCount}: '{route.PathFile}' (delay {route.StartDelayMs} ms, {route.CompletionMode}{mapInfo})");
+            }
+
+            _log($"[Coordinator]   EXP loop: '{_activeHunt.ExpLoop.PathFile}' (delay {_activeHunt.ExpLoop.StartDelayMs} ms)");
 
             try
             {
@@ -196,9 +207,6 @@ namespace DriverScanTester.Services
                         break;
                     case BotPhase.Repot:
                         await PhaseRepot(token);
-                        break;
-                    case BotPhase.MoveToCityExit:
-                        await PhaseMoveToCityExit(token);
                         break;
                     case BotPhase.MoveToExp:
                         await PhaseMoveToExp(token);
@@ -280,8 +288,8 @@ namespace DriverScanTester.Services
             // Dry-run check
             if (_profile.DryRunRepot)
             {
-                _log("[Phase] Repot: DryRunRepot=true — skipping actual repot. Moving to city exit.");
-                CurrentPhase = BotPhase.MoveToCityExit;
+                _log("[Phase] Repot: DryRunRepot=true — skipping actual repot. Moving to exp travel routes.");
+                CurrentPhase = BotPhase.MoveToExp;
                 return;
             }
 
@@ -302,52 +310,50 @@ namespace DriverScanTester.Services
             var snapshot = _memoryService.GetSnapshot();
             _log($"[Phase] Post-repot: HP Pots: {snapshot.HpPotions}, Mana Pots: {snapshot.ManaPotions}");
 
-            CurrentPhase = BotPhase.MoveToCityExit;
+            CurrentPhase = BotPhase.MoveToExp;
             await Task.CompletedTask;
         }
 
-        private async Task PhaseMoveToCityExit(CancellationToken token)
-        {
-            var result = await RunRouteOnceAsync(_activeHunt.RepotToCityExit, "Repot → Outside City", token);
-            if (token.IsCancellationRequested) return;
-
-            switch (result)
-            {
-                case RouteRunResult.MissingSegment:
-                    _log("[Phase] MoveToCityExit: Repot → Outside City path missing or invalid. Failing.");
-                    CurrentPhase = BotPhase.Failed;
-                    break;
-                case RouteRunResult.Completed:
-                    _log("[Phase] MoveToCityExit: Arrived outside the city.");
-                    CurrentPhase = BotPhase.MoveToExp;
-                    break;
-                default:
-                    _log("[Phase] MoveToCityExit: Path did not complete. Retrying from start.");
-                    CurrentPhase = BotPhase.DetectCityStart;
-                    break;
-            }
-        }
-
+        /// <summary>
+        /// Executes the complete ordered TravelToExpRoutes chain from the repot location
+        /// to the EXP position. Route N + 1 is never started until route N has completed
+        /// by its final waypoint or has reached and settled on its expected destination map.
+        /// </summary>
         private async Task PhaseMoveToExp(CancellationToken token)
         {
-            var result = await RunRouteOnceAsync(_activeHunt.CityExitToExp, "Outside City → Exp Spot", token);
-            if (token.IsCancellationRequested) return;
-
-            switch (result)
+            var routes = _activeHunt.TravelToExpRoutes;
+            if (routes == null || routes.Count == 0)
             {
-                case RouteRunResult.MissingSegment:
-                    _log("[Phase] MoveToExp: Outside City → Exp Spot path missing or invalid. Failing.");
-                    CurrentPhase = BotPhase.Failed;
-                    break;
-                case RouteRunResult.Completed:
-                    _log("[Phase] MoveToExp: Arrived at exp area.");
-                    CurrentPhase = BotPhase.ExpLoop;
-                    break;
-                default:
-                    _log("[Phase] MoveToExp: Path did not complete. Retrying.");
-                    CurrentPhase = BotPhase.DetectCityStart;
-                    break;
+                _log("[Phase] MoveToExp: No travel routes configured. Failing.");
+                CurrentPhase = BotPhase.Failed;
+                return;
             }
+
+            for (int i = 0; i < routes.Count; i++)
+            {
+                var result = await RunTravelRouteAsync(routes[i], i + 1, routes.Count, token);
+
+                switch (result)
+                {
+                    case TravelRouteRunResult.Completed:
+                        // Continue to the next route.
+                        break;
+                    case TravelRouteRunResult.Cancelled:
+                        return;
+                    case TravelRouteRunResult.Incomplete:
+                        _log($"[Phase] MoveToExp: Route {i + 1}/{routes.Count} did not complete. Retrying from start.");
+                        CurrentPhase = BotPhase.DetectCityStart;
+                        return;
+                    default:
+                        // MissingSegment, ExpectedMapNotReached, UnexpectedMapReached, InvalidMapState
+                        _log($"[Phase] MoveToExp: Route {i + 1}/{routes.Count} failed ({result}). Failing.");
+                        CurrentPhase = BotPhase.Failed;
+                        return;
+                }
+            }
+
+            _log("[Phase] MoveToExp: All travel routes completed. Starting exp loop.");
+            CurrentPhase = BotPhase.ExpLoop;
         }
 
         private async Task PhaseExpLoop(CancellationToken token)
@@ -461,6 +467,17 @@ namespace DriverScanTester.Services
             Incomplete
         }
 
+        private enum TravelRouteRunResult
+        {
+            Completed,
+            MissingSegment,
+            Incomplete,
+            ExpectedMapNotReached,
+            UnexpectedMapReached,
+            InvalidMapState,
+            Cancelled
+        }
+
         /// <summary>
         /// Waits the configured startup delay of a route step, if any.
         /// Zero (or an invalid negative) delay returns immediately.
@@ -476,8 +493,8 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Runs one non-loop route stage (stages 1-3): waits the configured startup delay,
-        /// loads the segment via SavedPathLoader and runs it once with loop: false.
+        /// Runs one non-loop BotRouteStep (e.g. City → Repot): waits the configured startup
+        /// delay, loads the segment via SavedPathLoader and runs it once with loop: false.
         /// Returns whether the path completed, or whether the segment is missing/invalid.
         /// </summary>
         private async Task<RouteRunResult> RunRouteOnceAsync(BotRouteStep step, string stageName, CancellationToken token)
@@ -506,6 +523,263 @@ namespace DriverScanTester.Services
                 _log($"[Phase] {stageName}: path did not complete.");
 
             return completed ? RouteRunResult.Completed : RouteRunResult.Incomplete;
+        }
+
+        /// <summary>
+        /// Executes one travel route of the Repot → EXP chain.
+        /// FinalWaypoint routes complete through normal non-loop path completion;
+        /// ExpectedMapReached routes complete when the configured destination map is
+        /// stably detected, without requiring the final waypoint.
+        /// </summary>
+        private async Task<TravelRouteRunResult> RunTravelRouteAsync(
+            TravelRouteStep step,
+            int routeIndex,
+            int routeCount,
+            CancellationToken token)
+        {
+            try
+            {
+                return await RunTravelRouteCoreAsync(step, routeIndex, routeCount, token);
+            }
+            catch (OperationCanceledException)
+            {
+                return TravelRouteRunResult.Cancelled;
+            }
+        }
+
+        private async Task<TravelRouteRunResult> RunTravelRouteCoreAsync(
+            TravelRouteStep step,
+            int routeIndex,
+            int routeCount,
+            CancellationToken token)
+        {
+            if (step == null || string.IsNullOrWhiteSpace(step.PathFile))
+            {
+                _log($"[MoveToExp] Route {routeIndex}/{routeCount}: no path configured. Cannot proceed.");
+                return TravelRouteRunResult.MissingSegment;
+            }
+
+            // Startup delay (cancellable).
+            if (step.StartDelayMs > 0)
+            {
+                _log($"[MoveToExp] Route {routeIndex}/{routeCount}: waiting {step.StartDelayMs} ms before start...");
+                await Task.Delay(step.StartDelayMs, token);
+            }
+
+            _log($"[MoveToExp] Route {routeIndex}/{routeCount}:");
+            _log($"  Path='{step.PathFile}'");
+            _log($"  Completion={step.CompletionMode}");
+            if (step.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached)
+                _log($"  DestinationMap={step.ExpectedDestinationMapNumber}");
+
+            var waypoints = _pathLoader.LoadSegment(step.PathFile);
+            if (waypoints == null)
+            {
+                _log($"[MoveToExp] Route {routeIndex}/{routeCount}: Missing required segment '{step.PathFile}'. Cannot proceed.");
+                return TravelRouteRunResult.MissingSegment;
+            }
+
+            if (step.CompletionMode != TravelRouteCompletionMode.ExpectedMapReached)
+            {
+                // FinalWaypoint: normal non-loop execution.
+                bool completed = await _pathRunner.RunPathAsync(waypoints, loop: false, token);
+                if (token.IsCancellationRequested) return TravelRouteRunResult.Cancelled;
+
+                if (completed)
+                    _log($"[MoveToExp] Route {routeIndex}/{routeCount}: path completed (final waypoint).");
+                else
+                    _log($"[MoveToExp] Route {routeIndex}/{routeCount}: path did not complete.");
+
+                return completed ? TravelRouteRunResult.Completed : TravelRouteRunResult.Incomplete;
+            }
+
+            // ExpectedMapReached: portal-aware execution.
+            return await RunMapTransitionRouteAsync(step, routeIndex, routeCount, waypoints, token);
+        }
+
+        /// <summary>
+        /// Executes one portal route: runs the path while polling the map number, stops
+        /// movement as soon as the expected destination map is confirmed, and settles the
+        /// map/player-position reads before the next route starts.
+        /// </summary>
+        private async Task<TravelRouteRunResult> RunMapTransitionRouteAsync(
+            TravelRouteStep step,
+            int routeIndex,
+            int routeCount,
+            List<Waypoint> waypoints,
+            CancellationToken token)
+        {
+            int expectedMap = step.ExpectedDestinationMapNumber;
+
+            // Wait for a valid nonzero source map before starting.
+            int sourceMap = await WaitForValidMapAsync(BotConstants.Delays.ValidMapReadTimeoutMs, token);
+            if (sourceMap == 0)
+            {
+                _log($"[MoveToExp] Route {routeIndex}/{routeCount}: no valid source map read within {BotConstants.Delays.ValidMapReadTimeoutMs} ms. Failing.");
+                return TravelRouteRunResult.InvalidMapState;
+            }
+
+            _log($"[MoveToExp] Route {routeIndex}/{routeCount}: source map {sourceMap}.");
+
+            // Already on the destination map: the route is already complete, do not start its path.
+            if (sourceMap == expectedMap)
+            {
+                _log($"[MoveToExp] Route {routeIndex}/{routeCount}: already on destination map {expectedMap}. Route considered complete.");
+                return TravelRouteRunResult.Completed;
+            }
+
+            using var routeCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+            var routeToken = routeCts.Token;
+
+            var pathTask = _pathRunner.RunPathAsync(waypoints, loop: false, routeToken);
+
+            int consecutiveDestReads = 0;
+            bool destinationConfirmed = false;
+
+            while (!routeToken.IsCancellationRequested && !destinationConfirmed)
+            {
+                if (pathTask.IsCompleted)
+                    break; // path finished before the map changed — handled by the grace period below
+
+                await Task.Delay(BotConstants.Delays.MapTransitionPollMs, routeToken);
+
+                int map = _memoryService.GetMapNumber();
+                if (map == 0)
+                    continue; // ignore unreadable map reads
+
+                if (map == expectedMap)
+                {
+                    consecutiveDestReads++;
+                    if (consecutiveDestReads >= BotConstants.Delays.MapTransitionStableReadCount)
+                    {
+                        _log($"[MoveToExp] Route {routeIndex}/{routeCount}: destination map {expectedMap} confirmed. Stopping movement.");
+                        destinationConfirmed = true;
+                        _pathRunner.Stop();
+                        routeCts.Cancel();
+                        try { await pathTask; } catch (OperationCanceledException) { }
+                    }
+                }
+                else if (map != sourceMap)
+                {
+                    _log($"[MoveToExp] Route {routeIndex}/{routeCount}: unexpected map {map} (expected {expectedMap}). Stopping route.");
+                    _pathRunner.Stop();
+                    routeCts.Cancel();
+                    try { await pathTask; } catch (OperationCanceledException) { }
+                    return TravelRouteRunResult.UnexpectedMapReached;
+                }
+                else
+                {
+                    consecutiveDestReads = 0;
+                }
+            }
+
+            if (token.IsCancellationRequested)
+                return TravelRouteRunResult.Cancelled;
+
+            if (destinationConfirmed)
+                return await WaitForMapSettlementAsync(expectedMap, routeIndex, routeCount, token);
+
+            // The path finished before the expected destination map was confirmed:
+            // give the portal a bounded grace period to activate.
+            _log($"[MoveToExp] Route {routeIndex}/{routeCount}: path finished before destination map confirmed. Waiting grace period for portal transition...");
+            _pathRunner.Stop();
+
+            var graceDeadline = DateTime.UtcNow.AddMilliseconds(BotConstants.Delays.MapTransitionGraceAfterPathMs);
+            int graceConsecutiveReads = 0;
+            while (DateTime.UtcNow < graceDeadline)
+            {
+                await Task.Delay(BotConstants.Delays.MapTransitionPollMs, token);
+                if (token.IsCancellationRequested)
+                    return TravelRouteRunResult.Cancelled;
+
+                int map = _memoryService.GetMapNumber();
+                if (map == 0)
+                    continue;
+
+                if (map == expectedMap)
+                {
+                    graceConsecutiveReads++;
+                    if (graceConsecutiveReads >= BotConstants.Delays.MapTransitionStableReadCount)
+                    {
+                        _log($"[MoveToExp] Route {routeIndex}/{routeCount}: destination map {expectedMap} confirmed during grace period.");
+                        return await WaitForMapSettlementAsync(expectedMap, routeIndex, routeCount, token);
+                    }
+                }
+                else if (map != sourceMap)
+                {
+                    _log($"[MoveToExp] Route {routeIndex}/{routeCount}: unexpected map {map} during grace period (expected {expectedMap}).");
+                    return TravelRouteRunResult.UnexpectedMapReached;
+                }
+                else
+                {
+                    graceConsecutiveReads = 0;
+                }
+            }
+
+            _log($"[MoveToExp] Route {routeIndex}/{routeCount}: still on source map {sourceMap} after grace period. Expected map {expectedMap} not reached.");
+            return TravelRouteRunResult.ExpectedMapNotReached;
+        }
+
+        /// <summary>
+        /// Polls until a valid nonzero map number can be read or the timeout elapses.
+        /// Returns 0 on timeout. GameMemoryService.GetMapNumber() returns 0 when the
+        /// pointer chain cannot be read, so zero reads are ignored.
+        /// </summary>
+        private async Task<int> WaitForValidMapAsync(int timeoutMs, CancellationToken token)
+        {
+            var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+            while (DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(BotConstants.Delays.MapTransitionPollMs, token);
+
+                int map = _memoryService.GetMapNumber();
+                if (map != 0)
+                    return map;
+            }
+
+            return 0;
+        }
+
+        /// <summary>
+        /// Waits until the destination map and the player position read are both stable
+        /// (two consecutive polls) so the next route never initializes while the player
+        /// pointer or coordinates are temporarily unavailable during loading.
+        /// </summary>
+        private async Task<TravelRouteRunResult> WaitForMapSettlementAsync(
+            int expectedMap,
+            int routeIndex,
+            int routeCount,
+            CancellationToken token)
+        {
+            var deadline = DateTime.UtcNow.AddMilliseconds(BotConstants.Delays.MapTransitionSettleTimeoutMs);
+            int stableReads = 0;
+
+            while (DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(BotConstants.Delays.MapTransitionPollMs, token);
+                if (token.IsCancellationRequested)
+                    return TravelRouteRunResult.Cancelled;
+
+                int map = _memoryService.GetMapNumber();
+                var (_, _, positionSuccess) = _memoryService.GetPlayerPosition();
+
+                if (map == expectedMap && positionSuccess)
+                {
+                    stableReads++;
+                    if (stableReads >= BotConstants.Delays.MapTransitionStableReadCount)
+                    {
+                        _log($"[MoveToExp] Route {routeIndex}/{routeCount}: destination map {expectedMap} settled (map and player position stable).");
+                        return TravelRouteRunResult.Completed;
+                    }
+                }
+                else
+                {
+                    stableReads = 0;
+                }
+            }
+
+            _log($"[MoveToExp] Route {routeIndex}/{routeCount}: destination map {expectedMap} did not settle within {BotConstants.Delays.MapTransitionSettleTimeoutMs} ms.");
+            return TravelRouteRunResult.InvalidMapState;
         }
 
         private async Task TeleportToCity(CancellationToken token)

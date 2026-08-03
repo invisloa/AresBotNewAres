@@ -17,10 +17,11 @@ namespace DriverScanTester.Models
         /// <summary>Bot is performing repot actions (sell items, buy potions).</summary>
         Repot,
 
-        /// <summary>Bot is moving from the repot NPC to a position outside the city.</summary>
-        MoveToCityExit,
-
-        /// <summary>Bot is moving from outside the city to the exp hunting area.</summary>
+        /// <summary>
+        /// Bot is executing the complete ordered travel-route chain from the repot location
+        /// to the EXP area (each leg completes by final waypoint or by reaching its expected
+        /// destination map).
+        /// </summary>
         MoveToExp,
 
         /// <summary>Bot is in the exp hunting loop (move, attack, loot).</summary>
