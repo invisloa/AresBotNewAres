@@ -2599,15 +2599,39 @@ namespace DriverScanTester.ViewModels
         private BotProfileLoader? _profileLoader;
 
         public bool IsWorkflowRunning => _workflowCoordinator?.IsRunning ?? false;
-        public string WorkflowPhaseText => _workflowCoordinator?.CurrentPhase.ToString() ?? "Idle";
+
+        /// <summary>
+        /// User-friendly text for the current workflow stage (no raw phase enum names).
+        /// </summary>
+        public string WorkflowPhaseText
+        {
+            get
+            {
+                var phase = _workflowCoordinator?.CurrentPhase ?? BotPhase.Idle;
+                return phase switch
+                {
+                    BotPhase.Idle => "Idle",
+                    BotPhase.DetectCityStart => "Checking city position",
+                    BotPhase.MoveToRepot => "Moving to repot",
+                    BotPhase.Repot => "Repotting",
+                    BotPhase.MoveToExp => "Going to EXP",
+                    BotPhase.ExpLoop => "EXP hunting",
+                    BotPhase.NeedRepot => "Returning to city",
+                    BotPhase.Stopping => "Stopping",
+                    BotPhase.Failed => "Failed",
+                    _ => phase.ToString()
+                };
+            }
+        }
+
         public BotProfile? ActiveProfile => _workflowCoordinator?.ActiveProfile;
 
         /// <summary>
-        /// Starts the route workflow (City → Repot, Travel Routes Repot → EXP chain,
-        /// Exp Loop). Requires a non-null valid profile and a non-null active hunt;
+        /// Starts the route workflow (Stage 1 Repot, Stage 2 Go to EXP chain,
+        /// Stage 3 EXP Path) for the given profile. Requires a non-null valid profile;
         /// there is no no-profile fallback mode.
         /// </summary>
-        public void StartWorkflow(BotProfile profile, HuntDefinition activeHunt)
+        public void StartWorkflow(BotProfile profile)
         {
             if (!_isAttached) { AppendLog("Attach first."); return; }
             if (_workflowCoordinator?.IsRunning == true) { AppendLog("Workflow already running."); return; }
@@ -2639,23 +2663,8 @@ namespace DriverScanTester.ViewModels
 
             _workflowCoordinator = new BotWorkflowCoordinator(
                 memoryService, repotSystem, repotDetector, pathLoader, pathRunner,
-                profile, activeHunt, AppendLog, FocusGameWindow);
+                profile, AppendLog, FocusGameWindow);
             AppendLog($"Starting workflow with profile '{profile.Name}'.");
-            AppendLog($"Active hunt: '{activeHunt.Name}'");
-            AppendLog($"  City → Repot: '{profile.CityToRepot.PathFile}' (delay {profile.CityToRepot.StartDelayMs} ms)");
-
-            var travelRoutes = activeHunt.TravelToExpRoutes ?? new List<TravelRouteStep>();
-            for (int i = 0; i < travelRoutes.Count; i++)
-            {
-                var route = travelRoutes[i];
-                if (route == null) continue;
-                string mapInfo = route.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached
-                    ? $", map {route.ExpectedDestinationMapNumber}"
-                    : "";
-                AppendLog($"  Travel route {i + 1}/{travelRoutes.Count}: '{route.PathFile}' (delay {route.StartDelayMs} ms, {route.CompletionMode}{mapInfo})");
-            }
-
-            AppendLog($"  EXP loop: '{activeHunt.ExpLoop.PathFile}' (delay {activeHunt.ExpLoop.StartDelayMs} ms)");
 
             _workflowCoordinator.OnPhaseChanged = phaseName =>
             {

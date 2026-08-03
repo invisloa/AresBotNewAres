@@ -9,15 +9,14 @@ namespace DriverScanTester.Services
 {
     /// <summary>
     /// Central coordinator of the bot route workflow:
-    ///   1. City → Repot (route stage 1)
+    ///   1. Stage 1 — Repot (path to the repot location)
     ///      [repot operation: sell items, buy potions]
-    ///   2. Travel Routes: Repot → EXP (ordered chain; each leg completes by final
+    ///   2. Stage 2 — Go to EXP (ordered chain of paths; each leg completes by final
     ///      waypoint or by reaching its expected destination map, e.g. through portals)
-    ///   3. Exp Loop (loops until repot is needed)
+    ///   3. Stage 3 — EXP Path (loops until repot is needed)
     ///
     /// MovementSystem is used ONLY for movement. All phase decisions are made here.
-    /// A workflow requires a non-null valid BotProfile and a non-null active HuntDefinition;
-    /// there are no hardcoded fallback paths.
+    /// A workflow requires a non-null valid BotProfile; there are no hardcoded fallback paths.
     /// </summary>
     public class BotWorkflowCoordinator
     {
@@ -39,7 +38,6 @@ namespace DriverScanTester.Services
         private readonly Action _focusGameWindow;
 
         private readonly BotProfile _profile;
-        private readonly HuntDefinition _activeHunt;
 
         private CancellationTokenSource? _cts;
         private bool _isRunning;
@@ -75,9 +73,8 @@ namespace DriverScanTester.Services
         // ======================== Constructor ========================
 
         /// <summary>
-        /// Profile-based constructor. The activeHunt ties the travel-route chain
-        /// (Repot → EXP) and the exp loop together so they always use a consistent
-        /// set of paths.
+        /// Profile-based constructor. The profile carries all three workflow stages
+        /// directly: CityToRepot (stage 1), TravelToExpRoutes (stage 2) and ExpLoop (stage 3).
         /// </summary>
         public BotWorkflowCoordinator(
             GameMemoryService memoryService,
@@ -86,7 +83,6 @@ namespace DriverScanTester.Services
             SavedPathLoader pathLoader,
             PathRunnerService pathRunner,
             BotProfile profile,
-            HuntDefinition activeHunt,
             Action<string> log,
             Action focusGameWindow)
         {
@@ -96,7 +92,6 @@ namespace DriverScanTester.Services
             _pathLoader = pathLoader;
             _pathRunner = pathRunner;
             _profile = profile;
-            _activeHunt = activeHunt;
             _log = log;
             _focusGameWindow = focusGameWindow;
 
@@ -133,22 +128,21 @@ namespace DriverScanTester.Services
 
             _focusGameWindow();
             _log("[Coordinator] Workflow started.");
-            _log($"[Coordinator] Using profile: {_profile.Name}");
-            _log($"[Coordinator] Active hunt: '{_activeHunt.Name}'");
-            _log($"[Coordinator]   City → Repot: '{_profile.CityToRepot.PathFile}' (delay {_profile.CityToRepot.StartDelayMs} ms)");
+            _log($"[Coordinator] Profile: {_profile.Name}");
+            _log($"[Coordinator]   Stage 1 — Repot: '{_profile.CityToRepot.PathFile}' (wait {_profile.CityToRepot.StartDelayMs} ms)");
 
-            int routeCount = _activeHunt.TravelToExpRoutes?.Count ?? 0;
+            int routeCount = _profile.TravelToExpRoutes?.Count ?? 0;
             for (int i = 0; i < routeCount; i++)
             {
-                var route = _activeHunt.TravelToExpRoutes[i];
+                var route = _profile.TravelToExpRoutes[i];
                 if (route == null) continue;
-                string mapInfo = route.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached
-                    ? $", map {route.ExpectedDestinationMapNumber}"
-                    : "";
-                _log($"[Coordinator]   Travel route {i + 1}/{routeCount}: '{route.PathFile}' (delay {route.StartDelayMs} ms, {route.CompletionMode}{mapInfo})");
+                string completionInfo = route.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached
+                    ? $"finish when destination map loaded → map {route.ExpectedDestinationMapNumber}"
+                    : "finish when last waypoint reached";
+                _log($"[Coordinator]   Stage 2 — Go to EXP path {i + 1}/{routeCount}: '{route.PathFile}' (wait {route.StartDelayMs} ms, {completionInfo})");
             }
 
-            _log($"[Coordinator]   EXP loop: '{_activeHunt.ExpLoop.PathFile}' (delay {_activeHunt.ExpLoop.StartDelayMs} ms)");
+            _log($"[Coordinator]   Stage 3 — EXP Path: '{_profile.ExpLoop.PathFile}' (wait {_profile.ExpLoop.StartDelayMs} ms)");
 
             try
             {
@@ -321,7 +315,7 @@ namespace DriverScanTester.Services
         /// </summary>
         private async Task PhaseMoveToExp(CancellationToken token)
         {
-            var routes = _activeHunt.TravelToExpRoutes;
+            var routes = _profile.TravelToExpRoutes;
             if (routes == null || routes.Count == 0)
             {
                 _log("[Phase] MoveToExp: No travel routes configured. Failing.");
@@ -358,7 +352,7 @@ namespace DriverScanTester.Services
 
         private async Task PhaseExpLoop(CancellationToken token)
         {
-            var loopStep = _activeHunt.ExpLoop;
+            var loopStep = _profile.ExpLoop;
             if (loopStep == null || string.IsNullOrWhiteSpace(loopStep.PathFile))
             {
                 _log("[Phase] ExpLoop: Exp Loop path missing or invalid. Failing.");

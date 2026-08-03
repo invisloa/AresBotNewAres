@@ -1,45 +1,21 @@
 {
   "Name": "NewProfile",
-  "CityMapNumber": 1,
-  "StartRoutes": [
+  "CityToRepot": {
+    "PathFile": "",
+    "StartDelayMs": 0
+  },
+  "TravelToExpRoutes": [
     {
-      "Name": "xxx",
-      "Area": {
-        "MapNumber": 1,
-        "MinX": 0,
-        "MaxX": 0,
-        "MinY": 0,
-        "MaxY": 0
-      },
-      "PathFile": "xxx.json"
-    },
-    {
-      "Name": "xxx (2)",
-      "Area": {
-        "MapNumber": 1,
-        "MinX": 0,
-        "MaxX": 0,
-        "MinY": 0,
-        "MaxY": 0
-      },
-      "PathFile": "xxx.json"
-    },
-    {
-      "Name": "HEAL Hershal Leader",
-      "Area": {
-        "MapNumber": 1,
-        "MinX": 0,
-        "MaxX": 0,
-        "MinY": 0,
-        "MaxY": 0
-      },
-      "PathFile": "HEAL Hershal Leader.json"
+      "PathFile": "",
+      "StartDelayMs": 0,
+      "CompletionMode": 0,
+      "ExpectedDestinationMapNumber": 0
     }
   ],
-  "HuntDefinitions": [],
-  "DefaultHuntName": "qqq",
-  "RepotToExpPath": "",
-  "ExpLoopPath": "",
+  "ExpLoop": {
+    "PathFile": "",
+    "StartDelayMs": 0
+  },
   "MinHpPotions": 2,
   "MinManaPotions": 2,
   "MaxWeightRatio": 1,

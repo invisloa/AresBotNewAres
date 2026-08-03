@@ -94,7 +94,7 @@
         <!-- Row 2: Route Workflow -->
         <GroupBox Grid.Row="2" Header="Route Workflow" Margin="0,0,0,10" BorderBrush="#FF3399FF" BorderThickness="1">
             <StackPanel>
-                <!-- Row within groupbox: Profile selection + Hunt selection -->
+                <!-- Row within groupbox: Profile selection + workflow actions -->
                 <WrapPanel Orientation="Horizontal" Margin="5,3">
                     <TextBlock Text="Profile:" FontWeight="Bold" VerticalAlignment="Center"/>
                     <ComboBox ItemsSource="{Binding ProfileNames}"
@@ -106,25 +106,19 @@
                     <Button Content="Validate" Command="{Binding ValidateProfileCommand}"
                             Width="60" Margin="3,0" FontSize="10"/>
                     <Separator Width="1" Margin="5,2" Background="LightGray"/>
-                    <TextBlock Text="Hunt:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,3,0"/>
-                    <ComboBox ItemsSource="{Binding HuntNames}"
-                              SelectedItem="{Binding SelectedHuntName}"
-                              Width="120" VerticalAlignment="Center" Margin="3,0"
-                              IsEditable="True" IsTextSearchEnabled="True"/>
-                    <Separator Width="1" Margin="5,2" Background="LightGray"/>
                     <Button Content="Start" Command="{Binding StartWorkflowCommand}"
                             Width="70" Margin="2" Background="#FFDEFFDE" FontWeight="Bold"/>
                     <Button Content="Stop" Command="{Binding StopWorkflowCommand}"
                             Width="70" Margin="3,2" Background="#FFFFD0D0" FontWeight="Bold"/>
                 </WrapPanel>
-                <!-- Row within groupbox: Status + Phase -->
+                <!-- Row within groupbox: Status + Current stage -->
                 <WrapPanel Orientation="Horizontal" Margin="5,0,5,3">
                     <TextBlock Text="Running:" FontWeight="Bold" VerticalAlignment="Center"/>
                     <TextBlock Text="{Binding IsWorkflowRunning}" VerticalAlignment="Center" Width="30" Margin="3,0"/>
                     <Separator Width="1" Margin="10,2" Background="LightGray"/>
-                    <TextBlock Text="Phase:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,3,0"/>
+                    <TextBlock Text="Current stage:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,3,0"/>
                     <TextBlock Text="{Binding WorkflowPhaseText}" VerticalAlignment="Center" FontWeight="Bold"
-                               Foreground="#FF007ACC" MinWidth="120"/>
+                               Foreground="#FF007ACC" MinWidth="140"/>
                     <Separator Width="1" Margin="10,2" Background="LightGray"/>
                     <TextBlock Text="Validation:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,3,0"/>
                     <TextBlock Text="{Binding ValidationText}" VerticalAlignment="Center" Foreground="Gray" FontSize="10"/>

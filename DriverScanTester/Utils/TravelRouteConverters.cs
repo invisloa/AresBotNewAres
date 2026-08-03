@@ -24,7 +24,7 @@ namespace DriverScanTester.Utils
     {
         public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
             => value is TravelRouteCompletionMode mode
-                ? (mode == TravelRouteCompletionMode.ExpectedMapReached ? "Expected Map Reached" : "Final Waypoint")
+                ? (mode == TravelRouteCompletionMode.ExpectedMapReached ? "Destination map loaded" : "Last waypoint reached")
                 : "";
 
         public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)

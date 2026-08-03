@@ -31,10 +31,6 @@ namespace DriverScanTester.ViewModels
         private string? _selectedProfileName;
         private string _validationText = "";
 
-        // Hunt selection (within selected profile)
-        private System.Collections.ObjectModel.ObservableCollection<string> _huntNames = new();
-        private string? _selectedHuntName;
-
         public BotViewModel(MainViewModel main, Action<string> appendLog)
         {
             _main = main;
@@ -223,7 +219,6 @@ namespace DriverScanTester.ViewModels
             {
                 if (SetProperty(ref _selectedProfileName, value))
                 {
-                    OnProfileChanged();
                     OnPropertyChanged(nameof(CanStartWorkflow));
                     System.Windows.Input.CommandManager.InvalidateRequerySuggested();
                 }
@@ -236,27 +231,8 @@ namespace DriverScanTester.ViewModels
             set => SetProperty(ref _validationText, value);
         }
 
-        // Hunt selection (within selected profile)
-        public System.Collections.ObjectModel.ObservableCollection<string> HuntNames
-        {
-            get => _huntNames;
-            set => SetProperty(ref _huntNames, value);
-        }
-
-        public string? SelectedHuntName
-        {
-            get => _selectedHuntName;
-            set
-            {
-                if (SetProperty(ref _selectedHuntName, value))
-                {
-                    OnPropertyChanged(nameof(CanStartWorkflow));
-                    System.Windows.Input.CommandManager.InvalidateRequerySuggested();
-                }
-            }
-        }
-
-        public bool CanStartWorkflow => !string.IsNullOrEmpty(SelectedProfileName) && !string.IsNullOrEmpty(SelectedHuntName);
+        public bool CanStartWorkflow =>
+            !string.IsNullOrWhiteSpace(SelectedProfileName);
 
         private void RunBot()
         {
@@ -284,10 +260,6 @@ namespace DriverScanTester.ViewModels
             ProfileNames.Clear();
             foreach (var n in names)
                 ProfileNames.Add(n);
-
-            // Refresh hunt names for the currently selected profile
-            if (!string.IsNullOrEmpty(SelectedProfileName))
-                OnProfileChanged();
 
             ValidationText = $"Found {names.Count} profile(s).";
         }
@@ -326,40 +298,12 @@ namespace DriverScanTester.ViewModels
         }
 
         /// <summary>
-        /// Called when the user selects a different profile. Loads the profile
-        /// and populates the HuntNames list from its HuntDefinitions.
+        /// Starts the route workflow for the selected profile: requires a selection,
+        /// loads and validates the profile, starts the workflow and logs the three stages.
         /// </summary>
-        private void OnProfileChanged()
-        {
-            HuntNames.Clear();
-            SelectedHuntName = null;
-
-            if (string.IsNullOrEmpty(SelectedProfileName))
-                return;
-
-            var profile = _main.LoadProfile(SelectedProfileName);
-            if (profile == null || profile.HuntDefinitions == null || profile.HuntDefinitions.Count == 0)
-            {
-                _appendLog($"Profile '{SelectedProfileName}' has no HuntDefinitions.");
-                return;
-            }
-
-            foreach (var hunt in profile.HuntDefinitions)
-            {
-                if (!string.IsNullOrWhiteSpace(hunt.Name))
-                    HuntNames.Add(hunt.Name);
-            }
-
-            // If DefaultHuntName matches an existing hunt, select it; otherwise select the first one
-            if (!string.IsNullOrEmpty(profile.DefaultHuntName) && HuntNames.Contains(profile.DefaultHuntName))
-                SelectedHuntName = profile.DefaultHuntName;
-            else if (HuntNames.Count > 0)
-                SelectedHuntName = HuntNames[0];
-        }
-
         private void StartWorkflowWithProfile()
         {
-            if (string.IsNullOrEmpty(SelectedProfileName))
+            if (string.IsNullOrWhiteSpace(SelectedProfileName))
             {
                 _appendLog("No profile selected. Workflow cannot start.");
                 ValidationText = "No profile selected.";
@@ -371,23 +315,6 @@ namespace DriverScanTester.ViewModels
             {
                 _appendLog($"Failed to load profile '{SelectedProfileName}'.");
                 ValidationText = $"Failed to load profile '{SelectedProfileName}'.";
-                return;
-            }
-
-            if (string.IsNullOrEmpty(SelectedHuntName))
-            {
-                _appendLog("No hunt selected. Workflow cannot start.");
-                ValidationText = "No hunt selected.";
-                return;
-            }
-
-            // The explicitly selected hunt must resolve exactly; never silently pick another hunt.
-            var activeHunt = profile.HuntDefinitions?
-                .FirstOrDefault(h => string.Equals(h.Name, SelectedHuntName, StringComparison.OrdinalIgnoreCase));
-            if (activeHunt == null)
-            {
-                _appendLog($"Selected hunt '{SelectedHuntName}' does not exist in profile '{profile.Name}'. Workflow NOT started.");
-                ValidationText = $"Hunt '{SelectedHuntName}' not found in profile.";
                 return;
             }
 
@@ -403,25 +330,23 @@ namespace DriverScanTester.ViewModels
                 return;
             }
 
-            // Single call — profile+activeHunt are paired consistently
-            _main.StartWorkflow(profile, activeHunt);
+            _main.StartWorkflow(profile);
 
             _appendLog($"Workflow started with profile '{profile.Name}'.");
-            _appendLog($"Active hunt: '{activeHunt.Name}'");
-            _appendLog($"  City → Repot: '{profile.CityToRepot.PathFile}' (delay {profile.CityToRepot.StartDelayMs} ms)");
+            _appendLog($"  Stage 1 — Repot: '{profile.CityToRepot.PathFile}' (wait {profile.CityToRepot.StartDelayMs} ms)");
 
-            var travelRoutes = activeHunt.TravelToExpRoutes ?? new List<TravelRouteStep>();
+            var travelRoutes = profile.TravelToExpRoutes ?? new List<TravelRouteStep>();
             for (int i = 0; i < travelRoutes.Count; i++)
             {
                 var route = travelRoutes[i];
                 if (route == null) continue;
-                string mapInfo = route.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached
-                    ? $", map {route.ExpectedDestinationMapNumber}"
-                    : "";
-                _appendLog($"  Travel route {i + 1}/{travelRoutes.Count}: '{route.PathFile}' (delay {route.StartDelayMs} ms, {route.CompletionMode}{mapInfo})");
+                string completionInfo = route.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached
+                    ? $"finish when destination map loaded → map {route.ExpectedDestinationMapNumber}"
+                    : "finish when last waypoint reached";
+                _appendLog($"  Stage 2 — Go to EXP path {i + 1}/{travelRoutes.Count}: '{route.PathFile}' (wait {route.StartDelayMs} ms, {completionInfo})");
             }
 
-            _appendLog($"  EXP loop: '{activeHunt.ExpLoop.PathFile}' (delay {activeHunt.ExpLoop.StartDelayMs} ms)");
+            _appendLog($"  Stage 3 — EXP Path: '{profile.ExpLoop.PathFile}' (wait {profile.ExpLoop.StartDelayMs} ms)");
         }
 
         public void SyncBotStates()

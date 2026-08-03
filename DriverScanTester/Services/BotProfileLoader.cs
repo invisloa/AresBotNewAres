@@ -45,9 +45,9 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Loads a profile by name (with or without .json extension).
-        /// Profiles created by the immediately previous schema (fixed RepotToCityExit /
-        /// CityExitToExp hunt routes) are migrated in memory to the TravelToExpRoutes chain.
-        /// Saving the profile writes only the new schema.
+        /// Profiles saved with the previous Hunt-based schema are migrated in memory:
+        /// the default hunt (or the first hunt) becomes the profile's direct
+        /// Go to EXP / EXP Path stages. Saving the profile writes only the new schema.
         /// </summary>
         public BotProfile? LoadProfile(string profileName)
         {
@@ -71,9 +71,9 @@ namespace DriverScanTester.Services
                     return null;
                 }
 
-                MigrateLegacyHuntRoutes(profile, json);
+                MigrateLegacyHuntSchema(profile, json);
 
-                _log($"[BotProfileLoader] Loaded profile '{profile.Name}' ({profile.HuntDefinitions?.Count ?? 0} hunt(s)).");
+                _log($"[BotProfileLoader] Loaded profile '{profile.Name}'.");
                 return profile;
             }
             catch (Exception ex)
@@ -83,48 +83,75 @@ namespace DriverScanTester.Services
             }
         }
 
-        /// <summary>
-        /// One-time in-memory migration for the immediately previous profile schema.
-        /// When a hunt's JSON has no TravelToExpRoutes but contains the old
-        /// RepotToCityExit / CityExitToExp steps, converts them in that order into
-        /// FinalWaypoint travel routes, preserving PathFile and StartDelayMs.
-        /// </summary>
-        private void MigrateLegacyHuntRoutes(BotProfile profile, string json)
-        {
-            if (profile.HuntDefinitions == null || profile.HuntDefinitions.Count == 0)
-                return;
+        // ──────────────────── Legacy migration (private) ────────────────────
 
+        /// <summary>
+        /// Private DTO for the old Hunt-based schema. Used only to read legacy
+        /// profile JSON; the public BotProfile model never exposes Hunt properties.
+        /// </summary>
+        private sealed class LegacyHuntDto
+        {
+            public string Name { get; set; } = "";
+            public List<TravelRouteStep> TravelToExpRoutes { get; set; } = new();
+            public BotRouteStep ExpLoop { get; set; } = new();
+            public BotRouteStep? RepotToCityExit { get; set; }
+            public BotRouteStep? CityExitToExp { get; set; }
+        }
+
+        /// <summary>
+        /// One-time in-memory migration for profiles saved with the Hunt-based schema.
+        /// The hunt matching the old DefaultHuntName (or the first hunt when there is
+        /// no match) is selected and its TravelToExpRoutes / ExpLoop are copied into the
+        /// new direct profile properties. All other profile settings are preserved.
+        /// </summary>
+        private void MigrateLegacyHuntSchema(BotProfile profile, string json)
+        {
             using var doc = JsonDocument.Parse(json);
+
+            // New direct schema already present: nothing to migrate.
+            if (doc.RootElement.TryGetProperty("TravelToExpRoutes", out var directRoutesElement) &&
+                directRoutesElement.ValueKind == JsonValueKind.Array &&
+                directRoutesElement.GetArrayLength() > 0)
+            {
+                return;
+            }
+
             if (!doc.RootElement.TryGetProperty("HuntDefinitions", out var huntsElement) ||
                 huntsElement.ValueKind != JsonValueKind.Array)
             {
                 return;
             }
 
-            int index = 0;
+            var hunts = new List<LegacyHuntDto>();
             foreach (var huntElement in huntsElement.EnumerateArray())
             {
-                if (index >= profile.HuntDefinitions.Count)
-                    break;
+                var hunt = huntElement.Deserialize<LegacyHuntDto>();
+                if (hunt != null)
+                    hunts.Add(hunt);
+            }
+            if (hunts.Count == 0)
+                return;
 
-                var hunt = profile.HuntDefinitions[index++];
-                bool alreadyHasRoutes = hunt.TravelToExpRoutes != null && hunt.TravelToExpRoutes.Count > 0;
-                if (alreadyHasRoutes)
-                    continue;
+            // Select the hunt matching the old DefaultHuntName, otherwise the first one.
+            string defaultHuntName = "";
+            if (doc.RootElement.TryGetProperty("DefaultHuntName", out var defaultElement) &&
+                defaultElement.ValueKind == JsonValueKind.String)
+            {
+                defaultHuntName = defaultElement.GetString() ?? "";
+            }
 
-                bool hasLegacyRoutes =
-                    huntElement.TryGetProperty("RepotToCityExit", out _) ||
-                    huntElement.TryGetProperty("CityExitToExp", out _);
-                if (!hasLegacyRoutes)
-                    continue;
+            var selected = hunts.FirstOrDefault(h =>
+                string.Equals(h.Name, defaultHuntName, StringComparison.OrdinalIgnoreCase))
+                ?? hunts[0];
 
-                var routes = new List<TravelRouteStep>();
-                foreach (var propertyName in new[] { "RepotToCityExit", "CityExitToExp" })
+            // Newer legacy hunts carry TravelToExpRoutes directly; the older schema used
+            // RepotToCityExit / CityExitToExp steps, converted here in that order into
+            // FinalWaypoint travel paths, preserving PathFile and StartDelayMs.
+            var routes = new List<TravelRouteStep>(selected.TravelToExpRoutes ?? new List<TravelRouteStep>());
+            if (routes.Count == 0 && (selected.RepotToCityExit != null || selected.CityExitToExp != null))
+            {
+                foreach (var step in new[] { selected.RepotToCityExit, selected.CityExitToExp })
                 {
-                    if (!huntElement.TryGetProperty(propertyName, out var stepElement))
-                        continue;
-
-                    var step = stepElement.Deserialize<BotRouteStep>();
                     if (step == null)
                         continue;
 
@@ -136,15 +163,22 @@ namespace DriverScanTester.Services
                         ExpectedDestinationMapNumber = 0
                     });
                 }
-
-                hunt.TravelToExpRoutes = routes;
-                _log($"[BotProfileLoader] Migrated hunt '{hunt.Name}' in memory: converted RepotToCityExit/CityExitToExp to {routes.Count} TravelToExpRoutes (FinalWaypoint).");
             }
+
+            profile.TravelToExpRoutes = routes;
+            profile.ExpLoop = selected.ExpLoop ?? new BotRouteStep();
+            if (profile.ExpLoop.PathFile == null)
+                profile.ExpLoop.PathFile = "";
+
+            _log($"[BotProfileLoader] Legacy profile '{profile.Name}': migrated hunt '{selected.Name}' into the profile's Go to EXP / EXP Path stages.");
+            if (hunts.Count > 1)
+                _log($"[BotProfileLoader] Legacy profile '{profile.Name}' contained {hunts.Count} hunts; only '{selected.Name}' was migrated because one profile now represents exactly one EXP destination.");
         }
 
         /// <summary>
         /// Saves a profile to disk. The file name is derived from profile.Name.
         /// Returns true when the profile was written successfully, false otherwise.
+        /// Saving always writes the new direct schema.
         /// </summary>
         public bool SaveProfile(BotProfile profile)
         {
@@ -193,107 +227,77 @@ namespace DriverScanTester.Services
 
             // --- General ---
             if (string.IsNullOrWhiteSpace(profile.Name))
-                errors.Add("Profile Name is empty.");
+                errors.Add("Profile name is empty.");
 
-            // --- Stage 1: City → Repot (profile-level) ---
+            // --- Stage 1: REPOT ---
             if (profile.CityToRepot == null)
             {
-                errors.Add("City → Repot: route step is missing. Configure stage 1 (City → Repot).");
+                errors.Add("Stage 1 — Repot: path is missing. Configure the path to the repot location.");
             }
             else
             {
-                ValidateRouteStep(errors, profile.CityToRepot, "City → Repot");
+                ValidatePathStep(errors, profile.CityToRepot, "Stage 1 — Repot");
             }
 
-            // --- Hunt definitions ---
-            if (profile.HuntDefinitions == null || profile.HuntDefinitions.Count == 0)
+            // --- Stage 2: GO TO EXP ---
+            if (profile.TravelToExpRoutes == null)
             {
-                errors.Add("Profile has no hunts. Add at least one hunt with all route stages configured.");
+                errors.Add("Stage 2 — Go to EXP: no paths configured. Add at least one path.");
+            }
+            else if (profile.TravelToExpRoutes.Count == 0)
+            {
+                errors.Add("Stage 2 — Go to EXP: no paths configured. Add at least one path.");
             }
             else
             {
-                for (int i = 0; i < profile.HuntDefinitions.Count; i++)
+                for (int r = 0; r < profile.TravelToExpRoutes.Count; r++)
                 {
-                    var hunt = profile.HuntDefinitions[i];
-                    string huntLabel = string.IsNullOrWhiteSpace(hunt.Name) ? $"Hunt[{i}]" : $"Hunt '{hunt.Name}'";
+                    var route = profile.TravelToExpRoutes[r];
+                    string routeLabel = $"Go to EXP path {r + 1}";
 
-                    if (string.IsNullOrWhiteSpace(hunt.Name))
-                        errors.Add($"HuntDefinitions[{i}]: Name is empty.");
-
-                    // Travel route chain (Repot → EXP)
-                    if (hunt.TravelToExpRoutes == null)
+                    if (route == null)
                     {
-                        errors.Add($"{huntLabel}: TravelToExpRoutes is null. Add at least one travel route.");
-                    }
-                    else if (hunt.TravelToExpRoutes.Count == 0)
-                    {
-                        errors.Add($"{huntLabel}: TravelToExpRoutes is empty. Add at least one travel route.");
-                    }
-                    else
-                    {
-                        for (int r = 0; r < hunt.TravelToExpRoutes.Count; r++)
-                        {
-                            var route = hunt.TravelToExpRoutes[r];
-                            string routeLabel = $"{huntLabel}, travel route {r + 1}";
-
-                            if (route == null)
-                            {
-                                errors.Add($"{routeLabel}: route step is missing.");
-                                continue;
-                            }
-
-                            if (string.IsNullOrWhiteSpace(route.PathFile))
-                                errors.Add($"{routeLabel}: PathFile is empty.");
-                            else if (!SegmentFileExists(route.PathFile))
-                                errors.Add($"{routeLabel}: segment '{route.PathFile}' was not found in SavedPaths.");
-
-                            if (route.StartDelayMs < 0)
-                                errors.Add($"{routeLabel}: StartDelayMs cannot be negative.");
-
-                            if (!Enum.IsDefined(typeof(TravelRouteCompletionMode), route.CompletionMode))
-                                errors.Add($"{routeLabel}: CompletionMode '{route.CompletionMode}' is not a defined value.");
-
-                            switch (route.CompletionMode)
-                            {
-                                case TravelRouteCompletionMode.FinalWaypoint:
-                                    if (route.ExpectedDestinationMapNumber != 0)
-                                        errors.Add($"{routeLabel}: ExpectedDestinationMapNumber must be 0 for FinalWaypoint.");
-                                    break;
-                                case TravelRouteCompletionMode.ExpectedMapReached:
-                                    if (route.ExpectedDestinationMapNumber <= 0)
-                                        errors.Add($"{routeLabel}: ExpectedDestinationMapNumber must be greater than 0 for ExpectedMapReached.");
-                                    break;
-                            }
-                        }
+                        errors.Add($"{routeLabel}: path is missing.");
+                        continue;
                     }
 
-                    if (hunt.ExpLoop == null)
-                        errors.Add($"{huntLabel}, Exp Loop: route step is missing.");
-                    else
-                        ValidateRouteStep(errors, hunt.ExpLoop, $"{huntLabel}, Exp Loop");
+                    if (string.IsNullOrWhiteSpace(route.PathFile))
+                    {
+                        errors.Add($"{routeLabel}: path is empty.");
+                    }
+                    else if (!SegmentFileExists(route.PathFile))
+                    {
+                        errors.Add($"{routeLabel}: path '{route.PathFile}' was not found in SavedPaths.");
+                    }
+
+                    if (route.StartDelayMs < 0)
+                        errors.Add($"{routeLabel}: wait time cannot be negative.");
+
+                    if (!Enum.IsDefined(typeof(TravelRouteCompletionMode), route.CompletionMode))
+                        errors.Add($"{routeLabel}: completion mode '{route.CompletionMode}' is not a defined value.");
+
+                    switch (route.CompletionMode)
+                    {
+                        case TravelRouteCompletionMode.FinalWaypoint:
+                            if (route.ExpectedDestinationMapNumber != 0)
+                                errors.Add($"{routeLabel}: destination map must be 0 when finishing at the last waypoint.");
+                            break;
+                        case TravelRouteCompletionMode.ExpectedMapReached:
+                            if (route.ExpectedDestinationMapNumber <= 0)
+                                errors.Add($"{routeLabel}: expected destination map must be greater than 0.");
+                            break;
+                    }
                 }
-
-                // Duplicate hunt names (ordinal case-insensitive)
-                var duplicateNames = profile.HuntDefinitions
-                    .GroupBy(h => h.Name, StringComparer.OrdinalIgnoreCase)
-                    .Where(g => g.Count() > 1)
-                    .Select(g => g.Key)
-                    .ToList();
-                foreach (var dup in duplicateNames)
-                    errors.Add($"Duplicate hunt name '{dup}' (names are compared case-insensitively).");
             }
 
-            // --- Default hunt ---
-            if (string.IsNullOrWhiteSpace(profile.DefaultHuntName))
+            // --- Stage 3: EXP PATH ---
+            if (profile.ExpLoop == null)
             {
-                errors.Add("DefaultHuntName is empty. Set a default hunt.");
+                errors.Add("Stage 3 — EXP Path: path is missing. Configure the looping EXP path.");
             }
-            else if (profile.HuntDefinitions != null)
+            else
             {
-                int defaultMatches = profile.HuntDefinitions.Count(h =>
-                    string.Equals(h.Name, profile.DefaultHuntName, StringComparison.OrdinalIgnoreCase));
-                if (defaultMatches != 1)
-                    errors.Add($"DefaultHuntName '{profile.DefaultHuntName}' does not match exactly one hunt.");
+                ValidatePathStep(errors, profile.ExpLoop, "Stage 3 — EXP Path");
             }
 
             // --- Repot thresholds / weight / retries ---
@@ -314,33 +318,33 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Validates one route step: non-null step, non-empty PathFile, the referenced
-        /// segment existing in SavedPaths (with or without .json), and a nonnegative delay.
+        /// Validates one path step: non-null step, non-empty PathFile, the referenced
+        /// path existing in SavedPaths (with or without .json), and a nonnegative delay.
         /// </summary>
-        private void ValidateRouteStep(List<string> errors, BotRouteStep step, string displayName)
+        private void ValidatePathStep(List<string> errors, BotRouteStep step, string displayName)
         {
             if (step == null)
             {
-                errors.Add($"{displayName}: route step is missing.");
+                errors.Add($"{displayName}: path is missing.");
                 return;
             }
 
             if (string.IsNullOrWhiteSpace(step.PathFile))
             {
-                errors.Add($"{displayName}: PathFile is empty.");
+                errors.Add($"{displayName}: path is empty.");
             }
             else if (!SegmentFileExists(step.PathFile))
             {
-                errors.Add($"{displayName}: segment '{step.PathFile}' was not found in SavedPaths.");
+                errors.Add($"{displayName}: path '{step.PathFile}' was not found in SavedPaths.");
             }
 
             if (step.StartDelayMs < 0)
-                errors.Add($"{displayName}: StartDelayMs cannot be negative.");
+                errors.Add($"{displayName}: wait time cannot be negative.");
         }
 
         /// <summary>
-        /// Returns true when a segment file exists in SavedPaths.
-        /// Segment names may be stored with or without the .json extension.
+        /// Returns true when a path file exists in SavedPaths.
+        /// Path names may be stored with or without the .json extension.
         /// </summary>
         private static bool SegmentFileExists(string segmentFileName)
         {

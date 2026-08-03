@@ -6,7 +6,7 @@
         xmlns:vm="clr-namespace:DriverScanTester.ViewModels"
         xmlns:utils="clr-namespace:DriverScanTester.Utils"
         mc:Ignorable="d"
-        Title="Path &amp; Route Editor" Height="900" Width="1200" MinWidth="1050" MinHeight="700">
+        Title="Path &amp; Profile Editor" Height="900" Width="1200" MinWidth="1050" MinHeight="700">
     <Window.Resources>
         <utils:RouteNumberConverter x:Key="RouteNumberConverter"/>
         <utils:TravelRouteCompletionModeTextConverter x:Key="TravelRouteCompletionModeTextConverter"/>
@@ -18,8 +18,8 @@
         </Grid.RowDefinitions>
 
         <TabControl Grid.Row="0">
-            <!-- TAB 1: SEGMENT CREATOR -->
-            <TabItem Header="Segment Creator">
+            <!-- TAB 1: PATH EDITOR -->
+            <TabItem Header="Path Editor">
                 <Grid Margin="5">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="2*"/>
@@ -27,8 +27,8 @@
                         <ColumnDefinition Width="1.1*"/>
                     </Grid.ColumnDefinitions>
 
-                    <!-- A. Segment point editor -->
-                    <GroupBox Header="Current Segment Points" Grid.Column="0">
+                    <!-- A. Path point editor -->
+                    <GroupBox Header="Current Path Points" Grid.Column="0">
                         <DataGrid ItemsSource="{Binding Points}" AutoGenerateColumns="False" 
                                   SelectedItem="{Binding SelectedPoint}" CanUserAddRows="False">
                             <DataGrid.Columns>
@@ -53,7 +53,7 @@
                         </DataGrid>
                     </GroupBox>
 
-                    <!-- B. Segment settings and actions -->
+                    <!-- B. Path settings and actions -->
                     <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto">
                         <StackPanel Margin="10,0,0,0">
                             <Button Content="Capture Position (Bot)" Command="{Binding CapturePositionCommand}" Margin="0,0,0,10" Padding="8" Background="#FFE6F7FF" FontWeight="Bold"/>
@@ -80,7 +80,7 @@
 
                             <CheckBox Content="Loop Path" IsChecked="{Binding LoopRoute}" Margin="0,0,0,10" ToolTip="Start over from first point when finished"/>
 
-                            <Label Content="Segment Name (Save As):"/>
+                            <Label Content="Path Name (Save As):"/>
                             <TextBox Text="{Binding SegmentName, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,5" Padding="3"/>
                             
                             <Label Content="Precision for new points:"/>
@@ -111,18 +111,18 @@
                                      Margin="0,0,0,10" Padding="3"
                                      ToolTip="If the bot moves farther than this Manhattan distance from the current attack waypoint, it will stop attacking until the waypoint is reached again."/>
 
-                            <Button Content="Save Segment to Library" Command="{Binding SaveSegmentCommand}" Margin="0,0,0,20" Padding="5"/>
+                            <Button Content="Save Path" Command="{Binding SaveSegmentCommand}" Margin="0,0,0,20" Padding="5"/>
 
                             <Separator Height="10"/>
-                            <TextBlock Text="To edit an existing segment, select it in the Saved Segment Library and click Load into Editor." TextWrapping="Wrap" Foreground="Gray" FontSize="10"/>
+                            <TextBlock Text="To edit an existing path, select it in Saved Paths and click Edit Path." TextWrapping="Wrap" Foreground="Gray" FontSize="10"/>
                             
-                            <Button Content="RUN THIS SEGMENT ONLY" Command="{Binding RunCurrentSegmentCommand}" Margin="0,20,0,0" Padding="5" Background="#FFF0F0F0"/>
+                            <Button Content="Run This Path" Command="{Binding RunCurrentSegmentCommand}" Margin="0,20,0,0" Padding="5" Background="#FFF0F0F0"/>
                             <Button Content="STOP BOT" Command="{Binding StopBotCommand}" Margin="0,5,0,0" Padding="5" Background="#FFFFCCCC" FontWeight="Bold"/>
                         </StackPanel>
                     </ScrollViewer>
 
-                    <!-- C. Saved Segment Library -->
-                    <GroupBox Header="Saved Segment Library" Grid.Column="2" Margin="10,0,0,0">
+                    <!-- C. Saved Paths library -->
+                    <GroupBox Header="Saved Paths" Grid.Column="2" Margin="10,0,0,0">
                         <Grid Margin="3">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="*"/>
@@ -133,9 +133,9 @@
 
                             <StackPanel Grid.Row="1" Margin="0,5,0,0">
                                 <Button Content="Refresh" Command="{Binding RefreshLibraryCommand}" Margin="0,0,0,5"/>
-                                <Button Content="Load into Editor" Command="{Binding LoadSegmentCommand}" Margin="0,0,0,5"
-                                        ToolTip="Load the selected segment into the Segment Creator for editing"/>
-                                <Button Content="Delete Segment" Command="{Binding DeleteSegmentCommand}" Margin="0,0,0,5"
+                                <Button Content="Edit Path" Command="{Binding LoadSegmentCommand}" Margin="0,0,0,5"
+                                        ToolTip="Load the selected path into the Path Editor for editing"/>
+                                <Button Content="Delete Path" Command="{Binding DeleteSegmentCommand}" Margin="0,0,0,5"
                                         Background="#FFFFE6E6" ToolTip="Permanently delete from disk"/>
                                 <Button Content="STOP BOT" Command="{Binding StopBotCommand}" Margin="0,5,0,0"
                                         Padding="5" Background="#FFFFCCCC" FontWeight="Bold"/>
@@ -145,8 +145,8 @@
                 </Grid>
             </TabItem>
 
-            <!-- TAB 2: PROFILE EDITOR -->
-            <TabItem Header="Profile Editor">
+            <!-- TAB 2: BOT PROFILE -->
+            <TabItem Header="Bot Profile">
                 <Grid Margin="5" DataContext="{Binding ProfileEditor}">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -159,307 +159,242 @@
                         <WrapPanel Orientation="Horizontal">
                             <TextBlock Text="Profile:" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,5,0"/>
                             <ComboBox ItemsSource="{Binding ProfileNames}" SelectedItem="{Binding SelectedProfileName}"
-                                      Width="150" VerticalAlignment="Center" IsEditable="True" Margin="0,0,5,0"/>
+                                      Width="150" VerticalAlignment="Center" IsEditable="True" Margin="0,0,8,0"/>
+                            <TextBlock Text="Name:" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                            <TextBox Text="{Binding ProfileName, UpdateSourceTrigger=PropertyChanged}"
+                                     Width="140" VerticalAlignment="Center" Margin="0,0,8,0" Padding="3"/>
                             <Button Content="New" Command="{Binding NewProfileCommand}" Width="50" Margin="2" Background="#FFE6FFE6" FontWeight="Bold"/>
                             <Button Content="Save" Command="{Binding SaveProfileCommand}" Width="50" Margin="2" Background="#FFE6F7FF" FontWeight="Bold"/>
                             <Button Content="Delete" Command="{Binding DeleteProfileCommand}" Width="55" Margin="2" Background="#FFFFE6E6"/>
-                            <Button Content="Refresh Profiles" Command="{Binding RefreshProfilesCommand}" Width="110" Margin="2"/>
                             <Separator Width="1" Margin="5,2" Background="LightGray"/>
-                            <Button Content="Refresh Segments" Command="{Binding RefreshSegmentsCommand}" Width="120" Margin="2"/>
+                            <Button Content="Refresh Profiles" Command="{Binding RefreshProfilesCommand}" Width="110" Margin="2"/>
+                            <Button Content="Refresh Paths" Command="{Binding RefreshPathsCommand}" Width="105" Margin="2"/>
                         </WrapPanel>
                     </Border>
 
-                    <!-- Row 1: Scrollable workflow content -->
+                    <!-- Row 1: Scrollable three-stage workflow -->
                     <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                         <StackPanel Margin="0,0,5,0">
 
-                            <!-- General and repot settings -->
-                            <GroupBox Header="General and Repot Settings" Margin="0,0,0,8">
-                                <Grid Margin="3">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto"/>
-                                        <ColumnDefinition Width="*"/>
-                                    </Grid.ColumnDefinitions>
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                    </Grid.RowDefinitions>
-
-                                    <Label Grid.Row="0" Grid.Column="0" Content="Name:"/>
-                                    <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding ProfileName, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
-
-                                    <Label Grid.Row="1" Grid.Column="0" Content="Min HP Pots:"/>
-                                    <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding MinHpPotions, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
-
-                                    <Label Grid.Row="2" Grid.Column="0" Content="Min Mana Pots:"/>
-                                    <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding MinManaPotions, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
-
-                                    <Label Grid.Row="3" Grid.Column="0" Content="Max Weight Ratio:"/>
-                                    <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding MaxWeightRatio, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
-
-                                    <Label Grid.Row="4" Grid.Column="0" Content="Min HP:"/>
-                                    <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding MinHp, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
-
-                                    <Label Grid.Row="5" Grid.Column="0" Content="Min Mana:"/>
-                                    <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding MinMana, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
-
-                                    <Label Grid.Row="6" Grid.Column="0" Content="HP Buy Target:"/>
-                                    <TextBox Grid.Row="6" Grid.Column="1" Text="{Binding HpBuyTarget, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
-
-                                    <Label Grid.Row="7" Grid.Column="0" Content="Mana Buy Target:"/>
-                                    <TextBox Grid.Row="7" Grid.Column="1" Text="{Binding ManaBuyTarget, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
-
-                                    <Label Grid.Row="8" Grid.Column="0" Content="Red Buy Target:"/>
-                                    <TextBox Grid.Row="8" Grid.Column="1" Text="{Binding RedBuyTarget, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
-
-                                    <Label Grid.Row="9" Grid.Column="0" Content="White Buy Target:"/>
-                                    <TextBox Grid.Row="9" Grid.Column="1" Text="{Binding WhiteBuyTarget, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
-
-                                    <CheckBox Grid.Row="10" Grid.Column="1" Content="Dry Run Repot" IsChecked="{Binding DryRunRepot}" Margin="2"/>
-                                </Grid>
-                            </GroupBox>
-
-                            <!-- Advanced workflow settings -->
-                            <GroupBox Header="Advanced Workflow Settings" Margin="0,0,0,8">
-                                <Grid Margin="3">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto"/>
-                                        <ColumnDefinition Width="*"/>
-                                    </Grid.ColumnDefinitions>
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                        <RowDefinition Height="Auto"/>
-                                    </Grid.RowDefinitions>
-
-                                    <Label Grid.Row="0" Grid.Column="0" Content="Teleport Key:"/>
-                                    <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding TeleportKey, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
-
-                                    <Label Grid.Row="1" Grid.Column="0" Content="Teleport Scan Code:"/>
-                                    <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding TeleportScanCode, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
-
-                                    <Label Grid.Row="2" Grid.Column="0" Content="Max Teleport Retries:"/>
-                                    <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding MaxTeleportRetries, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
-
-                                    <Label Grid.Row="3" Grid.Column="0" Content="Window Offset X:"/>
-                                    <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding WindowOffsetX, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
-
-                                    <Label Grid.Row="4" Grid.Column="0" Content="Window Offset Y:"/>
-                                    <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding WindowOffsetY, UpdateSourceTrigger=PropertyChanged}" Margin="2"/>
-                                </Grid>
-                            </GroupBox>
-
-                            <!-- Stage 1 card: City → Repot (profile-level) -->
-                            <GroupBox Header="Stage 1 — City → Repot (profile-level)" Margin="0,0,0,8" BorderBrush="#FF3399FF" BorderThickness="1">
+                            <!-- ─────────── Stage 1: REPOT ─────────── -->
+                            <GroupBox Header="1. REPOT" Margin="0,0,0,10" BorderBrush="#FF3399FF" BorderThickness="2" Padding="4">
                                 <StackPanel Margin="3">
                                     <WrapPanel Orientation="Horizontal" Margin="0,0,0,5">
-                                        <TextBlock Text="Saved Path:" FontWeight="Bold" VerticalAlignment="Center" Width="90"/>
-                                        <ComboBox ItemsSource="{Binding AvailableSegments}" SelectedItem="{Binding CityToRepot.PathFile}"
-                                                  Width="300" VerticalAlignment="Center"/>
+                                        <TextBlock Text="Path to repot:" FontWeight="Bold" VerticalAlignment="Center" Width="120"/>
+                                        <ComboBox ItemsSource="{Binding AvailablePaths}" SelectedItem="{Binding CityToRepot.PathFile}"
+                                                  Width="320" VerticalAlignment="Center"/>
                                     </WrapPanel>
-                                    <WrapPanel Orientation="Horizontal" Margin="0,0,0,5">
-                                        <TextBlock Text="Wait before start (ms):" FontWeight="Bold" VerticalAlignment="Center" Width="140"/>
+                                    <WrapPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                        <TextBlock Text="Wait before start (ms):" FontWeight="Bold" VerticalAlignment="Center" Width="120"/>
                                         <TextBox Text="{Binding CityToRepot.StartDelayMs, UpdateSourceTrigger=PropertyChanged}"
                                                  Width="100" VerticalAlignment="Center"/>
                                     </WrapPanel>
-                                    <TextBlock Text="Only one City → Repot path is supported for now. Additional city-to-repot path selection will be designed later."
-                                               TextWrapping="Wrap" Foreground="Gray" FontSize="10"/>
+
+                                    <GroupBox Header="Repot when" Margin="0,0,0,8" BorderBrush="#FF99CCFF" BorderThickness="1">
+                                        <Grid Margin="3">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="Auto"/>
+                                            </Grid.RowDefinitions>
+
+                                            <Label Grid.Row="0" Grid.Column="0" Content="Minimum HP potions:"/>
+                                            <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding MinHpPotions, UpdateSourceTrigger=PropertyChanged}" Width="70" Margin="2" HorizontalAlignment="Left"/>
+
+                                            <Label Grid.Row="0" Grid.Column="2" Content="Minimum mana potions:"/>
+                                            <TextBox Grid.Row="0" Grid.Column="3" Text="{Binding MinManaPotions, UpdateSourceTrigger=PropertyChanged}" Width="70" Margin="2" HorizontalAlignment="Left"/>
+
+                                            <Label Grid.Row="1" Grid.Column="0" Content="Maximum weight (%):"/>
+                                            <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding MaxWeightPercent, UpdateSourceTrigger=PropertyChanged}" Width="70" Margin="2" HorizontalAlignment="Left"/>
+
+                                            <Label Grid.Row="1" Grid.Column="2" Content="Minimum HP:"/>
+                                            <TextBox Grid.Row="1" Grid.Column="3" Text="{Binding MinHp, UpdateSourceTrigger=PropertyChanged}" Width="70" Margin="2" HorizontalAlignment="Left"/>
+
+                                            <Label Grid.Row="2" Grid.Column="0" Content="Minimum mana:"/>
+                                            <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding MinMana, UpdateSourceTrigger=PropertyChanged}" Width="70" Margin="2" HorizontalAlignment="Left"/>
+                                        </Grid>
+                                    </GroupBox>
+
+                                    <GroupBox Header="Buy potions up to" Margin="0,0,0,4" BorderBrush="#FF99CCFF" BorderThickness="1">
+                                        <Grid Margin="3">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+
+                                            <StackPanel Grid.Column="0" Margin="0,0,8,0">
+                                                <TextBlock Text="HP" FontWeight="Bold"/>
+                                                <TextBox Text="{Binding HpBuyTarget, UpdateSourceTrigger=PropertyChanged}" Width="70" HorizontalAlignment="Left" Margin="0,2,0,0"/>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="1" Margin="0,0,8,0">
+                                                <TextBlock Text="Mana" FontWeight="Bold"/>
+                                                <TextBox Text="{Binding ManaBuyTarget, UpdateSourceTrigger=PropertyChanged}" Width="70" HorizontalAlignment="Left" Margin="0,2,0,0"/>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="2" Margin="0,0,8,0">
+                                                <TextBlock Text="Red" FontWeight="Bold"/>
+                                                <TextBox Text="{Binding RedBuyTarget, UpdateSourceTrigger=PropertyChanged}" Width="70" HorizontalAlignment="Left" Margin="0,2,0,0"/>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="3">
+                                                <TextBlock Text="White" FontWeight="Bold"/>
+                                                <TextBox Text="{Binding WhiteBuyTarget, UpdateSourceTrigger=PropertyChanged}" Width="70" HorizontalAlignment="Left" Margin="0,2,0,0"/>
+                                            </StackPanel>
+                                        </Grid>
+                                    </GroupBox>
                                 </StackPanel>
                             </GroupBox>
 
-                            <!-- Hunt selector (master-detail) -->
-                            <GroupBox Header="Hunts" Margin="0,0,0,8" BorderBrush="#FF3399FF" BorderThickness="1">
-                                <Grid Margin="3">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="230"/>
-                                        <ColumnDefinition Width="*"/>
-                                    </Grid.ColumnDefinitions>
+                            <!-- ─────────── Stage 2: GO TO EXP ─────────── -->
+                            <GroupBox Header="2. GO TO EXP" Margin="0,0,0,10" BorderBrush="#FF3399FF" BorderThickness="2" Padding="4">
+                                <StackPanel Margin="3">
+                                    <TextBlock Text="Paths are executed in order from top to bottom. Use “Destination map loaded” for a path that ends at a portal."
+                                               TextWrapping="Wrap" Foreground="Gray" FontSize="10" Margin="0,0,0,6"/>
 
-                                    <!-- Master: hunt list -->
-                                    <Grid Grid.Column="0" Margin="0,0,8,0">
-                                        <Grid.RowDefinitions>
-                                            <RowDefinition Height="*"/>
-                                            <RowDefinition Height="Auto"/>
-                                        </Grid.RowDefinitions>
+                                    <DataGrid ItemsSource="{Binding TravelToExpRoutes}"
+                                              SelectedItem="{Binding SelectedTravelRoute}"
+                                              AutoGenerateColumns="False"
+                                              CanUserAddRows="False"
+                                              CanUserDeleteRows="False"
+                                              HeadersVisibility="Column"
+                                              GridLinesVisibility="All"
+                                              AlternationCount="2147483647"
+                                              RowHeaderWidth="0"
+                                              SelectionMode="Single"
+                                              SelectionUnit="FullRow"
+                                              MinHeight="120"
+                                              MaxHeight="320"
+                                              VerticalScrollBarVisibility="Auto">
+                                        <DataGrid.Columns>
+                                            <!-- # -->
+                                            <DataGridTemplateColumn Header="#" Width="36" IsReadOnly="True">
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <TextBlock Text="{Binding RelativeSource={RelativeSource AncestorType=DataGridRow}, Path=(ItemsControl.AlternationIndex), Converter={StaticResource RouteNumberConverter}}"
+                                                                   VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
 
-                                        <ListBox Grid.Row="0" ItemsSource="{Binding HuntDefinitions}" SelectedItem="{Binding SelectedHunt}" Margin="0,0,0,5">
-                                            <ListBox.ItemTemplate>
-                                                <DataTemplate>
-                                                    <StackPanel Orientation="Horizontal">
-                                                        <TextBlock Text="{Binding Name}"/>
-                                                        <TextBlock Text=" (default)" Foreground="#FF008000" FontWeight="Bold">
-                                                            <TextBlock.Style>
-                                                                <Style TargetType="TextBlock">
-                                                                    <Setter Property="Visibility" Value="Collapsed"/>
-                                                                    <Style.Triggers>
-                                                                        <DataTrigger Binding="{Binding IsDefault}" Value="True">
-                                                                            <Setter Property="Visibility" Value="Visible"/>
-                                                                        </DataTrigger>
-                                                                    </Style.Triggers>
-                                                                </Style>
-                                                            </TextBlock.Style>
-                                                        </TextBlock>
-                                                    </StackPanel>
-                                                </DataTemplate>
-                                            </ListBox.ItemTemplate>
-                                        </ListBox>
+                                            <!-- Path -->
+                                            <DataGridTemplateColumn Header="Path" Width="2*">
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <ComboBox ItemsSource="{Binding DataContext.AvailablePaths, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                                  SelectedItem="{Binding PathFile, UpdateSourceTrigger=PropertyChanged}"
+                                                                  BorderThickness="0" Background="Transparent"
+                                                                  VerticalAlignment="Center" Margin="2,0"/>
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
 
-                                        <WrapPanel Grid.Row="1" Orientation="Horizontal">
-                                            <Button Content="Add Hunt" Command="{Binding AddHuntCommand}" Width="80" Margin="0,0,2,0" Background="#FFE6F7FF"/>
-                                            <Button Content="Remove" Command="{Binding RemoveHuntCommand}" Width="65" Margin="2,0,0,0" Background="#FFFFE6E6"/>
-                                            <Button Content="▲" Command="{Binding MoveHuntUpCommand}" Width="28" Margin="4,0,2,0" ToolTip="Move up"/>
-                                            <Button Content="▼" Command="{Binding MoveHuntDownCommand}" Width="28" Margin="0,0,4,0" ToolTip="Move down"/>
-                                            <Button Content="Set as Default" Command="{Binding SetDefaultHuntCommand}" Width="110" Margin="0,3,0,0" Background="#FFE6FFE6"/>
-                                        </WrapPanel>
-                                    </Grid>
+                                            <!-- Wait (ms) -->
+                                            <DataGridTextColumn Header="Wait (ms)" Width="80"
+                                                                Binding="{Binding StartDelayMs, UpdateSourceTrigger=PropertyChanged}"/>
 
-                                    <!-- Detail: selected hunt stages -->
-                                    <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                                        <StackPanel>
-                                            <WrapPanel Orientation="Horizontal" Margin="0,0,0,8">
-                                                <TextBlock Text="Hunt Name:" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                                                <TextBox Text="{Binding SelectedHunt.Name, UpdateSourceTrigger=PropertyChanged}" Width="200" VerticalAlignment="Center" Padding="3"/>
-                                            </WrapPanel>
-
-                                            <!-- Stage 2: Travel Routes (Repot → EXP) -->
-                                            <GroupBox Header="Stage 2 — Travel Routes: Repot → EXP" Margin="0,0,0,8" BorderBrush="#FF66B2FF" BorderThickness="1">
-                                                <Grid Margin="3">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="300"/>
-                                                        <ColumnDefinition Width="*"/>
-                                                    </Grid.ColumnDefinitions>
-
-                                                    <!-- Left: ordered route list -->
-                                                    <Grid Grid.Column="0" Margin="0,0,8,0">
-                                                        <Grid.RowDefinitions>
-                                                            <RowDefinition Height="*"/>
-                                                            <RowDefinition Height="Auto"/>
-                                                        </Grid.RowDefinitions>
-
-                                                        <ListBox Grid.Row="0" ItemsSource="{Binding SelectedHunt.TravelToExpRoutes}"
-                                                                 SelectedItem="{Binding SelectedHunt.SelectedTravelRoute}"
-                                                                 AlternationCount="2147483647" Margin="0,0,0,5">
-                                                            <ListBox.ItemTemplate>
-                                                                <DataTemplate>
-                                                                    <StackPanel Margin="2">
-                                                                        <StackPanel Orientation="Horizontal">
-                                                                            <TextBlock FontWeight="Bold"
-                                                                                       Text="{Binding RelativeSource={RelativeSource AncestorType=ListBoxItem}, Path=(ItemsControl.AlternationIndex), Converter={StaticResource RouteNumberConverter}, StringFormat='Route {0}: '}"/>
-                                                                            <TextBlock Text="{Binding PathFile}"/>
-                                                                        </StackPanel>
-                                                                        <StackPanel Orientation="Horizontal" Margin="14,0,0,0">
-                                                                            <TextBlock Text="{Binding CompletionMode, Converter={StaticResource TravelRouteCompletionModeTextConverter}}" Foreground="Gray"/>
-                                                                            <TextBlock Text="{Binding ExpectedDestinationMapNumber, StringFormat=' → Map {0}'}" Foreground="Gray">
-                                                                                <TextBlock.Style>
-                                                                                    <Style TargetType="TextBlock">
-                                                                                        <Setter Property="Visibility" Value="Collapsed"/>
-                                                                                        <Style.Triggers>
-                                                                                            <DataTrigger Binding="{Binding CompletionMode}" Value="ExpectedMapReached">
-                                                                                                <Setter Property="Visibility" Value="Visible"/>
-                                                                                            </DataTrigger>
-                                                                                        </Style.Triggers>
-                                                                                    </Style>
-                                                                                </TextBlock.Style>
-                                                                            </TextBlock>
-                                                                        </StackPanel>
-                                                                    </StackPanel>
-                                                                </DataTemplate>
-                                                            </ListBox.ItemTemplate>
-                                                        </ListBox>
-
-                                                        <WrapPanel Grid.Row="1" Orientation="Horizontal">
-                                                            <Button Content="Add Route" Command="{Binding AddTravelRouteCommand}" Width="80" Margin="0,0,2,0" Background="#FFE6F7FF"/>
-                                                            <Button Content="Remove" Command="{Binding RemoveTravelRouteCommand}" Width="65" Margin="2,0,0,0" Background="#FFFFE6E6"/>
-                                                            <Button Content="▲" Command="{Binding MoveTravelRouteUpCommand}" Width="28" Margin="4,0,2,0" ToolTip="Move up"/>
-                                                            <Button Content="▼" Command="{Binding MoveTravelRouteDownCommand}" Width="28" Margin="0,0,4,0" ToolTip="Move down"/>
-                                                        </WrapPanel>
-                                                    </Grid>
-
-                                                    <!-- Right: selected route editor -->
-                                                    <Grid Grid.Column="1">
-                                                        <Grid.ColumnDefinitions>
-                                                            <ColumnDefinition Width="Auto"/>
-                                                            <ColumnDefinition Width="*"/>
-                                                        </Grid.ColumnDefinitions>
-                                                        <Grid.RowDefinitions>
-                                                            <RowDefinition Height="Auto"/>
-                                                            <RowDefinition Height="Auto"/>
-                                                            <RowDefinition Height="Auto"/>
-                                                            <RowDefinition Height="Auto"/>
-                                                        </Grid.RowDefinitions>
-
-                                                        <Label Grid.Row="0" Grid.Column="0" Content="Saved Path:"/>
-                                                        <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding AvailableSegments}"
-                                                                  SelectedItem="{Binding SelectedHunt.SelectedTravelRoute.PathFile}"
-                                                                  Width="300" Margin="2" HorizontalAlignment="Left"/>
-
-                                                        <Label Grid.Row="1" Grid.Column="0" Content="Wait before start (ms):"/>
-                                                        <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding SelectedHunt.SelectedTravelRoute.StartDelayMs, UpdateSourceTrigger=PropertyChanged}"
-                                                                 Width="100" Margin="2" HorizontalAlignment="Left"/>
-
-                                                        <Label Grid.Row="2" Grid.Column="0" Content="Complete when:"/>
-                                                        <ComboBox Grid.Row="2" Grid.Column="1"
-                                                                  ItemsSource="{Binding Source={x:Static vm:EnumSources.TravelRouteCompletionModes}}"
-                                                                  SelectedItem="{Binding SelectedHunt.SelectedTravelRoute.CompletionMode}"
-                                                                  Width="180" Margin="2" HorizontalAlignment="Left">
+                                            <!-- Finish when -->
+                                            <DataGridTemplateColumn Header="Finish when" Width="1.4*">
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <ComboBox ItemsSource="{Binding Source={x:Static vm:EnumSources.TravelRouteCompletionModes}}"
+                                                                  SelectedItem="{Binding CompletionMode, UpdateSourceTrigger=PropertyChanged}"
+                                                                  BorderThickness="0" Background="Transparent"
+                                                                  VerticalAlignment="Center" Margin="2,0">
                                                             <ComboBox.ItemTemplate>
                                                                 <DataTemplate>
                                                                     <TextBlock Text="{Binding Converter={StaticResource TravelRouteCompletionModeTextConverter}}"/>
                                                                 </DataTemplate>
                                                             </ComboBox.ItemTemplate>
                                                         </ComboBox>
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
 
-                                                        <Label Grid.Row="3" Grid.Column="0" Content="Expected destination map:"/>
-                                                        <TextBox Grid.Row="3" Grid.Column="1"
-                                                                 Text="{Binding SelectedHunt.SelectedTravelRoute.ExpectedDestinationMapNumber, UpdateSourceTrigger=PropertyChanged}"
-                                                                 Width="100" Margin="2" HorizontalAlignment="Left">
-                                                            <TextBox.Style>
-                                                                <Style TargetType="TextBox">
-                                                                    <Setter Property="IsEnabled" Value="False"/>
-                                                                    <Style.Triggers>
-                                                                        <DataTrigger Binding="{Binding SelectedHunt.SelectedTravelRoute.CompletionMode}" Value="ExpectedMapReached">
-                                                                            <Setter Property="IsEnabled" Value="True"/>
-                                                                        </DataTrigger>
-                                                                    </Style.Triggers>
-                                                                </Style>
-                                                            </TextBox.Style>
-                                                        </TextBox>
-                                                    </Grid>
-                                                </Grid>
-                                            </GroupBox>
+                                            <!-- Destination map (enabled only for ExpectedMapReached) -->
+                                            <DataGridTextColumn Header="Destination map" Width="110"
+                                                                Binding="{Binding ExpectedDestinationMapNumber, UpdateSourceTrigger=PropertyChanged}">
+                                                <DataGridTextColumn.EditingElementStyle>
+                                                    <Style TargetType="TextBox">
+                                                        <Setter Property="IsEnabled" Value="False"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding CompletionMode}" Value="ExpectedMapReached">
+                                                                <Setter Property="IsEnabled" Value="True"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </DataGridTextColumn.EditingElementStyle>
+                                            </DataGridTextColumn>
+                                        </DataGrid.Columns>
+                                    </DataGrid>
 
-                                            <!-- Stage 3: EXP Loop -->
-                                            <GroupBox Header="Stage 3 — EXP Loop" Margin="0,0,0,8" BorderBrush="#FF66B2FF" BorderThickness="1">
-                                                <StackPanel Margin="3">
-                                                    <WrapPanel Orientation="Horizontal" Margin="0,0,0,5">
-                                                        <TextBlock Text="Saved Path:" FontWeight="Bold" VerticalAlignment="Center" Width="90"/>
-                                                        <ComboBox ItemsSource="{Binding AvailableSegments}" SelectedItem="{Binding SelectedHunt.ExpLoop.PathFile}"
-                                                                  Width="300" VerticalAlignment="Center"/>
-                                                    </WrapPanel>
-                                                    <WrapPanel Orientation="Horizontal" Margin="0,0,0,5">
-                                                        <TextBlock Text="Wait before start (ms):" FontWeight="Bold" VerticalAlignment="Center" Width="140"/>
-                                                        <TextBox Text="{Binding SelectedHunt.ExpLoop.StartDelayMs, UpdateSourceTrigger=PropertyChanged}"
-                                                                 Width="100" VerticalAlignment="Center"/>
-                                                    </WrapPanel>
-                                                    <TextBlock Text="The selected path loops until repot is needed."
-                                                               TextWrapping="Wrap" Foreground="Gray" FontSize="10"/>
-                                                </StackPanel>
-                                            </GroupBox>
-                                        </StackPanel>
-                                    </ScrollViewer>
-                                </Grid>
+                                    <WrapPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                        <Button Content="Add path" Command="{Binding AddTravelRouteCommand}" Width="80" Margin="0,0,4,0" Background="#FFE6F7FF"/>
+                                        <Button Content="Remove" Command="{Binding RemoveTravelRouteCommand}" Width="70" Margin="0,0,4,0" Background="#FFFFE6E6"/>
+                                        <Button Content="Move up" Command="{Binding MoveTravelRouteUpCommand}" Width="75" Margin="0,0,4,0"/>
+                                        <Button Content="Move down" Command="{Binding MoveTravelRouteDownCommand}" Width="85" Margin="0,0,4,0"/>
+                                    </WrapPanel>
+                                </StackPanel>
                             </GroupBox>
+
+                            <!-- ─────────── Stage 3: EXP PATH ─────────── -->
+                            <GroupBox Header="3. EXP PATH" Margin="0,0,0,10" BorderBrush="#FF3399FF" BorderThickness="2" Padding="4">
+                                <StackPanel Margin="3">
+                                    <WrapPanel Orientation="Horizontal" Margin="0,0,0,5">
+                                        <TextBlock Text="Path:" FontWeight="Bold" VerticalAlignment="Center" Width="120"/>
+                                        <ComboBox ItemsSource="{Binding AvailablePaths}" SelectedItem="{Binding ExpLoop.PathFile}"
+                                                  Width="320" VerticalAlignment="Center"/>
+                                    </WrapPanel>
+                                    <WrapPanel Orientation="Horizontal" Margin="0,0,0,5">
+                                        <TextBlock Text="Wait before start (ms):" FontWeight="Bold" VerticalAlignment="Center" Width="120"/>
+                                        <TextBox Text="{Binding ExpLoop.StartDelayMs, UpdateSourceTrigger=PropertyChanged}"
+                                                 Width="100" VerticalAlignment="Center"/>
+                                    </WrapPanel>
+                                    <TextBlock Text="This path loops until the bot needs to repot."
+                                               TextWrapping="Wrap" Foreground="Gray" FontSize="10"/>
+                                </StackPanel>
+                            </GroupBox>
+
+                            <!-- ─────────── Advanced settings ─────────── -->
+                            <Expander Header="Advanced settings" IsExpanded="False" Margin="0,0,0,8">
+                                <Grid Margin="3,8,3,3">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+
+                                    <CheckBox Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2" Content="Dry Run Repot"
+                                              IsChecked="{Binding DryRunRepot}" Margin="2" VerticalAlignment="Center"/>
+
+                                    <Label Grid.Row="1" Grid.Column="0" Content="Teleport Key:"/>
+                                    <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding TeleportKey, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="2" HorizontalAlignment="Left"/>
+
+                                    <Label Grid.Row="2" Grid.Column="0" Content="Teleport Scan Code:"/>
+                                    <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding TeleportScanCode, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="2" HorizontalAlignment="Left"/>
+
+                                    <Label Grid.Row="3" Grid.Column="0" Content="Max Teleport Retries:"/>
+                                    <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding MaxTeleportRetries, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="2" HorizontalAlignment="Left"/>
+
+                                    <Label Grid.Row="4" Grid.Column="0" Content="Window Offset X:"/>
+                                    <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding WindowOffsetX, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="2" HorizontalAlignment="Left"/>
+
+                                    <Label Grid.Row="5" Grid.Column="0" Content="Window Offset Y:"/>
+                                    <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding WindowOffsetY, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="2" HorizontalAlignment="Left"/>
+                                </Grid>
+                            </Expander>
                         </StackPanel>
                     </ScrollViewer>
 

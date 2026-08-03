@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
-using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Windows.Input;
@@ -12,10 +11,11 @@ using DriverScanTester.Utils;
 namespace DriverScanTester.ViewModels
 {
     /// <summary>
-    /// ViewModel for the Profile Editor tab in PathEditorWindow.
-    /// Allows creating/editing BotProfiles with the route workflow:
-    /// Stage 1 (City → Repot, profile-level) and per-hunt stages 2-3
-    /// (Travel Routes Repot → EXP chain, Exp Loop).
+    /// ViewModel for the Bot Profile editor tab in PathEditorWindow.
+    /// A profile is a simple three-stage configuration:
+    ///   1. REPOT      — CityToRepot (one path)
+    ///   2. GO TO EXP  — TravelToExpRoutes (ordered list of paths)
+    ///   3. EXP PATH   — ExpLoop (one looping path)
     /// Uses BotProfileLoader as the single persistence and validation service.
     /// </summary>
     public class ProfileEditorViewModel : BaseViewModel
@@ -23,7 +23,7 @@ namespace DriverScanTester.ViewModels
         // Used only for deleting profile files (persistence itself lives in BotProfileLoader).
         private static readonly string PROFILE_DIR = Path.GetFullPath(
             Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "SavedBotProfiles"));
-        private static readonly string SEGMENT_DIR = Path.GetFullPath(
+        private static readonly string PATH_DIR = Path.GetFullPath(
             Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "SavedPaths"));
 
         private readonly Action<string> _log;
@@ -34,8 +34,8 @@ namespace DriverScanTester.ViewModels
             _log = log ?? (_ => { });
             _profileLoader = new BotProfileLoader(_log);
 
-            if (!Directory.Exists(SEGMENT_DIR))
-                Directory.CreateDirectory(SEGMENT_DIR);
+            if (!Directory.Exists(PATH_DIR))
+                Directory.CreateDirectory(PATH_DIR);
 
             // Commands
             NewProfileCommand = new RelayCommand(_ => NewProfile());
@@ -43,22 +43,16 @@ namespace DriverScanTester.ViewModels
             LoadProfileCommand = new RelayCommand(_ => LoadSelectedProfile(), _ => SelectedProfileName != null);
             DeleteProfileCommand = new RelayCommand(_ => DeleteSelectedProfile(), _ => SelectedProfileName != null);
             RefreshProfilesCommand = new RelayCommand(_ => RefreshProfiles());
-            RefreshSegmentsCommand = new RelayCommand(_ => RefreshSegments());
+            RefreshPathsCommand = new RelayCommand(_ => RefreshPaths());
 
-            AddHuntCommand = new RelayCommand(_ => AddHunt(), _ => CurrentProfile != null);
-            RemoveHuntCommand = new RelayCommand(_ => RemoveHunt(), _ => SelectedHunt != null);
-            MoveHuntUpCommand = new RelayCommand(_ => MoveHunt(-1), _ => SelectedHunt != null);
-            MoveHuntDownCommand = new RelayCommand(_ => MoveHunt(1), _ => SelectedHunt != null);
-            SetDefaultHuntCommand = new RelayCommand(_ => SetDefaultHunt(), _ => SelectedHunt != null);
-
-            AddTravelRouteCommand = new RelayCommand(_ => AddTravelRoute(), _ => SelectedHunt != null);
-            RemoveTravelRouteCommand = new RelayCommand(_ => RemoveTravelRoute(), _ => SelectedHunt?.SelectedTravelRoute != null);
-            MoveTravelRouteUpCommand = new RelayCommand(_ => MoveTravelRoute(-1), _ => SelectedHunt?.SelectedTravelRoute != null);
-            MoveTravelRouteDownCommand = new RelayCommand(_ => MoveTravelRoute(1), _ => SelectedHunt?.SelectedTravelRoute != null);
+            AddTravelRouteCommand = new RelayCommand(_ => AddTravelRoute(), _ => CurrentProfile != null);
+            RemoveTravelRouteCommand = new RelayCommand(_ => RemoveTravelRoute(), _ => CanRemoveTravelRoute);
+            MoveTravelRouteUpCommand = new RelayCommand(_ => MoveTravelRoute(-1), _ => CanMoveTravelRoute(-1));
+            MoveTravelRouteDownCommand = new RelayCommand(_ => MoveTravelRoute(1), _ => CanMoveTravelRoute(1));
 
             // Initial loads
             RefreshProfiles();
-            RefreshSegments();
+            RefreshPaths();
         }
 
         // ──────────────────── Profile list ────────────────────
@@ -89,13 +83,13 @@ namespace DriverScanTester.ViewModels
             }
         }
 
-        // ──────────────────── Available segments ────────────────────
+        // ──────────────────── Available saved paths ────────────────────
 
-        private ObservableCollection<string> _availableSegments = new();
-        public ObservableCollection<string> AvailableSegments
+        private ObservableCollection<string> _availablePaths = new();
+        public ObservableCollection<string> AvailablePaths
         {
-            get => _availableSegments;
-            set => SetProperty(ref _availableSegments, value);
+            get => _availablePaths;
+            set => SetProperty(ref _availablePaths, value);
         }
 
         // ──────────────────── Current profile being edited ────────────────────
@@ -112,7 +106,7 @@ namespace DriverScanTester.ViewModels
                     OnPropertyChanged(nameof(ProfileName));
                     OnPropertyChanged(nameof(MinHpPotions));
                     OnPropertyChanged(nameof(MinManaPotions));
-                    OnPropertyChanged(nameof(MaxWeightRatio));
+                    OnPropertyChanged(nameof(MaxWeightPercent));
                     OnPropertyChanged(nameof(MinHp));
                     OnPropertyChanged(nameof(MinMana));
                     OnPropertyChanged(nameof(HpBuyTarget));
@@ -125,7 +119,6 @@ namespace DriverScanTester.ViewModels
                     OnPropertyChanged(nameof(MaxTeleportRetries));
                     OnPropertyChanged(nameof(WindowOffsetX));
                     OnPropertyChanged(nameof(WindowOffsetY));
-                    OnPropertyChanged(nameof(DefaultHuntName));
                     LoadProfileIntoEditor();
                     CommandManager.InvalidateRequerySuggested();
                 }
@@ -154,10 +147,18 @@ namespace DriverScanTester.ViewModels
             set { if (CurrentProfile != null) { CurrentProfile.MinManaPotions = value; OnPropertyChanged(); } }
         }
 
-        public float MaxWeightRatio
+        /// <summary>MaxWeightRatio (0..1) exposed to the UI as a percentage (0..100).</summary>
+        public int MaxWeightPercent
         {
-            get => CurrentProfile?.MaxWeightRatio ?? BotConstants.Repot.DefaultMaxWeightRatio;
-            set { if (CurrentProfile != null) { CurrentProfile.MaxWeightRatio = value; OnPropertyChanged(); } }
+            get => (int)Math.Round((CurrentProfile?.MaxWeightRatio ?? BotConstants.Repot.DefaultMaxWeightRatio) * 100f);
+            set
+            {
+                if (CurrentProfile != null)
+                {
+                    CurrentProfile.MaxWeightRatio = Math.Clamp(value, 0, 100) / 100f;
+                    OnPropertyChanged();
+                }
+            }
         }
 
         public int MinHp
@@ -232,35 +233,29 @@ namespace DriverScanTester.ViewModels
             set { if (CurrentProfile != null) { CurrentProfile.WindowOffsetY = value; OnPropertyChanged(); } }
         }
 
-        public string DefaultHuntName
-        {
-            get => CurrentProfile?.DefaultHuntName ?? "";
-            set { if (CurrentProfile != null) { CurrentProfile.DefaultHuntName = value; OnPropertyChanged(); RefreshDefaultMarkers(); } }
-        }
-
-        // ──────────────────── Stage 1: City → Repot (profile-level) ────────────────────
+        // ──────────────────── Stage 1: REPOT ────────────────────
 
         public BotRouteStepViewModel CityToRepot { get; } = new();
 
-        // ──────────────────── Hunt list ────────────────────
+        // ──────────────────── Stage 2: GO TO EXP ────────────────────
 
-        private ObservableCollection<HuntDefinitionViewModel> _huntDefinitions = new();
-        public ObservableCollection<HuntDefinitionViewModel> HuntDefinitions
-        {
-            get => _huntDefinitions;
-            set => SetProperty(ref _huntDefinitions, value);
-        }
+        /// <summary>Ordered list of paths from the repot location to the EXP position.</summary>
+        public ObservableCollection<TravelRouteStepViewModel> TravelToExpRoutes { get; } = new();
 
-        private HuntDefinitionViewModel? _selectedHunt;
-        public HuntDefinitionViewModel? SelectedHunt
+        private TravelRouteStepViewModel? _selectedTravelRoute;
+        public TravelRouteStepViewModel? SelectedTravelRoute
         {
-            get => _selectedHunt;
+            get => _selectedTravelRoute;
             set
             {
-                if (SetProperty(ref _selectedHunt, value))
+                if (SetProperty(ref _selectedTravelRoute, value))
                     CommandManager.InvalidateRequerySuggested();
             }
         }
+
+        // ──────────────────── Stage 3: EXP PATH ────────────────────
+
+        public BotRouteStepViewModel ExpLoop { get; } = new();
 
         // ──────────────────── Status ────────────────────
 
@@ -278,12 +273,7 @@ namespace DriverScanTester.ViewModels
         public ICommand LoadProfileCommand { get; }
         public ICommand DeleteProfileCommand { get; }
         public ICommand RefreshProfilesCommand { get; }
-        public ICommand RefreshSegmentsCommand { get; }
-        public ICommand AddHuntCommand { get; }
-        public ICommand RemoveHuntCommand { get; }
-        public ICommand MoveHuntUpCommand { get; }
-        public ICommand MoveHuntDownCommand { get; }
-        public ICommand SetDefaultHuntCommand { get; }
+        public ICommand RefreshPathsCommand { get; }
         public ICommand AddTravelRouteCommand { get; }
         public ICommand RemoveTravelRouteCommand { get; }
         public ICommand MoveTravelRouteUpCommand { get; }
@@ -315,30 +305,31 @@ namespace DriverScanTester.ViewModels
                 WindowOffsetX = 0,
                 WindowOffsetY = 0,
                 CityToRepot = new BotRouteStep(),
-                HuntDefinitions = new List<HuntDefinition>
+                TravelToExpRoutes = new List<TravelRouteStep>
                 {
-                    new HuntDefinition
+                    new TravelRouteStep
                     {
-                        Name = "Default",
-                        TravelToExpRoutes = new List<TravelRouteStep> { new TravelRouteStep() }
+                        CompletionMode = TravelRouteCompletionMode.FinalWaypoint,
+                        StartDelayMs = 0,
+                        ExpectedDestinationMapNumber = 0
                     }
                 },
-                DefaultHuntName = "Default"
+                ExpLoop = new BotRouteStep()
             };
-            StatusText = "Created new profile with hunt 'Default'. Fill in the fields and click Save.";
+            StatusText = "Created new profile. Fill in the three stages and click Save.";
         }
 
         private void SaveProfile()
         {
             if (CurrentProfile == null)
             {
-                StatusText = "No profile to save. Click 'New Profile' first.";
+                StatusText = "No profile to save. Click 'New' first.";
                 return;
             }
 
             if (string.IsNullOrWhiteSpace(CurrentProfile.Name))
             {
-                StatusText = "Profile Name cannot be empty.";
+                StatusText = "Profile name cannot be empty.";
                 return;
             }
 
@@ -347,27 +338,18 @@ namespace DriverScanTester.ViewModels
             CurrentProfile.CityToRepot ??= new BotRouteStep();
             CurrentProfile.CityToRepot.PathFile = CityToRepot.PathFile;
             CurrentProfile.CityToRepot.StartDelayMs = CityToRepot.StartDelayMs;
-            CurrentProfile.HuntDefinitions = HuntDefinitions
-                .Select(h => new HuntDefinition
+            CurrentProfile.TravelToExpRoutes = TravelToExpRoutes
+                .Select(r => new TravelRouteStep
                 {
-                    Name = h.Name,
-                    TravelToExpRoutes = (h.TravelToExpRoutes ?? new ObservableCollection<TravelRouteStepViewModel>())
-                        .Select(r => new TravelRouteStep
-                        {
-                            PathFile = r.PathFile,
-                            StartDelayMs = r.StartDelayMs,
-                            CompletionMode = r.CompletionMode,
-                            ExpectedDestinationMapNumber = r.ExpectedDestinationMapNumber
-                        })
-                        .ToList(),
-                    ExpLoop = new BotRouteStep
-                    {
-                        PathFile = h.ExpLoop.PathFile,
-                        StartDelayMs = h.ExpLoop.StartDelayMs
-                    }
+                    PathFile = r.PathFile,
+                    StartDelayMs = r.StartDelayMs,
+                    CompletionMode = r.CompletionMode,
+                    ExpectedDestinationMapNumber = r.ExpectedDestinationMapNumber
                 })
                 .ToList();
-            CurrentProfile.DefaultHuntName = DefaultHuntName;
+            CurrentProfile.ExpLoop ??= new BotRouteStep();
+            CurrentProfile.ExpLoop.PathFile = ExpLoop.PathFile;
+            CurrentProfile.ExpLoop.StartDelayMs = ExpLoop.StartDelayMs;
 
             // 2. Validate the complete model (one pass, all errors reported)
             var errors = _profileLoader.ValidateProfile(CurrentProfile);
@@ -413,7 +395,7 @@ namespace DriverScanTester.ViewModels
             }
 
             CurrentProfile = profile;
-            StatusText = $"Loaded profile '{profile.Name}' ({profile.HuntDefinitions?.Count ?? 0} hunt(s)).";
+            StatusText = $"Loaded profile '{profile.Name}'.";
         }
 
         private void DeleteSelectedProfile()
@@ -504,47 +486,34 @@ namespace DriverScanTester.ViewModels
             CommandManager.InvalidateRequerySuggested();
         }
 
-        private void RefreshSegments()
+        private void RefreshPaths()
         {
-            // Capture every configured route path and selection before clearing the segment list.
+            // Capture every configured path and the route selection before clearing the list.
             // Clearing a bound ComboBox ItemsSource writes null back into the SelectedItem,
-            // so the paths and selections must be restored after the collection has been repopulated.
+            // so the paths and the selection must be restored after the collection is repopulated.
             string cityToRepotPath = CityToRepot.PathFile;
-            HuntDefinitionViewModel? selectedHunt = SelectedHunt;
-            var huntStates = HuntDefinitions
-                .Select(h => new
-                {
-                    Hunt = h,
-                    SelectedRoute = h.SelectedTravelRoute,
-                    ExpLoopPath = h.ExpLoop.PathFile,
-                    RoutePaths = h.TravelToExpRoutes.Select(r => r.PathFile).ToList()
-                })
-                .ToList();
+            TravelRouteStepViewModel? selectedRoute = SelectedTravelRoute;
+            var routePaths = TravelToExpRoutes.Select(r => r.PathFile).ToList();
+            string expLoopPath = ExpLoop.PathFile;
 
-            AvailableSegments.Clear();
-            if (!Directory.Exists(SEGMENT_DIR))
+            AvailablePaths.Clear();
+            if (!Directory.Exists(PATH_DIR))
             {
-                Directory.CreateDirectory(SEGMENT_DIR);
+                Directory.CreateDirectory(PATH_DIR);
             }
 
-            foreach (var f in Directory.GetFiles(SEGMENT_DIR, "*.json"))
+            foreach (var f in Directory.GetFiles(PATH_DIR, "*.json"))
             {
-                AvailableSegments.Add(Path.GetFileName(f));
+                AvailablePaths.Add(Path.GetFileName(f));
             }
 
             // Restore the exact stored strings, including paths that no longer exist in
             // SavedPaths, so validation can still report them.
             CityToRepot.PathFile = cityToRepotPath;
-            foreach (var state in huntStates)
-            {
-                for (int i = 0; i < state.RoutePaths.Count && i < state.Hunt.TravelToExpRoutes.Count; i++)
-                    state.Hunt.TravelToExpRoutes[i].PathFile = state.RoutePaths[i];
-
-                state.Hunt.ExpLoop.PathFile = state.ExpLoopPath;
-                state.Hunt.SelectedTravelRoute = state.SelectedRoute;
-            }
-
-            SelectedHunt = selectedHunt;
+            for (int i = 0; i < routePaths.Count && i < TravelToExpRoutes.Count; i++)
+                TravelToExpRoutes[i].PathFile = routePaths[i];
+            ExpLoop.PathFile = expLoopPath;
+            SelectedTravelRoute = selectedRoute;
         }
 
         private void OnProfileSelectionChanged()
@@ -559,54 +528,41 @@ namespace DriverScanTester.ViewModels
 
         private void LoadProfileIntoEditor()
         {
-            DetachAllHunts();
-            HuntDefinitions.Clear();
+            TravelToExpRoutes.Clear();
 
             if (CurrentProfile == null)
             {
                 CityToRepot.PathFile = "";
                 CityToRepot.StartDelayMs = 0;
-                SelectedHunt = null;
+                ExpLoop.PathFile = "";
+                ExpLoop.StartDelayMs = 0;
+                SelectedTravelRoute = null;
                 return;
             }
 
             CityToRepot.PathFile = CurrentProfile.CityToRepot?.PathFile ?? "";
             CityToRepot.StartDelayMs = CurrentProfile.CityToRepot?.StartDelayMs ?? 0;
 
-            foreach (var h in CurrentProfile.HuntDefinitions ?? new List<HuntDefinition>())
+            foreach (var r in CurrentProfile.TravelToExpRoutes ?? new List<TravelRouteStep>())
             {
-                var vm = new HuntDefinitionViewModel { Name = h.Name };
-
-                foreach (var r in h.TravelToExpRoutes ?? new List<TravelRouteStep>())
+                TravelToExpRoutes.Add(new TravelRouteStepViewModel
                 {
-                    vm.TravelToExpRoutes.Add(new TravelRouteStepViewModel
-                    {
-                        PathFile = r.PathFile ?? "",
-                        StartDelayMs = r.StartDelayMs,
-                        CompletionMode = r.CompletionMode,
-                        ExpectedDestinationMapNumber = r.ExpectedDestinationMapNumber
-                    });
-                }
-                // Loading selects the first travel route.
-                vm.SelectedTravelRoute = vm.TravelToExpRoutes.FirstOrDefault();
-
-                vm.ExpLoop.PathFile = h.ExpLoop?.PathFile ?? "";
-                vm.ExpLoop.StartDelayMs = h.ExpLoop?.StartDelayMs ?? 0;
-                AttachHunt(vm);
-                HuntDefinitions.Add(vm);
+                    PathFile = r.PathFile ?? "",
+                    StartDelayMs = r.StartDelayMs,
+                    CompletionMode = r.CompletionMode,
+                    ExpectedDestinationMapNumber = r.ExpectedDestinationMapNumber
+                });
             }
+            // Loading selects the first Go to EXP path.
+            SelectedTravelRoute = TravelToExpRoutes.FirstOrDefault();
 
-            RefreshDefaultMarkers();
-
-            // Select the default hunt, or the first one when no valid default is configured.
-            var defaultHunt = HuntDefinitions.FirstOrDefault(h =>
-                string.Equals(h.Name, CurrentProfile.DefaultHuntName, StringComparison.OrdinalIgnoreCase));
-            SelectedHunt = defaultHunt ?? HuntDefinitions.FirstOrDefault();
+            ExpLoop.PathFile = CurrentProfile.ExpLoop?.PathFile ?? "";
+            ExpLoop.StartDelayMs = CurrentProfile.ExpLoop?.StartDelayMs ?? 0;
         }
 
-        // ── Hunt management ──
+        // ── Stage 2: Go to EXP path management ──
 
-        private void AddHunt()
+        private void AddTravelRoute()
         {
             if (CurrentProfile == null)
             {
@@ -614,165 +570,72 @@ namespace DriverScanTester.ViewModels
                 return;
             }
 
-            string baseName = "New Hunt";
-            string huntName = baseName;
-            var existingNames = new HashSet<string>(HuntDefinitions.Select(h => h.Name), StringComparer.OrdinalIgnoreCase);
-            int counter = 2;
-            while (existingNames.Contains(huntName))
-                huntName = $"{baseName} {counter++}";
-
-            var hunt = new HuntDefinitionViewModel { Name = huntName };
-            hunt.TravelToExpRoutes.Add(new TravelRouteStepViewModel
-            {
-                CompletionMode = TravelRouteCompletionMode.FinalWaypoint,
-                StartDelayMs = 0,
-                ExpectedDestinationMapNumber = 0
-            });
-            hunt.SelectedTravelRoute = hunt.TravelToExpRoutes[0];
-            AttachHunt(hunt);
-            HuntDefinitions.Add(hunt);
-            SelectedHunt = hunt;
-            RefreshDefaultMarkers();
-            StatusText = $"Added hunt '{huntName}'.";
-        }
-
-        private void RemoveHunt()
-        {
-            if (SelectedHunt == null) return;
-
-            string name = SelectedHunt.Name;
-            int index = HuntDefinitions.IndexOf(SelectedHunt);
-            var removed = SelectedHunt;
-            HuntDefinitions.Remove(removed);
-            DetachHunt(removed);
-
-            // If the removed hunt was the default, update DefaultHuntName accordingly.
-            if (CurrentProfile != null &&
-                string.Equals(CurrentProfile.DefaultHuntName, name, StringComparison.OrdinalIgnoreCase))
-            {
-                CurrentProfile.DefaultHuntName = HuntDefinitions.Count > 0 ? HuntDefinitions[0].Name : "";
-                OnPropertyChanged(nameof(DefaultHuntName));
-            }
-
-            if (HuntDefinitions.Count > 0)
-                SelectedHunt = HuntDefinitions[Math.Min(index, HuntDefinitions.Count - 1)];
-            else
-                SelectedHunt = null;
-
-            RefreshDefaultMarkers();
-            StatusText = $"Removed hunt '{name}'.";
-        }
-
-        private void MoveHunt(int direction)
-        {
-            if (SelectedHunt == null) return;
-            int oldIndex = HuntDefinitions.IndexOf(SelectedHunt);
-            int newIndex = oldIndex + direction;
-            if (newIndex >= 0 && newIndex < HuntDefinitions.Count)
-            {
-                HuntDefinitions.Move(oldIndex, newIndex);
-            }
-        }
-
-        private void SetDefaultHunt()
-        {
-            if (CurrentProfile == null || SelectedHunt == null) return;
-
-            CurrentProfile.DefaultHuntName = SelectedHunt.Name;
-            OnPropertyChanged(nameof(DefaultHuntName));
-            RefreshDefaultMarkers();
-            StatusText = $"'{SelectedHunt.Name}' is now the default hunt.";
-        }
-
-        private void RefreshDefaultMarkers()
-        {
-            string defaultName = CurrentProfile?.DefaultHuntName ?? "";
-            foreach (var h in HuntDefinitions)
-                h.IsDefault = string.Equals(h.Name, defaultName, StringComparison.OrdinalIgnoreCase);
-        }
-
-        // ── Travel route management (within the selected hunt) ──
-
-        private void AddTravelRoute()
-        {
-            if (SelectedHunt == null) return;
-
             var route = new TravelRouteStepViewModel
             {
                 CompletionMode = TravelRouteCompletionMode.FinalWaypoint,
                 StartDelayMs = 0,
                 ExpectedDestinationMapNumber = 0
             };
-            SelectedHunt.TravelToExpRoutes.Add(route);
-            SelectedHunt.SelectedTravelRoute = route;
-            StatusText = $"Added travel route {SelectedHunt.TravelToExpRoutes.Count} for hunt '{SelectedHunt.Name}'.";
+
+            // Insert after the currently selected path when possible, otherwise append.
+            if (SelectedTravelRoute != null)
+            {
+                int index = TravelToExpRoutes.IndexOf(SelectedTravelRoute);
+                TravelToExpRoutes.Insert(index + 1, route);
+            }
+            else
+            {
+                TravelToExpRoutes.Add(route);
+            }
+
+            SelectedTravelRoute = route;
+            CommandManager.InvalidateRequerySuggested();
+            StatusText = $"Added Go to EXP path {TravelToExpRoutes.Count}.";
         }
+
+        private bool CanRemoveTravelRoute =>
+            SelectedTravelRoute != null && TravelToExpRoutes.Count > 1;
 
         private void RemoveTravelRoute()
         {
-            var hunt = SelectedHunt;
-            var route = hunt?.SelectedTravelRoute;
-            if (hunt == null || route == null) return;
+            if (SelectedTravelRoute == null) return;
+            if (TravelToExpRoutes.Count <= 1) return; // the profile must always keep at least one path
 
-            int index = hunt.TravelToExpRoutes.IndexOf(route);
-            hunt.TravelToExpRoutes.Remove(route);
+            int index = TravelToExpRoutes.IndexOf(SelectedTravelRoute);
+            TravelToExpRoutes.RemoveAt(index);
 
-            // Select the nearest remaining route.
-            if (hunt.TravelToExpRoutes.Count > 0)
-                hunt.SelectedTravelRoute = hunt.TravelToExpRoutes[Math.Min(index, hunt.TravelToExpRoutes.Count - 1)];
-            else
-                hunt.SelectedTravelRoute = null;
+            // Select the nearest remaining path.
+            SelectedTravelRoute = TravelToExpRoutes[Math.Min(index, TravelToExpRoutes.Count - 1)];
+            CommandManager.InvalidateRequerySuggested();
+            StatusText = $"Removed Go to EXP path {index + 1}.";
+        }
 
-            StatusText = $"Removed travel route {index + 1} from hunt '{hunt.Name}'.";
+        private bool CanMoveTravelRoute(int direction)
+        {
+            if (SelectedTravelRoute == null) return false;
+            int index = TravelToExpRoutes.IndexOf(SelectedTravelRoute);
+            int newIndex = index + direction;
+            return newIndex >= 0 && newIndex < TravelToExpRoutes.Count;
         }
 
         private void MoveTravelRoute(int direction)
         {
-            var hunt = SelectedHunt;
-            var route = hunt?.SelectedTravelRoute;
-            if (hunt == null || route == null) return;
+            if (SelectedTravelRoute == null) return;
 
-            int oldIndex = hunt.TravelToExpRoutes.IndexOf(route);
+            int oldIndex = TravelToExpRoutes.IndexOf(SelectedTravelRoute);
             int newIndex = oldIndex + direction;
-            if (newIndex >= 0 && newIndex < hunt.TravelToExpRoutes.Count)
-            {
-                // The item reference is preserved, so the selection stays on the same route.
-                hunt.TravelToExpRoutes.Move(oldIndex, newIndex);
-            }
-        }
+            if (newIndex < 0 || newIndex >= TravelToExpRoutes.Count) return;
 
-        // ── Hunt rename sync (keep DefaultHuntName pointing at the default hunt) ──
-
-        private void AttachHunt(HuntDefinitionViewModel hunt) => hunt.PropertyChanged += OnHuntPropertyChanged;
-
-        private void DetachHunt(HuntDefinitionViewModel hunt) => hunt.PropertyChanged -= OnHuntPropertyChanged;
-
-        private void DetachAllHunts()
-        {
-            foreach (var h in HuntDefinitions)
-                DetachHunt(h);
-        }
-
-        private void OnHuntPropertyChanged(object? sender, PropertyChangedEventArgs e)
-        {
-            if (e.PropertyName != nameof(HuntDefinitionViewModel.Name)) return;
-            if (sender is not HuntDefinitionViewModel hunt) return;
-            if (CurrentProfile == null) return;
-
-            // When the default hunt is renamed, follow it so the relationship does not break.
-            if (string.Equals(CurrentProfile.DefaultHuntName, hunt.PreviousName, StringComparison.OrdinalIgnoreCase))
-            {
-                CurrentProfile.DefaultHuntName = hunt.Name;
-                OnPropertyChanged(nameof(DefaultHuntName));
-                RefreshDefaultMarkers();
-            }
+            // The item reference is preserved, so the selection stays on the same path.
+            TravelToExpRoutes.Move(oldIndex, newIndex);
+            CommandManager.InvalidateRequerySuggested();
         }
     }
 
     // ──────────────────── Helper ViewModels ────────────────────
 
     /// <summary>
-    /// Editor representation of one route step: a saved path segment reference
+    /// Editor representation of one path step: a saved path reference
     /// plus the startup delay in milliseconds.
     /// </summary>
     public class BotRouteStepViewModel : BaseViewModel
@@ -793,7 +656,7 @@ namespace DriverScanTester.ViewModels
     }
 
     /// <summary>
-    /// Editor representation of one travel route leg: a saved path segment reference,
+    /// Editor representation of one Go to EXP path: a saved path reference,
     /// a startup delay, the completion mode and the expected destination map.
     /// </summary>
     public sealed class TravelRouteStepViewModel : BaseViewModel
@@ -834,47 +697,6 @@ namespace DriverScanTester.ViewModels
         {
             get => _expectedDestinationMapNumber;
             set => SetProperty(ref _expectedDestinationMapNumber, value);
-        }
-    }
-
-    public class HuntDefinitionViewModel : BaseViewModel
-    {
-        private string _name = "";
-        private string _previousName = "";
-
-        public string Name
-        {
-            get => _name;
-            set
-            {
-                if (_name == value) return;
-                _previousName = _name;
-                _name = value;
-                OnPropertyChanged();
-            }
-        }
-
-        /// <summary>Name before the last rename (used to keep DefaultHuntName in sync).</summary>
-        public string PreviousName => _previousName;
-
-        /// <summary>Ordered travel-route chain from the repot location to the EXP position.</summary>
-        public ObservableCollection<TravelRouteStepViewModel> TravelToExpRoutes { get; } = new();
-
-        private TravelRouteStepViewModel? _selectedTravelRoute;
-        public TravelRouteStepViewModel? SelectedTravelRoute
-        {
-            get => _selectedTravelRoute;
-            set => SetProperty(ref _selectedTravelRoute, value);
-        }
-
-        public BotRouteStepViewModel ExpLoop { get; } = new();
-
-        private bool _isDefault;
-        /// <summary>True when this hunt is currently the profile's default hunt.</summary>
-        public bool IsDefault
-        {
-            get => _isDefault;
-            set => SetProperty(ref _isDefault, value);
         }
     }
 }

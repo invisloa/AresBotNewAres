@@ -265,7 +265,7 @@ namespace DriverScanTester.ViewModels
             string cleanName = SegmentName.Trim();
             if (string.IsNullOrEmpty(cleanName))
             {
-                StatusText = "Enter a segment name.";
+                StatusText = "Enter a path name.";
                 return;
             }
 
@@ -357,7 +357,7 @@ namespace DriverScanTester.ViewModels
                         SegmentCameraDistanceLockText = PathPoint.DefaultCameraDistanceLock.ToString();
                         SegmentAttackDisengageDistanceText = PathPoint.DefaultAttackDisengageDistance.ToString();
                     }
-                    StatusText = $"Loaded '{SelectedAvailableSegment}' ({SegmentPrecision}/{SegmentBotMode}) into Editor with cam/attack defaults and loop={LoopRoute}.";
+                    StatusText = $"Loaded '{SelectedAvailableSegment}' ({SegmentPrecision}/{SegmentBotMode}) into Path Editor with cam/attack defaults and loop={LoopRoute}.";
                 }
             }
             catch (Exception ex)
@@ -370,7 +370,7 @@ namespace DriverScanTester.ViewModels
         {
             var list = Points.Select(p => new DriverScanTester.Services.Waypoint(p.X, p.Y, p.Precision, p.Mode, p.CameraDistanceLock, p.AttackDisengageDistance, p.ZoneRestriction)).ToList();
             OnRunPath?.Invoke(list, LoopRoute);
-            StatusText = "Running current editor segment...";
+            StatusText = "Running current editor path...";
         }
 
         // ========================== SAVED SEGMENT LIBRARY LOGIC ==========================
