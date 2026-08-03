@@ -1,40 +1,36 @@
 using System.Collections.Generic;
-using System.Linq;
-using System.Text.Json.Serialization;
 
 namespace DriverScanTester.Models
 {
     /// <summary>
-    /// A bot profile describes segment file names and repot thresholds.
+    /// A bot profile describes one complete EXP destination as a three-stage workflow:
+    ///   1. City → Repot (one path),
+    ///   2. Go to EXP (an ordered chain of one or more paths, each finishing at its
+    ///      last waypoint or when the expected destination map is reached),
+    ///   3. EXP Path (one looping path used while hunting).
     /// It does NOT contain waypoint data — only references to SavedPaths/*.json files.
-    /// The profile has exactly one City → Repot route step; every hunt defines its own
-    /// Travel Routes (Repot → EXP chain) and Exp Loop route steps.
+    /// One profile represents exactly one EXP destination; a new EXP location means a new profile.
     /// </summary>
     public class BotProfile
     {
         /// <summary>Display name for this profile.</summary>
         public string Name { get; set; } = "NewProfile";
 
-        /// <summary>The single City → Repot route step (stage 1 of the workflow).</summary>
+        // --- Stage 1: REPOT ---
+        /// <summary>The single path from the city/player starting position to the repot location.</summary>
         public BotRouteStep CityToRepot { get; set; } = new();
 
+        // --- Stage 2: GO TO EXP ---
         /// <summary>
-        /// List of hunt/exp definitions. Each hunt defines the route stages 2-4 of the workflow.
+        /// Ordered list of travel paths from the repot location to the EXP position.
+        /// Each path completes independently by its final waypoint (FinalWaypoint) or
+        /// when the expected destination map is reached (ExpectedMapReached).
         /// </summary>
-        public List<HuntDefinition> HuntDefinitions { get; set; } = new();
+        public List<TravelRouteStep> TravelToExpRoutes { get; set; } = new();
 
-        /// <summary>
-        /// Name of the default hunt from HuntDefinitions (used when no explicit hunt is selected).
-        /// </summary>
-        public string DefaultHuntName { get; set; } = "";
-
-        /// <summary>
-        /// Returns the default HuntDefinition based on DefaultHuntName, or the first one if not found.
-        /// </summary>
-        [JsonIgnore]
-        public HuntDefinition? DefaultHunt =>
-            HuntDefinitions.FirstOrDefault(h => h.Name == DefaultHuntName)
-            ?? HuntDefinitions.FirstOrDefault();
+        // --- Stage 3: EXP PATH ---
+        /// <summary>The single looping hunting path; stops when the repot conditions are met.</summary>
+        public BotRouteStep ExpLoop { get; set; } = new();
 
         // --- Repot thresholds (override RepotDetectorService defaults) ---
         /// <summary>Minimum HP potions before repot is needed.</summary>

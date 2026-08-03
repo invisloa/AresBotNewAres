@@ -21,7 +21,7 @@ namespace DriverScanTester.Models
 
     /// <summary>
     /// One ordered leg of the journey from the repot location to the EXP position.
-    /// A hunt's TravelToExpRoutes chain may contain any number of these steps.
+    /// A profile's TravelToExpRoutes chain may contain any number of these steps.
     /// </summary>
     public sealed class TravelRouteStep
     {
