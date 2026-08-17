@@ -609,7 +609,7 @@ namespace DriverScanTester.ViewModels
                         AppendLog)
                     {
                         NameText = "Camera Vertical Angle",
-                        AddressText = "[Ares.exe + 0x4704B0] + 0x1BE",
+                        AddressText = "[Ares.exe + 0x4853F0] + 0x1BE",
                         ValueType = LockValueType.Short,
                         ValueText = "16320"
                     });
@@ -2688,8 +2688,17 @@ namespace DriverScanTester.ViewModels
             var pathLoader = new SavedPathLoader(AppendLog);
             var pathRunner = new PathRunnerService(memoryService, AppendLog);
 
+            var operationContext = new OperationContext(
+                memoryService,
+                pathRunner,
+                new ItemSellerService(memoryService, AppendLog),
+                profile,
+                AppendLog,
+                FocusGameWindow);
+            var operationRunner = new OperationRunnerService(operationContext, AppendLog);
+
             _workflowCoordinator = new BotWorkflowCoordinator(
-                memoryService, repotSystem, repotDetector, pathLoader, pathRunner,
+                memoryService, repotSystem, repotDetector, pathLoader, pathRunner, operationRunner,
                 profile, AppendLog, FocusGameWindow);
             AppendLog($"Starting workflow with profile '{profile.Name}'.");
 

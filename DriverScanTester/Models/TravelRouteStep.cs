@@ -44,5 +44,19 @@ namespace DriverScanTester.Models
         /// than 0 for <see cref="TravelRouteCompletionMode.ExpectedMapReached"/>.
         /// </summary>
         public int ExpectedDestinationMapNumber { get; set; }
+
+        /// <summary>
+        /// Name of a built-in custom operation (see BotOperations) to run BEFORE this
+        /// route starts — e.g. talking to an NPC that unlocks the way ahead.
+        /// Empty means no operation. Unknown names fail the workflow, never silently skip.
+        /// </summary>
+        public string OperationBefore { get; set; } = "";
+
+        /// <summary>
+        /// Name of a built-in custom operation (see BotOperations) to run AFTER this
+        /// route completes — e.g. talking to an NPC once the destination map is reached.
+        /// Empty means no operation. Unknown names fail the workflow, never silently skip.
+        /// </summary>
+        public string OperationAfter { get; set; } = "";
     }
 }

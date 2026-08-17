@@ -1,6 +1,6 @@
 [
   {
-    "AddressText": "[Ares.exe \u002B 0x4704A8] \u002B 0xC",
+    "AddressText": "[Ares.exe \u002B 0x4853E8] \u002B 0xC",
     "NameText": "S_IsSellerPointed 143850200 ",
     "ValueText": "",
     "ValueType": 2,
@@ -8,7 +8,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C98] \u002B 0xE8",
+    "AddressText": "[Ares.exe \u002B 0x486BD8] \u002B 0xE8",
     "NameText": "I_SellConfirmationUI",
     "ValueText": "",
     "ValueType": 2,
@@ -16,7 +16,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0x1A2",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0x1A2",
     "NameText": "111_Invis_EYE",
     "ValueText": "4",
     "ValueType": 0,
@@ -24,7 +24,7 @@
     "LockGroup": 1
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0x5F8",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0x5F8",
     "NameText": "A_CurrentMap",
     "ValueText": "",
     "ValueType": 2,
@@ -32,7 +32,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0x60",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0x60",
     "NameText": "T_IsMobSelected1",
     "ValueText": "",
     "ValueType": 2,
@@ -40,7 +40,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0xC74",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0xC74",
     "NameText": "A_WeightMax",
     "ValueText": "",
     "ValueType": 2,
@@ -48,7 +48,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0xC70",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0xC70",
     "NameText": "A_WeightCurrent",
     "ValueText": "",
     "ValueType": 2,
@@ -56,7 +56,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0x5F4",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0x5F4",
     "NameText": "L_IsInCity2",
     "ValueText": "",
     "ValueType": 2,
@@ -64,7 +64,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0xACA",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0xACA",
     "NameText": "A_SkillSpeed",
     "ValueText": "0",
     "ValueType": 1,
@@ -72,7 +72,7 @@
     "LockGroup": 1
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x4704B0] \u002B 0x1A8",
+    "AddressText": "[Ares.exe \u002B 0x4853F0] \u002B 0x1A8",
     "NameText": "C_CameraHorizontal",
     "ValueText": "16662",
     "ValueType": 1,
@@ -80,7 +80,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0xEE8 ",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0xEE8 ",
     "NameText": "A_PositionY",
     "ValueText": "",
     "ValueType": 1,
@@ -88,7 +88,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0x47A",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0x47A",
     "NameText": "A_attack1",
     "ValueText": "16671",
     "ValueType": 1,
@@ -96,7 +96,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0x47e",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0x47e",
     "NameText": "A_attack2",
     "ValueText": "16671",
     "ValueType": 1,
@@ -104,7 +104,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x4704B0] \u002B 0x1A6",
+    "AddressText": "[Ares.exe \u002B 0x4853F0] \u002B 0x1A6",
     "NameText": "C_camera_Distance 16880",
     "ValueText": "17090",
     "ValueType": 1,
@@ -112,7 +112,7 @@
     "LockGroup": 1
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0x3Ba",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0x3Ba",
     "NameText": "A_Anim1 S17622",
     "ValueText": "17688",
     "ValueType": 1,
@@ -120,7 +120,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0x3BE",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0x3BE",
     "NameText": "A_Anim2",
     "ValueText": "0",
     "ValueType": 1,
@@ -128,7 +128,7 @@
     "LockGroup": 1
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0xC58 ",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0xC58 ",
     "NameText": "A_CurrentManna",
     "ValueText": "",
     "ValueType": 0,
@@ -136,7 +136,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0x168",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0x168",
     "NameText": "A_CurrenttHP",
     "ValueText": "",
     "ValueType": 1,
@@ -144,7 +144,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0x16c",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0x16c",
     "NameText": "A_MaxHP",
     "ValueText": "",
     "ValueType": 1,
@@ -152,7 +152,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0xC5c",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0xC5c",
     "NameText": "A_MaxMP",
     "ValueText": "",
     "ValueType": 1,
@@ -160,7 +160,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0x144 ",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0x144 ",
     "NameText": "A_PositionX",
     "ValueText": "",
     "ValueType": 1,
@@ -168,7 +168,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0xF20 ",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0xF20 ",
     "NameText": "A_HP_Count",
     "ValueText": "",
     "ValueType": 0,
@@ -176,7 +176,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0xF40 ",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0xF40 ",
     "NameText": "A_MP_Count",
     "ValueText": "",
     "ValueType": 0,
@@ -184,7 +184,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0xF60 ",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0xF60 ",
     "NameText": "A_WP_Count",
     "ValueText": "",
     "ValueType": 0,
@@ -192,7 +192,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0xF80 ",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0xF80 ",
     "NameText": "A_RP_Count",
     "ValueText": "",
     "ValueType": 0,
@@ -200,7 +200,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x4704B0] \u002B 0x1BE",
+    "AddressText": "[Ares.exe \u002B 0x4853F0] \u002B 0x1BE",
     "NameText": "C_CameraVertical",
     "ValueText": "16310",
     "ValueType": 1,
@@ -208,7 +208,7 @@
     "LockGroup": 1
   },
   {
-    "AddressText": "[[Ares.exe \u002B 0x471CA8] \u002B 0x60] \u002B 0xE8",
+    "AddressText": "[[Ares.exe \u002B 0x486BE8] \u002B 0x60] \u002B 0xE8",
     "NameText": "S_InventoryOpen",
     "ValueText": "",
     "ValueType": 2,
@@ -216,7 +216,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[[Ares.exe \u002B 0x471CB4] \u002B 0x60] \u002B 0x100",
+    "AddressText": "[[Ares.exe \u002B 0x486BF4] \u002B 0x60] \u002B 0x100",
     "NameText": "S_InventoryOpen",
     "ValueText": "",
     "ValueType": 2,
@@ -224,7 +224,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[[Ares.exe \u002B 0x471CA8] \u002B 0x60] \u002B 0x104",
+    "AddressText": "[[Ares.exe \u002B 0x486BE8] \u002B 0x60] \u002B 0x104",
     "NameText": "S_InventoryOpen",
     "ValueText": "",
     "ValueType": 2,
@@ -232,7 +232,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[[Ares.exe \u002B 0x471CA8] \u002B 0x94] \u002B 0x104",
+    "AddressText": "[[Ares.exe \u002B 0x486BE8] \u002B 0x94] \u002B 0x104",
     "NameText": "S_ShopOpen",
     "ValueText": "",
     "ValueType": 2,
@@ -240,7 +240,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[[Ares.exe \u002B 0x471CA8] \u002B 0x94] \u002B 0xE8",
+    "AddressText": "[[Ares.exe \u002B 0x486BE8] \u002B 0x94] \u002B 0xE8",
     "NameText": "S_ShopOpen",
     "ValueText": "",
     "ValueType": 2,
@@ -248,7 +248,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[[Ares.exe \u002B 0x471CA8] \u002B 0x94] \u002B 0x100",
+    "AddressText": "[[Ares.exe \u002B 0x486BE8] \u002B 0x94] \u002B 0x100",
     "NameText": "S_ShopOpen",
     "ValueText": "",
     "ValueType": 2,
@@ -256,7 +256,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0x3B0",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0x3B0",
     "NameText": "A_CurrentAction (0=idle, 3=running, 4=hit by mob, 7=attacking)",
     "ValueText": "39",
     "ValueType": 0,
@@ -264,7 +264,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0x3B8",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0x3B8",
     "NameText": "A_Anim1Long",
     "ValueText": "1159200000",
     "ValueType": 2,
@@ -272,7 +272,7 @@
     "LockGroup": 1
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x471C88] \u002B 0xF1A",
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0xF1A",
     "NameText": "Sell_FirstSellSlotItem",
     "ValueText": "",
     "ValueType": 1,

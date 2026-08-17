@@ -1,36 +1,36 @@
 [
   {
-    "AddressText": "[[Ares.exe \u002B 0x471CA8] \u002B 0x60] \u002B 0xE8",
+    "AddressText": "[[Ares.exe \u002B 0x486BE8] \u002B 0x60] \u002B 0xE8",
     "NameText": "S_InventoryOpen",
     "ValueText": "",
     "ValueType": 2
   },
   {
-    "AddressText": "[[Ares.exe \u002B 0x471CB4] \u002B 0x60] \u002B 0x100",
+    "AddressText": "[[Ares.exe \u002B 0x486BF4] \u002B 0x60] \u002B 0x100",
     "NameText": "S_InventoryOpen",
     "ValueText": "",
     "ValueType": 2
   },
   {
-    "AddressText": "[[Ares.exe \u002B 0x471CA8] \u002B 0x60] \u002B 0x104",
+    "AddressText": "[[Ares.exe \u002B 0x486BE8] \u002B 0x60] \u002B 0x104",
     "NameText": "S_InventoryOpen",
     "ValueText": "",
     "ValueType": 2
   },
   {
-    "AddressText": "[[Ares.exe \u002B 0x471CA8] \u002B 0x94] \u002B 0x104",
+    "AddressText": "[[Ares.exe \u002B 0x486BE8] \u002B 0x94] \u002B 0x104",
     "NameText": "S_ShopOpen",
     "ValueText": "",
     "ValueType": 2
   },
   {
-    "AddressText": "[[Ares.exe \u002B 0x471CA8] \u002B 0x94] \u002B 0xE8",
+    "AddressText": "[[Ares.exe \u002B 0x486BE8] \u002B 0x94] \u002B 0xE8",
     "NameText": "S_ShopOpen",
     "ValueText": "",
     "ValueType": 2
   },
   {
-    "AddressText": "[[Ares.exe \u002B 0x471CA8] \u002B 0x94] \u002B 0x100",
+    "AddressText": "[[Ares.exe \u002B 0x486BE8] \u002B 0x94] \u002B 0x100",
     "NameText": "S_ShopOpen",
     "ValueText": "",
     "ValueType": 2

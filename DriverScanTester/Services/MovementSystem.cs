@@ -461,20 +461,20 @@ namespace DriverScanTester.Services
                 return;
             }
 
-            // ── Loot-priority mode (profile flag "Loot Priority") ──
-            // Looting outranks combat and waypoint movement. While the loot system is
-            // in its pixel-scan state it is actively looking for, clicking and walking
-            // to ground items; during that time ALL attack actions and movement toward
-            // the next waypoint are suspended so the character stands still and every
-            // item gets collected. Combat and movement resume as soon as the loot
-            // machine reports a full empty scan pass (ScanComplete → IsScanActive false).
-            if (LootPriorityMode && LootSystemRef != null && LootSystemRef.IsScanActive)
+            // ── Loot collection interrupts combat/movement ──
+            // The loot system scans for ground items WHILE the character keeps attacking
+            // (scanning alone never interrupts the attack). Only when the scan actually
+            // found an item — mouseover confirmed, the loot system left-clicked and the
+            // character auto-walks to it (IsCollecting) — are the attack and waypoint
+            // movement suspended, so the pickup is not fought over. Combat and movement
+            // resume as soon as the collection finishes.
+            if (LootSystemRef != null && LootSystemRef.IsCollecting)
             {
                 if (!_lootPriorityHoldActive)
                 {
                     _lootPriorityHoldActive = true;
                     _combatHandler.ResetState();
-                    _log($"[Tick {_tickCount}] Loot priority — loot scan active, suspending combat and waypoint movement.");
+                    _log($"[Tick {_tickCount}] Loot item found — suspending combat while collecting.");
                 }
                 ReleaseSkillThree();
                 StopMoving();

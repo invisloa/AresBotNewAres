@@ -116,6 +116,25 @@ namespace DriverScanTester.Services
             return false;
         }
 
+        /// <summary>
+        /// Scans for the seller NPC (same spiral scan as the repot seller flow) and
+        /// right-clicks it when found. Does NOT click any dialog option — the caller
+        /// inspects the resulting NPC dialog itself. Returns true when the NPC was
+        /// found and right-clicked (or the dialog is already open).
+        /// </summary>
+        public bool ScanAndRightClickNpc()
+        {
+            SetSellCameraView();
+
+            if (_memory.IsShopOpen())
+            {
+                _log("ItemSeller: NPC dialog already open — skipping scan.");
+                return true;
+            }
+
+            return TryOpenSellerDialogByScanning(clickShopOption: false);
+        }
+
         public void SellItemsByMouseMove()
         {
             AssignWeight();
@@ -1102,7 +1121,7 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Reads the seller-mouseover int at <c>[Ares.exe + 0x4704A8] + 0xC</c>.
+        /// Reads the seller-mouseover int at <c>[Ares.exe + 0x4853E8] + 0xC</c>.
         /// 0 is treated as "not pointed" (also returned if the pointer chain fails).
         /// </summary>
         private int ReadIsSellerPointed()
@@ -1121,7 +1140,7 @@ namespace DriverScanTester.Services
         /// All scan points use the actual game-window client rectangle so this works
         /// regardless of window position or resolution.
         /// </summary>
-        private bool TryOpenSellerDialogByScanning()
+        private bool TryOpenSellerDialogByScanning(bool clickShopOption = true)
         {
             if (_memory.IsShopOpen())
             {
@@ -1162,7 +1181,7 @@ namespace DriverScanTester.Services
                 if (ScanSellerAtClientPoint(centerClientX, centerClientY,
                                             clientOriginX, clientOriginY,
                                             clientWidth, clientHeight,
-                                            scanIndex, pointsThisScan++))
+                                            scanIndex, pointsThisScan++, clickShopOption))
                     return true;
 
                 for (int radius = step; radius <= maxRadius && !sellerDetectedThisScan; radius += step)
@@ -1173,7 +1192,7 @@ namespace DriverScanTester.Services
                         if (ScanSellerAtClientPoint(centerClientX + dx, centerClientY - radius,
                                                     clientOriginX, clientOriginY,
                                                     clientWidth, clientHeight,
-                                                    scanIndex, pointsThisScan++))
+                                                    scanIndex, pointsThisScan++, clickShopOption))
                             return true;
                     }
                     // Right edge: from -radius+step to +radius-step
@@ -1182,7 +1201,7 @@ namespace DriverScanTester.Services
                         if (ScanSellerAtClientPoint(centerClientX + radius, centerClientY + dy,
                                                     clientOriginX, clientOriginY,
                                                     clientWidth, clientHeight,
-                                                    scanIndex, pointsThisScan++))
+                                                    scanIndex, pointsThisScan++, clickShopOption))
                             return true;
                     }
                     // Bottom edge: from +radius-step down to -radius
@@ -1191,7 +1210,7 @@ namespace DriverScanTester.Services
                         if (ScanSellerAtClientPoint(centerClientX + dx, centerClientY + radius,
                                                     clientOriginX, clientOriginY,
                                                     clientWidth, clientHeight,
-                                                    scanIndex, pointsThisScan++))
+                                                    scanIndex, pointsThisScan++, clickShopOption))
                             return true;
                     }
                     // Left edge: from +radius-step up to -radius+step
@@ -1200,7 +1219,7 @@ namespace DriverScanTester.Services
                         if (ScanSellerAtClientPoint(centerClientX - radius, centerClientY + dy,
                                                     clientOriginX, clientOriginY,
                                                     clientWidth, clientHeight,
-                                                    scanIndex, pointsThisScan++))
+                                                    scanIndex, pointsThisScan++, clickShopOption))
                             return true;
                     }
                 }
@@ -1208,7 +1227,7 @@ namespace DriverScanTester.Services
                 _log($"ItemSeller: Seller scan #{scanIndex + 1}/{SellerMaxFullScans} finished — no S_IsSellerPointed=={SellerPointedValue} match ({pointsThisScan} points checked).");
             }
 
-            return _memory.IsShopOpen();
+            return clickShopOption && _memory.IsShopOpen();
         }
 
         /// <summary>
@@ -1222,7 +1241,8 @@ namespace DriverScanTester.Services
         private bool ScanSellerAtClientPoint(int clientX, int clientY,
                                              int clientOriginX, int clientOriginY,
                                              int clientWidth, int clientHeight,
-                                             int scanIndex, int pointIndex)
+                                             int scanIndex, int pointIndex,
+                                             bool clickShopOption)
         {
             // Skip points outside the game window — the scan must not move the mouse
             // beyond the actual game client rectangle.
@@ -1240,15 +1260,23 @@ namespace DriverScanTester.Services
             if (pointed != SellerPointedValue)
                 return false;
 
-            _log($"ItemSeller: S_IsSellerPointed=={SellerPointedValue} detected at client ({clientX},{clientY}) screen ({screenX},{screenY}) [scan {scanIndex + 1}, point {pointIndex}]. Right-clicking to open seller dialog.");
+            _log($"ItemSeller: S_IsSellerPointed=={SellerPointedValue} detected at client ({clientX},{clientY}) screen ({screenX},{screenY}) [scan {scanIndex + 1}, point {pointIndex}]. Right-clicking to open the NPC dialog.");
 
             // Right-click the seller NPC to open its context menu (Shop / Storage / etc.).
             MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.RightDown);
             Thread.Sleep(50);
             MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.RightUp);
-            // Wait for the seller context-menu dialog to fully render before we try
-            // to click the "Shop" option — clicking too early hits nothing.
+            // Wait for the NPC dialog to fully render before we click anything —
+            // clicking too early hits nothing.
             Thread.Sleep(1000);
+
+            if (!clickShopOption)
+            {
+                // Caller only wanted the NPC found and right-clicked (e.g. a custom
+                // operation that will handle the dialog itself).
+                _log("ItemSeller: NPC found and right-clicked (no dialog option clicked).");
+                return true;
+            }
 
             // The right-click only opens the context menu — we still need to click the
             // "Shop" option in that menu to actually open the shop window. This is the

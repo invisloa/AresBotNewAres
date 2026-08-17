@@ -84,20 +84,28 @@ namespace DriverScanTester.Services
         private nint _hwnd;
 
         /// <summary>
-        /// Loot-priority mode (profile flag "Loot Priority"): looting outranks combat.
-        /// When true the loot machine does NOT cancel itself when a mob gets selected —
-        /// it keeps scanning for and collecting ground items even during the attack
-        /// phase. The movement system (LootPriorityMode) suspends attack actions and
-        /// waypoint movement while the scan is active so every item gets picked up.
+        /// Loot-priority mode (profile flag "Loot Priority"): when a mob is killed, loot
+        /// starts immediately instead of TABbing to check for more mobs first.
+        /// The loot machine ALWAYS keeps scanning during combat (it never cancels on mob
+        /// selection) — but the attack is only interrupted when an item is actually found
+        /// and collected (<see cref="IsCollecting"/>), never during plain scanning.
         /// </summary>
         public bool LootPriorityMode { get; set; } = false;
 
         /// <summary>
         /// True while the loot machine is in the pixel-scan state (Scan): it is actively
-        /// looking for, clicking and walking to ground items. In loot-priority mode the
-        /// movement system suspends combat and waypoint movement while this is true.
+        /// looking for, clicking and walking to ground items.
         /// </summary>
         public bool IsScanActive => _lootState == LootMachineState.Scan;
+
+        /// <summary>
+        /// True while the loot system is actually collecting a found item (mouseover
+        /// confirmed): it left-clicked and the character is auto-walking to the item.
+        /// The movement system suspends combat and waypoint movement ONLY while this is
+        /// true — scanning alone never interrupts the attack.
+        /// </summary>
+        public bool IsCollecting => _isCollecting;
+        private bool _isCollecting = false;
 
         /// <summary>Previous tick's IsMobSelected value — used to detect mob death.</summary>
         private bool _wasMobSelectedPrev = false;
@@ -552,32 +560,14 @@ namespace DriverScanTester.Services
                 }
             }
 
-            // ── If a mob is selected, TOTALLY CANCEL any loot in progress. ──
-            // EXCEPT in loot-priority mode (LootPriorityMode), where looting outranks
-            // combat: the machine keeps scanning/collecting even while a mob is selected
-            // (the movement system suspends attack while the scan runs, see
-            // MovementSystem.LootPriorityMode).
-            if (isMobSelected && !LootPriorityMode)
-            {
-                _wasMobSelectedPrev = true;
-
-                // Kill any running spacebar-spam background task from the Scan phase.
-                StopScanSpacebarSpam();
-
-                if (_lootState != LootMachineState.Idle)
-                {
-                    _log("[Loot] Mob selected — cancelling loot, returning to Idle.");
-                    _lootState = LootMachineState.Idle;
-                    _consecutiveEmptySpacePresses = 0;
-                }
-                await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
-                return;
-            }
-
+            // ── A selected mob does NOT cancel loot ──
+            // The loot machine keeps scanning while the character is attacking. The scan
+            // only LOOKS for items (mouseover check); the attack continues undisturbed
+            // until an item is actually found — only then does collection start
+            // (IsCollecting) and the movement system suspends the attack.
             if (isMobSelected)
             {
-                // Loot-priority mode: remember the selection for mob-death detection
-                // and keep the loot cycle running.
+                // Remember the selection for mob-death detection.
                 _wasMobSelectedPrev = true;
             }
 
@@ -785,12 +775,11 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// True when the loot machine must abort its current action immediately:
-        /// the player entered the city, or — outside loot-priority mode — a mob got
-        /// selected (combat interrupts loot). In loot-priority mode (LootPriorityMode)
-        /// a mob selection never aborts loot: looting outranks combat.
+        /// the player entered the city. A selected mob NEVER aborts loot — the scan
+        /// keeps running during combat and only interrupts it when an item is found
+        /// (see <see cref="IsCollecting"/> and the movement system's hold).
         /// </summary>
-        private bool ShouldAbortLoot() =>
-            _memoryService.GetIsInCity() || (!LootPriorityMode && _memoryService.IsMobSelected());
+        private bool ShouldAbortLoot() => _memoryService.GetIsInCity();
 
         private bool PixelScan()
         {
@@ -947,7 +936,9 @@ namespace DriverScanTester.Services
         private void CollectionClick()
         {
             int positionBeforeClick = GetPositionX();
-
+            _isCollecting = true;
+            try
+            {
             // Release any held right button, then left-click to pick up the item.
             MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.RightUp);
             MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.LeftDown);
@@ -1038,6 +1029,13 @@ namespace DriverScanTester.Services
             // screen content has changed).
             CaptureScreen();
             _log("[Loot] Fresh screen capture forced after click.");
+            }
+            finally
+            {
+                // Collection finished (item picked up / aborted) — the movement and
+                // combat systems may resume attacking.
+                _isCollecting = false;
+            }
         }
 
         private void UnbugWhenCollecting(int beforeClickPosX)

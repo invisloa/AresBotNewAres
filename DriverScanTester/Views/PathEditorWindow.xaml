@@ -179,15 +179,57 @@
                             <!-- ─────────── Stage 1: REPOT ─────────── -->
                             <GroupBox Header="1. REPOT" Margin="0,0,0,10" BorderBrush="#FF3399FF" BorderThickness="2" Padding="4">
                                 <StackPanel Margin="3">
-                                    <WrapPanel Orientation="Horizontal" Margin="0,0,0,5">
-                                        <TextBlock Text="Path to repot:" FontWeight="Bold" VerticalAlignment="Center" Width="120"/>
-                                        <ComboBox ItemsSource="{Binding AvailablePaths}" SelectedItem="{Binding CityToRepot.PathFile}"
-                                                  Width="320" VerticalAlignment="Center"/>
-                                    </WrapPanel>
-                                    <WrapPanel Orientation="Horizontal" Margin="0,0,0,8">
-                                        <TextBlock Text="Wait before start (ms):" FontWeight="Bold" VerticalAlignment="Center" Width="120"/>
-                                        <TextBox Text="{Binding CityToRepot.StartDelayMs, UpdateSourceTrigger=PropertyChanged}"
-                                                 Width="100" VerticalAlignment="Center"/>
+                                    <TextBlock Text="The bot walks to the repot using the next path in the list on every repot trip (wraps back to the first path)."
+                                               TextWrapping="Wrap" Foreground="Gray" FontSize="10" Margin="0,0,0,6"/>
+
+                                    <DataGrid ItemsSource="{Binding CityToRepotPaths}"
+                                              SelectedItem="{Binding SelectedRepotPath}"
+                                              AutoGenerateColumns="False"
+                                              CanUserAddRows="False"
+                                              CanUserDeleteRows="False"
+                                              HeadersVisibility="Column"
+                                              GridLinesVisibility="All"
+                                              AlternationCount="2147483647"
+                                              RowHeaderWidth="0"
+                                              SelectionMode="Single"
+                                              SelectionUnit="FullRow"
+                                              MinHeight="80"
+                                              MaxHeight="220"
+                                              VerticalScrollBarVisibility="Auto">
+                                        <DataGrid.Columns>
+                                            <!-- # -->
+                                            <DataGridTemplateColumn Header="#" Width="36" IsReadOnly="True">
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <TextBlock Text="{Binding RelativeSource={RelativeSource AncestorType=DataGridRow}, Path=(ItemsControl.AlternationIndex), Converter={StaticResource RouteNumberConverter}}"
+                                                                   VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
+
+                                            <!-- Path -->
+                                            <DataGridTemplateColumn Header="Path" Width="2*">
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <ComboBox ItemsSource="{Binding DataContext.AvailablePaths, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                                  SelectedItem="{Binding PathFile, UpdateSourceTrigger=PropertyChanged}"
+                                                                  BorderThickness="0" Background="Transparent"
+                                                                  VerticalAlignment="Center" Margin="2,0"/>
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
+
+                                            <!-- Wait (ms) -->
+                                            <DataGridTextColumn Header="Wait (ms)" Width="80"
+                                                                Binding="{Binding StartDelayMs, UpdateSourceTrigger=PropertyChanged}"/>
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+
+                                    <WrapPanel Orientation="Horizontal" Margin="0,6,0,8">
+                                        <Button Content="Add path" Command="{Binding AddRepotPathCommand}" Width="80" Margin="0,0,4,0" Background="#FFE6F7FF"/>
+                                        <Button Content="Remove" Command="{Binding RemoveRepotPathCommand}" Width="70" Margin="0,0,4,0" Background="#FFFFE6E6"/>
+                                        <Button Content="Move up" Command="{Binding MoveRepotPathUpCommand}" Width="75" Margin="0,0,4,0"/>
+                                        <Button Content="Move down" Command="{Binding MoveRepotPathDownCommand}" Width="85" Margin="0,0,4,0"/>
                                     </WrapPanel>
 
                                     <GroupBox Header="Repot when" Margin="0,0,0,8" BorderBrush="#FF99CCFF" BorderThickness="1">
@@ -330,6 +372,30 @@
                                                     </Style>
                                                 </DataGridTextColumn.EditingElementStyle>
                                             </DataGridTextColumn>
+
+                                            <!-- Operation before this leg -->
+                                            <DataGridTemplateColumn Header="Op before" Width="1.3*">
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <ComboBox ItemsSource="{Binding DataContext.AvailableOperations, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                                  SelectedItem="{Binding OperationBefore, UpdateSourceTrigger=PropertyChanged}"
+                                                                  BorderThickness="0" Background="Transparent"
+                                                                  VerticalAlignment="Center" Margin="2,0"/>
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
+
+                                            <!-- Operation after this leg -->
+                                            <DataGridTemplateColumn Header="Op after" Width="1.3*">
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <ComboBox ItemsSource="{Binding DataContext.AvailableOperations, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                                  SelectedItem="{Binding OperationAfter, UpdateSourceTrigger=PropertyChanged}"
+                                                                  BorderThickness="0" Background="Transparent"
+                                                                  VerticalAlignment="Center" Margin="2,0"/>
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
                                         </DataGrid.Columns>
                                     </DataGrid>
 
@@ -362,6 +428,24 @@
                                     </WrapPanel>
                                     <TextBlock Text="This path loops until the bot needs to repot."
                                                TextWrapping="Wrap" Foreground="Gray" FontSize="10"/>
+
+                                    <GroupBox Header="Custom operations before hunting (e.g. talk to NPC)" Margin="0,8,0,0" BorderBrush="#FF99CCFF" BorderThickness="1">
+                                        <StackPanel Margin="3">
+                                            <TextBlock Text="Runs in order once the player reaches the EXP map, before the loop starts."
+                                                       TextWrapping="Wrap" Foreground="Gray" FontSize="10" Margin="0,0,0,4"/>
+                                            <ListBox ItemsSource="{Binding PreExpOperations}"
+                                                     SelectedItem="{Binding SelectedPreExpOperation}"
+                                                     MinHeight="70" MaxHeight="150"
+                                                     ScrollViewer.VerticalScrollBarVisibility="Auto"/>
+                                            <WrapPanel Orientation="Horizontal" Margin="0,4,0,0">
+                                                <ComboBox ItemsSource="{Binding AvailableOperations}"
+                                                          SelectedItem="{Binding NewPreExpOperation}"
+                                                          Width="180" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                                <Button Content="Add" Command="{Binding AddPreExpOperationCommand}" Width="60" Margin="0,0,4,0" Background="#FFE6F7FF"/>
+                                                <Button Content="Remove" Command="{Binding RemovePreExpOperationCommand}" Width="70" Background="#FFFFE6E6"/>
+                                            </WrapPanel>
+                                        </StackPanel>
+                                    </GroupBox>
                                 </StackPanel>
                             </GroupBox>
 

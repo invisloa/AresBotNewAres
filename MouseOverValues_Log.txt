@@ -2,7 +2,7 @@
  MOUSEOVER ITEM/NPC VALUE LOG
 ================================================================================
 
-Plik sluzy do rejestrowania wartosci spod adresu [Ares.exe + 0x4704A8] + 0xC
+Plik sluzy do rejestrowania wartosci spod adresu [Ares.exe + 0x4853E8] + 0xC
 odczytywanych jako 32-bitowa liczba calkowita (cl / int) podczas gdy kursor
 myszy znajduje sie nad przedmiotem (itemem) lub NPC w grze Ares.
 
@@ -11,9 +11,9 @@ do detekcji czy pod kursorem znajduje sie item do podniesienia. Dokladnie
 chodzi o stala `LootMouseOverValue` w `BotConstants.GameMagicValues`.
 
 DLACZEGO TE WARTOSCI SA ZAPISYWANE:
-- Adres bazowy: Ares.exe + 0x4704A8
+- Adres bazowy: Ares.exe + 0x4853E8
 - Offset: +0xC (12 w systemie dziesietnym)
-- Pointer chain: [Ares.exe + 0x4704A8] -> odczytana wartosc wskaznika + 0xC
+- Pointer chain: [Ares.exe + 0x4853E8] -> odczytana wartosc wskaznika + 0xC
 - Sposob odczytu: 32-bit integer (cl / int / ReadInt32)
 - Wartosc zmienia sie przy kazdym restarcie gry (per-session seed).
 - Jesli loot bot przestanie wykrywac przedmioty, nalezy odczytac aktualna
@@ -21,7 +21,7 @@ DLACZEGO TE WARTOSCI SA ZAPISYWANE:
   `LootMouseOverValue` oraz dodac nowy wpis do tego pliku.
 
 ZALEZNOSC MIEDZY ITEM A NPC:
-Adres [Ares.exe + 0x4704A8] + 0xC zwraca rozne wartosci w zaleznosci od tego
+Adres [Ares.exe + 0x4853E8] + 0xC zwraca rozne wartosci w zaleznosci od tego
 czy kursor jest nad itemem (loot) czy nad NPC. Roznica polega na bajcie w
 offsccie +0xD (db):
   - Item: db = 0xDB (219)
@@ -49,17 +49,17 @@ AKTUALNE WARTOSCI (SESJA 4, 2026-08-03):
 
   Name | Address                       | Typ     | Item (decimal)   | Item (hex)     | NPC (decimal)    | NPC (hex)
   -----+-------------------------------+---------+------------------+----------------+------------------+---------------
-  cb   | [Ares.exe + 0x4704A8] + 0xC  | byte    | 160              | 0xA0           | 72               | 0x48
-  db   | [Ares.exe + 0x4704A8] + 0xD  | byte    | 122              | 0x7A           | 219              | 0xDB
-  bs   | [Ares.exe + 0x4704A8] + 0xB  | short   | -24576           | 0xA000         | 18432            | 0x4800
-  cs   | [Ares.exe + 0x4704A8] + 0xC  | short   | 31392            | 0x7AA0         | -9400            | 0xDB48
-  ds   | [Ares.exe + 0x4704A8] + 0xD  | short   | 1402             | 0x057A         | 17115            | 0x42DB
-  al   | [Ares.exe + 0x4704A8] + 0xA  | int     | 2057306356       | 0x7AA000F4     | -616038397       | 0xDB480003
-  bl   | [Ares.exe + 0x4704A8] + 0xB  | int     | 91922432         | 0x057AA000     | 1121667072       | 0x42DB4800
-  cl   | [Ares.exe + 0x4704A8] + 0xC  | int     | 302348960        | 0x12057AA0     | 138599240        | 0x0842DB48
-  dl   | [Ares.exe + 0x4704A8] + 0xD  | int     | 1181050          | 0x0012057A     | 541403           | 0x000842DB
+  cb   | [Ares.exe + 0x4853E8] + 0xC  | byte    | 160              | 0xA0           | 72               | 0x48
+  db   | [Ares.exe + 0x4853E8] + 0xD  | byte    | 122              | 0x7A           | 219              | 0xDB
+  bs   | [Ares.exe + 0x4853E8] + 0xB  | short   | -24576           | 0xA000         | 18432            | 0x4800
+  cs   | [Ares.exe + 0x4853E8] + 0xC  | short   | 31392            | 0x7AA0         | -9400            | 0xDB48
+  ds   | [Ares.exe + 0x4853E8] + 0xD  | short   | 1402             | 0x057A         | 17115            | 0x42DB
+  al   | [Ares.exe + 0x4853E8] + 0xA  | int     | 2057306356       | 0x7AA000F4     | -616038397       | 0xDB480003
+  bl   | [Ares.exe + 0x4853E8] + 0xB  | int     | 91922432         | 0x057AA000     | 1121667072       | 0x42DB4800
+  cl   | [Ares.exe + 0x4853E8] + 0xC  | int     | 302348960        | 0x12057AA0     | 138599240        | 0x0842DB48
+  dl   | [Ares.exe + 0x4853E8] + 0xD  | int     | 1181050          | 0x0012057A     | 541403           | 0x000842DB
 
-  Camera Vertical Angle [Ares.exe + 0x4704B0] + 0x1BE: 16310 (0x3FB6) przed
+  Camera Vertical Angle [Ares.exe + 0x4853F0] + 0x1BE: 16310 (0x3FB6) przed
   naprowadzeniem na NPC / 16320 podczas naprowadzenia na NPC.
   (Zakodowane: BotConstants.NpcMouseOverValues.CameraVerticalAngle = 16320,
   BotConstants.Camera.DefaultVerticalLock = 16310.)
@@ -114,13 +114,13 @@ HISTORIA ZMIAN:
                              al=-616038397, bl=1121667072, cl=138599240,
                              dl=541403)
                            - NpcMouseOverValues.CameraVerticalAngle = 16320
-                             ([Ares.exe+0x4704B0]+0x1BE podczas naprowadzenia
+                             ([Ares.exe+0x4853F0]+0x1BE podczas naprowadzenia
                              na NPC; poza naprowadzeniem = 16310 ==
                              Camera.DefaultVerticalLock)
 
 WNIOSKI Z ANALIZY (SESJE 1-4) — CZY WARTOSCI MAJA LOGIKE? TAK:
 ================================================================================
-1. Wartosc pod [Ares.exe + 0x4704A8] + 0xA..0xF to ADRES/ID obiektu pod
+1. Wartosc pod [Ares.exe + 0x4853E8] + 0xA..0xF to ADRES/ID obiektu pod
    kursorem (48-bitowy wskaznik: bajty +0xA..+0xF, np. NPC = 03 00 48 DB 42 08).
    To NIE jest flaga item/NPC.
 

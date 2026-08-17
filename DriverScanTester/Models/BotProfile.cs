@@ -4,7 +4,7 @@ namespace DriverScanTester.Models
 {
     /// <summary>
     /// A bot profile describes one complete EXP destination as a three-stage workflow:
-    ///   1. City → Repot (one path),
+    ///   1. City → Repot (a list of paths — each repot trip uses the next path in the list),
     ///   2. Go to EXP (an ordered chain of one or more paths, each finishing at its
     ///      last waypoint or when the expected destination map is reached),
     ///   3. EXP Path (one looping path used while hunting).
@@ -17,8 +17,13 @@ namespace DriverScanTester.Models
         public string Name { get; set; } = "NewProfile";
 
         // --- Stage 1: REPOT ---
-        /// <summary>The single path from the city/player starting position to the repot location.</summary>
-        public BotRouteStep CityToRepot { get; set; } = new();
+        /// <summary>
+        /// Ordered list of paths from the city/player starting position to the repot
+        /// location. The bot cycles through this list: every repot trip walks to the
+        /// repot using the next path in the list, wrapping back to the first one after
+        /// the last, so the repot route is rotated across repots.
+        /// </summary>
+        public List<BotRouteStep> CityToRepotPaths { get; set; } = new();
 
         // --- Stage 2: GO TO EXP ---
         /// <summary>
@@ -31,6 +36,15 @@ namespace DriverScanTester.Models
         // --- Stage 3: EXP PATH ---
         /// <summary>The single looping hunting path; stops when the repot conditions are met.</summary>
         public BotRouteStep ExpLoop { get; set; } = new();
+
+        // --- Custom operations ---
+        /// <summary>
+        /// Ordered list of built-in custom operation names (see BotOperations) to run
+        /// once the player has arrived at the EXP map, before the EXP loop starts.
+        /// E.g. talking to an NPC that grants access to the hunting area.
+        /// Empty entries are ignored; unknown names fail the workflow, never silently skip.
+        /// </summary>
+        public List<string> PreExpOperations { get; set; } = new();
 
         // --- Repot thresholds (override RepotDetectorService defaults) ---
         /// <summary>Minimum HP potions before repot is needed.</summary>

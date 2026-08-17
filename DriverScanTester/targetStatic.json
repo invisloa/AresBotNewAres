@@ -6,8 +6,8 @@
     "ValueType": 2
   },
   {
-    "AddressText": "[[Ares.exe \u002B 0x471BD0] \u002B 0xE0] - 0x541",
-    "NameText": "[[Ares.exe \u002B 0x471BD0] \u002B 0xE0] - 0x541",
+    "AddressText": "[[Ares.exe \u002B 0x486B10] \u002B 0xE0] - 0x541",
+    "NameText": "[[Ares.exe \u002B 0x486B10] \u002B 0xE0] - 0x541",
     "ValueText": "",
     "ValueType": 2
   },
@@ -18,26 +18,26 @@
     "ValueType": 2
   },
   {
-    "AddressText": "[[Ares.exe \u002B 0x471BD0] \u002B 0x360] - 0x390",
-    "NameText": "[[Ares.exe \u002B 0x471BD0] \u002B 0x360] - 0x390",
+    "AddressText": "[[Ares.exe \u002B 0x486B10] \u002B 0x360] - 0x390",
+    "NameText": "[[Ares.exe \u002B 0x486B10] \u002B 0x360] - 0x390",
     "ValueText": "",
     "ValueType": 2
   },
   {
-    "AddressText": "[[Ares.exe \u002B 0x471CA8] \u002B 0x8A4] \u002B 0xA8",
-    "NameText": "[[Ares.exe \u002B 0x471CA8] \u002B 0x8A4] \u002B 0xA8",
+    "AddressText": "[[Ares.exe \u002B 0x486BE8] \u002B 0x8A4] \u002B 0xA8",
+    "NameText": "[[Ares.exe \u002B 0x486BE8] \u002B 0x8A4] \u002B 0xA8",
     "ValueText": "",
     "ValueType": 2
   },
   {
-    "AddressText": "[[Ares.exe \u002B 0x471CB4] \u002B 0x8A4] \u002B 0xA8",
-    "NameText": "[[Ares.exe \u002B 0x471CB4] \u002B 0x8A4] \u002B 0xA8",
+    "AddressText": "[[Ares.exe \u002B 0x486BF4] \u002B 0x8A4] \u002B 0xA8",
+    "NameText": "[[Ares.exe \u002B 0x486BF4] \u002B 0x8A4] \u002B 0xA8",
     "ValueText": "",
     "ValueType": 2
   },
   {
-    "AddressText": "[[Ares.exe \u002B 0x471CB8] \u002B 0x8A4] \u002B 0xA8",
-    "NameText": "[[Ares.exe \u002B 0x471CB8] \u002B 0x8A4] \u002B 0xA8",
+    "AddressText": "[[Ares.exe \u002B 0x486BF8] \u002B 0x8A4] \u002B 0xA8",
+    "NameText": "[[Ares.exe \u002B 0x486BF8] \u002B 0x8A4] \u002B 0xA8",
     "ValueText": "",
     "ValueType": 2
   },
@@ -72,8 +72,8 @@
     "ValueType": 2
   },
   {
-    "AddressText": "[[Ares.exe \u002B 0x471BD0] \u002B 0xD80] - 0xE88",
-    "NameText": "[[Ares.exe \u002B 0x471BD0] \u002B 0xD80] - 0xE88",
+    "AddressText": "[[Ares.exe \u002B 0x486B10] \u002B 0xD80] - 0xE88",
+    "NameText": "[[Ares.exe \u002B 0x486B10] \u002B 0xD80] - 0xE88",
     "ValueText": "",
     "ValueType": 2
   }

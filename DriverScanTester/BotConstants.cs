@@ -64,7 +64,7 @@ namespace DriverScanTester
 
         // ════════════════════════════════════════════════════════════════
         //  CAMERA ANGLE — bit-patterns of the exact float radians stored at
-        //  [Ares.exe + 0x4704B0] + 0x1A8 for each cardinal direction.
+        //  [Ares.exe + 0x4853F0] + 0x1A8 for each cardinal direction.
         //  These are the ONLY authoritative target values for writing the
         //  camera angle via the int bit-pattern helper.
         //  Source: exact measurement of full 4-byte float at +0x1A8.
@@ -273,7 +273,7 @@ namespace DriverScanTester
         public static class MemoryOffsets
         {
             // Player structure
-            public const ulong PlayerPtr = 0x471C88;
+            public const ulong PlayerPtr = 0x486BC8;
             public const ulong MobSelectedPtr2 = 0x3F4D4C;
             public const ulong MobSelectedSub2 = 0x9D;
             public const ulong MobSelected2 = 0x60;
@@ -304,7 +304,7 @@ namespace DriverScanTester
             public const ulong CurrentAction = 0x3B0;
 
             // Camera structure
-            public const ulong CameraPtr = 0x4704B0;
+            public const ulong CameraPtr = 0x4853F0;
             public const ulong CameraDistance = 0x1a6;
             // Horizontal camera yaw (full 32-bit float) lives at +0x1A8.
             // Do NOT read it from +0x1AA — that is only the upper 16 bits of
@@ -316,8 +316,8 @@ namespace DriverScanTester
             public const ulong CameraVerticalAngle = 0x1B0;
 
             // UI / Window
-            public const ulong BaseNormalM = 0x471C88;
-            public const ulong UiWindowM = 0x471CA8;
+            public const ulong BaseNormalM = 0x486BC8;
+            public const ulong UiWindowM = 0x486BE8;
             public const int ShopWindow2M = 0x94;
             public const int ShopWindow1 = 0x100;
             public const int InventoryOpen = 0xE8;
@@ -337,7 +337,7 @@ namespace DriverScanTester
             public const int InventoryTabSelectedSub2 = 0x36B;
             public const int SellWindow = 0xc0;
             public const ulong SellWindowM = 0x2AD308;
-            public const ulong SellConfirmWindowPtr = 0x471C98;
+            public const ulong SellConfirmWindowPtr = 0x486BD8;
             public const int DeleteWindow = 0x138c;
             public const int SellItemSelected = 0x12e;
             public const int SlotHP = 0xbb2;
@@ -361,13 +361,13 @@ namespace DriverScanTester
             public const ulong HealManaOffset1 = 0x2C8;
 
             // Mouseover / NPC highlight
-            public const ulong IsNpcMousePointedPtr = 0x471C84;
+            public const ulong IsNpcMousePointedPtr = 0x486BC4;
             public const ulong IsNpcMousePointed = 0x7C;
 
             // Seller mouseover (S_IsSellerPointed)
             // Pointer chain: [Ares.exe + <IsSellerPointedPtr>] + <IsSellerPointed>
             // Expected value when the mouse is pointing at the seller/NPC: 143850200.
-            public const ulong IsSellerPointedPtr = 0x4704A8;
+            public const ulong IsSellerPointedPtr = 0x4853E8;
             public const ulong IsSellerPointed = 0xC;
 
             // Camera vertical "lock" used by the sell view (16-bit value, e.g. 16310).
@@ -397,7 +397,7 @@ namespace DriverScanTester
             public static readonly int[] ItemsNotForSale = { 0, 246, 247, 1092, 1093, 1094, 1095, 3093, 9049, 9050 };
 
             /// <summary>
-            /// Full 32-bit value of L_LootSelectedItem1 at [Ares.exe+0x4704A8]+0xC when a loot item is
+            /// Full 32-bit value of L_LootSelectedItem1 at [Ares.exe+0x4853E8]+0xC when a loot item is
             /// under the mouse cursor.  WARNING: This value changes every game launch (per-session seed).
             /// If loot stops detecting, re-read this address as cl (32-bit int) while hovering an item
             /// via the 'Mouseover Item' button in the Bot window (MainViewModel.CaptureItemMouseOver),
@@ -439,7 +439,7 @@ namespace DriverScanTester
         // ════════════════════════════════════════════════════════════════
         //  NPC MOUSEOVER VALUES — current per-session values read while the
         //  mouse cursor hovers the NPC (seller).
-        //  Pointer chain: [Ares.exe + 0x4704A8] + 0xA..0xD
+        //  Pointer chain: [Ares.exe + 0x4853E8] + 0xA..0xD
         //  WARNING: these values change every game launch (per-session seed)
         //  and are likely the hovered object's address/ID (heap), so they may
         //  only match ONE specific NPC. Re-read the dump when detection fails.
@@ -474,7 +474,7 @@ namespace DriverScanTester
             /// <summary>Int at +0xD (dl).</summary>
             public const int Dl = 541403;         // 0x000842DB
 
-            /// <summary>Camera vertical angle (short at [Ares.exe + 0x4704B0] + 0x1BE)
+            /// <summary>Camera vertical angle (short at [Ares.exe + 0x4853F0] + 0x1BE)
             /// observed while hovering the NPC.</summary>
             public const short CameraVerticalAngle = 16320; // 0x3FB6
         }
@@ -553,6 +553,10 @@ namespace DriverScanTester
             // Space key
             public const byte VkSpace = 0x20;
             public const byte ScanSpace = 0x39;
+
+            // Enter key (chat / confirm)
+            public const byte VkEnter = 0x0D;
+            public const byte ScanEnter = 0x1C;
 
             /// <summary>Delay in ms between key down and key up in PressKey().</summary>
             public const int PressKeyGapMs = 20;

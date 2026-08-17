@@ -13,7 +13,7 @@ namespace DriverScanTester.ViewModels
     /// <summary>
     /// ViewModel for the Bot Profile editor tab in PathEditorWindow.
     /// A profile is a simple three-stage configuration:
-    ///   1. REPOT      — CityToRepot (one path)
+    ///   1. REPOT      — CityToRepotPaths (list of paths, cycled on every repot)
     ///   2. GO TO EXP  — TravelToExpRoutes (ordered list of paths)
     ///   3. EXP PATH   — ExpLoop (one looping path)
     /// Uses BotProfileLoader as the single persistence and validation service.
@@ -50,7 +50,16 @@ namespace DriverScanTester.ViewModels
             MoveTravelRouteUpCommand = new RelayCommand(_ => MoveTravelRoute(-1), _ => CanMoveTravelRoute(-1));
             MoveTravelRouteDownCommand = new RelayCommand(_ => MoveTravelRoute(1), _ => CanMoveTravelRoute(1));
 
+            AddRepotPathCommand = new RelayCommand(_ => AddRepotPath(), _ => CurrentProfile != null);
+            RemoveRepotPathCommand = new RelayCommand(_ => RemoveRepotPath(), _ => CanRemoveRepotPath);
+            MoveRepotPathUpCommand = new RelayCommand(_ => MoveRepotPath(-1), _ => CanMoveRepotPath(-1));
+            MoveRepotPathDownCommand = new RelayCommand(_ => MoveRepotPath(1), _ => CanMoveRepotPath(1));
+
+            AddPreExpOperationCommand = new RelayCommand(_ => AddPreExpOperation(), _ => CurrentProfile != null);
+            RemovePreExpOperationCommand = new RelayCommand(_ => RemovePreExpOperation(), _ => CanRemovePreExpOperation);
+
             // Initial loads
+            BuildAvailableOperations();
             RefreshProfiles();
             RefreshPaths();
         }
@@ -90,6 +99,22 @@ namespace DriverScanTester.ViewModels
         {
             get => _availablePaths;
             set => SetProperty(ref _availablePaths, value);
+        }
+
+        // ──────────────────── Available custom operations ────────────────────
+
+        /// <summary>
+        /// Operation names selectable in the profile editor. Empty string means "no operation".
+        /// Populated from the <see cref="BotOperations"/> registry.
+        /// </summary>
+        public ObservableCollection<string> AvailableOperations { get; } = new();
+
+        private void BuildAvailableOperations()
+        {
+            AvailableOperations.Clear();
+            AvailableOperations.Add(""); // empty = no operation
+            foreach (var name in BotOperations.KnownNames)
+                AvailableOperations.Add(name);
         }
 
         // ──────────────────── Current profile being edited ────────────────────
@@ -247,7 +272,23 @@ namespace DriverScanTester.ViewModels
 
         // ──────────────────── Stage 1: REPOT ────────────────────
 
-        public BotRouteStepViewModel CityToRepot { get; } = new();
+        /// <summary>
+        /// Ordered list of paths from the city/player starting position to the repot
+        /// location. The bot uses the next path in the list on every repot trip
+        /// (cycling back to the first after the last).
+        /// </summary>
+        public ObservableCollection<BotRouteStepViewModel> CityToRepotPaths { get; } = new();
+
+        private BotRouteStepViewModel? _selectedRepotPath;
+        public BotRouteStepViewModel? SelectedRepotPath
+        {
+            get => _selectedRepotPath;
+            set
+            {
+                if (SetProperty(ref _selectedRepotPath, value))
+                    CommandManager.InvalidateRequerySuggested();
+            }
+        }
 
         // ──────────────────── Stage 2: GO TO EXP ────────────────────
 
@@ -265,9 +306,33 @@ namespace DriverScanTester.ViewModels
             }
         }
 
-        // ──────────────────── Stage 3: EXP PATH ────────────────────
+// ──────────────────── Stage 3: EXP PATH ────────────────────
 
         public BotRouteStepViewModel ExpLoop { get; } = new();
+
+        // ──────────────────── Custom operations (pre-EXP) ────────────────────
+
+        /// <summary>Ordered list of operation names to run at the EXP map before hunting starts.</summary>
+        public ObservableCollection<string> PreExpOperations { get; } = new();
+
+        private string? _selectedPreExpOperation;
+        public string? SelectedPreExpOperation
+        {
+            get => _selectedPreExpOperation;
+            set
+            {
+                if (SetProperty(ref _selectedPreExpOperation, value))
+                    CommandManager.InvalidateRequerySuggested();
+            }
+        }
+
+        /// <summary>Operation name chosen in the "Add operation" combo box.</summary>
+        private string? _newPreExpOperation = "";
+        public string? NewPreExpOperation
+        {
+            get => _newPreExpOperation;
+            set => SetProperty(ref _newPreExpOperation, value);
+        }
 
         // ──────────────────── Status ────────────────────
 
@@ -290,6 +355,12 @@ namespace DriverScanTester.ViewModels
         public ICommand RemoveTravelRouteCommand { get; }
         public ICommand MoveTravelRouteUpCommand { get; }
         public ICommand MoveTravelRouteDownCommand { get; }
+        public ICommand AddRepotPathCommand { get; }
+        public ICommand RemoveRepotPathCommand { get; }
+        public ICommand MoveRepotPathUpCommand { get; }
+        public ICommand MoveRepotPathDownCommand { get; }
+        public ICommand AddPreExpOperationCommand { get; }
+        public ICommand RemovePreExpOperationCommand { get; }
 
         // ──────────────────── Implementation ────────────────────
 
@@ -317,7 +388,7 @@ namespace DriverScanTester.ViewModels
                 MaxTeleportRetries = BotConstants.Repot.MaxTeleportRetries,
                 WindowOffsetX = 0,
                 WindowOffsetY = 0,
-                CityToRepot = new BotRouteStep(),
+                CityToRepotPaths = new List<BotRouteStep> { new BotRouteStep() },
                 TravelToExpRoutes = new List<TravelRouteStep>
                 {
                     new TravelRouteStep
@@ -327,7 +398,8 @@ namespace DriverScanTester.ViewModels
                         ExpectedDestinationMapNumber = 0
                     }
                 },
-                ExpLoop = new BotRouteStep()
+                ExpLoop = new BotRouteStep(),
+                PreExpOperations = new List<string>()
             };
             StatusText = "Created new profile. Fill in the three stages and click Save.";
         }
@@ -348,21 +420,30 @@ namespace DriverScanTester.ViewModels
 
             // 1. Copy editor values into the profile model
             CurrentProfile.Name = ProfileName;
-            CurrentProfile.CityToRepot ??= new BotRouteStep();
-            CurrentProfile.CityToRepot.PathFile = CityToRepot.PathFile;
-            CurrentProfile.CityToRepot.StartDelayMs = CityToRepot.StartDelayMs;
+            CurrentProfile.CityToRepotPaths = CityToRepotPaths
+                .Select(r => new BotRouteStep
+                {
+                    PathFile = r.PathFile,
+                    StartDelayMs = r.StartDelayMs
+                })
+                .ToList();
             CurrentProfile.TravelToExpRoutes = TravelToExpRoutes
                 .Select(r => new TravelRouteStep
                 {
                     PathFile = r.PathFile,
                     StartDelayMs = r.StartDelayMs,
                     CompletionMode = r.CompletionMode,
-                    ExpectedDestinationMapNumber = r.ExpectedDestinationMapNumber
+                    ExpectedDestinationMapNumber = r.ExpectedDestinationMapNumber,
+                    OperationBefore = r.OperationBefore,
+                    OperationAfter = r.OperationAfter
                 })
                 .ToList();
             CurrentProfile.ExpLoop ??= new BotRouteStep();
             CurrentProfile.ExpLoop.PathFile = ExpLoop.PathFile;
             CurrentProfile.ExpLoop.StartDelayMs = ExpLoop.StartDelayMs;
+            CurrentProfile.PreExpOperations = PreExpOperations
+                .Where(op => !string.IsNullOrWhiteSpace(op))
+                .ToList();
 
             // 2. Validate the complete model (one pass, all errors reported)
             var errors = _profileLoader.ValidateProfile(CurrentProfile);
@@ -504,7 +585,8 @@ namespace DriverScanTester.ViewModels
             // Capture every configured path and the route selection before clearing the list.
             // Clearing a bound ComboBox ItemsSource writes null back into the SelectedItem,
             // so the paths and the selection must be restored after the collection is repopulated.
-            string cityToRepotPath = CityToRepot.PathFile;
+            BotRouteStepViewModel? selectedRepotPath = SelectedRepotPath;
+            var repotPaths = CityToRepotPaths.Select(p => p.PathFile).ToList();
             TravelRouteStepViewModel? selectedRoute = SelectedTravelRoute;
             var routePaths = TravelToExpRoutes.Select(r => r.PathFile).ToList();
             string expLoopPath = ExpLoop.PathFile;
@@ -522,10 +604,12 @@ namespace DriverScanTester.ViewModels
 
             // Restore the exact stored strings, including paths that no longer exist in
             // SavedPaths, so validation can still report them.
-            CityToRepot.PathFile = cityToRepotPath;
+            for (int i = 0; i < repotPaths.Count && i < CityToRepotPaths.Count; i++)
+                CityToRepotPaths[i].PathFile = repotPaths[i];
             for (int i = 0; i < routePaths.Count && i < TravelToExpRoutes.Count; i++)
                 TravelToExpRoutes[i].PathFile = routePaths[i];
             ExpLoop.PathFile = expLoopPath;
+            SelectedRepotPath = selectedRepotPath;
             SelectedTravelRoute = selectedRoute;
         }
 
@@ -541,20 +625,28 @@ namespace DriverScanTester.ViewModels
 
         private void LoadProfileIntoEditor()
         {
+            CityToRepotPaths.Clear();
             TravelToExpRoutes.Clear();
 
             if (CurrentProfile == null)
             {
-                CityToRepot.PathFile = "";
-                CityToRepot.StartDelayMs = 0;
                 ExpLoop.PathFile = "";
                 ExpLoop.StartDelayMs = 0;
+                SelectedRepotPath = null;
                 SelectedTravelRoute = null;
                 return;
             }
 
-            CityToRepot.PathFile = CurrentProfile.CityToRepot?.PathFile ?? "";
-            CityToRepot.StartDelayMs = CurrentProfile.CityToRepot?.StartDelayMs ?? 0;
+            foreach (var step in CurrentProfile.CityToRepotPaths ?? new List<BotRouteStep>())
+            {
+                CityToRepotPaths.Add(new BotRouteStepViewModel
+                {
+                    PathFile = step.PathFile ?? "",
+                    StartDelayMs = step.StartDelayMs
+                });
+            }
+            // Loading selects the first repot path.
+            SelectedRepotPath = CityToRepotPaths.FirstOrDefault();
 
             foreach (var r in CurrentProfile.TravelToExpRoutes ?? new List<TravelRouteStep>())
             {
@@ -563,14 +655,134 @@ namespace DriverScanTester.ViewModels
                     PathFile = r.PathFile ?? "",
                     StartDelayMs = r.StartDelayMs,
                     CompletionMode = r.CompletionMode,
-                    ExpectedDestinationMapNumber = r.ExpectedDestinationMapNumber
+                    ExpectedDestinationMapNumber = r.ExpectedDestinationMapNumber,
+                    OperationBefore = r.OperationBefore ?? "",
+                    OperationAfter = r.OperationAfter ?? ""
                 });
             }
             // Loading selects the first Go to EXP path.
             SelectedTravelRoute = TravelToExpRoutes.FirstOrDefault();
 
+            PreExpOperations.Clear();
+            foreach (var op in CurrentProfile.PreExpOperations ?? new List<string>())
+            {
+                if (!string.IsNullOrWhiteSpace(op))
+                    PreExpOperations.Add(op);
+            }
+            SelectedPreExpOperation = PreExpOperations.FirstOrDefault();
+
             ExpLoop.PathFile = CurrentProfile.ExpLoop?.PathFile ?? "";
             ExpLoop.StartDelayMs = CurrentProfile.ExpLoop?.StartDelayMs ?? 0;
+        }
+
+        // ── Stage 1: Repot path management ──
+
+        private void AddRepotPath()
+        {
+            if (CurrentProfile == null)
+            {
+                StatusText = "No profile loaded. Create or load a profile first.";
+                return;
+            }
+
+            var step = new BotRouteStepViewModel();
+
+            // Insert after the currently selected path when possible, otherwise append.
+            if (SelectedRepotPath != null)
+            {
+                int index = CityToRepotPaths.IndexOf(SelectedRepotPath);
+                CityToRepotPaths.Insert(index + 1, step);
+            }
+            else
+            {
+                CityToRepotPaths.Add(step);
+            }
+
+            SelectedRepotPath = step;
+            CommandManager.InvalidateRequerySuggested();
+            StatusText = $"Added repot path {CityToRepotPaths.Count}.";
+        }
+
+        private bool CanRemoveRepotPath =>
+            SelectedRepotPath != null && CityToRepotPaths.Count > 1;
+
+        private void RemoveRepotPath()
+        {
+            if (SelectedRepotPath == null) return;
+            if (CityToRepotPaths.Count <= 1) return; // the profile must always keep at least one repot path
+
+            int index = CityToRepotPaths.IndexOf(SelectedRepotPath);
+            CityToRepotPaths.RemoveAt(index);
+
+            // Select the nearest remaining path.
+            SelectedRepotPath = CityToRepotPaths[Math.Min(index, CityToRepotPaths.Count - 1)];
+            CommandManager.InvalidateRequerySuggested();
+            StatusText = $"Removed repot path {index + 1}.";
+        }
+
+        private bool CanMoveRepotPath(int direction)
+        {
+            if (SelectedRepotPath == null) return false;
+            int index = CityToRepotPaths.IndexOf(SelectedRepotPath);
+            int newIndex = index + direction;
+            return newIndex >= 0 && newIndex < CityToRepotPaths.Count;
+        }
+
+        private void MoveRepotPath(int direction)
+        {
+            if (SelectedRepotPath == null) return;
+
+            int oldIndex = CityToRepotPaths.IndexOf(SelectedRepotPath);
+            int newIndex = oldIndex + direction;
+            if (newIndex < 0 || newIndex >= CityToRepotPaths.Count) return;
+
+            // The item reference is preserved, so the selection stays on the same path.
+            CityToRepotPaths.Move(oldIndex, newIndex);
+            CommandManager.InvalidateRequerySuggested();
+        }
+
+        // ── Custom operations (pre-EXP) management ──
+
+        private void AddPreExpOperation()
+        {
+            if (CurrentProfile == null)
+            {
+                StatusText = "No profile loaded. Create or load a profile first.";
+                return;
+            }
+
+            string op = NewPreExpOperation?.Trim() ?? "";
+            if (string.IsNullOrWhiteSpace(op))
+            {
+                StatusText = "Select an operation name first.";
+                return;
+            }
+
+            if (PreExpOperations.Contains(op))
+            {
+                StatusText = $"Operation '{op}' is already in the list.";
+                return;
+            }
+
+            PreExpOperations.Add(op);
+            SelectedPreExpOperation = op;
+            NewPreExpOperation = "";
+            CommandManager.InvalidateRequerySuggested();
+            StatusText = $"Added pre-EXP operation '{op}'.";
+        }
+
+        private bool CanRemovePreExpOperation => SelectedPreExpOperation != null;
+
+        private void RemovePreExpOperation()
+        {
+            if (SelectedPreExpOperation == null) return;
+
+            string op = SelectedPreExpOperation;
+            PreExpOperations.Remove(op);
+
+            SelectedPreExpOperation = PreExpOperations.FirstOrDefault();
+            CommandManager.InvalidateRequerySuggested();
+            StatusText = $"Removed pre-EXP operation '{op}'.";
         }
 
         // ── Stage 2: Go to EXP path management ──
@@ -710,6 +922,20 @@ namespace DriverScanTester.ViewModels
         {
             get => _expectedDestinationMapNumber;
             set => SetProperty(ref _expectedDestinationMapNumber, value);
+        }
+
+        private string _operationBefore = "";
+        public string OperationBefore
+        {
+            get => _operationBefore;
+            set => SetProperty(ref _operationBefore, value);
+        }
+
+        private string _operationAfter = "";
+        public string OperationAfter
+        {
+            get => _operationAfter;
+            set => SetProperty(ref _operationAfter, value);
         }
     }
 }

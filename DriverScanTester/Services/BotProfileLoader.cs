@@ -72,6 +72,7 @@ namespace DriverScanTester.Services
                 }
 
                 MigrateLegacyHuntSchema(profile, json);
+                MigrateLegacySingleRepotPath(profile, json);
 
                 _log($"[BotProfileLoader] Loaded profile '{profile.Name}'.");
                 return profile;
@@ -176,6 +177,33 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// One-time in-memory migration for profiles saved with the old single
+        /// CityToRepot object schema. The single step becomes the first entry of the
+        /// new CityToRepotPaths list, so the profile can then hold any number of repot
+        /// paths that are cycled through on every repot trip.
+        /// </summary>
+        private void MigrateLegacySingleRepotPath(BotProfile profile, string json)
+        {
+            if (profile.CityToRepotPaths != null && profile.CityToRepotPaths.Count > 0)
+                return;
+
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("CityToRepot", out var element) ||
+                element.ValueKind != JsonValueKind.Object)
+            {
+                return;
+            }
+
+            var step = element.Deserialize<BotRouteStep>();
+            if (step == null || string.IsNullOrWhiteSpace(step.PathFile))
+                return;
+
+            profile.CityToRepotPaths ??= new List<BotRouteStep>();
+            profile.CityToRepotPaths.Add(step);
+            _log($"[BotProfileLoader] Profile '{profile.Name}': migrated the single repot path '{step.PathFile}' into the repot path list.");
+        }
+
+        /// <summary>
         /// Saves a profile to disk. The file name is derived from profile.Name.
         /// Returns true when the profile was written successfully, false otherwise.
         /// Saving always writes the new direct schema.
@@ -230,13 +258,25 @@ namespace DriverScanTester.Services
                 errors.Add("Profile name is empty.");
 
             // --- Stage 1: REPOT ---
-            if (profile.CityToRepot == null)
+            if (profile.CityToRepotPaths == null || profile.CityToRepotPaths.Count == 0)
             {
-                errors.Add("Stage 1 — Repot: path is missing. Configure the path to the repot location.");
+                errors.Add("Stage 1 — Repot: no paths configured. Add at least one path to the repot location.");
             }
             else
             {
-                ValidatePathStep(errors, profile.CityToRepot, "Stage 1 — Repot");
+                for (int r = 0; r < profile.CityToRepotPaths.Count; r++)
+                {
+                    var repotStep = profile.CityToRepotPaths[r];
+                    string repotLabel = $"Repot path {r + 1}";
+
+                    if (repotStep == null)
+                    {
+                        errors.Add($"{repotLabel}: path is missing.");
+                        continue;
+                    }
+
+                    ValidatePathStep(errors, repotStep, repotLabel);
+                }
             }
 
             // --- Stage 2: GO TO EXP ---
@@ -272,6 +312,12 @@ namespace DriverScanTester.Services
 
                     if (route.StartDelayMs < 0)
                         errors.Add($"{routeLabel}: wait time cannot be negative.");
+
+                    if (!string.IsNullOrWhiteSpace(route.OperationBefore) && !BotOperations.IsKnown(route.OperationBefore))
+                        errors.Add($"{routeLabel}: operation before '{route.OperationBefore}' is not a known operation.");
+
+                    if (!string.IsNullOrWhiteSpace(route.OperationAfter) && !BotOperations.IsKnown(route.OperationAfter))
+                        errors.Add($"{routeLabel}: operation after '{route.OperationAfter}' is not a known operation.");
 
                     if (!Enum.IsDefined(typeof(TravelRouteCompletionMode), route.CompletionMode))
                         errors.Add($"{routeLabel}: completion mode '{route.CompletionMode}' is not a defined value.");
@@ -318,6 +364,18 @@ namespace DriverScanTester.Services
                             break;
                         }
                     }
+                }
+            }
+
+            // --- Custom operations ---
+            if (profile.PreExpOperations != null)
+            {
+                for (int i = 0; i < profile.PreExpOperations.Count; i++)
+                {
+                    string op = profile.PreExpOperations[i];
+                    if (string.IsNullOrWhiteSpace(op)) continue;
+                    if (!BotOperations.IsKnown(op))
+                        errors.Add($"Pre-EXP operation {i + 1}: '{op}' is not a known operation.");
                 }
             }
 

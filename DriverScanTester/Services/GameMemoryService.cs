@@ -505,7 +505,7 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Checks whether the mouse is currently pointing at an NPC/mob (highlighted).
-        /// Pointer: [Ares.exe + 0x471C84] + 0x7C
+        /// Pointer: [Ares.exe + 0x486BC4] + 0x7C
         /// Returns 1 if pointed, 0 if not.
         /// </summary>
         public bool IsNpcMousePointed()
@@ -517,7 +517,7 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Reads the seller mouseover int (clong / 32-bit) from <c>[Ares.exe + 0x4704A8] + 0xC</c>.
+        /// Reads the seller mouseover int (clong / 32-bit) from <c>[Ares.exe + 0x4853E8] + 0xC</c>.
         /// Returns 0 when the pointer chain fails (treat 0 as "not pointed").
         /// The expected value while the mouse is pointing at the seller/NPC is 138599240
         /// (0x0842DB48) — stable across sessions (Sesja 2-4, see MouseOverValues_Log.txt),
@@ -533,7 +533,7 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Checks whether a loot item is currently under the mouse cursor by reading
-        /// L_LootSelectedItem1 at <c>[Ares.exe + 0x4704A8] + 0xC</c> (same pointer as
+        /// L_LootSelectedItem1 at <c>[Ares.exe + 0x4853E8] + 0xC</c> (same pointer as
         /// seller mouseover but interpreted as a 32-bit clong value).
         ///
         /// VALUE-BASED check against <see cref="BotConstants.GameMagicValues.LootMouseOverValue"/>:
@@ -545,7 +545,7 @@ namespace DriverScanTester.Services
         /// A MOB or NPC under the cursor produces a DIFFERENT cl value, so exact matching
         /// cleanly separates ground items from mobs/NPCs. The previous STRUCTURAL check
         /// (value != 0 && !IsNpcMousePointed()) mistook mobs for items, because mobs do
-        /// not set the NPC-highlight flag ([Ares.exe + 0x471C84] + 0x7C).
+        /// not set the NPC-highlight flag ([Ares.exe + 0x486BC4] + 0x7C).
         /// </summary>
         public bool IsLootMouseOver()
         {
@@ -574,8 +574,8 @@ namespace DriverScanTester.Services
         private static bool _warnedNoLootCalibration = false;
 
         /// <summary>
-        /// Captures the FULL mouseover value dump at <c>[Ares.exe + 0x4704A8] + 0xA..+0xF</c>
-        /// (bytes, shorts, ints) plus the NPC-highlight flag (<c>[Ares.exe + 0x471C84] + 0x7C</c>).
+        /// Captures the FULL mouseover value dump at <c>[Ares.exe + 0x4853E8] + 0xA..+0xF</c>
+        /// (bytes, shorts, ints) plus the NPC-highlight flag (<c>[Ares.exe + 0x486BC4] + 0x7C</c>).
         ///
         /// The cl int at +0xC is the hovered object's heap address/ID (48-bit pointer in
         /// bytes +0xA..+0xF) — it changes every game launch and per object, so it cannot be
@@ -785,7 +785,7 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Gets the base address for inventory sell slots.
-        /// Slot 0 item type is at [Ares.exe + 0x471C88] + 0xF1A (playerBase + 0xF1A).
+        /// Slot 0 item type is at [Ares.exe + 0x486BC8] + 0xF1A (playerBase + 0xF1A).
         /// Each slot is 0x20 bytes. Slot 1 item type is at playerBase + 0x10BA.
         /// </summary>
         private ulong TryGetInventorySlotBase()
@@ -798,8 +798,8 @@ namespace DriverScanTester.Services
         /// <summary>
         /// Reads inventory slot item type (2 bytes, short).
         /// Item type is at offset 0 of each 0x20-byte slot.
-        /// Slot 0: [Ares.exe + 0x471C88] + 0xF1A
-        /// Slot 1: [Ares.exe + 0x471C88] + 0x10BA
+        /// Slot 0: [Ares.exe + 0x486BC8] + 0xF1A
+        /// Slot 1: [Ares.exe + 0x486BC8] + 0x10BA
         /// </summary>
         public int TryGetSellSlotItemType(int slotIndex)
         {
@@ -811,7 +811,7 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Reads inventory slot item count.
-        /// Verified: [Ares.exe + 0x471C88] + 0x10A0 → slot offset +6.
+        /// Verified: [Ares.exe + 0x486BC8] + 0x10A0 → slot offset +6.
         /// </summary>
         public int TryGetSellSlotItemCount(int slotIndex)
         {
@@ -850,7 +850,7 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Reads inventory slot item stat1 (Baruch).
-        /// Verified offset: Baruch = [Ares.exe + 0x471C88] + 0x109C → slot offset +2.
+        /// Verified offset: Baruch = [Ares.exe + 0x486BC8] + 0x109C → slot offset +2.
         /// </summary>
         public int TryGetSellSlotItemStat1(int slotIndex)
         {
@@ -862,7 +862,7 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Reads inventory slot item stat2 (Keluchi).
-        /// Verified: [Ares.exe + 0x471C88] + 0x109E → slot offset +4.
+        /// Verified: [Ares.exe + 0x486BC8] + 0x109E → slot offset +4.
         /// </summary>
         public int TryGetSellSlotItemStat2(int slotIndex)
         {
@@ -971,7 +971,7 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Checks whether the SELL CONFIRMATION dialog is open (popup after right-clicking an item).
-        /// Pointer: [Ares.exe + 0x471C98] + 0xE8
+        /// Pointer: [Ares.exe + 0x486BD8] + 0xE8
         /// </summary>
         public bool IsSellConfirmWindowOpen()
         {
@@ -1077,18 +1077,18 @@ namespace DriverScanTester.Services
     }
 
     /// <summary>
-    /// Full mouseover value dump captured at <c>[Ares.exe + 0x4704A8] + 0xA..+0xF</c>
-    /// plus the NPC-highlight flag (<c>[Ares.exe + 0x471C84] + 0x7C</c>).
+    /// Full mouseover value dump captured at <c>[Ares.exe + 0x4853E8] + 0xA..+0xF</c>
+    /// plus the NPC-highlight flag (<c>[Ares.exe + 0x486BC4] + 0x7C</c>).
     /// Read via <see cref="GameMemoryService.ReadMouseOverDump"/>. Used to compare
     /// NPC vs item hovers across sessions (see MouseOverValues_Log.txt) so detection
     /// can be automated structurally.
     /// </summary>
     public sealed class MouseOverDumpData
     {
-        /// <summary>False when the pointer chain [Ares.exe + 0x4704A8] failed (no buffer).</summary>
+        /// <summary>False when the pointer chain [Ares.exe + 0x4853E8] failed (no buffer).</summary>
         public bool Success;
 
-        /// <summary>Address of the buffer ([Ares.exe + 0x4704A8] value).</summary>
+        /// <summary>Address of the buffer ([Ares.exe + 0x4853E8] value).</summary>
         public ulong BufferAddress;
 
         /// <summary>Byte at +0xA.</summary>
@@ -1133,7 +1133,7 @@ namespace DriverScanTester.Services
         /// <summary>Int at +0xD (dl).</summary>
         public int Dl;
 
-        /// <summary>NPC-highlight flag ([Ares.exe + 0x471C84] + 0x7C == 1).</summary>
+        /// <summary>NPC-highlight flag ([Ares.exe + 0x486BC4] + 0x7C == 1).</summary>
         public bool NpcFlag;
 
         /// <summary>
@@ -1150,18 +1150,18 @@ namespace DriverScanTester.Services
         {
             var sb = new StringBuilder();
             sb.AppendLine($"--- Mouseover dump ({hoverType}) ---");
-            sb.AppendLine($"  buffer  [Ares.exe + 0x4704A8] = 0x{BufferAddress:X8}    IsNpcMousePointed = {NpcFlag}");
-            sb.AppendLine($"  cb      [Ares.exe + 0x4704A8] + 0xC  0x{BufferAddress + 0xC:X8}  {C} (0x{C:X2})");
-            sb.AppendLine($"  db      [Ares.exe + 0x4704A8] + 0xD  0x{BufferAddress + 0xD:X8}  {D} (0x{D:X2})");
-            sb.AppendLine($"  eb      [Ares.exe + 0x4704A8] + 0xE  0x{BufferAddress + 0xE:X8}  {E} (0x{E:X2})");
-            sb.AppendLine($"  fb      [Ares.exe + 0x4704A8] + 0xF  0x{BufferAddress + 0xF:X8}  {F} (0x{F:X2})");
-            sb.AppendLine($"  bs      [Ares.exe + 0x4704A8] + 0xB  0x{BufferAddress + 0xB:X8}  {Bs} (0x{(ushort)Bs:X4})");
-            sb.AppendLine($"  cs      [Ares.exe + 0x4704A8] + 0xC  0x{BufferAddress + 0xC:X8}  {Cs} (0x{(ushort)Cs:X4})");
-            sb.AppendLine($"  ds      [Ares.exe + 0x4704A8] + 0xD  0x{BufferAddress + 0xD:X8}  {Ds} (0x{(ushort)Ds:X4})");
-            sb.AppendLine($"  al      [Ares.exe + 0x4704A8] + 0xA  0x{BufferAddress + 0xA:X8}  {Al} (0x{(uint)Al:X8})");
-            sb.AppendLine($"  bl      [Ares.exe + 0x4704A8] + 0xB  0x{BufferAddress + 0xB:X8}  {Bl} (0x{(uint)Bl:X8})");
-            sb.AppendLine($"  cl      [Ares.exe + 0x4704A8] + 0xC  0x{BufferAddress + 0xC:X8}  {Cl} (0x{(uint)Cl:X8})");
-            sb.AppendLine($"  dl      [Ares.exe + 0x4704A8] + 0xD  0x{BufferAddress + 0xD:X8}  {Dl} (0x{(uint)Dl:X8})");
+            sb.AppendLine($"  buffer  [Ares.exe + 0x4853E8] = 0x{BufferAddress:X8}    IsNpcMousePointed = {NpcFlag}");
+            sb.AppendLine($"  cb      [Ares.exe + 0x4853E8] + 0xC  0x{BufferAddress + 0xC:X8}  {C} (0x{C:X2})");
+            sb.AppendLine($"  db      [Ares.exe + 0x4853E8] + 0xD  0x{BufferAddress + 0xD:X8}  {D} (0x{D:X2})");
+            sb.AppendLine($"  eb      [Ares.exe + 0x4853E8] + 0xE  0x{BufferAddress + 0xE:X8}  {E} (0x{E:X2})");
+            sb.AppendLine($"  fb      [Ares.exe + 0x4853E8] + 0xF  0x{BufferAddress + 0xF:X8}  {F} (0x{F:X2})");
+            sb.AppendLine($"  bs      [Ares.exe + 0x4853E8] + 0xB  0x{BufferAddress + 0xB:X8}  {Bs} (0x{(ushort)Bs:X4})");
+            sb.AppendLine($"  cs      [Ares.exe + 0x4853E8] + 0xC  0x{BufferAddress + 0xC:X8}  {Cs} (0x{(ushort)Cs:X4})");
+            sb.AppendLine($"  ds      [Ares.exe + 0x4853E8] + 0xD  0x{BufferAddress + 0xD:X8}  {Ds} (0x{(ushort)Ds:X4})");
+            sb.AppendLine($"  al      [Ares.exe + 0x4853E8] + 0xA  0x{BufferAddress + 0xA:X8}  {Al} (0x{(uint)Al:X8})");
+            sb.AppendLine($"  bl      [Ares.exe + 0x4853E8] + 0xB  0x{BufferAddress + 0xB:X8}  {Bl} (0x{(uint)Bl:X8})");
+            sb.AppendLine($"  cl      [Ares.exe + 0x4853E8] + 0xC  0x{BufferAddress + 0xC:X8}  {Cl} (0x{(uint)Cl:X8})");
+            sb.AppendLine($"  dl      [Ares.exe + 0x4853E8] + 0xD  0x{BufferAddress + 0xD:X8}  {Dl} (0x{(uint)Dl:X8})");
             sb.AppendLine($"  ptr48   bytes +0xA..+0xF = 0x{Pointer48:X12} (hovered object address/ID)");
             return sb.ToString();
         }

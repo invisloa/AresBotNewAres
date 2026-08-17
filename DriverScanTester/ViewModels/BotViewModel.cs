@@ -335,7 +335,21 @@ namespace DriverScanTester.ViewModels
             _main.StartWorkflow(profile);
 
             _appendLog($"Workflow started with profile '{profile.Name}'.");
-            _appendLog($"  Stage 1 — Repot: '{profile.CityToRepot.PathFile}' (wait {profile.CityToRepot.StartDelayMs} ms)");
+
+            var repotPaths = profile.CityToRepotPaths ?? new List<BotRouteStep>();
+            if (repotPaths.Count == 0)
+            {
+                _appendLog("  Stage 1 — Repot: no repot paths configured.");
+            }
+            else
+            {
+                for (int i = 0; i < repotPaths.Count; i++)
+                {
+                    var repotStep = repotPaths[i];
+                    if (repotStep == null) continue;
+                    _appendLog($"  Stage 1 — Repot path {i + 1}/{repotPaths.Count}: '{repotStep.PathFile}' (wait {repotStep.StartDelayMs} ms)");
+                }
+            }
 
             var travelRoutes = profile.TravelToExpRoutes ?? new List<TravelRouteStep>();
             for (int i = 0; i < travelRoutes.Count; i++)
@@ -345,10 +359,18 @@ namespace DriverScanTester.ViewModels
                 string completionInfo = route.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached
                     ? $"finish when destination map loaded → map {route.ExpectedDestinationMapNumber}"
                     : "finish when last waypoint reached";
-                _appendLog($"  Stage 2 — Go to EXP path {i + 1}/{travelRoutes.Count}: '{route.PathFile}' (wait {route.StartDelayMs} ms, {completionInfo})");
+                string opInfo = "";
+                if (!string.IsNullOrWhiteSpace(route.OperationBefore)) opInfo += $", op before '{route.OperationBefore}'";
+                if (!string.IsNullOrWhiteSpace(route.OperationAfter)) opInfo += $", op after '{route.OperationAfter}'";
+                _appendLog($"  Stage 2 — Go to EXP path {i + 1}/{travelRoutes.Count}: '{route.PathFile}' (wait {route.StartDelayMs} ms, {completionInfo}{opInfo})");
             }
 
             _appendLog($"  Stage 3 — EXP Path: '{profile.ExpLoop.PathFile}' (wait {profile.ExpLoop.StartDelayMs} ms)");
+
+            var preExpOps = profile.PreExpOperations ?? new List<string>();
+            var configuredOps = preExpOps.Where(op => !string.IsNullOrWhiteSpace(op)).ToList();
+            if (configuredOps.Count > 0)
+                _appendLog($"  Pre-EXP operations: {string.Join(", ", configuredOps)}");
         }
 
         public void SyncBotStates()

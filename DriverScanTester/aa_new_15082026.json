@@ -1,0 +1,18 @@
+[
+  {
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0x47A",
+    "NameText": "0x1146F70A",
+    "ValueText": "",
+    "ValueType": 0,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0x47e",
+    "NameText": "0x1146F70E",
+    "ValueText": "",
+    "ValueType": 0,
+    "Priority": 2,
+    "LockGroup": 0
+  }
+]
