@@ -3,48 +3,27 @@ using System.Collections.Generic;
 namespace DriverScanTester.Models
 {
     /// <summary>
-    /// A bot profile describes one complete EXP destination as a three-stage workflow:
-    ///   1. City → Repot (a list of paths — each repot trip uses the next path in the list),
-    ///   2. Go to EXP (an ordered chain of one or more paths, each finishing at its
-    ///      last waypoint or when the expected destination map is reached),
-    ///   3. EXP Path (one looping path used while hunting).
-    /// It does NOT contain waypoint data — only references to SavedPaths/*.json files.
-    /// One profile represents exactly one EXP destination; a new EXP location means a new profile.
+    /// A bot profile is a linear FLOW of mixed steps that the bot cycles through:
+    /// Repot steps, Path steps (walk a saved segment), Operation steps (run a named
+    /// custom operation such as talking to an NPC), and an ExpLoop step (the looping
+    /// hunting path that runs until the repot conditions are met).
+    ///
+    /// Steps are executed top to bottom and wrap around at the end, so the flow cycles
+    /// indefinitely. Any step type can be placed anywhere, so a flow can look like:
+    ///   Repot → Operation (talk to NPC) → Path (go to exp) → Operation → ExpLoop
+    ///
+    /// The profile itself does NOT contain waypoint data — only references to
+    /// SavedPaths/*.json files and named operations.
     /// </summary>
     public class BotProfile
     {
         /// <summary>Display name for this profile.</summary>
         public string Name { get; set; } = "NewProfile";
 
-        // --- Stage 1: REPOT ---
         /// <summary>
-        /// Ordered list of paths from the city/player starting position to the repot
-        /// location. The bot cycles through this list: every repot trip walks to the
-        /// repot using the next path in the list, wrapping back to the first one after
-        /// the last, so the repot route is rotated across repots.
+        /// The ordered flow of steps executed by the workflow. Empty flows are invalid.
         /// </summary>
-        public List<BotRouteStep> CityToRepotPaths { get; set; } = new();
-
-        // --- Stage 2: GO TO EXP ---
-        /// <summary>
-        /// Ordered list of travel paths from the repot location to the EXP position.
-        /// Each path completes independently by its final waypoint (FinalWaypoint) or
-        /// when the expected destination map is reached (ExpectedMapReached).
-        /// </summary>
-        public List<TravelRouteStep> TravelToExpRoutes { get; set; } = new();
-
-        // --- Stage 3: EXP PATH ---
-        /// <summary>The single looping hunting path; stops when the repot conditions are met.</summary>
-        public BotRouteStep ExpLoop { get; set; } = new();
-
-        // --- Custom operations ---
-        /// <summary>
-        /// Ordered list of built-in custom operation names (see BotOperations) to run
-        /// once the player has arrived at the EXP map, before the EXP loop starts.
-        /// E.g. talking to an NPC that grants access to the hunting area.
-        /// Empty entries are ignored; unknown names fail the workflow, never silently skip.
-        /// </summary>
-        public List<string> PreExpOperations { get; set; } = new();
+        public List<BotFlowStep> FlowSteps { get; set; } = new();
 
         // --- Repot thresholds (override RepotDetectorService defaults) ---
         /// <summary>Minimum HP potions before repot is needed.</summary>
@@ -76,11 +55,7 @@ namespace DriverScanTester.Models
 
         // --- Loot priority mode ---
         /// <summary>
-        /// When true, this profile is a loot-priority profile: looting outranks combat
-        /// and waypoint movement. The bot scans for ground loot even while a mob is
-        /// selected / being attacked; as soon as a loot item is found the bot goes to
-        /// loot it, and while the bot walks to loot it performs NO attack actions and
-        /// NO movement toward the next waypoint. Looting all items is the top priority.
+        /// When true, looting outranks combat and waypoint movement during the ExpLoop step.
         /// </summary>
         public bool LootPriority { get; set; } = false;
 

@@ -25,5 +25,8 @@ namespace DriverScanTester.ViewModels
 
         public static System.Array TravelRouteCompletionModes { get; } =
             System.Enum.GetValues(typeof(TravelRouteCompletionMode));
+
+        public static System.Array BotFlowStepTypes { get; } =
+            System.Enum.GetValues(typeof(BotFlowStepType));
     }
 }

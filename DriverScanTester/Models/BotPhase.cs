@@ -8,23 +8,19 @@ namespace DriverScanTester.Models
         /// <summary>Bot is stopped or not initialized.</summary>
         Idle,
 
-        /// <summary>Bot is detecting current position and city, preparing to move to repot.</summary>
+        /// <summary>Bot is detecting current position and city, preparing to start the flow.</summary>
         DetectCityStart,
 
-        /// <summary>Bot is moving from city to the repot NPC.</summary>
-        MoveToRepot,
+        /// <summary>Bot is walking a Path flow step (a saved segment, once).</summary>
+        PathStep,
 
-        /// <summary>Bot is performing repot actions (sell items, buy potions).</summary>
+        /// <summary>Bot is performing the repot flow step (teleport, walk to repot, sell, buy).</summary>
         Repot,
 
-        /// <summary>
-        /// Bot is executing the complete ordered travel-route chain from the repot location
-        /// to the EXP area (each leg completes by final waypoint or by reaching its expected
-        /// destination map).
-        /// </summary>
-        MoveToExp,
+        /// <summary>Bot is running a custom operation flow step (named BotOperations method).</summary>
+        OperationStep,
 
-        /// <summary>Bot is in the exp hunting loop (move, attack, loot).</summary>
+        /// <summary>Bot is in the exp hunting loop flow step (move, attack, loot).</summary>
         ExpLoop,
 
         /// <summary>Bot detected that repot is needed; will teleport to city.</summary>

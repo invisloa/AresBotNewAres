@@ -2635,19 +2635,25 @@ namespace DriverScanTester.ViewModels
             get
             {
                 var phase = _workflowCoordinator?.CurrentPhase ?? BotPhase.Idle;
-                return phase switch
+                string baseText = phase switch
                 {
                     BotPhase.Idle => "Idle",
                     BotPhase.DetectCityStart => "Checking city position",
-                    BotPhase.MoveToRepot => "Moving to repot",
+                    BotPhase.PathStep => "Following path",
                     BotPhase.Repot => "Repotting",
-                    BotPhase.MoveToExp => "Going to EXP",
+                    BotPhase.OperationStep => "Running custom operation",
                     BotPhase.ExpLoop => "EXP hunting",
                     BotPhase.NeedRepot => "Returning to city",
                     BotPhase.Stopping => "Stopping",
                     BotPhase.Failed => "Failed",
                     _ => phase.ToString()
                 };
+
+                var stepText = _workflowCoordinator?.CurrentStepText;
+                if (!string.IsNullOrEmpty(stepText))
+                    baseText += $" — {stepText}";
+
+                return baseText;
             }
         }
 
@@ -2707,6 +2713,13 @@ namespace DriverScanTester.ViewModels
                 System.Windows.Application.Current?.Dispatcher?.Invoke(() =>
                 {
                     OnPropertyChanged(nameof(IsWorkflowRunning));
+                    OnPropertyChanged(nameof(WorkflowPhaseText));
+                });
+            };
+            _workflowCoordinator.OnCurrentStepChanged = stepText =>
+            {
+                System.Windows.Application.Current?.Dispatcher?.Invoke(() =>
+                {
                     OnPropertyChanged(nameof(WorkflowPhaseText));
                 });
             };

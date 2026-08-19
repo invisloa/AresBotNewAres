@@ -336,41 +336,45 @@ namespace DriverScanTester.ViewModels
 
             _appendLog($"Workflow started with profile '{profile.Name}'.");
 
-            var repotPaths = profile.CityToRepotPaths ?? new List<BotRouteStep>();
-            if (repotPaths.Count == 0)
+            var flowSteps = profile.FlowSteps ?? new List<BotFlowStep>();
+            if (flowSteps.Count == 0)
             {
-                _appendLog("  Stage 1 — Repot: no repot paths configured.");
+                _appendLog("  Flow: no steps configured.");
             }
             else
             {
-                for (int i = 0; i < repotPaths.Count; i++)
+                _appendLog($"  Flow ({flowSteps.Count} steps):");
+                for (int i = 0; i < flowSteps.Count; i++)
                 {
-                    var repotStep = repotPaths[i];
-                    if (repotStep == null) continue;
-                    _appendLog($"  Stage 1 — Repot path {i + 1}/{repotPaths.Count}: '{repotStep.PathFile}' (wait {repotStep.StartDelayMs} ms)");
+                    var step = flowSteps[i];
+                    if (step == null) continue;
+                    _appendLog($"    {i + 1}. {DescribeFlowStepForLog(step)}");
                 }
             }
+        }
 
-            var travelRoutes = profile.TravelToExpRoutes ?? new List<TravelRouteStep>();
-            for (int i = 0; i < travelRoutes.Count; i++)
+        private static string DescribeFlowStepForLog(BotFlowStep step)
+        {
+            switch (step.Type)
             {
-                var route = travelRoutes[i];
-                if (route == null) continue;
-                string completionInfo = route.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached
-                    ? $"finish when destination map loaded → map {route.ExpectedDestinationMapNumber}"
-                    : "finish when last waypoint reached";
-                string opInfo = "";
-                if (!string.IsNullOrWhiteSpace(route.OperationBefore)) opInfo += $", op before '{route.OperationBefore}'";
-                if (!string.IsNullOrWhiteSpace(route.OperationAfter)) opInfo += $", op after '{route.OperationAfter}'";
-                _appendLog($"  Stage 2 — Go to EXP path {i + 1}/{travelRoutes.Count}: '{route.PathFile}' (wait {route.StartDelayMs} ms, {completionInfo}{opInfo})");
+                case BotFlowStepType.Path:
+                    string mode = step.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached
+                        ? $"finish when destination map loaded → map {step.ExpectedDestinationMapNumber}"
+                        : "finish when last waypoint reached";
+                    return $"Path '{step.PathFile}' (wait {step.StartDelayMs} ms, {mode})";
+                case BotFlowStepType.Repot:
+                    int count = step.RepotPaths?.Count ?? 0;
+                    var names = (step.RepotPaths ?? new List<BotRouteStep>())
+                        .Where(p => p != null && !string.IsNullOrWhiteSpace(p.PathFile))
+                        .Select(p => p.PathFile);
+                    return $"Repot (paths: {string.Join(", ", names)})";
+                case BotFlowStepType.Operation:
+                    return $"Operation '{step.OperationName}'";
+                case BotFlowStepType.ExpLoop:
+                    return $"ExpLoop '{step.PathFile}' (wait {step.StartDelayMs} ms)";
+                default:
+                    return step.Type.ToString();
             }
-
-            _appendLog($"  Stage 3 — EXP Path: '{profile.ExpLoop.PathFile}' (wait {profile.ExpLoop.StartDelayMs} ms)");
-
-            var preExpOps = profile.PreExpOperations ?? new List<string>();
-            var configuredOps = preExpOps.Where(op => !string.IsNullOrWhiteSpace(op)).ToList();
-            if (configuredOps.Count > 0)
-                _appendLog($"  Pre-EXP operations: {string.Join(", ", configuredOps)}");
         }
 
         public void SyncBotStates()

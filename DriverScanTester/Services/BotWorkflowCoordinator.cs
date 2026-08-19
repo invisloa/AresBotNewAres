@@ -9,15 +9,22 @@ using DriverScanTester.Models;
 namespace DriverScanTester.Services
 {
     /// <summary>
-    /// Central coordinator of the bot route workflow:
-    ///   1. Stage 1 — Repot (path to the repot location)
-    ///      [repot operation: sell items, buy potions]
-    ///   2. Stage 2 — Go to EXP (ordered chain of paths; each leg completes by final
-    ///      waypoint or by reaching its expected destination map, e.g. through portals)
-    ///   3. Stage 3 — EXP Path (loops until repot is needed)
+    /// Central coordinator of the bot workflow. The workflow is a linear FLOW of mixed
+    /// steps defined by the profile (BotProfile.FlowSteps):
+    ///   • Path      — walk a saved segment once (final waypoint or expected map)
+    ///   • Repot     — teleport to city if needed, walk to the repot point (cycling the
+    ///                 step's repot path pool), then sell items and buy potions
+    ///   • Operation — run a named custom operation (see BotOperations)
+    ///   • ExpLoop   — loop the hunting path until the repot conditions are met
     ///
-    /// MovementSystem is used ONLY for movement. All phase decisions are made here.
-    /// A workflow requires a non-null valid BotProfile; there are no hardcoded fallback paths.
+    /// Steps are executed top to bottom and wrap around at the end, so the flow cycles
+    /// indefinitely. When the ExpLoop step ends (repot conditions met or the player is in
+    /// the city) the flow simply continues to the next step; the Repot step is what
+    /// returns the bot to the city and refills. Any mix of steps can be arranged freely,
+    /// e.g.:
+    ///   Repot → Operation (talk to NPC) → Path (go to exp) → Operation → ExpLoop
+    ///
+    /// MovementSystem is used ONLY for movement. All flow decisions are made here.
     /// </summary>
     public class BotWorkflowCoordinator
     {
@@ -45,18 +52,24 @@ namespace DriverScanTester.Services
         private bool _isRunning;
         private BotPhase _currentPhase = BotPhase.Idle;
 
-        private int _teleportRetryCount;
-
-        /// <summary>Consecutive MoveToRepot route failures. After 3 the workflow fails
-        /// visibly instead of retrying forever (e.g. the player cannot move in the city).</summary>
-        private int _moveToRepotRetryCount;
+        /// <summary>Index of the flow step currently being executed.</summary>
+        private int _flowIndex;
 
         /// <summary>
-        /// Index of the next repot path in <see cref="BotProfile.CityToRepotPaths"/>.
+        /// Index of the next repot path in the Repot step's RepotPaths pool.
         /// Each repot trip walks to the repot using the next path in the list and then
         /// advances (wrapping around), so different repot routes are used over time.
         /// </summary>
         private int _repotPathIndex;
+
+        /// <summary>Consecutive repot-path failures. After 3 the workflow fails
+        /// visibly instead of retrying forever (e.g. the player cannot move in the city).</summary>
+        private int _moveToRepotRetryCount;
+
+        /// <summary>Consecutive Path-step failures. After 3 the workflow fails visibly.</summary>
+        private int _pathStepRetryCount;
+
+        private int _teleportRetryCount;
 
         /// <summary>Current phase of the bot workflow.</summary>
         public BotPhase CurrentPhase
@@ -71,8 +84,24 @@ namespace DriverScanTester.Services
             }
         }
 
+        private string _currentStepText = "";
+        /// <summary>Human-readable description of the flow step currently being executed.</summary>
+        public string CurrentStepText
+        {
+            get => _currentStepText;
+            private set
+            {
+                if (_currentStepText == value) return;
+                _currentStepText = value;
+                OnCurrentStepChanged?.Invoke(value);
+            }
+        }
+
         /// <summary>Fires whenever CurrentPhase changes.</summary>
         public Action<string>? OnPhaseChanged { get; set; }
+
+        /// <summary>Fires whenever the current flow step description changes.</summary>
+        public Action<string>? OnCurrentStepChanged { get; set; }
 
         /// <summary>Fires when the workflow stops.</summary>
         public Action? OnStopped { get; set; }
@@ -86,8 +115,8 @@ namespace DriverScanTester.Services
         // ======================== Constructor ========================
 
         /// <summary>
-        /// Profile-based constructor. The profile carries all three workflow stages
-        /// directly: CityToRepotPaths (stage 1), TravelToExpRoutes (stage 2) and ExpLoop (stage 3).
+        /// Profile-based constructor. The profile carries the whole flow (FlowSteps)
+        /// plus the repot thresholds and potion buy targets.
         /// </summary>
         public BotWorkflowCoordinator(
             GameMemoryService memoryService,
@@ -140,45 +169,18 @@ namespace DriverScanTester.Services
             _isRunning = true;
             _cts = new CancellationTokenSource();
             var token = _cts.Token;
-            _teleportRetryCount = 0;
-            _moveToRepotRetryCount = 0;
+            _flowIndex = 0;
             _repotPathIndex = 0;
+            _moveToRepotRetryCount = 0;
+            _pathStepRetryCount = 0;
+            _teleportRetryCount = 0;
 
             _focusGameWindow();
             _log("[Coordinator] Workflow started.");
             _log($"[Coordinator] Profile: {_profile.Name}");
-            var repotPaths = _profile.CityToRepotPaths ?? new List<BotRouteStep>();
-            if (repotPaths.Count == 0)
-            {
-                _log("[Coordinator]   Stage 1 — Repot: no repot paths configured.");
-            }
-            else
-            {
-                for (int i = 0; i < repotPaths.Count; i++)
-                {
-                    _log($"[Coordinator]   Stage 1 — Repot path {i + 1}/{repotPaths.Count}: '{repotPaths[i].PathFile}' (wait {repotPaths[i].StartDelayMs} ms)");
-                }
-            }
-
-            int routeCount = _profile.TravelToExpRoutes?.Count ?? 0;
-            for (int i = 0; i < routeCount; i++)
-            {
-                var route = _profile.TravelToExpRoutes[i];
-                if (route == null) continue;
-                string completionInfo = route.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached
-                    ? $"finish when destination map loaded → map {route.ExpectedDestinationMapNumber}"
-                    : "finish when last waypoint reached";
-                _log($"[Coordinator]   Stage 2 — Go to EXP path {i + 1}/{routeCount}: '{route.PathFile}' (wait {route.StartDelayMs} ms, {completionInfo})");
-            }
-
-            _log($"[Coordinator]   Stage 3 — EXP Path: '{_profile.ExpLoop.PathFile}' (wait {_profile.ExpLoop.StartDelayMs} ms)");
+            LogFlowPlan();
 
             // ── Auto potion drinking ──
-            // The workflow previously never drank HP/mana potions (HealManaSystem only
-            // ran in the UI flow). Without it the player's mana drains during hunting
-            // and the repot detector teleports to the city on a low-mana sample even
-            // with a full potion stock. Drink automatically for the whole workflow,
-            // using the profile's MinHp/MinMana as the drink thresholds.
             var healSystem = new HealManaSystem(_memoryService, _log);
             HealManaSystem.Threshold1 = (short)Math.Clamp(_profile.MinHp, 0, short.MaxValue);
             HealManaSystem.Threshold2 = (short)Math.Clamp(_profile.MinMana, 0, short.MaxValue);
@@ -245,8 +247,28 @@ namespace DriverScanTester.Services
             _pathRunner.Stop();
         }
 
+        private void LogFlowPlan()
+        {
+            var steps = _profile.FlowSteps;
+            if (steps == null || steps.Count == 0)
+            {
+                _log("[Coordinator]   Flow: no steps configured!");
+                return;
+            }
+            _log($"[Coordinator]   Flow ({steps.Count} steps):");
+            for (int i = 0; i < steps.Count; i++)
+            {
+                _log($"[Coordinator]     {i + 1}. {DescribeStep(steps[i])}");
+            }
+        }
+
         // ======================== Main Loop ========================
 
+        /// <summary>
+        /// Drives the linear flow: executes the current step; on success advances to the
+        /// next step (wrapping around at the end). Steps that return false handled the
+        /// flow position themselves (e.g. a failed Path step restarted the flow).
+        /// </summary>
         private async Task RunWorkflowLoop(CancellationToken token)
         {
             while (!token.IsCancellationRequested)
@@ -254,268 +276,256 @@ namespace DriverScanTester.Services
                 if (CurrentPhase == BotPhase.Stopping)
                     break;
 
-                switch (CurrentPhase)
+                if (CurrentPhase == BotPhase.Failed)
                 {
-                    case BotPhase.Idle:
-                        CurrentPhase = BotPhase.DetectCityStart;
-                        break;
-                    case BotPhase.DetectCityStart:
-                        await PhaseDetectCityStart(token);
-                        break;
-                    case BotPhase.MoveToRepot:
-                        await PhaseMoveToRepot(token);
-                        break;
-                    case BotPhase.Repot:
-                        await PhaseRepot(token);
-                        break;
-                    case BotPhase.MoveToExp:
-                        await PhaseMoveToExp(token);
-                        break;
-                    case BotPhase.ExpLoop:
-                        await PhaseExpLoop(token);
-                        break;
-                    case BotPhase.NeedRepot:
-                        await PhaseNeedRepot(token);
-                        break;
-                    case BotPhase.Stopping:
-                        break;
-                    case BotPhase.Failed:
-                        _log("[Coordinator] Bot in Failed state. Manual restart required.");
-                        await Task.Delay(BotConstants.Delays.FailedStateMs, token);
-                        break;
-                    default:
-                        await Task.Delay(BotConstants.Delays.DefaultPhaseMs, token);
-                        break;
+                    _log("[Coordinator] Bot in Failed state. Manual restart required.");
+                    await Task.Delay(BotConstants.Delays.FailedStateMs, token);
+                    continue;
                 }
+
+                var steps = _profile.FlowSteps;
+                if (steps == null || steps.Count == 0)
+                {
+                    _log("[Coordinator] No flow steps configured. Failing.");
+                    CurrentPhase = BotPhase.Failed;
+                    continue;
+                }
+
+                if (_flowIndex < 0 || _flowIndex >= steps.Count)
+                    _flowIndex = 0;
+
+                var step = steps[_flowIndex];
+                CurrentStepText = $"Step {_flowIndex + 1}/{steps.Count} · {DescribeStep(step)}";
+                CurrentPhase = PhaseForStep(step);
+
+                _log($"[Coordinator] Executing flow step {_flowIndex + 1}/{steps.Count}: {DescribeStep(step)}");
+
+                bool advance = await ExecuteFlowStepAsync(step, token);
+                if (token.IsCancellationRequested)
+                    break;
+
+                if (advance)
+                {
+                    _flowIndex++;
+                }
+                // When !advance the step already moved _flowIndex itself (e.g. a failed
+                // Path step restarted the flow from the beginning, or the step failed).
 
                 await Task.Delay(BotConstants.Delays.WorkflowMainLoopMs, token);
             }
         }
 
-        // ======================== Phase Implementations ========================
+        // ======================== Flow Step Execution ========================
 
-        private async Task PhaseDetectCityStart(CancellationToken token)
+        /// <summary>
+        /// Executes one flow step. Returns true when the flow should advance to the next
+        /// step; false when the step handled the flow position itself (restart/failure).
+        /// </summary>
+        private async Task<bool> ExecuteFlowStepAsync(BotFlowStep step, CancellationToken token)
         {
-            _log("[Phase] DetectCityStart — checking player state...");
-
-            var snapshot = _memoryService.GetSnapshot();
-            _log($"[Phase] Position: ({snapshot.X:F1}, {snapshot.Y:F1}), Map: {snapshot.MapNumber}, InCity: {snapshot.IsInCity}");
-            _log($"[Phase] HP: {snapshot.Hp}, Mana: {snapshot.Mana}, HP Pots: {snapshot.HpPotions}, Mana Pots: {snapshot.ManaPotions}");
-            _log($"[Phase] Weight: {snapshot.CurrentWeight}/{snapshot.MaxWeight}");
-
-            if (!snapshot.IsInCity)
+            switch (step.Type)
             {
-                _log("[Phase] Player is NOT in city. Teleporting...");
-                await TeleportToCity(token);
-                snapshot = _memoryService.GetSnapshot();
-                if (!snapshot.IsInCity)
-                {
-                    _log("[Phase] Failed to reach city after teleport.");
-                    CurrentPhase = BotPhase.Failed;
-                    return;
-                }
-            }
-
-            _log("[Phase] Player is in city. Moving to repot.");
-            CurrentPhase = BotPhase.MoveToRepot;
-            await Task.CompletedTask;
-        }
-
-        private async Task PhaseMoveToRepot(CancellationToken token)
-        {
-            var repotPaths = _profile.CityToRepotPaths;
-            if (repotPaths == null || repotPaths.Count == 0)
-            {
-                _log("[Phase] MoveToRepot: No repot paths configured. Failing.");
-                CurrentPhase = BotPhase.Failed;
-                return;
-            }
-
-            // Cycle through the repot paths: every repot trip walks to the repot using
-            // the next path in the list, wrapping back to the first one after the last.
-            if (_repotPathIndex < 0 || _repotPathIndex >= repotPaths.Count)
-                _repotPathIndex = 0;
-
-            var repotStep = repotPaths[_repotPathIndex];
-            _log($"[Phase] MoveToRepot: repot path {_repotPathIndex + 1}/{repotPaths.Count} — '{repotStep.PathFile}'.");
-
-            var result = await RunRouteOnceAsync(repotStep, "City → Repot", token);
-            if (token.IsCancellationRequested) return;
-
-            switch (result)
-            {
-                case RouteRunResult.MissingSegment:
-                    _log("[Phase] MoveToRepot: City → Repot path missing or invalid. Failing.");
-                    CurrentPhase = BotPhase.Failed;
-                    break;
-                case RouteRunResult.Completed:
-                    _moveToRepotRetryCount = 0;
-                    _log("[Phase] MoveToRepot: Arrived at repot point.");
-                    // The next repot trip will use the next path in the list.
-                    _repotPathIndex = (_repotPathIndex + 1) % repotPaths.Count;
-                    CurrentPhase = BotPhase.Repot;
-                    break;
+                case BotFlowStepType.Path:
+                    return await ExecutePathStepAsync(step, token);
+                case BotFlowStepType.Repot:
+                    return await ExecuteRepotStepAsync(step, token);
+                case BotFlowStepType.Operation:
+                    return await ExecuteOperationStepAsync(step, token);
+                case BotFlowStepType.ExpLoop:
+                    return await ExecuteExpLoopStepAsync(step, token);
                 default:
-                    // Incomplete (e.g. city-stuck escalation or zone-block abort).
-                    _moveToRepotRetryCount++;
-                    if (_moveToRepotRetryCount >= BotConstants.Repot.MaxMoveToRepotRetries)
-                    {
-                        _log($"[Phase] MoveToRepot: Failed {_moveToRepotRetryCount} times in a row (player likely stuck in the city). Giving up.");
-                        _moveToRepotRetryCount = 0;
-                        CurrentPhase = BotPhase.Failed;
-                    }
-                    else
-                    {
-                        _log($"[Phase] MoveToRepot: Path did not complete (attempt {_moveToRepotRetryCount}/{BotConstants.Repot.MaxMoveToRepotRetries}). Retrying from start.");
-                        CurrentPhase = BotPhase.DetectCityStart;
-                    }
-                    break;
+                    _log($"[Coordinator] Unknown flow step type '{step.Type}'. Failing.");
+                    CurrentPhase = BotPhase.Failed;
+                    return false;
             }
-        }
-
-        private async Task PhaseRepot(CancellationToken token)
-        {
-            // Dry-run check
-            if (_profile.DryRunRepot)
-            {
-                _log("[Phase] Repot: DryRunRepot=true — skipping actual repot. Moving to exp travel routes.");
-                CurrentPhase = BotPhase.MoveToExp;
-                return;
-            }
-
-            _log("[Phase] Repot — starting repot sequence...");
-
-            try
-            {
-                _repotSystem.Repot();
-                _log("[Phase] Repot completed.");
-            }
-            catch (Exception ex)
-            {
-                _log($"[Phase] Repot failed: {ex.Message}");
-                CurrentPhase = BotPhase.Failed;
-                return;
-            }
-
-            var snapshot = _memoryService.GetSnapshot();
-            _log($"[Phase] Post-repot: HP Pots: {snapshot.HpPotions}, Mana Pots: {snapshot.ManaPotions}");
-
-            CurrentPhase = BotPhase.MoveToExp;
-            await Task.CompletedTask;
         }
 
         /// <summary>
-        /// Executes the complete ordered TravelToExpRoutes chain from the repot location
-        /// to the EXP position. Route N + 1 is never started until route N has completed
-        /// by its final waypoint or has reached and settled on its expected destination map.
+        /// Path step: runs one saved segment once (final waypoint or expected map).
         /// </summary>
-        private async Task PhaseMoveToExp(CancellationToken token)
+        private async Task<bool> ExecutePathStepAsync(BotFlowStep step, CancellationToken token)
         {
-            var routes = _profile.TravelToExpRoutes;
-            if (routes == null || routes.Count == 0)
-            {
-                _log("[Phase] MoveToExp: No travel routes configured. Failing.");
-                CurrentPhase = BotPhase.Failed;
-                return;
-            }
+            var result = await RunTravelRouteAsync(step, _flowIndex + 1, _profile.FlowSteps.Count, token);
+            if (token.IsCancellationRequested) return false;
 
-            for (int i = 0; i < routes.Count; i++)
+            switch (result)
             {
-                var route = routes[i];
+                case TravelRouteRunResult.Completed:
+                    _pathStepRetryCount = 0;
+                    _log("[Path] Step completed.");
+                    return true;
 
-                // Custom operation BEFORE this leg (e.g. talk to an NPC that unlocks the way).
-                if (!string.IsNullOrWhiteSpace(route.OperationBefore))
-                {
-                    if (!await RunOperationWithRetryAsync(route.OperationBefore, token))
+                case TravelRouteRunResult.Cancelled:
+                    return false;
+
+                case TravelRouteRunResult.Incomplete:
+                    _pathStepRetryCount++;
+                    if (_pathStepRetryCount >= BotConstants.Repot.MaxMoveToRepotRetries)
                     {
-                        _log($"[Phase] MoveToExp: OperationBefore '{route.OperationBefore}' for route {i + 1} failed. Failing.");
+                        _log($"[Path] Path did not complete {_pathStepRetryCount} times in a row. Giving up.");
+                        _pathStepRetryCount = 0;
                         CurrentPhase = BotPhase.Failed;
-                        return;
+                        return false;
                     }
-                }
+                    _log($"[Path] Path did not complete (attempt {_pathStepRetryCount}/{BotConstants.Repot.MaxMoveToRepotRetries}). Restarting the flow.");
+                    _flowIndex = 0;
+                    return false;
 
-                var result = await RunTravelRouteAsync(route, i + 1, routes.Count, token);
+                default:
+                    // MissingSegment, ExpectedMapNotReached, UnexpectedMapReached, InvalidMapState
+                    _log($"[Path] Path step failed ({result}).");
 
-                switch (result)
-                {
-                    case TravelRouteRunResult.Completed:
-                        // Custom operation AFTER this leg completed (e.g. talk to an NPC at the destination).
-                        if (!string.IsNullOrWhiteSpace(route.OperationAfter))
-                        {
-                            if (!await RunOperationWithRetryAsync(route.OperationAfter, token))
-                            {
-                                _log($"[Phase] MoveToExp: OperationAfter '{route.OperationAfter}' for route {i + 1} failed. Failing.");
-                                CurrentPhase = BotPhase.Failed;
-                                return;
-                            }
-                        }
-                        // Continue to the next route.
-                        break;
-                    case TravelRouteRunResult.Cancelled:
-                        return;
-                    case TravelRouteRunResult.Incomplete:
-                        _log($"[Phase] MoveToExp: Route {i + 1}/{routes.Count} did not complete. Retrying from start.");
-                        CurrentPhase = BotPhase.DetectCityStart;
-                        return;
-                    default:
-                        // MissingSegment, ExpectedMapNotReached, UnexpectedMapReached, InvalidMapState
-                        _log($"[Phase] MoveToExp: Route {i + 1}/{routes.Count} failed ({result}). Failing.");
+                    // If the player ended up in the city (e.g. teleported mid-route), do
+                    // not fail the whole workflow — restart from the beginning of the flow.
+                    if (_memoryService.GetIsInCity())
+                    {
+                        _log("[Path] Player is in the city — restarting the flow from the start.");
+                        _flowIndex = 0;
+                        return false;
+                    }
 
-                        // If the player ended up in the city (e.g. teleported mid-route), do
-                        // not fail the whole workflow — restart from the repot flow instead.
-                        if (_memoryService.GetIsInCity())
-                        {
-                            _log("[Phase] MoveToExp: Player is in the city — restarting from repot flow.");
-                            CurrentPhase = BotPhase.DetectCityStart;
-                            return;
-                        }
-
-                        CurrentPhase = BotPhase.Failed;
-                        return;
-                }
+                    CurrentPhase = BotPhase.Failed;
+                    return false;
             }
-
-            _log("[Phase] MoveToExp: All travel routes completed. Starting exp loop.");
-            CurrentPhase = BotPhase.ExpLoop;
         }
 
-        private async Task PhaseExpLoop(CancellationToken token)
+        /// <summary>
+        /// Repot step: ensures the player is in the city (teleports if needed), walks to
+        /// the repot point using the next path from the step's repot-path pool (cycling),
+        /// then sells items and buys potions.
+        /// </summary>
+        private async Task<bool> ExecuteRepotStepAsync(BotFlowStep step, CancellationToken token)
         {
-            var loopStep = _profile.ExpLoop;
-            if (loopStep == null || string.IsNullOrWhiteSpace(loopStep.PathFile))
+            // 1. Ensure in city.
+            if (!_memoryService.GetIsInCity())
             {
-                _log("[Phase] ExpLoop: Exp Loop path missing or invalid. Failing.");
-                CurrentPhase = BotPhase.Failed;
-                return;
+                _log("[Repot] Not in city. Teleporting before repot.");
+                await TeleportToCity(token);
+                if (!_memoryService.GetIsInCity())
+                {
+                    _teleportRetryCount++;
+                    if (_teleportRetryCount >= _profile.MaxTeleportRetries)
+                    {
+                        _log($"[Repot] Failed to reach city after {_profile.MaxTeleportRetries} teleport attempts. Giving up.");
+                        _teleportRetryCount = 0;
+                        CurrentPhase = BotPhase.Failed;
+                        return false;
+                    }
+                    _log($"[Repot] Not in city after teleport (attempt {_teleportRetryCount}/{_profile.MaxTeleportRetries}). Retrying.");
+                    return false; // stay on this step and retry
+                }
+                _teleportRetryCount = 0;
             }
 
-            // Run any pre-EXP custom operations (e.g. talk to an NPC that grants access
-            // to the hunting area). This runs on every arrival at the EXP map.
-            var preExpOps = _profile.PreExpOperations ?? new List<string>();
-            for (int i = 0; i < preExpOps.Count; i++)
+            // 2. Walk to the repot point using the next repot path (cycling).
+            var repotPaths = step.RepotPaths ?? new List<BotRouteStep>();
+            if (repotPaths.Count == 0)
             {
-                string opName = preExpOps[i];
-                if (string.IsNullOrWhiteSpace(opName)) continue;
+                _log("[Repot] Repot step has no repot paths. Failing.");
+                CurrentPhase = BotPhase.Failed;
+                return false;
+            }
 
-                if (!await RunOperationWithRetryAsync(opName, token))
+            if (_repotPathIndex < 0 || _repotPathIndex >= repotPaths.Count)
+                _repotPathIndex = 0;
+
+            var repotPath = repotPaths[_repotPathIndex];
+            _log($"[Repot] Walking to repot point using repot path {_repotPathIndex + 1}/{repotPaths.Count} — '{repotPath.PathFile}'.");
+
+            var result = await RunRouteOnceAsync(repotPath, "Repot path", token);
+            if (token.IsCancellationRequested) return false;
+
+            if (result != RouteRunResult.Completed)
+            {
+                _moveToRepotRetryCount++;
+                if (_moveToRepotRetryCount >= BotConstants.Repot.MaxMoveToRepotRetries)
                 {
-                    _log($"[Phase] ExpLoop: pre-EXP operation '{opName}' failed. Failing.");
+                    _log($"[Repot] Could not reach the repot point after {_moveToRepotRetryCount} tries (player likely stuck in the city). Giving up.");
+                    _moveToRepotRetryCount = 0;
                     CurrentPhase = BotPhase.Failed;
-                    return;
+                    return false;
                 }
+                _log($"[Repot] Could not reach the repot point (attempt {_moveToRepotRetryCount}/{BotConstants.Repot.MaxMoveToRepotRetries}). Retrying.");
+                return false; // stay on this step and retry
+            }
+            _moveToRepotRetryCount = 0;
+
+            // The next repot trip will use the next path in the pool.
+            _repotPathIndex = (_repotPathIndex + 1) % repotPaths.Count;
+
+            // 3. Perform the repot sequence.
+            if (_profile.DryRunRepot)
+            {
+                _log("[Repot] DryRunRepot=true — skipping actual repot. Moving to the next flow step.");
+                return true;
+            }
+
+            _log("[Repot] Performing repot sequence (sell + buy)...");
+            try
+            {
+                _repotSystem.Repot();
+                _log("[Repot] Repot completed.");
+            }
+            catch (Exception ex)
+            {
+                _log($"[Repot] Repot failed: {ex.Message}");
+                CurrentPhase = BotPhase.Failed;
+                return false;
+            }
+
+            var snapshot = _memoryService.GetSnapshot();
+            _log($"[Repot] Post-repot: HP Pots: {snapshot.HpPotions}, Mana Pots: {snapshot.ManaPotions}");
+
+            return true;
+        }
+
+        /// <summary>
+        /// Operation step: runs the named custom operation with the runner's retry policy.
+        /// </summary>
+        private async Task<bool> ExecuteOperationStepAsync(BotFlowStep step, CancellationToken token)
+        {
+            if (string.IsNullOrWhiteSpace(step.OperationName))
+            {
+                _log("[Operation] Operation step has no operation name. Failing.");
+                CurrentPhase = BotPhase.Failed;
+                return false;
+            }
+
+            if (!await RunOperationWithRetryAsync(step.OperationName, token))
+            {
+                _log($"[Operation] Operation '{step.OperationName}' failed after retries. Failing.");
+                CurrentPhase = BotPhase.Failed;
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// ExpLoop step: runs the looping hunting path (with loot collection) until the
+        /// repot conditions are met or the player is detected in the city. Afterwards the
+        /// bot returns to the city (if needed) and the flow restarts from the first step.
+        /// </summary>
+        private async Task<bool> ExecuteExpLoopStepAsync(BotFlowStep step, CancellationToken token)
+        {
+            if (string.IsNullOrWhiteSpace(step.PathFile))
+            {
+                _log("[ExpLoop] ExpLoop step has no path. Failing.");
+                CurrentPhase = BotPhase.Failed;
+                return false;
             }
 
             // Wait once before starting the looping route (not on every cycle).
-            await WaitBeforeStepAsync(loopStep, "Exp Loop", token);
-            if (token.IsCancellationRequested) return;
+            await WaitBeforeStepAsync(step.PathFile, step.StartDelayMs, "Exp Loop", token);
+            if (token.IsCancellationRequested) return false;
 
-            _log($"[Phase] ExpLoop — loading path '{loopStep.PathFile}'...");
-            var waypoints = _pathLoader.LoadSegment(loopStep.PathFile);
+            _log($"[ExpLoop] Loading hunting path '{step.PathFile}'...");
+            var waypoints = _pathLoader.LoadSegment(step.PathFile);
             if (waypoints == null)
             {
-                _log($"[Phase] ExpLoop: Missing required segment '{loopStep.PathFile}'. Cannot proceed.");
+                _log($"[ExpLoop] Missing required segment '{step.PathFile}'. Cannot proceed.");
                 CurrentPhase = BotPhase.Failed;
-                return;
+                return false;
             }
 
             using var expCts = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -525,9 +535,6 @@ namespace DriverScanTester.Services
 
             // The EXP route is a hunting route (MoveAndAttackAndLoot): run the loot
             // system in parallel so drops are collected while walking and after kills.
-            // It shares the movement system's memory service and cancels itself the
-            // moment a mob gets selected. Without it the bot would never loot at all —
-            // the loot bot was previously only started from the UI, not the workflow.
             LootSystem? lootSystem = null;
             Task? lootTask = null;
             if (waypoints.Any(w => w.Mode == BotMode.MoveAndAttackAndLoot))
@@ -558,12 +565,12 @@ namespace DriverScanTester.Services
                     catch (OperationCanceledException) { }
                     catch (Exception ex)
                     {
-                        _log($"[Phase] ExpLoop: Loot system error: {ex.Message}");
+                        _log($"[ExpLoop] Loot system error: {ex.Message}");
                     }
                 }, expToken);
-                _log("[Phase] ExpLoop: Loot system started (MoveAndAttackAndLoot route).");
+                _log("[ExpLoop] Loot system started (MoveAndAttackAndLoot route).");
                 if (_profile.LootPriority)
-                    _log("[Phase] ExpLoop: LOOT PRIORITY MODE ON — looting outranks combat; attack and waypoint movement are suspended while loot is being scanned/collected.");
+                    _log("[ExpLoop] LOOT PRIORITY MODE ON — looting outranks combat; attack and waypoint movement are suspended while loot is being scanned/collected.");
             }
 
             bool repotNeeded = false;
@@ -585,7 +592,7 @@ namespace DriverScanTester.Services
                         inCityConsecutiveReads++;
                         if (inCityConsecutiveReads >= BotConstants.Delays.InCityDetectionStableReads)
                         {
-                            _log("[Phase] ExpLoop: Player detected in city — stopping exp loop.");
+                            _log("[ExpLoop] Player detected in city — stopping exp loop.");
                             cityDetected = true;
                             expCts.Cancel();
                             break;
@@ -598,7 +605,7 @@ namespace DriverScanTester.Services
 
                     if (_repotDetector.NeedsRepot(snapshot))
                     {
-                        _log("[Phase] ExpLoop: Repot condition detected. Stopping exp loop.");
+                        _log("[ExpLoop] Repot condition detected. Stopping exp loop.");
                         repotNeeded = true;
                         expCts.Cancel();
                         break;
@@ -613,7 +620,7 @@ namespace DriverScanTester.Services
             }
             catch (OperationCanceledException) { }
 
-            // Stop the loot loop with the phase — it must not run during repot/teleport.
+            // Stop the loot loop with the step — it must not run during repot/teleport.
             if (!expCts.IsCancellationRequested)
                 expCts.Cancel();
             if (lootTask != null)
@@ -626,59 +633,17 @@ namespace DriverScanTester.Services
             }
 
             _pathRunner.Stop();
-            _log("[Phase] ExpLoop: Exp hunting loop ended.");
+            _log("[ExpLoop] Exp hunting loop ended.");
 
             if (token.IsCancellationRequested)
-                return;
+                return false;
 
-            bool inCity = _memoryService.GetIsInCity();
-            if (inCity || cityDetected)
-            {
-                // Already in the city — no teleport needed, go straight to the repot flow.
-                _log("[Phase] ExpLoop: Player is in the city — going to repot (no teleport needed).");
-                CurrentPhase = BotPhase.DetectCityStart;
-            }
-            else if (repotNeeded)
-            {
-                _log("[Phase] ExpLoop: Transitioning to NeedRepot.");
-                CurrentPhase = BotPhase.NeedRepot;
-            }
-            else
-            {
-                _log("[Phase] ExpLoop: Path stopped for unknown reason. Going to city.");
-                CurrentPhase = BotPhase.DetectCityStart;
-            }
-        }
-
-        private async Task PhaseNeedRepot(CancellationToken token)
-        {
-            _log("[Phase] NeedRepot — teleporting to city...");
-
-            await TeleportToCity(token);
-
-            var snapshot = _memoryService.GetSnapshot();
-            if (snapshot.IsInCity)
-            {
-                _log("[Phase] NeedRepot: Successfully arrived in city.");
-                _teleportRetryCount = 0;
-                CurrentPhase = BotPhase.DetectCityStart;
-            }
-            else
-            {
-                int maxRetries = _profile.MaxTeleportRetries;
-                _teleportRetryCount++;
-                if (_teleportRetryCount >= maxRetries)
-                {
-                    _log($"[Phase] NeedRepot: Failed after {maxRetries} teleport attempts. Giving up.");
-                    _teleportRetryCount = 0;
-                    CurrentPhase = BotPhase.Failed;
-                }
-                else
-                {
-                    _log($"[Phase] NeedRepot: Not in city after teleport (attempt {_teleportRetryCount}/{maxRetries}). Retrying.");
-                    CurrentPhase = BotPhase.NeedRepot;
-                }
-            }
+            // The flow simply advances to the next step (and wraps around at the end).
+            // The Repot step is responsible for returning to the city and refilling, so a
+            // flow like Repot → ... → ExpLoop → Operation (after hunt) → Repot works:
+            // after hunting, any following steps run, and the cycle returns to Repot.
+            _log("[ExpLoop] Advancing to the next flow step.");
+            return true;
         }
 
         // ======================== Helpers ========================
@@ -701,18 +666,50 @@ namespace DriverScanTester.Services
             Cancelled
         }
 
-        /// <summary>
-        /// Waits the configured startup delay of a route step, if any.
-        /// Zero (or an invalid negative) delay returns immediately.
-        /// The wait is cancellable and happens every time the workflow enters the stage.
-        /// </summary>
-        private async Task WaitBeforeStepAsync(BotRouteStep step, string stepName, CancellationToken token)
+        /// <summary>Maps a flow step type to the phase shown in the UI.</summary>
+        private static BotPhase PhaseForStep(BotFlowStep step)
         {
-            if (step == null) return;
-            if (step.StartDelayMs <= 0) return;
+            switch (step.Type)
+            {
+                case BotFlowStepType.Path: return BotPhase.PathStep;
+                case BotFlowStepType.Repot: return BotPhase.Repot;
+                case BotFlowStepType.Operation: return BotPhase.OperationStep;
+                case BotFlowStepType.ExpLoop: return BotPhase.ExpLoop;
+                default: return BotPhase.Failed;
+            }
+        }
 
-            _log($"[Coordinator] {stepName}: waiting {step.StartDelayMs} ms before start...");
-            await Task.Delay(step.StartDelayMs, token);
+        /// <summary>Human-readable description of a flow step, used in logs and the UI.</summary>
+        private static string DescribeStep(BotFlowStep step)
+        {
+            switch (step.Type)
+            {
+                case BotFlowStepType.Path:
+                    string mode = step.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached
+                        ? $"until map {step.ExpectedDestinationMapNumber}"
+                        : "until last waypoint";
+                    return $"Path '{step.PathFile}' ({mode})";
+                case BotFlowStepType.Repot:
+                    return $"Repot ({step.RepotPaths?.Count ?? 0} repot paths)";
+                case BotFlowStepType.Operation:
+                    return $"Operation '{step.OperationName}'";
+                case BotFlowStepType.ExpLoop:
+                    return $"ExpLoop '{step.PathFile}'";
+                default:
+                    return step.Type.ToString();
+            }
+        }
+
+        /// <summary>
+        /// Waits the configured startup delay of a step, if any.
+        /// Zero (or an invalid negative) delay returns immediately.
+        /// </summary>
+        private async Task WaitBeforeStepAsync(string pathFile, int startDelayMs, string stepName, CancellationToken token)
+        {
+            if (startDelayMs <= 0) return;
+
+            _log($"[Coordinator] {stepName}: waiting {startDelayMs} ms before start...");
+            await Task.Delay(startDelayMs, token);
         }
 
         /// <summary>
@@ -723,53 +720,51 @@ namespace DriverScanTester.Services
             => _operationRunner.RunWithRetryAsync(operationName, token);
 
         /// <summary>
-        /// Runs one non-loop BotRouteStep (e.g. City → Repot): waits the configured startup
-        /// delay, loads the segment via SavedPathLoader and runs it once with loop: false.
-        /// Returns whether the path completed, or whether the segment is missing/invalid.
+        /// Runs one non-loop BotRouteStep (e.g. one repot path): waits the configured
+        /// startup delay, loads the segment via SavedPathLoader and runs it once.
         /// </summary>
         private async Task<RouteRunResult> RunRouteOnceAsync(BotRouteStep step, string stageName, CancellationToken token)
         {
             if (step == null || string.IsNullOrWhiteSpace(step.PathFile))
             {
-                _log($"[Phase] {stageName}: no path configured. Cannot proceed.");
+                _log($"[Coordinator] {stageName}: no path configured. Cannot proceed.");
                 return RouteRunResult.MissingSegment;
             }
 
-            await WaitBeforeStepAsync(step, stageName, token);
+            await WaitBeforeStepAsync(step.PathFile, step.StartDelayMs, stageName, token);
             if (token.IsCancellationRequested) return RouteRunResult.Incomplete;
 
-            _log($"[Phase] {stageName} — loading path '{step.PathFile}'...");
+            _log($"[Coordinator] {stageName} — loading path '{step.PathFile}'...");
             var waypoints = _pathLoader.LoadSegment(step.PathFile);
             if (waypoints == null)
             {
-                _log($"[Phase] {stageName}: Missing required segment '{step.PathFile}'. Cannot proceed.");
+                _log($"[Coordinator] {stageName}: Missing required segment '{step.PathFile}'. Cannot proceed.");
                 return RouteRunResult.MissingSegment;
             }
 
             bool completed = await _pathRunner.RunPathAsync(waypoints, loop: false, token);
             if (completed)
-                _log($"[Phase] {stageName}: path completed.");
+                _log($"[Coordinator] {stageName}: path completed.");
             else
-                _log($"[Phase] {stageName}: path did not complete.");
+                _log($"[Coordinator] {stageName}: path did not complete.");
 
             return completed ? RouteRunResult.Completed : RouteRunResult.Incomplete;
         }
 
         /// <summary>
-        /// Executes one travel route of the Repot → EXP chain.
-        /// FinalWaypoint routes complete through normal non-loop path completion;
-        /// ExpectedMapReached routes complete when the configured destination map is
-        /// stably detected, without requiring the final waypoint.
+        /// Executes one Path flow step. FinalWaypoint steps complete through normal
+        /// non-loop path completion; ExpectedMapReached steps complete when the
+        /// configured destination map is stably detected, without requiring the final waypoint.
         /// </summary>
         private async Task<TravelRouteRunResult> RunTravelRouteAsync(
-            TravelRouteStep step,
-            int routeIndex,
-            int routeCount,
+            BotFlowStep step,
+            int stepIndex,
+            int stepCount,
             CancellationToken token)
         {
             try
             {
-                return await RunTravelRouteCoreAsync(step, routeIndex, routeCount, token);
+                return await RunTravelRouteCoreAsync(step, stepIndex, stepCount, token);
             }
             catch (OperationCanceledException)
             {
@@ -778,25 +773,25 @@ namespace DriverScanTester.Services
         }
 
         private async Task<TravelRouteRunResult> RunTravelRouteCoreAsync(
-            TravelRouteStep step,
-            int routeIndex,
-            int routeCount,
+            BotFlowStep step,
+            int stepIndex,
+            int stepCount,
             CancellationToken token)
         {
             if (step == null || string.IsNullOrWhiteSpace(step.PathFile))
             {
-                _log($"[MoveToExp] Route {routeIndex}/{routeCount}: no path configured. Cannot proceed.");
+                _log($"[Path] Step {stepIndex}/{stepCount}: no path configured. Cannot proceed.");
                 return TravelRouteRunResult.MissingSegment;
             }
 
             // Startup delay (cancellable).
             if (step.StartDelayMs > 0)
             {
-                _log($"[MoveToExp] Route {routeIndex}/{routeCount}: waiting {step.StartDelayMs} ms before start...");
+                _log($"[Path] Step {stepIndex}/{stepCount}: waiting {step.StartDelayMs} ms before start...");
                 await Task.Delay(step.StartDelayMs, token);
             }
 
-            _log($"[MoveToExp] Route {routeIndex}/{routeCount}:");
+            _log($"[Path] Step {stepIndex}/{stepCount}:");
             _log($"  Path='{step.PathFile}'");
             _log($"  Completion={step.CompletionMode}");
             if (step.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached)
@@ -805,7 +800,7 @@ namespace DriverScanTester.Services
             var waypoints = _pathLoader.LoadSegment(step.PathFile);
             if (waypoints == null)
             {
-                _log($"[MoveToExp] Route {routeIndex}/{routeCount}: Missing required segment '{step.PathFile}'. Cannot proceed.");
+                _log($"[Path] Step {stepIndex}/{stepCount}: Missing required segment '{step.PathFile}'. Cannot proceed.");
                 return TravelRouteRunResult.MissingSegment;
             }
 
@@ -816,26 +811,26 @@ namespace DriverScanTester.Services
                 if (token.IsCancellationRequested) return TravelRouteRunResult.Cancelled;
 
                 if (completed)
-                    _log($"[MoveToExp] Route {routeIndex}/{routeCount}: path completed (final waypoint).");
+                    _log($"[Path] Step {stepIndex}/{stepCount}: path completed (final waypoint).");
                 else
-                    _log($"[MoveToExp] Route {routeIndex}/{routeCount}: path did not complete.");
+                    _log($"[Path] Step {stepIndex}/{stepCount}: path did not complete.");
 
                 return completed ? TravelRouteRunResult.Completed : TravelRouteRunResult.Incomplete;
             }
 
             // ExpectedMapReached: portal-aware execution.
-            return await RunMapTransitionRouteAsync(step, routeIndex, routeCount, waypoints, token);
+            return await RunMapTransitionRouteAsync(step, stepIndex, stepCount, waypoints, token);
         }
 
         /// <summary>
         /// Executes one portal route: runs the path while polling the map number, stops
         /// movement as soon as the expected destination map is confirmed, and settles the
-        /// map/player-position reads before the next route starts.
+        /// map/player-position reads before the next step starts.
         /// </summary>
         private async Task<TravelRouteRunResult> RunMapTransitionRouteAsync(
-            TravelRouteStep step,
-            int routeIndex,
-            int routeCount,
+            BotFlowStep step,
+            int stepIndex,
+            int stepCount,
             List<Waypoint> waypoints,
             CancellationToken token)
         {
@@ -845,24 +840,24 @@ namespace DriverScanTester.Services
             int sourceMap = await WaitForValidMapAsync(BotConstants.Delays.ValidMapReadTimeoutMs, token);
             if (sourceMap == 0)
             {
-                _log($"[MoveToExp] Route {routeIndex}/{routeCount}: no valid source map read within {BotConstants.Delays.ValidMapReadTimeoutMs} ms. Failing.");
+                _log($"[Path] Step {stepIndex}/{stepCount}: no valid source map read within {BotConstants.Delays.ValidMapReadTimeoutMs} ms. Failing.");
                 return TravelRouteRunResult.InvalidMapState;
             }
 
-            _log($"[MoveToExp] Route {routeIndex}/{routeCount}: source map {sourceMap}.");
+            _log($"[Path] Step {stepIndex}/{stepCount}: source map {sourceMap}.");
 
             // Already on the destination map: do not start its path, but still require
-            // the destination map and player position to settle before the next route starts.
+            // the destination map and player position to settle before the next step starts.
             if (sourceMap == expectedMap)
             {
                 _log(
-                    $"[MoveToExp] Route {routeIndex}/{routeCount}: " +
+                    $"[Path] Step {stepIndex}/{stepCount}: " +
                     $"already on destination map {expectedMap}. Verifying settlement.");
 
                 return await WaitForMapSettlementAsync(
                     expectedMap,
-                    routeIndex,
-                    routeCount,
+                    stepIndex,
+                    stepCount,
                     token);
             }
 
@@ -890,7 +885,7 @@ namespace DriverScanTester.Services
                     consecutiveDestReads++;
                     if (consecutiveDestReads >= BotConstants.Delays.MapTransitionStableReadCount)
                     {
-                        _log($"[MoveToExp] Route {routeIndex}/{routeCount}: destination map {expectedMap} confirmed. Stopping movement.");
+                        _log($"[Path] Step {stepIndex}/{stepCount}: destination map {expectedMap} confirmed. Stopping movement.");
                         destinationConfirmed = true;
                         _pathRunner.Stop();
                         routeCts.Cancel();
@@ -899,7 +894,7 @@ namespace DriverScanTester.Services
                 }
                 else if (map != sourceMap)
                 {
-                    _log($"[MoveToExp] Route {routeIndex}/{routeCount}: unexpected map {map} (expected {expectedMap}). Stopping route.");
+                    _log($"[Path] Step {stepIndex}/{stepCount}: unexpected map {map} (expected {expectedMap}). Stopping route.");
                     _pathRunner.Stop();
                     routeCts.Cancel();
                     try { await pathTask; } catch (OperationCanceledException) { }
@@ -915,11 +910,11 @@ namespace DriverScanTester.Services
                 return TravelRouteRunResult.Cancelled;
 
             if (destinationConfirmed)
-                return await WaitForMapSettlementAsync(expectedMap, routeIndex, routeCount, token);
+                return await WaitForMapSettlementAsync(expectedMap, stepIndex, stepCount, token);
 
             // The path finished before the expected destination map was confirmed:
             // give the portal a bounded grace period to activate.
-            _log($"[MoveToExp] Route {routeIndex}/{routeCount}: path finished before destination map confirmed. Waiting grace period for portal transition...");
+            _log($"[Path] Step {stepIndex}/{stepCount}: path finished before destination map confirmed. Waiting grace period for portal transition...");
             _pathRunner.Stop();
 
             var graceDeadline = DateTime.UtcNow.AddMilliseconds(BotConstants.Delays.MapTransitionGraceAfterPathMs);
@@ -939,13 +934,13 @@ namespace DriverScanTester.Services
                     graceConsecutiveReads++;
                     if (graceConsecutiveReads >= BotConstants.Delays.MapTransitionStableReadCount)
                     {
-                        _log($"[MoveToExp] Route {routeIndex}/{routeCount}: destination map {expectedMap} confirmed during grace period.");
-                        return await WaitForMapSettlementAsync(expectedMap, routeIndex, routeCount, token);
+                        _log($"[Path] Step {stepIndex}/{stepCount}: destination map {expectedMap} confirmed during grace period.");
+                        return await WaitForMapSettlementAsync(expectedMap, stepIndex, stepCount, token);
                     }
                 }
                 else if (map != sourceMap)
                 {
-                    _log($"[MoveToExp] Route {routeIndex}/{routeCount}: unexpected map {map} during grace period (expected {expectedMap}).");
+                    _log($"[Path] Step {stepIndex}/{stepCount}: unexpected map {map} during grace period (expected {expectedMap}).");
                     return TravelRouteRunResult.UnexpectedMapReached;
                 }
                 else
@@ -954,7 +949,7 @@ namespace DriverScanTester.Services
                 }
             }
 
-            _log($"[MoveToExp] Route {routeIndex}/{routeCount}: still on source map {sourceMap} after grace period. Expected map {expectedMap} not reached.");
+            _log($"[Path] Step {stepIndex}/{stepCount}: still on source map {sourceMap} after grace period. Expected map {expectedMap} not reached.");
             return TravelRouteRunResult.ExpectedMapNotReached;
         }
 
@@ -980,13 +975,13 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Waits until the destination map and the player position read are both stable
-        /// (two consecutive polls) so the next route never initializes while the player
+        /// (two consecutive polls) so the next step never initializes while the player
         /// pointer or coordinates are temporarily unavailable during loading.
         /// </summary>
         private async Task<TravelRouteRunResult> WaitForMapSettlementAsync(
             int expectedMap,
-            int routeIndex,
-            int routeCount,
+            int stepIndex,
+            int stepCount,
             CancellationToken token)
         {
             var deadline = DateTime.UtcNow.AddMilliseconds(BotConstants.Delays.MapTransitionSettleTimeoutMs);
@@ -1006,7 +1001,7 @@ namespace DriverScanTester.Services
                     stableReads++;
                     if (stableReads >= BotConstants.Delays.MapTransitionStableReadCount)
                     {
-                        _log($"[MoveToExp] Route {routeIndex}/{routeCount}: destination map {expectedMap} settled (map and player position stable).");
+                        _log($"[Path] Step {stepIndex}/{stepCount}: destination map {expectedMap} settled (map and player position stable).");
                         return TravelRouteRunResult.Completed;
                     }
                 }
@@ -1016,10 +1011,14 @@ namespace DriverScanTester.Services
                 }
             }
 
-            _log($"[MoveToExp] Route {routeIndex}/{routeCount}: destination map {expectedMap} did not settle within {BotConstants.Delays.MapTransitionSettleTimeoutMs} ms.");
+            _log($"[Path] Step {stepIndex}/{stepCount}: destination map {expectedMap} did not settle within {BotConstants.Delays.MapTransitionSettleTimeoutMs} ms.");
             return TravelRouteRunResult.InvalidMapState;
         }
 
+        /// <summary>
+        /// Teleports to the city with the profile's teleport key and waits for the game
+        /// UI to settle afterwards.
+        /// </summary>
         private async Task TeleportToCity(CancellationToken token)
         {
             byte vk = (byte)_profile.TeleportKey;
@@ -1052,7 +1051,6 @@ namespace DriverScanTester.Services
             // The game UI (loading screen → world render) needs time to finish after the
             // in-city flag becomes readable. Starting to move immediately makes the client
             // ignore input and the bot misreads the still-loading state as stuck (action=1).
-            // Wait for the UI to settle before the repot path is started.
             _log($"[Teleport] Waiting {BotConstants.Delays.PostTeleportUiLoadMs} ms for the game UI to load...");
             await Task.Delay(BotConstants.Delays.PostTeleportUiLoadMs, token);
         }

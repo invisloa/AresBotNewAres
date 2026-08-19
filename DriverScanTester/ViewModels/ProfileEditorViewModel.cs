@@ -12,10 +12,8 @@ namespace DriverScanTester.ViewModels
 {
     /// <summary>
     /// ViewModel for the Bot Profile editor tab in PathEditorWindow.
-    /// A profile is a simple three-stage configuration:
-    ///   1. REPOT      — CityToRepotPaths (list of paths, cycled on every repot)
-    ///   2. GO TO EXP  — TravelToExpRoutes (ordered list of paths)
-    ///   3. EXP PATH   — ExpLoop (one looping path)
+    /// A profile is a linear FLOW of mixed steps (Path / Repot / Operation / ExpLoop)
+    /// that the bot cycles through. Any step type can be placed anywhere in the flow.
     /// Uses BotProfileLoader as the single persistence and validation service.
     /// </summary>
     public class ProfileEditorViewModel : BaseViewModel
@@ -45,18 +43,13 @@ namespace DriverScanTester.ViewModels
             RefreshProfilesCommand = new RelayCommand(_ => RefreshProfiles());
             RefreshPathsCommand = new RelayCommand(_ => RefreshPaths());
 
-            AddTravelRouteCommand = new RelayCommand(_ => AddTravelRoute(), _ => CurrentProfile != null);
-            RemoveTravelRouteCommand = new RelayCommand(_ => RemoveTravelRoute(), _ => CanRemoveTravelRoute);
-            MoveTravelRouteUpCommand = new RelayCommand(_ => MoveTravelRoute(-1), _ => CanMoveTravelRoute(-1));
-            MoveTravelRouteDownCommand = new RelayCommand(_ => MoveTravelRoute(1), _ => CanMoveTravelRoute(1));
+            AddFlowStepCommand = new RelayCommand(_ => AddFlowStep(), _ => CurrentProfile != null);
+            RemoveFlowStepCommand = new RelayCommand(_ => RemoveFlowStep(), _ => CanRemoveFlowStep);
+            MoveFlowStepUpCommand = new RelayCommand(_ => MoveFlowStep(-1), _ => CanMoveFlowStep(-1));
+            MoveFlowStepDownCommand = new RelayCommand(_ => MoveFlowStep(1), _ => CanMoveFlowStep(1));
 
-            AddRepotPathCommand = new RelayCommand(_ => AddRepotPath(), _ => CurrentProfile != null);
+            AddRepotPathCommand = new RelayCommand(_ => AddRepotPath(), _ => CanAddRepotPath);
             RemoveRepotPathCommand = new RelayCommand(_ => RemoveRepotPath(), _ => CanRemoveRepotPath);
-            MoveRepotPathUpCommand = new RelayCommand(_ => MoveRepotPath(-1), _ => CanMoveRepotPath(-1));
-            MoveRepotPathDownCommand = new RelayCommand(_ => MoveRepotPath(1), _ => CanMoveRepotPath(1));
-
-            AddPreExpOperationCommand = new RelayCommand(_ => AddPreExpOperation(), _ => CurrentProfile != null);
-            RemovePreExpOperationCommand = new RelayCommand(_ => RemovePreExpOperation(), _ => CanRemovePreExpOperation);
 
             // Initial loads
             BuildAvailableOperations();
@@ -230,9 +223,8 @@ namespace DriverScanTester.ViewModels
         }
 
         /// <summary>
-        /// Loot-priority mode: when enabled, looting outranks combat and waypoint
-        /// movement — the bot scans for loot even while attacking a mob and suspends
-        /// attack/movement while it walks to loot.
+        /// Loot-priority mode: when enabled during the ExpLoop step, looting outranks
+        /// combat and waypoint movement.
         /// </summary>
         public bool LootPriority
         {
@@ -270,68 +262,23 @@ namespace DriverScanTester.ViewModels
             set { if (CurrentProfile != null) { CurrentProfile.WindowOffsetY = value; OnPropertyChanged(); } }
         }
 
-        // ──────────────────── Stage 1: REPOT ────────────────────
+        // ──────────────────── The flow of steps ────────────────────
 
         /// <summary>
-        /// Ordered list of paths from the city/player starting position to the repot
-        /// location. The bot uses the next path in the list on every repot trip
-        /// (cycling back to the first after the last).
+        /// The ordered flow of steps the bot executes (Path / Repot / Operation / ExpLoop),
+        /// cycled over time.
         /// </summary>
-        public ObservableCollection<BotRouteStepViewModel> CityToRepotPaths { get; } = new();
+        public ObservableCollection<BotFlowStepViewModel> FlowSteps { get; } = new();
 
-        private BotRouteStepViewModel? _selectedRepotPath;
-        public BotRouteStepViewModel? SelectedRepotPath
+        private BotFlowStepViewModel? _selectedFlowStep;
+        public BotFlowStepViewModel? SelectedFlowStep
         {
-            get => _selectedRepotPath;
+            get => _selectedFlowStep;
             set
             {
-                if (SetProperty(ref _selectedRepotPath, value))
+                if (SetProperty(ref _selectedFlowStep, value))
                     CommandManager.InvalidateRequerySuggested();
             }
-        }
-
-        // ──────────────────── Stage 2: GO TO EXP ────────────────────
-
-        /// <summary>Ordered list of paths from the repot location to the EXP position.</summary>
-        public ObservableCollection<TravelRouteStepViewModel> TravelToExpRoutes { get; } = new();
-
-        private TravelRouteStepViewModel? _selectedTravelRoute;
-        public TravelRouteStepViewModel? SelectedTravelRoute
-        {
-            get => _selectedTravelRoute;
-            set
-            {
-                if (SetProperty(ref _selectedTravelRoute, value))
-                    CommandManager.InvalidateRequerySuggested();
-            }
-        }
-
-// ──────────────────── Stage 3: EXP PATH ────────────────────
-
-        public BotRouteStepViewModel ExpLoop { get; } = new();
-
-        // ──────────────────── Custom operations (pre-EXP) ────────────────────
-
-        /// <summary>Ordered list of operation names to run at the EXP map before hunting starts.</summary>
-        public ObservableCollection<string> PreExpOperations { get; } = new();
-
-        private string? _selectedPreExpOperation;
-        public string? SelectedPreExpOperation
-        {
-            get => _selectedPreExpOperation;
-            set
-            {
-                if (SetProperty(ref _selectedPreExpOperation, value))
-                    CommandManager.InvalidateRequerySuggested();
-            }
-        }
-
-        /// <summary>Operation name chosen in the "Add operation" combo box.</summary>
-        private string? _newPreExpOperation = "";
-        public string? NewPreExpOperation
-        {
-            get => _newPreExpOperation;
-            set => SetProperty(ref _newPreExpOperation, value);
         }
 
         // ──────────────────── Status ────────────────────
@@ -351,16 +298,12 @@ namespace DriverScanTester.ViewModels
         public ICommand DeleteProfileCommand { get; }
         public ICommand RefreshProfilesCommand { get; }
         public ICommand RefreshPathsCommand { get; }
-        public ICommand AddTravelRouteCommand { get; }
-        public ICommand RemoveTravelRouteCommand { get; }
-        public ICommand MoveTravelRouteUpCommand { get; }
-        public ICommand MoveTravelRouteDownCommand { get; }
+        public ICommand AddFlowStepCommand { get; }
+        public ICommand RemoveFlowStepCommand { get; }
+        public ICommand MoveFlowStepUpCommand { get; }
+        public ICommand MoveFlowStepDownCommand { get; }
         public ICommand AddRepotPathCommand { get; }
         public ICommand RemoveRepotPathCommand { get; }
-        public ICommand MoveRepotPathUpCommand { get; }
-        public ICommand MoveRepotPathDownCommand { get; }
-        public ICommand AddPreExpOperationCommand { get; }
-        public ICommand RemovePreExpOperationCommand { get; }
 
         // ──────────────────── Implementation ────────────────────
 
@@ -388,20 +331,12 @@ namespace DriverScanTester.ViewModels
                 MaxTeleportRetries = BotConstants.Repot.MaxTeleportRetries,
                 WindowOffsetX = 0,
                 WindowOffsetY = 0,
-                CityToRepotPaths = new List<BotRouteStep> { new BotRouteStep() },
-                TravelToExpRoutes = new List<TravelRouteStep>
+                FlowSteps = new List<BotFlowStep>
                 {
-                    new TravelRouteStep
-                    {
-                        CompletionMode = TravelRouteCompletionMode.FinalWaypoint,
-                        StartDelayMs = 0,
-                        ExpectedDestinationMapNumber = 0
-                    }
-                },
-                ExpLoop = new BotRouteStep(),
-                PreExpOperations = new List<string>()
+                    new BotFlowStep { Type = BotFlowStepType.Path }
+                }
             };
-            StatusText = "Created new profile. Fill in the three stages and click Save.";
+            StatusText = "Created new profile. Build your flow and click Save.";
         }
 
         private void SaveProfile()
@@ -420,29 +355,23 @@ namespace DriverScanTester.ViewModels
 
             // 1. Copy editor values into the profile model
             CurrentProfile.Name = ProfileName;
-            CurrentProfile.CityToRepotPaths = CityToRepotPaths
-                .Select(r => new BotRouteStep
+            CurrentProfile.FlowSteps = FlowSteps
+                .Select(s => new BotFlowStep
                 {
-                    PathFile = r.PathFile,
-                    StartDelayMs = r.StartDelayMs
+                    Type = s.Type,
+                    PathFile = s.PathFile ?? "",
+                    StartDelayMs = s.StartDelayMs,
+                    CompletionMode = s.CompletionMode,
+                    ExpectedDestinationMapNumber = s.ExpectedDestinationMapNumber,
+                    OperationName = s.OperationName ?? "",
+                    RepotPaths = s.RepotPaths
+                        .Select(rp => new BotRouteStep
+                        {
+                            PathFile = rp.PathFile,
+                            StartDelayMs = rp.StartDelayMs
+                        })
+                        .ToList()
                 })
-                .ToList();
-            CurrentProfile.TravelToExpRoutes = TravelToExpRoutes
-                .Select(r => new TravelRouteStep
-                {
-                    PathFile = r.PathFile,
-                    StartDelayMs = r.StartDelayMs,
-                    CompletionMode = r.CompletionMode,
-                    ExpectedDestinationMapNumber = r.ExpectedDestinationMapNumber,
-                    OperationBefore = r.OperationBefore,
-                    OperationAfter = r.OperationAfter
-                })
-                .ToList();
-            CurrentProfile.ExpLoop ??= new BotRouteStep();
-            CurrentProfile.ExpLoop.PathFile = ExpLoop.PathFile;
-            CurrentProfile.ExpLoop.StartDelayMs = ExpLoop.StartDelayMs;
-            CurrentProfile.PreExpOperations = PreExpOperations
-                .Where(op => !string.IsNullOrWhiteSpace(op))
                 .ToList();
 
             // 2. Validate the complete model (one pass, all errors reported)
@@ -489,7 +418,7 @@ namespace DriverScanTester.ViewModels
             }
 
             CurrentProfile = profile;
-            StatusText = $"Loaded profile '{profile.Name}'.";
+            StatusText = $"Loaded profile '{profile.Name}' ({profile.FlowSteps?.Count ?? 0} flow steps).";
         }
 
         private void DeleteSelectedProfile()
@@ -582,14 +511,19 @@ namespace DriverScanTester.ViewModels
 
         private void RefreshPaths()
         {
-            // Capture every configured path and the route selection before clearing the list.
-            // Clearing a bound ComboBox ItemsSource writes null back into the SelectedItem,
-            // so the paths and the selection must be restored after the collection is repopulated.
-            BotRouteStepViewModel? selectedRepotPath = SelectedRepotPath;
-            var repotPaths = CityToRepotPaths.Select(p => p.PathFile).ToList();
-            TravelRouteStepViewModel? selectedRoute = SelectedTravelRoute;
-            var routePaths = TravelToExpRoutes.Select(r => r.PathFile).ToList();
-            string expLoopPath = ExpLoop.PathFile;
+            // Capture every configured path string before clearing the list. Clearing a
+            // bound ComboBox ItemsSource writes null back into the SelectedItem, so all
+            // path strings and selections must be restored after the collection is rebuilt.
+            var flowStepPaths = FlowSteps
+                .Select(s => new
+                {
+                    Step = s,
+                    Path = s.PathFile,
+                    RepotPaths = s.RepotPaths.Select(rp => rp.PathFile).ToList()
+                })
+                .ToList();
+            BotFlowStepViewModel? selectedStep = SelectedFlowStep;
+            BotRouteStepViewModel? selectedRepotPath = SelectedFlowStep?.SelectedRepotPath;
 
             AvailablePaths.Clear();
             if (!Directory.Exists(PATH_DIR))
@@ -604,13 +538,17 @@ namespace DriverScanTester.ViewModels
 
             // Restore the exact stored strings, including paths that no longer exist in
             // SavedPaths, so validation can still report them.
-            for (int i = 0; i < repotPaths.Count && i < CityToRepotPaths.Count; i++)
-                CityToRepotPaths[i].PathFile = repotPaths[i];
-            for (int i = 0; i < routePaths.Count && i < TravelToExpRoutes.Count; i++)
-                TravelToExpRoutes[i].PathFile = routePaths[i];
-            ExpLoop.PathFile = expLoopPath;
-            SelectedRepotPath = selectedRepotPath;
-            SelectedTravelRoute = selectedRoute;
+            foreach (var captured in flowStepPaths)
+            {
+                captured.Step.PathFile = captured.Path;
+                for (int i = 0; i < captured.RepotPaths.Count && i < captured.Step.RepotPaths.Count; i++)
+                    captured.Step.RepotPaths[i].PathFile = captured.RepotPaths[i];
+            }
+            if (selectedStep != null)
+            {
+                SelectedFlowStep = selectedStep;
+                selectedStep.SelectedRepotPath = selectedRepotPath;
+            }
         }
 
         private void OnProfileSelectionChanged()
@@ -625,267 +563,197 @@ namespace DriverScanTester.ViewModels
 
         private void LoadProfileIntoEditor()
         {
-            CityToRepotPaths.Clear();
-            TravelToExpRoutes.Clear();
+            FlowSteps.Clear();
 
             if (CurrentProfile == null)
             {
-                ExpLoop.PathFile = "";
-                ExpLoop.StartDelayMs = 0;
-                SelectedRepotPath = null;
-                SelectedTravelRoute = null;
+                SelectedFlowStep = null;
                 return;
             }
 
-            foreach (var step in CurrentProfile.CityToRepotPaths ?? new List<BotRouteStep>())
+            foreach (var step in CurrentProfile.FlowSteps ?? new List<BotFlowStep>())
             {
-                CityToRepotPaths.Add(new BotRouteStepViewModel
+                var vm = new BotFlowStepViewModel
                 {
+                    Type = step.Type,
                     PathFile = step.PathFile ?? "",
-                    StartDelayMs = step.StartDelayMs
-                });
-            }
-            // Loading selects the first repot path.
-            SelectedRepotPath = CityToRepotPaths.FirstOrDefault();
-
-            foreach (var r in CurrentProfile.TravelToExpRoutes ?? new List<TravelRouteStep>())
-            {
-                TravelToExpRoutes.Add(new TravelRouteStepViewModel
+                    StartDelayMs = step.StartDelayMs,
+                    CompletionMode = step.CompletionMode,
+                    ExpectedDestinationMapNumber = step.ExpectedDestinationMapNumber,
+                    OperationName = step.OperationName ?? ""
+                };
+                foreach (var rp in step.RepotPaths ?? new List<BotRouteStep>())
                 {
-                    PathFile = r.PathFile ?? "",
-                    StartDelayMs = r.StartDelayMs,
-                    CompletionMode = r.CompletionMode,
-                    ExpectedDestinationMapNumber = r.ExpectedDestinationMapNumber,
-                    OperationBefore = r.OperationBefore ?? "",
-                    OperationAfter = r.OperationAfter ?? ""
-                });
+                    vm.RepotPaths.Add(new BotRouteStepViewModel
+                    {
+                        PathFile = rp.PathFile ?? "",
+                        StartDelayMs = rp.StartDelayMs
+                    });
+                }
+                FlowSteps.Add(vm);
             }
-            // Loading selects the first Go to EXP path.
-            SelectedTravelRoute = TravelToExpRoutes.FirstOrDefault();
-
-            PreExpOperations.Clear();
-            foreach (var op in CurrentProfile.PreExpOperations ?? new List<string>())
-            {
-                if (!string.IsNullOrWhiteSpace(op))
-                    PreExpOperations.Add(op);
-            }
-            SelectedPreExpOperation = PreExpOperations.FirstOrDefault();
-
-            ExpLoop.PathFile = CurrentProfile.ExpLoop?.PathFile ?? "";
-            ExpLoop.StartDelayMs = CurrentProfile.ExpLoop?.StartDelayMs ?? 0;
+            // Loading selects the first flow step.
+            SelectedFlowStep = FlowSteps.FirstOrDefault();
         }
 
-        // ── Stage 1: Repot path management ──
+        // ── Flow step management ──
+
+        private void AddFlowStep()
+        {
+            if (CurrentProfile == null)
+            {
+                StatusText = "No profile loaded. Create or load a profile first.";
+                return;
+            }
+
+            var step = new BotFlowStepViewModel();
+
+            // Insert after the currently selected step when possible, otherwise append.
+            if (SelectedFlowStep != null)
+            {
+                int index = FlowSteps.IndexOf(SelectedFlowStep);
+                FlowSteps.Insert(index + 1, step);
+            }
+            else
+            {
+                FlowSteps.Add(step);
+            }
+
+            SelectedFlowStep = step;
+            CommandManager.InvalidateRequerySuggested();
+            StatusText = $"Added flow step {FlowSteps.Count}.";
+        }
+
+        private bool CanRemoveFlowStep => SelectedFlowStep != null && FlowSteps.Count > 1;
+
+        private void RemoveFlowStep()
+        {
+            if (SelectedFlowStep == null) return;
+            if (FlowSteps.Count <= 1) return; // the profile must always keep at least one step
+
+            int index = FlowSteps.IndexOf(SelectedFlowStep);
+            FlowSteps.RemoveAt(index);
+
+            // Select the nearest remaining step.
+            SelectedFlowStep = FlowSteps[Math.Min(index, FlowSteps.Count - 1)];
+            CommandManager.InvalidateRequerySuggested();
+            StatusText = $"Removed flow step {index + 1}.";
+        }
+
+        private bool CanMoveFlowStep(int direction)
+        {
+            if (SelectedFlowStep == null) return false;
+            int index = FlowSteps.IndexOf(SelectedFlowStep);
+            int newIndex = index + direction;
+            return newIndex >= 0 && newIndex < FlowSteps.Count;
+        }
+
+        private void MoveFlowStep(int direction)
+        {
+            if (SelectedFlowStep == null) return;
+
+            int oldIndex = FlowSteps.IndexOf(SelectedFlowStep);
+            int newIndex = oldIndex + direction;
+            if (newIndex < 0 || newIndex >= FlowSteps.Count) return;
+
+            // The item reference is preserved, so the selection stays on the same step.
+            FlowSteps.Move(oldIndex, newIndex);
+            CommandManager.InvalidateRequerySuggested();
+        }
+
+        // ── Repot step: repot path management ──
+
+        private bool CanAddRepotPath =>
+            CurrentProfile != null && SelectedFlowStep is { Type: BotFlowStepType.Repot };
+
+        private bool CanRemoveRepotPath =>
+            SelectedFlowStep is { Type: BotFlowStepType.Repot } s &&
+            s.SelectedRepotPath != null &&
+            s.RepotPaths.Count > 1;
 
         private void AddRepotPath()
         {
-            if (CurrentProfile == null)
+            if (SelectedFlowStep is not { Type: BotFlowStepType.Repot } repotStep)
             {
-                StatusText = "No profile loaded. Create or load a profile first.";
+                StatusText = "Select a Repot flow step first.";
                 return;
             }
 
-            var step = new BotRouteStepViewModel();
+            var repotPath = new BotRouteStepViewModel();
 
-            // Insert after the currently selected path when possible, otherwise append.
-            if (SelectedRepotPath != null)
+            // Insert after the currently selected repot path when possible, otherwise append.
+            if (repotStep.SelectedRepotPath != null)
             {
-                int index = CityToRepotPaths.IndexOf(SelectedRepotPath);
-                CityToRepotPaths.Insert(index + 1, step);
+                int index = repotStep.RepotPaths.IndexOf(repotStep.SelectedRepotPath);
+                repotStep.RepotPaths.Insert(index + 1, repotPath);
             }
             else
             {
-                CityToRepotPaths.Add(step);
+                repotStep.RepotPaths.Add(repotPath);
             }
 
-            SelectedRepotPath = step;
+            repotStep.SelectedRepotPath = repotPath;
             CommandManager.InvalidateRequerySuggested();
-            StatusText = $"Added repot path {CityToRepotPaths.Count}.";
+            StatusText = $"Added repot path {repotStep.RepotPaths.Count}.";
         }
-
-        private bool CanRemoveRepotPath =>
-            SelectedRepotPath != null && CityToRepotPaths.Count > 1;
 
         private void RemoveRepotPath()
         {
-            if (SelectedRepotPath == null) return;
-            if (CityToRepotPaths.Count <= 1) return; // the profile must always keep at least one repot path
+            if (SelectedFlowStep is not { Type: BotFlowStepType.Repot } repotStep) return;
+            if (repotStep.SelectedRepotPath == null) return;
+            if (repotStep.RepotPaths.Count <= 1) return; // keep at least one repot path
 
-            int index = CityToRepotPaths.IndexOf(SelectedRepotPath);
-            CityToRepotPaths.RemoveAt(index);
+            int index = repotStep.RepotPaths.IndexOf(repotStep.SelectedRepotPath);
+            repotStep.RepotPaths.RemoveAt(index);
 
             // Select the nearest remaining path.
-            SelectedRepotPath = CityToRepotPaths[Math.Min(index, CityToRepotPaths.Count - 1)];
+            repotStep.SelectedRepotPath = repotStep.RepotPaths[Math.Min(index, repotStep.RepotPaths.Count - 1)];
             CommandManager.InvalidateRequerySuggested();
             StatusText = $"Removed repot path {index + 1}.";
-        }
-
-        private bool CanMoveRepotPath(int direction)
-        {
-            if (SelectedRepotPath == null) return false;
-            int index = CityToRepotPaths.IndexOf(SelectedRepotPath);
-            int newIndex = index + direction;
-            return newIndex >= 0 && newIndex < CityToRepotPaths.Count;
-        }
-
-        private void MoveRepotPath(int direction)
-        {
-            if (SelectedRepotPath == null) return;
-
-            int oldIndex = CityToRepotPaths.IndexOf(SelectedRepotPath);
-            int newIndex = oldIndex + direction;
-            if (newIndex < 0 || newIndex >= CityToRepotPaths.Count) return;
-
-            // The item reference is preserved, so the selection stays on the same path.
-            CityToRepotPaths.Move(oldIndex, newIndex);
-            CommandManager.InvalidateRequerySuggested();
-        }
-
-        // ── Custom operations (pre-EXP) management ──
-
-        private void AddPreExpOperation()
-        {
-            if (CurrentProfile == null)
-            {
-                StatusText = "No profile loaded. Create or load a profile first.";
-                return;
-            }
-
-            string op = NewPreExpOperation?.Trim() ?? "";
-            if (string.IsNullOrWhiteSpace(op))
-            {
-                StatusText = "Select an operation name first.";
-                return;
-            }
-
-            if (PreExpOperations.Contains(op))
-            {
-                StatusText = $"Operation '{op}' is already in the list.";
-                return;
-            }
-
-            PreExpOperations.Add(op);
-            SelectedPreExpOperation = op;
-            NewPreExpOperation = "";
-            CommandManager.InvalidateRequerySuggested();
-            StatusText = $"Added pre-EXP operation '{op}'.";
-        }
-
-        private bool CanRemovePreExpOperation => SelectedPreExpOperation != null;
-
-        private void RemovePreExpOperation()
-        {
-            if (SelectedPreExpOperation == null) return;
-
-            string op = SelectedPreExpOperation;
-            PreExpOperations.Remove(op);
-
-            SelectedPreExpOperation = PreExpOperations.FirstOrDefault();
-            CommandManager.InvalidateRequerySuggested();
-            StatusText = $"Removed pre-EXP operation '{op}'.";
-        }
-
-        // ── Stage 2: Go to EXP path management ──
-
-        private void AddTravelRoute()
-        {
-            if (CurrentProfile == null)
-            {
-                StatusText = "No profile loaded. Create or load a profile first.";
-                return;
-            }
-
-            var route = new TravelRouteStepViewModel
-            {
-                CompletionMode = TravelRouteCompletionMode.FinalWaypoint,
-                StartDelayMs = 0,
-                ExpectedDestinationMapNumber = 0
-            };
-
-            // Insert after the currently selected path when possible, otherwise append.
-            if (SelectedTravelRoute != null)
-            {
-                int index = TravelToExpRoutes.IndexOf(SelectedTravelRoute);
-                TravelToExpRoutes.Insert(index + 1, route);
-            }
-            else
-            {
-                TravelToExpRoutes.Add(route);
-            }
-
-            SelectedTravelRoute = route;
-            CommandManager.InvalidateRequerySuggested();
-            StatusText = $"Added Go to EXP path {TravelToExpRoutes.Count}.";
-        }
-
-        private bool CanRemoveTravelRoute =>
-            SelectedTravelRoute != null && TravelToExpRoutes.Count > 1;
-
-        private void RemoveTravelRoute()
-        {
-            if (SelectedTravelRoute == null) return;
-            if (TravelToExpRoutes.Count <= 1) return; // the profile must always keep at least one path
-
-            int index = TravelToExpRoutes.IndexOf(SelectedTravelRoute);
-            TravelToExpRoutes.RemoveAt(index);
-
-            // Select the nearest remaining path.
-            SelectedTravelRoute = TravelToExpRoutes[Math.Min(index, TravelToExpRoutes.Count - 1)];
-            CommandManager.InvalidateRequerySuggested();
-            StatusText = $"Removed Go to EXP path {index + 1}.";
-        }
-
-        private bool CanMoveTravelRoute(int direction)
-        {
-            if (SelectedTravelRoute == null) return false;
-            int index = TravelToExpRoutes.IndexOf(SelectedTravelRoute);
-            int newIndex = index + direction;
-            return newIndex >= 0 && newIndex < TravelToExpRoutes.Count;
-        }
-
-        private void MoveTravelRoute(int direction)
-        {
-            if (SelectedTravelRoute == null) return;
-
-            int oldIndex = TravelToExpRoutes.IndexOf(SelectedTravelRoute);
-            int newIndex = oldIndex + direction;
-            if (newIndex < 0 || newIndex >= TravelToExpRoutes.Count) return;
-
-            // The item reference is preserved, so the selection stays on the same path.
-            TravelToExpRoutes.Move(oldIndex, newIndex);
-            CommandManager.InvalidateRequerySuggested();
         }
     }
 
     // ──────────────────── Helper ViewModels ────────────────────
 
     /// <summary>
-    /// Editor representation of one path step: a saved path reference
-    /// plus the startup delay in milliseconds.
+    /// Editor representation of one flow step. Which fields are used depends on Type.
     /// </summary>
-    public class BotRouteStepViewModel : BaseViewModel
+    public sealed class BotFlowStepViewModel : BaseViewModel
     {
-        private string _pathFile = "";
-        public string PathFile
+        private BotFlowStepType _type = BotFlowStepType.Path;
+        public BotFlowStepType Type
         {
-            get => _pathFile;
-            set => SetProperty(ref _pathFile, value);
+            get => _type;
+            set
+            {
+                if (SetProperty(ref _type, value))
+                {
+                    OnPropertyChanged(nameof(PathColumnVisibility));
+                    OnPropertyChanged(nameof(OperationColumnVisibility));
+                    OnPropertyChanged(nameof(PathOnlyColumnVisibility));
+                    CommandManager.InvalidateRequerySuggested();
+                }
+            }
         }
 
-        private int _startDelayMs = 0;
-        public int StartDelayMs
-        {
-            get => _startDelayMs;
-            set => SetProperty(ref _startDelayMs, value);
-        }
-    }
+        /// <summary>Visible for Path and ExpLoop steps (the Path combo column).</summary>
+        public System.Windows.Visibility PathColumnVisibility =>
+            (_type == BotFlowStepType.Path || _type == BotFlowStepType.ExpLoop)
+                ? System.Windows.Visibility.Visible
+                : System.Windows.Visibility.Collapsed;
 
-    /// <summary>
-    /// Editor representation of one Go to EXP path: a saved path reference,
-    /// a startup delay, the completion mode and the expected destination map.
-    /// </summary>
-    public sealed class TravelRouteStepViewModel : BaseViewModel
-    {
+        /// <summary>Visible for Operation steps (the Operation combo column).</summary>
+        public System.Windows.Visibility OperationColumnVisibility =>
+            _type == BotFlowStepType.Operation
+                ? System.Windows.Visibility.Visible
+                : System.Windows.Visibility.Collapsed;
+
+        /// <summary>Visible only for Path steps (Finish-when / Dest-map columns).</summary>
+        public System.Windows.Visibility PathOnlyColumnVisibility =>
+            _type == BotFlowStepType.Path
+                ? System.Windows.Visibility.Visible
+                : System.Windows.Visibility.Collapsed;
+
         private string _pathFile = "";
         public string PathFile
         {
@@ -924,18 +792,45 @@ namespace DriverScanTester.ViewModels
             set => SetProperty(ref _expectedDestinationMapNumber, value);
         }
 
-        private string _operationBefore = "";
-        public string OperationBefore
+        private string _operationName = "";
+        public string OperationName
         {
-            get => _operationBefore;
-            set => SetProperty(ref _operationBefore, value);
+            get => _operationName;
+            set => SetProperty(ref _operationName, value);
         }
 
-        private string _operationAfter = "";
-        public string OperationAfter
+        /// <summary>Repot paths for a Repot step (cycled on each repot).</summary>
+        public ObservableCollection<BotRouteStepViewModel> RepotPaths { get; } = new();
+
+        private BotRouteStepViewModel? _selectedRepotPath;
+        public BotRouteStepViewModel? SelectedRepotPath
         {
-            get => _operationAfter;
-            set => SetProperty(ref _operationAfter, value);
+            get => _selectedRepotPath;
+            set
+            {
+                if (SetProperty(ref _selectedRepotPath, value))
+                    CommandManager.InvalidateRequerySuggested();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Editor representation of one repot path: a saved path reference plus startup delay.
+    /// </summary>
+    public class BotRouteStepViewModel : BaseViewModel
+    {
+        private string _pathFile = "";
+        public string PathFile
+        {
+            get => _pathFile;
+            set => SetProperty(ref _pathFile, value);
+        }
+
+        private int _startDelayMs = 0;
+        public int StartDelayMs
+        {
+            get => _startDelayMs;
+            set => SetProperty(ref _startDelayMs, value);
         }
     }
 }
