@@ -702,6 +702,32 @@ namespace DriverScanTester
             /// </summary>
             public const int PostTeleportUiLoadMs = 10000;
 
+            // ── Start position check / protection ──
+            /// <summary>
+            /// Number of verification attempts for the start-position protection check
+            /// after the start teleport. When every attempt fails (map does not fit the
+            /// protected map or the player is not on the start position) the workflow
+            /// stops instead of starting.
+            /// </summary>
+            public const int StartProtectionVerifyAttempts = 3;
+
+            /// <summary>
+            /// Delay in ms between start-protection verification attempts. Kept very
+            /// short so the whole check reads like a real player: quick tap → instant
+            /// re-check. If the values are already correct the bot proceeds immediately.
+            /// </summary>
+            public const int StartProtectionRetryMs = 100;
+
+            /// <summary>
+            /// How long the W key is held during the post-teleport "position refresh"
+            /// tap. The game only refreshes the player position memory after the player
+            /// actually moves, so after a teleport the read stays stale until the player
+            /// takes a step. A very short W tap (like a real player's step) forces the
+            /// refresh without looking bot-like. The check runs immediately after the
+            /// tap — no settle wait.
+            /// </summary>
+            public const int StartProtectionNudgeKeyDownMs = 50;
+
             // ── Exp loop ──
             /// <summary>Interval in ms between repot condition checks during exp loop.</summary>
             public const int ExpLoopRepotCheckIntervalMs = 3000;

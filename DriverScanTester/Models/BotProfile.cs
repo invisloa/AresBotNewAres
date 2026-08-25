@@ -53,6 +53,38 @@ namespace DriverScanTester.Models
         /// <summary>If true, skip actual RepotSystem.Repot() and just log "dry run".</summary>
         public bool DryRunRepot { get; set; } = false;
 
+        // --- Start position check (protection) ---
+        /// <summary>
+        /// When true, the workflow verifies the player is standing on the profile's
+        /// start position (<see cref="StartPositionX"/>/<see cref="StartPositionY"/>)
+        /// before the flow starts. If the player is somewhere else, the bot uses the
+        /// town teleport scroll, waits for the game to settle (~10 s), then verifies
+        /// that the current map matches <see cref="ProtectionMapNumber"/> and that the
+        /// player is back on the start position. If the verification fails the bot
+        /// stops instead of starting the flow.
+        /// </summary>
+        public bool EnableStartPositionCheck { get; set; } = false;
+
+        /// <summary>Expected X coordinate of the player when the bot starts.</summary>
+        public int StartPositionX { get; set; } = 0;
+
+        /// <summary>Expected Y coordinate of the player when the bot starts.</summary>
+        public int StartPositionY { get; set; } = 0;
+
+        /// <summary>
+        /// The map number the player must be on after the start teleport (the
+        /// "protection" map, e.g. the town map). 0 disables the map check.
+        /// </summary>
+        public int ProtectionMapNumber { get; set; } = 0;
+
+        /// <summary>
+        /// Tolerance in game tiles for the start-position comparison. After a teleport
+        /// the game only refreshes the player position memory once the player moves, so
+        /// the bot nudges the player a few steps and then accepts any position within
+        /// this distance of the start coordinates (default 5 tiles).
+        /// </summary>
+        public int StartPositionTolerance { get; set; } = 5;
+
         // --- Loot priority mode ---
         /// <summary>
         /// When true, looting outranks combat and waypoint movement during the ExpLoop step.

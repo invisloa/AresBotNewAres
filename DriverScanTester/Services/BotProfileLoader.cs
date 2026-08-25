@@ -407,7 +407,19 @@ namespace DriverScanTester.Services
                     switch (step.Type)
                     {
                         case BotFlowStepType.Path:
-                            ValidatePathReference(errors, step.PathFile, step.StartDelayMs, stepLabel);
+                            if (step.Routes != null && step.Routes.Count > 0)
+                            {
+                                for (int r = 0; r < step.Routes.Count; r++)
+                                {
+                                    var route = step.Routes[r];
+                                    string routeLabel = $"{stepLabel} route {r + 1}";
+                                    ValidatePathStep(errors, route, routeLabel);
+                                }
+                            }
+                            else
+                            {
+                                ValidatePathReference(errors, step.PathFile, step.StartDelayMs, stepLabel);
+                            }
                             switch (step.CompletionMode)
                             {
                                 case TravelRouteCompletionMode.FinalWaypoint:
@@ -425,7 +437,19 @@ namespace DriverScanTester.Services
                             break;
 
                         case BotFlowStepType.ExpLoop:
-                            ValidatePathReference(errors, step.PathFile, step.StartDelayMs, stepLabel);
+                            if (step.Routes != null && step.Routes.Count > 0)
+                            {
+                                for (int r = 0; r < step.Routes.Count; r++)
+                                {
+                                    var route = step.Routes[r];
+                                    string routeLabel = $"{stepLabel} route {r + 1}";
+                                    ValidatePathStep(errors, route, routeLabel);
+                                }
+                            }
+                            else
+                            {
+                                ValidatePathReference(errors, step.PathFile, step.StartDelayMs, stepLabel);
+                            }
                             break;
 
                         case BotFlowStepType.Operation:
@@ -464,21 +488,43 @@ namespace DriverScanTester.Services
 
                 // Guard: the ExpLoop is the looping hunting route. Reusing one of the
                 // flow Path steps here makes the bot run the travel route forever
-                // instead of hunting the camp.
+                // instead of hunting the camp. Route groups are checked too.
                 var expLoopStep = profile.FlowSteps.FirstOrDefault(s => s != null && s.Type == BotFlowStepType.ExpLoop);
-                if (expLoopStep != null && !string.IsNullOrWhiteSpace(expLoopStep.PathFile))
+                if (expLoopStep != null)
                 {
-                    string expLoopFile = NormalizePathFileName(expLoopStep.PathFile);
-                    foreach (var step in profile.FlowSteps)
+                    var expLoopFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    if (!string.IsNullOrWhiteSpace(expLoopStep.PathFile))
+                        expLoopFiles.Add(NormalizePathFileName(expLoopStep.PathFile));
+                    foreach (var r in expLoopStep.Routes ?? new List<BotRouteStep>())
                     {
-                        if (step != null &&
-                            step.Type == BotFlowStepType.Path &&
-                            !string.IsNullOrWhiteSpace(step.PathFile) &&
-                            string.Equals(expLoopFile, NormalizePathFileName(step.PathFile),
-                                StringComparison.OrdinalIgnoreCase))
+                        if (r != null && !string.IsNullOrWhiteSpace(r.PathFile))
+                            expLoopFiles.Add(NormalizePathFileName(r.PathFile));
+                    }
+
+                    if (expLoopFiles.Count > 0)
+                    {
+                        foreach (var step in profile.FlowSteps)
                         {
-                            errors.Add($"Flow: ExpLoop path '{expLoopStep.PathFile}' is also used as a Path step. The ExpLoop must be the looping hunting path, not a travel route.");
-                            break;
+                            if (step == null || step.Type != BotFlowStepType.Path)
+                                continue;
+
+                            var pathFiles = new List<string>();
+                            if (!string.IsNullOrWhiteSpace(step.PathFile))
+                                pathFiles.Add(step.PathFile);
+                            foreach (var r in step.Routes ?? new List<BotRouteStep>())
+                            {
+                                if (r != null && !string.IsNullOrWhiteSpace(r.PathFile))
+                                    pathFiles.Add(r.PathFile);
+                            }
+
+                            foreach (var pathFile in pathFiles)
+                            {
+                                if (expLoopFiles.Contains(NormalizePathFileName(pathFile)))
+                                {
+                                    errors.Add($"Flow: ExpLoop path '{pathFile}' is also used as a Path step. The ExpLoop must be the looping hunting path, not a travel route.");
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
@@ -497,6 +543,12 @@ namespace DriverScanTester.Services
                 errors.Add("MaxWeightRatio should be between 0 and 1.");
             if (profile.MaxTeleportRetries < 0)
                 errors.Add("MaxTeleportRetries is negative.");
+
+            // --- Start position check / protection ---
+            if (profile.EnableStartPositionCheck && profile.ProtectionMapNumber <= 0)
+                errors.Add("Start position check: protected map number must be greater than 0. Set the map the player must be on after the start teleport.");
+            if (profile.StartPositionTolerance < 0)
+                errors.Add("Start position check: start position tolerance cannot be negative.");
 
             return errors;
         }

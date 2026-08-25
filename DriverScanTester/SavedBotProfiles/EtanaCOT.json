@@ -1,0 +1,59 @@
+{
+  "Name": "EtanaCOT",
+  "FlowSteps": [
+    {
+      "Type": 1,
+      "PathFile": "",
+      "StartDelayMs": 0,
+      "Routes": [],
+      "CompletionMode": 0,
+      "ExpectedDestinationMapNumber": 0,
+      "OperationName": "",
+      "RepotPaths": [
+        {
+          "PathFile": "Etana repot 01.json",
+          "StartDelayMs": 1111
+        },
+        {
+          "PathFile": "Etana repot 02.json",
+          "StartDelayMs": 1111
+        }
+      ]
+    },
+    {
+      "Type": 0,
+      "PathFile": "Etana Go COT 01.json",
+      "StartDelayMs": 555,
+      "Routes": [
+        {
+          "PathFile": "Etana Go COT 01.json",
+          "StartDelayMs": 555
+        },
+        {
+          "PathFile": "Etana Go COT 02.json",
+          "StartDelayMs": 555
+        }
+      ],
+      "CompletionMode": 0,
+      "ExpectedDestinationMapNumber": 0,
+      "OperationName": "",
+      "RepotPaths": []
+    }
+  ],
+  "MinHpPotions": 10,
+  "MinManaPotions": 10,
+  "MaxWeightRatio": 0.95,
+  "MinHp": 500,
+  "MinMana": 100,
+  "HpBuyTarget": 25,
+  "ManaBuyTarget": 15,
+  "RedBuyTarget": 4,
+  "WhiteBuyTarget": 4,
+  "DryRunRepot": false,
+  "LootPriority": false,
+  "TeleportKey": 54,
+  "TeleportScanCode": 7,
+  "MaxTeleportRetries": 3,
+  "WindowOffsetX": 0,
+  "WindowOffsetY": 0
+}

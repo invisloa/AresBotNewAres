@@ -35,10 +35,11 @@ namespace DriverScanTester.Models
     /// <summary>
     /// One step of a profile's linear flow. Which fields are used depends on
     /// <see cref="Type"/>:
-    ///   Path    → PathFile, StartDelayMs, CompletionMode, ExpectedDestinationMapNumber
-    ///   Repot   → RepotPaths (cycled on each repot)
+    ///   Path      → Routes (route group, cycled) or single PathFile, StartDelayMs,
+    ///               CompletionMode, ExpectedDestinationMapNumber
+    ///   Repot     → RepotPaths (cycled on each repot)
     ///   Operation → OperationName
-    ///   ExpLoop → PathFile, StartDelayMs
+    ///   ExpLoop   → Routes (route group, cycled) or single PathFile, StartDelayMs
     /// </summary>
     public sealed class BotFlowStep
     {
@@ -46,11 +47,29 @@ namespace DriverScanTester.Models
         public BotFlowStepType Type { get; set; } = BotFlowStepType.Path;
 
         // ── Path / ExpLoop ──
-        /// <summary>Filename of the saved segment in SavedPaths (with or without .json).</summary>
+        /// <summary>
+        /// Filename of the saved segment in SavedPaths (with or without .json).
+        /// Used as the single route when <see cref="Routes"/> is empty.
+        /// </summary>
         public string PathFile { get; set; } = "";
 
-        /// <summary>Delay in milliseconds to wait before this step starts. Zero means no wait.</summary>
+        /// <summary>
+        /// Delay in milliseconds to wait before this step starts. Zero means no wait.
+        /// Used as the single-route delay when <see cref="Routes"/> is empty.
+        /// </summary>
         public int StartDelayMs { get; set; }
+
+        // ── Path / ExpLoop route group ──
+        /// <summary>
+        /// The pool of alternative routes for this step. Each time the flow executes this
+        /// step, the NEXT route in the list is used (wrapping around), so the step's route
+        /// group rotates one route per flow cycle: e.g. repot1 → repot2 → repot3 → repot1 ...
+        /// Together with other grouped steps (e.g. an ExpLoop group exp1/exp2/exp3) the
+        /// rotation stays in lockstep, so cycle 1 uses repot1 + exp1, cycle 2 uses
+        /// repot2 + exp2, and so on. When empty, the step falls back to the single route
+        /// from <see cref="PathFile"/> and <see cref="StartDelayMs"/>.
+        /// </summary>
+        public List<BotRouteStep> Routes { get; set; } = new();
 
         // ── Path only ──
         /// <summary>How a Path step completes: final waypoint or expected destination map.</summary>

@@ -62,6 +62,16 @@ namespace DriverScanTester.Services
         /// </summary>
         private int _repotPathIndex;
 
+        /// <summary>
+        /// Rotation index per flow step for its route group (<see cref="BotFlowStep.Routes"/>).
+        /// Each time a step with a route group completes, its index advances (wrapping
+        /// around), so a group like exp1 → exp2 → exp3 rotates one route per flow cycle.
+        /// Steps with the same group size (e.g. a Repot step with repot1/2/3 and an
+        /// ExpLoop step with exp1/2/3) stay in lockstep: cycle 1 uses repot1 + exp1,
+        /// cycle 2 uses repot2 + exp2, etc.
+        /// </summary>
+        private readonly Dictionary<BotFlowStep, int> _stepRouteIndex = new();
+
         /// <summary>Consecutive repot-path failures. After 3 the workflow fails
         /// visibly instead of retrying forever (e.g. the player cannot move in the city).</summary>
         private int _moveToRepotRetryCount;
@@ -171,6 +181,7 @@ namespace DriverScanTester.Services
             var token = _cts.Token;
             _flowIndex = 0;
             _repotPathIndex = 0;
+            _stepRouteIndex.Clear();
             _moveToRepotRetryCount = 0;
             _pathStepRetryCount = 0;
             _teleportRetryCount = 0;
@@ -189,6 +200,18 @@ namespace DriverScanTester.Services
             Task? healTask = null;
             try
             {
+                // ── Start position protection gate ──
+                // Verifies the player stands on the profile's start position; if not,
+                // uses the town teleport scroll and then verifies map + position against
+                // the profile's protection settings. On failure the bot stops instead
+                // of starting the flow (the finally block below performs the cleanup).
+                if (!await RunStartProtectionAsync(token))
+                {
+                    _log("[Coordinator] Start protection failed — the bot will not start.");
+                    CurrentPhase = BotPhase.Failed;
+                    return;
+                }
+
                 healTask = Task.Run(async () =>
                 {
                     try
@@ -342,16 +365,30 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Path step: runs one saved segment once (final waypoint or expected map).
+        /// When the step has a route group (<see cref="BotFlowStep.Routes"/>), the next
+        /// route of the group is used on every execution (rotating per flow cycle).
         /// </summary>
         private async Task<bool> ExecutePathStepAsync(BotFlowStep step, CancellationToken token)
         {
-            var result = await RunTravelRouteAsync(step, _flowIndex + 1, _profile.FlowSteps.Count, token);
+            var pool = GetRoutePool(step);
+            if (pool == null)
+            {
+                _log("[Path] Path step has no route configured. Failing.");
+                CurrentPhase = BotPhase.Failed;
+                return false;
+            }
+
+            var (route, routeIndex) = GetCurrentRoute(step, pool);
+            _log($"[Path] Using route {routeIndex + 1}/{pool.Count} — '{route.PathFile}'.");
+
+            var result = await RunTravelRouteAsync(step, route, _flowIndex + 1, _profile.FlowSteps.Count, token);
             if (token.IsCancellationRequested) return false;
 
             switch (result)
             {
                 case TravelRouteRunResult.Completed:
                     _pathStepRetryCount = 0;
+                    AdvanceRoute(step, pool);
                     _log("[Path] Step completed.");
                     return true;
 
@@ -505,25 +542,31 @@ namespace DriverScanTester.Services
         /// ExpLoop step: runs the looping hunting path (with loot collection) until the
         /// repot conditions are met or the player is detected in the city. Afterwards the
         /// bot returns to the city (if needed) and the flow restarts from the first step.
+        /// When the step has a route group (<see cref="BotFlowStep.Routes"/>), the next
+        /// route of the group is hunted on every flow cycle (rotating per cycle).
         /// </summary>
         private async Task<bool> ExecuteExpLoopStepAsync(BotFlowStep step, CancellationToken token)
         {
-            if (string.IsNullOrWhiteSpace(step.PathFile))
+            var pool = GetRoutePool(step);
+            if (pool == null)
             {
-                _log("[ExpLoop] ExpLoop step has no path. Failing.");
+                _log("[ExpLoop] ExpLoop step has no route configured. Failing.");
                 CurrentPhase = BotPhase.Failed;
                 return false;
             }
 
+            var (route, routeIndex) = GetCurrentRoute(step, pool);
+            _log($"[ExpLoop] Using route {routeIndex + 1}/{pool.Count} — '{route.PathFile}'.");
+
             // Wait once before starting the looping route (not on every cycle).
-            await WaitBeforeStepAsync(step.PathFile, step.StartDelayMs, "Exp Loop", token);
+            await WaitBeforeStepAsync(route.PathFile, route.StartDelayMs, "Exp Loop", token);
             if (token.IsCancellationRequested) return false;
 
-            _log($"[ExpLoop] Loading hunting path '{step.PathFile}'...");
-            var waypoints = _pathLoader.LoadSegment(step.PathFile);
+            _log($"[ExpLoop] Loading hunting path '{route.PathFile}'...");
+            var waypoints = _pathLoader.LoadSegment(route.PathFile);
             if (waypoints == null)
             {
-                _log($"[ExpLoop] Missing required segment '{step.PathFile}'. Cannot proceed.");
+                _log($"[ExpLoop] Missing required segment '{route.PathFile}'. Cannot proceed.");
                 CurrentPhase = BotPhase.Failed;
                 return false;
             }
@@ -642,6 +685,7 @@ namespace DriverScanTester.Services
             // The Repot step is responsible for returning to the city and refilling, so a
             // flow like Repot → ... → ExpLoop → Operation (after hunt) → Repot works:
             // after hunting, any following steps run, and the cycle returns to Repot.
+            AdvanceRoute(step, pool);
             _log("[ExpLoop] Advancing to the next flow step.");
             return true;
         }
@@ -688,16 +732,62 @@ namespace DriverScanTester.Services
                     string mode = step.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached
                         ? $"until map {step.ExpectedDestinationMapNumber}"
                         : "until last waypoint";
+                    if (step.Routes != null && step.Routes.Count > 0)
+                        return $"Path group ({step.Routes.Count} routes, {mode})";
                     return $"Path '{step.PathFile}' ({mode})";
                 case BotFlowStepType.Repot:
                     return $"Repot ({step.RepotPaths?.Count ?? 0} repot paths)";
                 case BotFlowStepType.Operation:
                     return $"Operation '{step.OperationName}'";
                 case BotFlowStepType.ExpLoop:
+                    if (step.Routes != null && step.Routes.Count > 0)
+                        return $"ExpLoop group ({step.Routes.Count} routes)";
                     return $"ExpLoop '{step.PathFile}'";
                 default:
                     return step.Type.ToString();
             }
+        }
+
+        /// <summary>
+        /// Returns the route pool of a Path/ExpLoop step: the step's route group
+        /// (<see cref="BotFlowStep.Routes"/>) when configured, otherwise the single route
+        /// derived from <see cref="BotFlowStep.PathFile"/> / <see cref="BotFlowStep.StartDelayMs"/>.
+        /// Returns null when no route is configured at all.
+        /// </summary>
+        private static List<BotRouteStep>? GetRoutePool(BotFlowStep step)
+        {
+            if (step.Routes != null && step.Routes.Count > 0)
+                return step.Routes;
+
+            if (string.IsNullOrWhiteSpace(step.PathFile))
+                return null;
+
+            return new List<BotRouteStep>
+            {
+                new BotRouteStep { PathFile = step.PathFile, StartDelayMs = step.StartDelayMs }
+            };
+        }
+
+        /// <summary>
+        /// Picks the next route of a step's route group without advancing the rotation.
+        /// Returns the route and its zero-based index for logging.
+        /// </summary>
+        private (BotRouteStep Route, int Index) GetCurrentRoute(BotFlowStep step, List<BotRouteStep> pool)
+        {
+            int index = _stepRouteIndex.TryGetValue(step, out int i) ? i : 0;
+            if (index < 0 || index >= pool.Count)
+                index = 0;
+            return (pool[index], index);
+        }
+
+        /// <summary>
+        /// Advances the rotation of a step's route group so the NEXT execution of the
+        /// step uses the following route (wrapping around at the end).
+        /// </summary>
+        private void AdvanceRoute(BotFlowStep step, List<BotRouteStep> pool)
+        {
+            int index = _stepRouteIndex.TryGetValue(step, out int i) ? i : 0;
+            _stepRouteIndex[step] = (index + 1) % pool.Count;
         }
 
         /// <summary>
@@ -758,13 +848,14 @@ namespace DriverScanTester.Services
         /// </summary>
         private async Task<TravelRouteRunResult> RunTravelRouteAsync(
             BotFlowStep step,
+            BotRouteStep route,
             int stepIndex,
             int stepCount,
             CancellationToken token)
         {
             try
             {
-                return await RunTravelRouteCoreAsync(step, stepIndex, stepCount, token);
+                return await RunTravelRouteCoreAsync(step, route, stepIndex, stepCount, token);
             }
             catch (OperationCanceledException)
             {
@@ -774,33 +865,34 @@ namespace DriverScanTester.Services
 
         private async Task<TravelRouteRunResult> RunTravelRouteCoreAsync(
             BotFlowStep step,
+            BotRouteStep route,
             int stepIndex,
             int stepCount,
             CancellationToken token)
         {
-            if (step == null || string.IsNullOrWhiteSpace(step.PathFile))
+            if (step == null || route == null || string.IsNullOrWhiteSpace(route.PathFile))
             {
                 _log($"[Path] Step {stepIndex}/{stepCount}: no path configured. Cannot proceed.");
                 return TravelRouteRunResult.MissingSegment;
             }
 
             // Startup delay (cancellable).
-            if (step.StartDelayMs > 0)
+            if (route.StartDelayMs > 0)
             {
-                _log($"[Path] Step {stepIndex}/{stepCount}: waiting {step.StartDelayMs} ms before start...");
-                await Task.Delay(step.StartDelayMs, token);
+                _log($"[Path] Step {stepIndex}/{stepCount}: waiting {route.StartDelayMs} ms before start...");
+                await Task.Delay(route.StartDelayMs, token);
             }
 
             _log($"[Path] Step {stepIndex}/{stepCount}:");
-            _log($"  Path='{step.PathFile}'");
+            _log($"  Path='{route.PathFile}'");
             _log($"  Completion={step.CompletionMode}");
             if (step.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached)
                 _log($"  DestinationMap={step.ExpectedDestinationMapNumber}");
 
-            var waypoints = _pathLoader.LoadSegment(step.PathFile);
+            var waypoints = _pathLoader.LoadSegment(route.PathFile);
             if (waypoints == null)
             {
-                _log($"[Path] Step {stepIndex}/{stepCount}: Missing required segment '{step.PathFile}'. Cannot proceed.");
+                _log($"[Path] Step {stepIndex}/{stepCount}: Missing required segment '{route.PathFile}'. Cannot proceed.");
                 return TravelRouteRunResult.MissingSegment;
             }
 
@@ -1013,6 +1105,98 @@ namespace DriverScanTester.Services
 
             _log($"[Path] Step {stepIndex}/{stepCount}: destination map {expectedMap} did not settle within {BotConstants.Delays.MapTransitionSettleTimeoutMs} ms.");
             return TravelRouteRunResult.InvalidMapState;
+        }
+
+        /// <summary>
+        /// Start-position protection gate, run once when the workflow starts.
+        ///
+        /// When the profile has <see cref="BotProfile.EnableStartPositionCheck"/> disabled
+        /// this returns immediately and the flow starts normally.
+        ///
+        /// When enabled and the player is NOT standing on the profile's start coordinates
+        /// (<see cref="BotProfile.StartPositionX"/>/<see cref="BotProfile.StartPositionY"/>,
+        /// within <see cref="BotProfile.StartPositionTolerance"/> tiles), the bot uses the
+        /// town teleport scroll, waits for the game to settle
+        /// (<see cref="BotConstants.Delays.PostTeleportUiLoadMs"/> — the ~10 s UI load
+        /// wait), then taps W very briefly so the game refreshes the (stale, pre-teleport)
+        /// position memory, and immediately verifies (fast polls, ~100 ms apart) that the
+        /// current map matches the profile's protected map
+        /// (<see cref="BotProfile.ProtectionMapNumber"/>) AND that the player is back on
+        /// the start coordinates (within the tolerance). When the values are correct the
+        /// bot proceeds in a blink of an eye; if the verification never passes within the
+        /// fast window, the workflow stops (returns false).
+        /// </summary>
+        private async Task<bool> RunStartProtectionAsync(CancellationToken token)
+        {
+            if (!_profile.EnableStartPositionCheck)
+                return true;
+
+            int tolerance = Math.Max(0, _profile.StartPositionTolerance);
+
+            var (x, y, posSuccess) = _memoryService.GetPlayerPosition();
+            if (!posSuccess)
+            {
+                _log("[StartProtection] Cannot read the player position. Stopping.");
+                return false;
+            }
+
+            if (Math.Abs(x - _profile.StartPositionX) <= tolerance &&
+                Math.Abs(y - _profile.StartPositionY) <= tolerance)
+            {
+                _log($"[StartProtection] Player already on the start position ({x}, {y}). No teleport needed.");
+                return true;
+            }
+
+            _log($"[StartProtection] Player at ({x}, {y}) — start position is ({_profile.StartPositionX}, {_profile.StartPositionY}) (tolerance {tolerance} tiles). Using the town teleport scroll.");
+            await TeleportToCity(token);
+            if (token.IsCancellationRequested) return false;
+
+            // TeleportToCity already waits PostTeleportUiLoadMs (~10 s) for the game UI
+            // to settle. The player position memory stays STALE (pre-teleport values)
+            // until the player actually moves, so tap W very briefly to force the game
+            // to refresh the coordinates — then verify immediately, no settle wait.
+            _log("[StartProtection] Quick step tap to refresh the position memory...");
+            await NudgeMoveAsync(token);
+            if (token.IsCancellationRequested) return false;
+
+            for (int attempt = 1; attempt <= BotConstants.Delays.StartProtectionVerifyAttempts; attempt++)
+            {
+                int map = _memoryService.GetMapNumber();
+                var (vx, vy, verifyOk) = _memoryService.GetPlayerPosition();
+
+                bool mapOk = _profile.ProtectionMapNumber <= 0 || map == _profile.ProtectionMapNumber;
+                bool posOk = verifyOk &&
+                             Math.Abs(vx - _profile.StartPositionX) <= tolerance &&
+                             Math.Abs(vy - _profile.StartPositionY) <= tolerance;
+
+                if (mapOk && posOk)
+                {
+                    _log($"[StartProtection] Protection OK — map {map}, position ({vx}, {vy}). Proceeding.");
+                    return true;
+                }
+
+                _log($"[StartProtection] Verify attempt {attempt}/{BotConstants.Delays.StartProtectionVerifyAttempts} failed — map {map}, position ({vx}, {vy}).");
+                if (attempt < BotConstants.Delays.StartProtectionVerifyAttempts)
+                    await Task.Delay(BotConstants.Delays.StartProtectionRetryMs, token);
+            }
+
+            _log("[StartProtection] PROTECTION FAILED — the current map/position do not match the profile's protection. Stopping.");
+            return false;
+        }
+
+        /// <summary>
+        /// Taps the W key very briefly (like a real player taking a single step). Used to
+        /// force the game to refresh the player position memory after a teleport (the
+        /// read stays stale until the player moves).
+        /// </summary>
+        private async Task NudgeMoveAsync(CancellationToken token)
+        {
+            _focusGameWindow();
+
+            _log($"[StartProtection] Tapping W for {BotConstants.Delays.StartProtectionNudgeKeyDownMs} ms...");
+            keybd_event(BotConstants.Keyboard.VkW, BotConstants.Keyboard.ScanW, 0, 0);
+            await Task.Delay(BotConstants.Delays.StartProtectionNudgeKeyDownMs, token);
+            keybd_event(BotConstants.Keyboard.VkW, BotConstants.Keyboard.ScanW, KEYEVENTF_KEYUP, 0);
         }
 
         /// <summary>

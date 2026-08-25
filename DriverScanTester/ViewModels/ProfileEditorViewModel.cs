@@ -27,9 +27,19 @@ namespace DriverScanTester.ViewModels
         private readonly Action<string> _log;
         private readonly BotProfileLoader _profileLoader;
 
-        public ProfileEditorViewModel(Action<string>? log = null)
+        /// <summary>
+        /// Reads the current in-game player state for the "capture start position"
+        /// button: (X, Y) position and current map number. Null when the editor has no
+        /// game access (then the capture button stays disabled).
+        /// </summary>
+        private readonly Func<(float X, float Y, int Map, bool Success)>? _capturePosition;
+
+        public ProfileEditorViewModel(
+            Action<string>? log = null,
+            Func<(float X, float Y, int Map, bool Success)>? capturePosition = null)
         {
             _log = log ?? (_ => { });
+            _capturePosition = capturePosition;
             _profileLoader = new BotProfileLoader(_log);
 
             if (!Directory.Exists(PATH_DIR))
@@ -48,8 +58,9 @@ namespace DriverScanTester.ViewModels
             MoveFlowStepUpCommand = new RelayCommand(_ => MoveFlowStep(-1), _ => CanMoveFlowStep(-1));
             MoveFlowStepDownCommand = new RelayCommand(_ => MoveFlowStep(1), _ => CanMoveFlowStep(1));
 
-            AddRepotPathCommand = new RelayCommand(_ => AddRepotPath(), _ => CanAddRepotPath);
-            RemoveRepotPathCommand = new RelayCommand(_ => RemoveRepotPath(), _ => CanRemoveRepotPath);
+            AddRouteCommand = new RelayCommand(_ => AddRoute(), _ => CanAddRoute);
+            RemoveRouteCommand = new RelayCommand(_ => RemoveRoute(), _ => CanRemoveRoute);
+            CaptureStartPositionCommand = new RelayCommand(_ => CaptureStartPosition(), _ => CanCaptureStartPosition);
 
             // Initial loads
             BuildAvailableOperations();
@@ -136,6 +147,11 @@ namespace DriverScanTester.ViewModels
                     OnPropertyChanged(nameof(TeleportKey));
                     OnPropertyChanged(nameof(TeleportScanCode));
                     OnPropertyChanged(nameof(MaxTeleportRetries));
+                    OnPropertyChanged(nameof(StartPositionCheckEnabled));
+                    OnPropertyChanged(nameof(StartPositionX));
+                    OnPropertyChanged(nameof(StartPositionY));
+                    OnPropertyChanged(nameof(ProtectionMapNumber));
+                    OnPropertyChanged(nameof(StartPositionTolerance));
                     OnPropertyChanged(nameof(WindowOffsetX));
                     OnPropertyChanged(nameof(WindowOffsetY));
                     LoadProfileIntoEditor();
@@ -250,6 +266,93 @@ namespace DriverScanTester.ViewModels
             set { if (CurrentProfile != null) { CurrentProfile.MaxTeleportRetries = value; OnPropertyChanged(); } }
         }
 
+        /// <summary>
+        /// Start-position protection: when enabled, the bot teleports to town at start
+        /// if the player is not on the profile's start coordinates, then verifies the
+        /// map/position against the protection settings before starting the flow.
+        /// </summary>
+        public bool StartPositionCheckEnabled
+        {
+            get => CurrentProfile?.EnableStartPositionCheck ?? false;
+            set { if (CurrentProfile != null) { CurrentProfile.EnableStartPositionCheck = value; OnPropertyChanged(); } }
+        }
+
+        public int StartPositionX
+        {
+            get => CurrentProfile?.StartPositionX ?? 0;
+            set { if (CurrentProfile != null) { CurrentProfile.StartPositionX = value; OnPropertyChanged(); } }
+        }
+
+        public int StartPositionY
+        {
+            get => CurrentProfile?.StartPositionY ?? 0;
+            set { if (CurrentProfile != null) { CurrentProfile.StartPositionY = value; OnPropertyChanged(); } }
+        }
+
+        /// <summary>Map number the player must be on after the start teleport (0 = skip map check).</summary>
+        public int ProtectionMapNumber
+        {
+            get => CurrentProfile?.ProtectionMapNumber ?? 0;
+            set { if (CurrentProfile != null) { CurrentProfile.ProtectionMapNumber = value; OnPropertyChanged(); } }
+        }
+
+        /// <summary>
+        /// Tolerance in game tiles for the start-position comparison. The position memory
+        /// refreshes only after the player moves, so the bot nudges the player a few
+        /// steps after the teleport and accepts any position within this distance of the
+        /// start coordinates.
+        /// </summary>
+        public int StartPositionTolerance
+        {
+            get => CurrentProfile?.StartPositionTolerance ?? 5;
+            set { if (CurrentProfile != null) { CurrentProfile.StartPositionTolerance = value; OnPropertyChanged(); } }
+        }
+
+        private bool CanCaptureStartPosition => CurrentProfile != null && _capturePosition != null;
+
+        /// <summary>
+        /// Fills the start position / protection values from the player's CURRENT
+        /// in-game state: Start X/Y from the current position and the protected map from
+        /// the current map number. Stand on the spot you want the bot to start from.
+        /// </summary>
+        private void CaptureStartPosition()
+        {
+            if (CurrentProfile == null)
+            {
+                StatusText = "No profile loaded. Create or load a profile first.";
+                return;
+            }
+
+            if (_capturePosition == null)
+            {
+                StatusText = "Game capture is not available — attach to the game first.";
+                return;
+            }
+
+            var (x, y, map, success) = _capturePosition();
+            if (!success)
+            {
+                StatusText = "Failed to read the player position / map from the game.";
+                return;
+            }
+
+            CurrentProfile.StartPositionX = (int)x;
+            CurrentProfile.StartPositionY = (int)y;
+            OnPropertyChanged(nameof(StartPositionX));
+            OnPropertyChanged(nameof(StartPositionY));
+
+            if (map > 0)
+            {
+                CurrentProfile.ProtectionMapNumber = map;
+                OnPropertyChanged(nameof(ProtectionMapNumber));
+                StatusText = $"Captured start position ({x}, {y}) and protected map {map}.";
+            }
+            else
+            {
+                StatusText = $"Captured start position ({x}, {y}); map read returned 0 — protected map left unchanged.";
+            }
+        }
+
         public int WindowOffsetX
         {
             get => CurrentProfile?.WindowOffsetX ?? 0;
@@ -302,8 +405,9 @@ namespace DriverScanTester.ViewModels
         public ICommand RemoveFlowStepCommand { get; }
         public ICommand MoveFlowStepUpCommand { get; }
         public ICommand MoveFlowStepDownCommand { get; }
-        public ICommand AddRepotPathCommand { get; }
-        public ICommand RemoveRepotPathCommand { get; }
+        public ICommand AddRouteCommand { get; }
+        public ICommand RemoveRouteCommand { get; }
+        public ICommand CaptureStartPositionCommand { get; }
 
         // ──────────────────── Implementation ────────────────────
 
@@ -329,6 +433,11 @@ namespace DriverScanTester.ViewModels
                 TeleportKey = BotConstants.Workflow.DefaultTeleportKey,
                 TeleportScanCode = BotConstants.Workflow.DefaultTeleportScanCode,
                 MaxTeleportRetries = BotConstants.Repot.MaxTeleportRetries,
+                EnableStartPositionCheck = false,
+                StartPositionX = 0,
+                StartPositionY = 0,
+                ProtectionMapNumber = 0,
+                StartPositionTolerance = 5,
                 WindowOffsetX = 0,
                 WindowOffsetY = 0,
                 FlowSteps = new List<BotFlowStep>
@@ -356,22 +465,7 @@ namespace DriverScanTester.ViewModels
             // 1. Copy editor values into the profile model
             CurrentProfile.Name = ProfileName;
             CurrentProfile.FlowSteps = FlowSteps
-                .Select(s => new BotFlowStep
-                {
-                    Type = s.Type,
-                    PathFile = s.PathFile ?? "",
-                    StartDelayMs = s.StartDelayMs,
-                    CompletionMode = s.CompletionMode,
-                    ExpectedDestinationMapNumber = s.ExpectedDestinationMapNumber,
-                    OperationName = s.OperationName ?? "",
-                    RepotPaths = s.RepotPaths
-                        .Select(rp => new BotRouteStep
-                        {
-                            PathFile = rp.PathFile,
-                            StartDelayMs = rp.StartDelayMs
-                        })
-                        .ToList()
-                })
+                .Select(BuildStepModel)
                 .ToList();
 
             // 2. Validate the complete model (one pass, all errors reported)
@@ -402,6 +496,51 @@ namespace DriverScanTester.ViewModels
             // using the captured name.
             RefreshProfiles();
             StatusText = $"Saved profile '{savedName}'.";
+        }
+
+        /// <summary>
+        /// Copies one editor step ViewModel into a BotFlowStep model. Path and ExpLoop
+        /// steps write their route group (<see cref="BotFlowStep.Routes"/>) and keep the
+        /// single-route fields (PathFile / StartDelayMs) in sync with the first route so
+        /// the step stays readable as a legacy single-route step.
+        /// </summary>
+        private static BotFlowStep BuildStepModel(BotFlowStepViewModel s)
+        {
+            var model = new BotFlowStep
+            {
+                Type = s.Type,
+                PathFile = s.PathFile ?? "",
+                StartDelayMs = s.StartDelayMs,
+                CompletionMode = s.CompletionMode,
+                ExpectedDestinationMapNumber = s.ExpectedDestinationMapNumber,
+                OperationName = s.OperationName ?? "",
+                RepotPaths = s.RepotPaths
+                    .Select(rp => new BotRouteStep
+                    {
+                        PathFile = rp.PathFile,
+                        StartDelayMs = rp.StartDelayMs
+                    })
+                    .ToList()
+            };
+
+            if (s.Type == BotFlowStepType.Path || s.Type == BotFlowStepType.ExpLoop)
+            {
+                model.Routes = s.Routes
+                    .Select(rp => new BotRouteStep
+                    {
+                        PathFile = rp.PathFile,
+                        StartDelayMs = rp.StartDelayMs
+                    })
+                    .ToList();
+
+                if (model.Routes.Count > 0)
+                {
+                    model.PathFile = model.Routes[0].PathFile ?? "";
+                    model.StartDelayMs = model.Routes[0].StartDelayMs;
+                }
+            }
+
+            return model;
         }
 
         private void LoadSelectedProfile()
@@ -519,11 +658,13 @@ namespace DriverScanTester.ViewModels
                 {
                     Step = s,
                     Path = s.PathFile,
-                    RepotPaths = s.RepotPaths.Select(rp => rp.PathFile).ToList()
+                    RepotPaths = s.RepotPaths.Select(rp => rp.PathFile).ToList(),
+                    Routes = s.Routes.Select(rp => rp.PathFile).ToList()
                 })
                 .ToList();
             BotFlowStepViewModel? selectedStep = SelectedFlowStep;
             BotRouteStepViewModel? selectedRepotPath = SelectedFlowStep?.SelectedRepotPath;
+            BotRouteStepViewModel? selectedRoute = SelectedFlowStep?.SelectedRoute;
 
             AvailablePaths.Clear();
             if (!Directory.Exists(PATH_DIR))
@@ -543,11 +684,14 @@ namespace DriverScanTester.ViewModels
                 captured.Step.PathFile = captured.Path;
                 for (int i = 0; i < captured.RepotPaths.Count && i < captured.Step.RepotPaths.Count; i++)
                     captured.Step.RepotPaths[i].PathFile = captured.RepotPaths[i];
+                for (int i = 0; i < captured.Routes.Count && i < captured.Step.Routes.Count; i++)
+                    captured.Step.Routes[i].PathFile = captured.Routes[i];
             }
             if (selectedStep != null)
             {
                 SelectedFlowStep = selectedStep;
                 selectedStep.SelectedRepotPath = selectedRepotPath;
+                selectedStep.SelectedRoute = selectedRoute;
             }
         }
 
@@ -588,6 +732,26 @@ namespace DriverScanTester.ViewModels
                     {
                         PathFile = rp.PathFile ?? "",
                         StartDelayMs = rp.StartDelayMs
+                    });
+                }
+                foreach (var route in step.Routes ?? new List<BotRouteStep>())
+                {
+                    vm.Routes.Add(new BotRouteStepViewModel
+                    {
+                        PathFile = route.PathFile ?? "",
+                        StartDelayMs = route.StartDelayMs
+                    });
+                }
+                // Legacy single-route Path/ExpLoop steps (Routes empty, PathFile set):
+                // surface the path as the first route so the route panel always shows it.
+                if ((step.Type == BotFlowStepType.Path || step.Type == BotFlowStepType.ExpLoop) &&
+                    vm.Routes.Count == 0 &&
+                    !string.IsNullOrWhiteSpace(step.PathFile))
+                {
+                    vm.Routes.Add(new BotRouteStepViewModel
+                    {
+                        PathFile = step.PathFile ?? "",
+                        StartDelayMs = step.StartDelayMs
                     });
                 }
                 FlowSteps.Add(vm);
@@ -661,55 +825,57 @@ namespace DriverScanTester.ViewModels
             CommandManager.InvalidateRequerySuggested();
         }
 
-        // ── Repot step: repot path management ──
+        // ── Route group management (Path / Repot / ExpLoop steps) ──
 
-        private bool CanAddRepotPath =>
-            CurrentProfile != null && SelectedFlowStep is { Type: BotFlowStepType.Repot };
+        private bool CanAddRoute =>
+            CurrentProfile != null &&
+            SelectedFlowStep is { Type: BotFlowStepType.Path or BotFlowStepType.Repot or BotFlowStepType.ExpLoop };
 
-        private bool CanRemoveRepotPath =>
-            SelectedFlowStep is { Type: BotFlowStepType.Repot } s &&
-            s.SelectedRepotPath != null &&
-            s.RepotPaths.Count > 1;
+        private bool CanRemoveRoute =>
+            SelectedFlowStep != null &&
+            SelectedFlowStep.SelectedStepRoute != null &&
+            SelectedFlowStep.StepRoutes.Count > 1;
 
-        private void AddRepotPath()
+        private void AddRoute()
         {
-            if (SelectedFlowStep is not { Type: BotFlowStepType.Repot } repotStep)
+            if (SelectedFlowStep is not { Type: BotFlowStepType.Path or BotFlowStepType.Repot or BotFlowStepType.ExpLoop } step)
             {
-                StatusText = "Select a Repot flow step first.";
+                StatusText = "Select a Path, Repot or ExpLoop flow step first.";
                 return;
             }
 
-            var repotPath = new BotRouteStepViewModel();
+            var route = new BotRouteStepViewModel();
+            var routes = step.StepRoutes;
 
-            // Insert after the currently selected repot path when possible, otherwise append.
-            if (repotStep.SelectedRepotPath != null)
+            // Insert after the currently selected route when possible, otherwise append.
+            if (step.SelectedStepRoute != null)
             {
-                int index = repotStep.RepotPaths.IndexOf(repotStep.SelectedRepotPath);
-                repotStep.RepotPaths.Insert(index + 1, repotPath);
+                int index = routes.IndexOf(step.SelectedStepRoute);
+                routes.Insert(index + 1, route);
             }
             else
             {
-                repotStep.RepotPaths.Add(repotPath);
+                routes.Add(route);
             }
 
-            repotStep.SelectedRepotPath = repotPath;
+            step.SelectedStepRoute = route;
             CommandManager.InvalidateRequerySuggested();
-            StatusText = $"Added repot path {repotStep.RepotPaths.Count}.";
+            StatusText = $"Added route {routes.Count} to flow step {FlowSteps.IndexOf(step) + 1}.";
         }
 
-        private void RemoveRepotPath()
+        private void RemoveRoute()
         {
-            if (SelectedFlowStep is not { Type: BotFlowStepType.Repot } repotStep) return;
-            if (repotStep.SelectedRepotPath == null) return;
-            if (repotStep.RepotPaths.Count <= 1) return; // keep at least one repot path
+            if (SelectedFlowStep is not { Type: BotFlowStepType.Path or BotFlowStepType.Repot or BotFlowStepType.ExpLoop } step) return;
+            if (step.SelectedStepRoute == null) return;
+            if (step.StepRoutes.Count <= 1) return; // keep at least one route
 
-            int index = repotStep.RepotPaths.IndexOf(repotStep.SelectedRepotPath);
-            repotStep.RepotPaths.RemoveAt(index);
+            int index = step.StepRoutes.IndexOf(step.SelectedStepRoute);
+            step.StepRoutes.RemoveAt(index);
 
-            // Select the nearest remaining path.
-            repotStep.SelectedRepotPath = repotStep.RepotPaths[Math.Min(index, repotStep.RepotPaths.Count - 1)];
+            // Select the nearest remaining route.
+            step.SelectedStepRoute = step.StepRoutes[Math.Min(index, step.StepRoutes.Count - 1)];
             CommandManager.InvalidateRequerySuggested();
-            StatusText = $"Removed repot path {index + 1}.";
+            StatusText = $"Removed route {index + 1} from flow step {FlowSteps.IndexOf(step) + 1}.";
         }
     }
 
@@ -731,6 +897,8 @@ namespace DriverScanTester.ViewModels
                     OnPropertyChanged(nameof(PathColumnVisibility));
                     OnPropertyChanged(nameof(OperationColumnVisibility));
                     OnPropertyChanged(nameof(PathOnlyColumnVisibility));
+                    OnPropertyChanged(nameof(StepRoutes));
+                    OnPropertyChanged(nameof(SelectedStepRoute));
                     CommandManager.InvalidateRequerySuggested();
                 }
             }
@@ -758,7 +926,17 @@ namespace DriverScanTester.ViewModels
         public string PathFile
         {
             get => _pathFile;
-            set => SetProperty(ref _pathFile, value);
+            set
+            {
+                if (SetProperty(ref _pathFile, value) &&
+                    _type is BotFlowStepType.Path or BotFlowStepType.ExpLoop &&
+                    Routes.Count > 0)
+                {
+                    // Keep the first route of the group in sync with the grid's single
+                    // route combo so both views of the step never disagree.
+                    Routes[0].PathFile = value;
+                }
+            }
         }
 
         private int _startDelayMs = 0;
@@ -809,13 +987,60 @@ namespace DriverScanTester.ViewModels
             set
             {
                 if (SetProperty(ref _selectedRepotPath, value))
+                {
+                    OnPropertyChanged(nameof(SelectedStepRoute));
                     CommandManager.InvalidateRequerySuggested();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Route group for Path and ExpLoop steps (cycled on each execution, one route
+        /// per flow cycle). Mirrors how the Repot step cycles its repot paths.
+        /// </summary>
+        public ObservableCollection<BotRouteStepViewModel> Routes { get; } = new();
+
+        private BotRouteStepViewModel? _selectedRoute;
+        public BotRouteStepViewModel? SelectedRoute
+        {
+            get => _selectedRoute;
+            set
+            {
+                if (SetProperty(ref _selectedRoute, value))
+                {
+                    OnPropertyChanged(nameof(SelectedStepRoute));
+                    CommandManager.InvalidateRequerySuggested();
+                }
+            }
+        }
+
+        /// <summary>
+        /// The route list shown in the "Step routes" panel: <see cref="RepotPaths"/> for
+        /// Repot steps, <see cref="Routes"/> for Path and ExpLoop steps.
+        /// </summary>
+        public ObservableCollection<BotRouteStepViewModel> StepRoutes =>
+            Type == BotFlowStepType.Repot ? RepotPaths : Routes;
+
+        /// <summary>
+        /// The route selected in the "Step routes" panel: <see cref="SelectedRepotPath"/>
+        /// for Repot steps, <see cref="SelectedRoute"/> for Path and ExpLoop steps.
+        /// </summary>
+        public BotRouteStepViewModel? SelectedStepRoute
+        {
+            get => Type == BotFlowStepType.Repot ? SelectedRepotPath : SelectedRoute;
+            set
+            {
+                if (Type == BotFlowStepType.Repot)
+                    SelectedRepotPath = value;
+                else
+                    SelectedRoute = value;
             }
         }
     }
 
     /// <summary>
-    /// Editor representation of one repot path: a saved path reference plus startup delay.
+    /// Editor representation of one route of a step's route group (Path / Repot / ExpLoop
+    /// steps): a saved path reference plus startup delay.
     /// </summary>
     public class BotRouteStepViewModel : BaseViewModel
     {

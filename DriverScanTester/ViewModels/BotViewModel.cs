@@ -361,6 +361,8 @@ namespace DriverScanTester.ViewModels
                     string mode = step.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached
                         ? $"finish when destination map loaded → map {step.ExpectedDestinationMapNumber}"
                         : "finish when last waypoint reached";
+                    if (step.Routes != null && step.Routes.Count > 0)
+                        return $"Path group ({step.Routes.Count} routes, wait {step.StartDelayMs} ms, {mode})";
                     return $"Path '{step.PathFile}' (wait {step.StartDelayMs} ms, {mode})";
                 case BotFlowStepType.Repot:
                     int count = step.RepotPaths?.Count ?? 0;
@@ -371,6 +373,8 @@ namespace DriverScanTester.ViewModels
                 case BotFlowStepType.Operation:
                     return $"Operation '{step.OperationName}'";
                 case BotFlowStepType.ExpLoop:
+                    if (step.Routes != null && step.Routes.Count > 0)
+                        return $"ExpLoop group ({step.Routes.Count} routes, wait {step.StartDelayMs} ms)";
                     return $"ExpLoop '{step.PathFile}' (wait {step.StartDelayMs} ms)";
                 default:
                     return step.Type.ToString();

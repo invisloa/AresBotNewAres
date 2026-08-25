@@ -143,6 +143,9 @@ namespace DriverScanTester.ViewModels
         private const ulong XOffset = 0x144;
         private const ulong YOffset = 0xEE8;
 
+        // Map number (int at +0x5F8) — same read as GameMemoryService.GetMapNumber().
+        private const ulong MapOffset = 0x5F8;
+
         public PathEditorViewModel(Func<uint, ulong, byte[], uint, bool> readFunc, Func<int> ptrSizeFunc, Func<ulong> modBaseFunc, uint pid)
         {
             _readFunc = readFunc;
@@ -171,7 +174,42 @@ namespace DriverScanTester.ViewModels
             RefreshLibrary();
 
             // Profile Editor (no game process dependencies)
-            _profileEditor = new ProfileEditorViewModel();
+            _profileEditor = new ProfileEditorViewModel(capturePosition: CaptureGameState);
+        }
+
+        /// <summary>
+        /// Reads the player's CURRENT in-game state: position (X, Y) and the current
+        /// map number. Used by the profile editor's "Set from current position" button
+        /// to fill the start position / protection values.
+        /// </summary>
+        private (float X, float Y, int Map, bool Success) CaptureGameState()
+        {
+            ulong moduleBase = _moduleBaseFunc();
+            int ptrSize = _pointerSizeFunc();
+            if (moduleBase == 0 || ptrSize == 0) return (0, 0, 0, false);
+
+            // 1. Read Player Ptr
+            ulong ptrAddr = moduleBase + PlayerPtrOffset;
+            byte[] buf = new byte[ptrSize];
+            if (!_readFunc(_pid, ptrAddr, buf, 0)) return (0, 0, 0, false);
+
+            ulong playerBase = (ptrSize == 4) ? BitConverter.ToUInt32(buf, 0) : BitConverter.ToUInt64(buf, 0);
+            if (playerBase == 0) return (0, 0, 0, false);
+
+            // 2. Read X (short), Y (short), map number (int)
+            byte[] xBuf = new byte[2];
+            byte[] yBuf = new byte[2];
+            byte[] mapBuf = new byte[4];
+
+            if (!_readFunc(_pid, playerBase + XOffset, xBuf, 0)) return (0, 0, 0, false);
+            if (!_readFunc(_pid, playerBase + YOffset, yBuf, 0)) return (0, 0, 0, false);
+            if (!_readFunc(_pid, playerBase + MapOffset, mapBuf, 0)) return (0, 0, 0, false);
+
+            float x = (float)BitConverter.ToInt16(xBuf, 0);
+            float y = (float)BitConverter.ToInt16(yBuf, 0);
+            int map = BitConverter.ToInt32(mapBuf, 0);
+
+            return (x, y, map, true);
         }
 
         // ========================== EDITOR LOGIC ==========================

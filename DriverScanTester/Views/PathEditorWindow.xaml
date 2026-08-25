@@ -179,8 +179,8 @@
                             <!-- ─────────── FLOW ─────────── -->
                             <GroupBox Header="FLOW — steps executed in order, cycled" Margin="0,0,0,10" BorderBrush="#FF3399FF" BorderThickness="2" Padding="4">
                                 <StackPanel Margin="3">
-                                    <TextBlock Text="The bot runs these steps top to bottom. When the ExpLoop step ends (repot needed) it returns to the city and restarts from step 1. Mix Path / Repot / Operation / ExpLoop freely — e.g. Repot → Operation (talk to NPC) → Path (go to exp) → Operation → ExpLoop."
-                                               TextWrapping="Wrap" Foreground="Gray" FontSize="10" Margin="0,0,0,6"/>
+                                    <TextBlock Text="The bot runs these steps top to bottom. When the ExpLoop step ends (repot needed) it returns to the city and restarts from step 1. Mix Path / Repot / Operation / ExpLoop freely — e.g. Repot → Operation (talk to NPC) → Path (go to exp) → Operation → ExpLoop. Path, Repot and ExpLoop steps can hold a route group (see 'Step routes' below): the bot uses the next route of the group each time the step runs, so e.g. Repot with routes 1-2-3 and ExpLoop with routes 1-2-3 rotate together per cycle."
+                                           TextWrapping="Wrap" Foreground="Gray" FontSize="10" Margin="0,0,0,6"/>
 
                                     <DataGrid ItemsSource="{Binding FlowSteps}"
                                               SelectedItem="{Binding SelectedFlowStep}"
@@ -215,7 +215,7 @@
                                                                   SelectedItem="{Binding Type, UpdateSourceTrigger=PropertyChanged}"
                                                                   BorderThickness="0" Background="Transparent"
                                                                   VerticalAlignment="Center" Margin="2,0"
-                                                                  ToolTip="Path = walk a saved segment once. Repot = teleport to city, walk to repot, sell/buy. Operation = run a named custom operation. ExpLoop = loop the hunting path until repot is needed."/>
+                                                                  ToolTip="Path = walk a saved segment once. Repot = teleport to city, walk to repot, sell/buy. Operation = run a named custom operation. ExpLoop = loop the hunting path until repot is needed. Path, Repot and ExpLoop steps can hold a route group — the bot uses the next route each time the step runs."/>
                                                     </DataTemplate>
                                                 </DataGridTemplateColumn.CellTemplate>
                                             </DataGridTemplateColumn>
@@ -292,24 +292,30 @@
                                 </StackPanel>
                             </GroupBox>
 
-                            <!-- ─────────── REPOT STEP PATHS (selected Repot step) ─────────── -->
-                            <GroupBox Header="Repot step paths (for the selected Repot step)" Margin="0,0,0,10" BorderBrush="#FF99CCFF" BorderThickness="1" Padding="4">
+                            <!-- ─────────── STEP ROUTES (selected Path / Repot / ExpLoop step) ─────────── -->
+                            <GroupBox Header="Step routes (for the selected step)" Margin="0,0,0,10" BorderBrush="#FF99CCFF" BorderThickness="1" Padding="4">
                                 <GroupBox.Style>
                                     <Style TargetType="GroupBox">
                                         <Setter Property="Visibility" Value="Collapsed"/>
                                         <Style.Triggers>
+                                            <DataTrigger Binding="{Binding SelectedFlowStep.Type}" Value="Path">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
                                             <DataTrigger Binding="{Binding SelectedFlowStep.Type}" Value="Repot">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding SelectedFlowStep.Type}" Value="ExpLoop">
                                                 <Setter Property="Visibility" Value="Visible"/>
                                             </DataTrigger>
                                         </Style.Triggers>
                                     </Style>
                                 </GroupBox.Style>
                                 <StackPanel Margin="3">
-                                    <TextBlock Text="The bot walks to the repot using the next path in this list on every repot trip (wraps back to the first path)."
+                                    <TextBlock Text="The bot uses the NEXT route in this list every time this step runs (wraps back to the first). Repot: walk to the repot point. Path: walk the route once. ExpLoop: hunt the route until repot is needed. With several routes (e.g. repot 1, 2, 3) the step's route group rotates one route per flow cycle, so a Repot group of 3 and an ExpLoop group of 3 stay in sync: cycle 1 = repot 1 + exp 1, cycle 2 = repot 2 + exp 2, cycle 3 = repot 3 + exp 3."
                                                TextWrapping="Wrap" Foreground="Gray" FontSize="10" Margin="0,0,0,6"/>
 
-                                    <DataGrid ItemsSource="{Binding SelectedFlowStep.RepotPaths}"
-                                              SelectedItem="{Binding SelectedFlowStep.SelectedRepotPath}"
+                                    <DataGrid ItemsSource="{Binding SelectedFlowStep.StepRoutes}"
+                                              SelectedItem="{Binding SelectedFlowStep.SelectedStepRoute}"
                                               AutoGenerateColumns="False"
                                               CanUserAddRows="False"
                                               CanUserDeleteRows="False"
@@ -352,8 +358,8 @@
                                     </DataGrid>
 
                                     <WrapPanel Orientation="Horizontal" Margin="0,6,0,0">
-                                        <Button Content="Add path" Command="{Binding AddRepotPathCommand}" Width="80" Margin="0,0,4,0" Background="#FFE6F7FF"/>
-                                        <Button Content="Remove" Command="{Binding RemoveRepotPathCommand}" Width="70" Margin="0,0,4,0" Background="#FFFFE6E6"/>
+                                        <Button Content="Add route" Command="{Binding AddRouteCommand}" Width="80" Margin="0,0,4,0" Background="#FFE6F7FF"/>
+                                        <Button Content="Remove" Command="{Binding RemoveRouteCommand}" Width="70" Margin="0,0,4,0" Background="#FFFFE6E6"/>
                                     </WrapPanel>
                                 </StackPanel>
                             </GroupBox>
@@ -417,6 +423,46 @@
                                         <TextBox Text="{Binding WhiteBuyTarget, UpdateSourceTrigger=PropertyChanged}" Width="70" HorizontalAlignment="Left" Margin="0,2,0,0"/>
                                     </StackPanel>
                                 </Grid>
+                            </GroupBox>
+
+                            <!-- ─────────── START POSITION CHECK / PROTECTION ─────────── -->
+                            <GroupBox Header="Start position check (protection)" Margin="0,0,0,10" BorderBrush="#FF99CCFF" BorderThickness="1" Padding="4">
+                                <StackPanel Margin="3">
+                                    <CheckBox Content="Enable start check — teleport to town when the player is not on the start position"
+                                              IsChecked="{Binding StartPositionCheckEnabled}" Margin="2" VerticalAlignment="Center"
+                                              ToolTip="When enabled, the bot compares the player position with the start coordinates below before starting. If they differ it uses the town teleport scroll, waits ~10 s for the game to settle, takes a quick step so the game refreshes the (stale) position memory, then instantly verifies that the current map matches the protected map AND that the player is back on the start coordinates (within the tolerance). If the verification fails the bot stops instead of starting."/>
+                                    <Grid Margin="0,6,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+
+                                        <Label Grid.Row="0" Grid.Column="0" Content="Start X:"/>
+                                        <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding StartPositionX, UpdateSourceTrigger=PropertyChanged}" Width="70" Margin="2" HorizontalAlignment="Left"
+                                                 ToolTip="Expected X coordinate of the player when the bot starts."/>
+                                        <Label Grid.Row="0" Grid.Column="2" Content="Start Y:"/>
+                                        <TextBox Grid.Row="0" Grid.Column="3" Text="{Binding StartPositionY, UpdateSourceTrigger=PropertyChanged}" Width="70" Margin="2" HorizontalAlignment="Left"
+                                                 ToolTip="Expected Y coordinate of the player when the bot starts."/>
+                                        <Label Grid.Row="0" Grid.Column="4" Content="Protected map:"/>
+                                        <TextBox Grid.Row="0" Grid.Column="5" Text="{Binding ProtectionMapNumber, UpdateSourceTrigger=PropertyChanged}" Width="70" Margin="2" HorizontalAlignment="Left"
+                                                 ToolTip="Map number the player must be on after the start teleport (e.g. the town map). 0 disables the map check."/>
+
+                                        <Label Grid.Row="1" Grid.Column="0" Content="Tolerance:"/>
+                                        <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding StartPositionTolerance, UpdateSourceTrigger=PropertyChanged}" Width="70" Margin="2" HorizontalAlignment="Left"
+                                                 ToolTip="Tolerance in game tiles for the start-position comparison. After a teleport the game only refreshes the position once the player moves, so the bot takes a quick step first and accepts any position within this distance of the start coordinates (default 5)."/>
+                                    </Grid>
+
+                                    <Button Content="Set from current position (X, Y + map)" Command="{Binding CaptureStartPositionCommand}" Width="230" Margin="0,8,0,0" HorizontalAlignment="Left" Background="#FFE6F7FF"
+                                            ToolTip="Reads the player position and the current map from the game and fills Start X, Start Y and Protected map. Stand on the spot you want the bot to start from before clicking."/>
+                                </StackPanel>
                             </GroupBox>
 
                             <!-- ─────────── ADVANCED ─────────── -->
