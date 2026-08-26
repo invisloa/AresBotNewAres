@@ -158,6 +158,23 @@ namespace DriverScanTester
             /// </summary>
             public const float CombatStuckPosEpsilon = 0.5f;
 
+            /// <summary>
+            /// Attack-not-connecting detection: while the attack animation plays (attack
+            /// status &gt; 0) a real attack consumes mana (skill). If MANA does not drop at
+            /// all for this long, the attack is NOT connecting (phantom/unreachable target)
+            /// even though the animation looks normal and the mob never loses HP. Position
+            /// is deliberately NOT part of this check — the attack lunge animation moves
+            /// the player every swing, so a static-position test never fires. Triggers the
+            /// reposition-and-retry action (walk toward next waypoint, then TAB + attack).
+            /// </summary>
+            public const double CombatManaStuckTimeoutMs = 5000;
+
+            /// <summary>
+            /// How long (ms) the bot walks toward the next waypoint during the attack
+            /// reposition before TABbing and attacking again (2-3 seconds).
+            /// </summary>
+            public const int CombatRepositionDurationMs = 2500;
+
             /// <summary>Default distance at which the bot disengages attack from a waypoint.</summary>
             public const short DefaultAttackDisengageDistance = 60;
 
@@ -695,6 +712,12 @@ namespace DriverScanTester
             /// <summary>Interval between spacebar presses for area loot.</summary>
             public const int LootSpacePressMs = 300;
 
+            /// <summary>
+            /// Loot-priority mode: wait after a mob dies (target lost) before the loot
+            /// scan starts, so the corpse's drops have time to appear on the ground.
+            /// </summary>
+            public const int LootPostKillDelayMs = 200;
+
             // ── Teleport delays ──
             /// <summary>Delay after pressing teleport key.</summary>
             public const int TeleportKeyDownMs = 50;
@@ -739,6 +762,19 @@ namespace DriverScanTester
             /// tap — no settle wait.
             /// </summary>
             public const int StartProtectionNudgeKeyDownMs = 50;
+
+            /// <summary>
+            /// How many times the whole start protection is retried after a full failure.
+            /// Each retry: wait (base wait x10 per retry), perform a repot, then start
+            /// the protection over from scratch.
+            /// </summary>
+            public const int StartProtectionMaxRetries = 3;
+
+            /// <summary>
+            /// Base wait in seconds before the FIRST start-protection retry. The wait
+            /// is multiplied by 10 after each retry: 15s → 150s → 1500s.
+            /// </summary>
+            public const double StartProtectionRetryBaseWaitSeconds = 15;
 
             // ── Exp loop ──
             /// <summary>Interval in ms between repot condition checks during exp loop.</summary>

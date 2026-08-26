@@ -85,12 +85,25 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Loot-priority mode (profile flag "Loot Priority"): when a mob is killed, loot
-        /// starts immediately instead of TABbing to check for more mobs first.
-        /// The loot machine ALWAYS keeps scanning during combat (it never cancels on mob
-        /// selection) — but the attack is only interrupted when an item is actually found
-        /// and collected (<see cref="IsCollecting"/>), never during plain scanning.
+        /// starts immediately instead of TABbing to check for more mobs first. The loot
+        /// machine waits ~200ms for the drops to appear, then area-loots / pixel-scans
+        /// until everything is collected (<see cref="IsLootingActive"/>); only then may
+        /// the combat system select the next target and movement resume. The loot machine
+        /// ALWAYS keeps scanning during combat (it never cancels on mob selection) — but
+        /// the attack is only interrupted when an item is actually found and collected
+        /// (<see cref="IsCollecting"/>), never during plain scanning.
         /// </summary>
         public bool LootPriorityMode { get; set; } = false;
+
+        /// <summary>
+        /// True while the loot machine is in its post-kill looting phase (loot priority
+        /// mode only): set the moment a mob dies (mob selected → no target) and cleared
+        /// when a full scan pass finds no more items (everything looted) or the loot is
+        /// cancelled (city entered / focus lost). While true, the movement system must
+        /// NOT select the next target (no TAB / no attack) and must NOT move to the next
+        /// waypoint — loot is the priority.
+        /// </summary>
+        public bool IsLootingActive { get; private set; } = false;
 
         /// <summary>
         /// True while the loot machine is in the pixel-scan state (Scan): it is actively
@@ -411,6 +424,7 @@ namespace DriverScanTester.Services
                     _lootState = LootMachineState.Idle;
                     _consecutiveEmptySpacePresses = 0;
                 }
+                IsLootingActive = false;
                 await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
                 return;
             }
@@ -432,6 +446,7 @@ namespace DriverScanTester.Services
                     _lootState = LootMachineState.Idle;
                     _consecutiveEmptySpacePresses = 0;
                 }
+                IsLootingActive = false;
                 await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
                 return;
             }
@@ -441,16 +456,17 @@ namespace DriverScanTester.Services
 
             // Mob just died (was selected → no longer selected) → normally TAB first to
             // check if there are more mobs to kill before starting loot. In loot-priority
-            // mode the TAB check is skipped — looting comes first, so area loot starts
-            // immediately.
+            // mode the TAB check is skipped — looting comes first: wait ~200ms so the
+            // drops appear, then loot everything before the next target is even selected.
             if (_wasMobSelectedPrev && !isMobSelected)
             {
                 _wasMobSelectedPrev = false;
                 if (LootPriorityMode)
                 {
-                    _log("[Loot] Mob killed (loot priority) — starting area loot directly.");
+                    _log($"[Loot] Mob killed (loot priority) — waiting {BotConstants.Delays.LootPostKillDelayMs}ms for drops, then looting everything.");
+                    IsLootingActive = true;
                     _lootState = LootMachineState.AreaLoot;
-                    _nextActionTime = DateTime.UtcNow;
+                    _nextActionTime = DateTime.UtcNow.AddMilliseconds(BotConstants.Delays.LootPostKillDelayMs);
                     _consecutiveEmptySpacePresses = 0;
                 }
                 else
@@ -604,6 +620,7 @@ namespace DriverScanTester.Services
                             // hold briefly so the movement system can walk away before the
                             // next area-loot cycle restarts.
                             _log("[Loot] Scan complete — no more visible items.");
+                            IsLootingActive = false;
                             _lootState = LootMachineState.ScanComplete;
                             _scanCompleteUntil = DateTime.UtcNow.AddMilliseconds(
                                 BotConstants.Delays.LootScanCompleteHoldMs);

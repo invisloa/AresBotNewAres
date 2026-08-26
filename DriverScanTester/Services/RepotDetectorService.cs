@@ -20,6 +20,14 @@ namespace DriverScanTester.Services
         public float MaxWeightRatio { get; set; } = BotConstants.Repot.DefaultMaxWeightRatio;
 
         /// <summary>
+        /// Whether the weight-ratio check participates in repot decisions. Only enabled
+        /// when the profile uses LOOT PRIORITY — loot fills the inventory up to the
+        /// weight limit, so a full bag means it is time to repot. Without loot priority
+        /// the bot just exp's as the profile states and weight never forces a repot.
+        /// </summary>
+        public bool WeightRepotEnabled { get; set; } = true;
+
+        /// <summary>
         /// HP floor. While HP potions are available the heal/mana bot drinks them to
         /// stay above this value; repot is only triggered at/below this value once the
         /// HP potion stock is exhausted (the potion-count check above already fires then).
@@ -55,7 +63,10 @@ namespace DriverScanTester.Services
                 return true;
             }
 
-            if (snapshot.MaxWeight > 0)
+            // The weight check only applies with loot priority enabled (the profile's
+            // "Loot Priority" flag). Without loot priority the bot keeps exp'ing as the
+            // profile states and a full bag never forces a repot.
+            if (WeightRepotEnabled && snapshot.MaxWeight > 0)
             {
                 float ratio = (float)snapshot.CurrentWeight / snapshot.MaxWeight;
                 if (ratio >= MaxWeightRatio)

@@ -1,4 +1,4 @@
-ï»¿using DriverScanTester.Models;
+using DriverScanTester.Models;
 using DriverScanTester.Services;
 using DriverScanTester.Utils;
 using System;
@@ -10,7 +10,6 @@ namespace DriverScanTester.ViewModels
     public sealed class BotViewModel : BaseViewModel
     {
         private readonly MainViewModel _main;
-        private readonly Action<string> _appendLog;
 
         private string _hpThresholdText = HealMana.HpThreshold.ToString();
         private string _manaThresholdText = HealMana.MpThreshold.ToString();
@@ -37,10 +36,9 @@ namespace DriverScanTester.ViewModels
         private string? _selectedProfileName;
         private string _validationText = "";
 
-        public BotViewModel(MainViewModel main, Action<string> appendLog)
+        public BotViewModel(MainViewModel main)
         {
             _main = main;
-            _appendLog = appendLog;
 
             RunBotCommand = new RelayCommand(_ => RunBot(), _ => _main.IsAttached);
             StopBotCommand = new RelayCommand(_ => StopAllBots(), _ => _main.IsAttached && (IsMovementBotRunning || IsHealManaBotRunning || IsLootBotRunning));
@@ -207,7 +205,7 @@ namespace DriverScanTester.ViewModels
         public bool CanStartWorkflow =>
             !string.IsNullOrWhiteSpace(SelectedProfileName);
 
-        // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Test Method control â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // ¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦ Test Method control ¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦
 
         /// <summary>
         /// Operation names selectable in the Test Method control. Populated from
@@ -226,7 +224,7 @@ namespace DriverScanTester.ViewModels
             }
         }
 
-        /// <summary>Result text of the last operation test run ("Idle", "Runningâ€¦", "Success", "Failed", "Error").</summary>
+        /// <summary>Result text of the last operation test run ("Idle", "Running…", "Success", "Failed", "Error").</summary>
         public string OperationTestStatus
         {
             get => _operationTestStatus;
@@ -262,14 +260,14 @@ namespace DriverScanTester.ViewModels
         {
             if (string.IsNullOrWhiteSpace(SelectedOperationName))
             {
-                _appendLog("[Operation Test] No operation selected.");
+                AppendBotLog("[Operation Test] No operation selected.");
                 OperationTestStatus = "No operation selected";
                 return;
             }
 
             IsOperationTestRunning = true;
-            OperationTestStatus = "Runningâ€¦";
-            _appendLog($"[Operation Test] Starting '{SelectedOperationName}'...");
+            OperationTestStatus = "Running…";
+            AppendBotLog($"[Operation Test] Starting '{SelectedOperationName}'...");
             try
             {
                 bool ok = await _main.TestOperationAsync(SelectedOperationName);
@@ -278,7 +276,7 @@ namespace DriverScanTester.ViewModels
             catch (Exception ex)
             {
                 OperationTestStatus = "Error";
-                _appendLog($"[Operation Test] Error: {ex.Message}");
+                AppendBotLog($"[Operation Test] Error: {ex.Message}");
             }
             finally
             {
@@ -330,16 +328,16 @@ namespace DriverScanTester.ViewModels
             if (errors.Count == 0)
             {
                 ValidationText = $"Profile '{profile.Name}' is valid.";
-                _appendLog($"Profile '{profile.Name}' is valid.");
+                AppendBotLog($"Profile '{profile.Name}' is valid.");
             }
             else
             {
                 ValidationText = $"Profile '{profile.Name}' validation ERRORS:";
-                _appendLog($"Profile '{profile.Name}' validation ERRORS:");
+                AppendBotLog($"Profile '{profile.Name}' validation ERRORS:");
                 foreach (var err in errors)
                 {
                     ValidationText += "\n" + err;
-                    _appendLog($"  - {err}");
+                    AppendBotLog($"  - {err}");
                 }
             }
         }
@@ -352,7 +350,7 @@ namespace DriverScanTester.ViewModels
         {
             if (string.IsNullOrWhiteSpace(SelectedProfileName))
             {
-                _appendLog("No profile selected. Workflow cannot start.");
+                AppendBotLog("No profile selected. Workflow cannot start.");
                 ValidationText = "No profile selected.";
                 return;
             }
@@ -360,7 +358,7 @@ namespace DriverScanTester.ViewModels
             var profile = _main.LoadProfile(SelectedProfileName);
             if (profile == null)
             {
-                _appendLog($"Failed to load profile '{SelectedProfileName}'.");
+                AppendBotLog($"Failed to load profile '{SelectedProfileName}'.");
                 ValidationText = $"Failed to load profile '{SelectedProfileName}'.";
                 return;
             }
@@ -369,31 +367,31 @@ namespace DriverScanTester.ViewModels
             var errors = _main.ValidateProfile(profile);
             if (errors.Count > 0)
             {
-                _appendLog("Profile validation failed:");
+                AppendBotLog("Profile validation failed:");
                 foreach (var error in errors)
-                    _appendLog(" - " + error);
-                _appendLog("Workflow NOT started. Fix profile errors first.");
-                ValidationText = "Validation FAILED â€” check main log.";
+                    AppendBotLog(" - " + error);
+                AppendBotLog("Workflow NOT started. Fix profile errors first.");
+                ValidationText = "Validation FAILED — check main log.";
                 return;
             }
 
             _main.StartWorkflow(profile);
 
-            _appendLog($"Workflow started with profile '{profile.Name}'.");
+            AppendBotLog($"Workflow started with profile '{profile.Name}'.");
 
             var flowSteps = profile.FlowSteps ?? new List<BotFlowStep>();
             if (flowSteps.Count == 0)
             {
-                _appendLog("  Flow: no steps configured.");
+                AppendBotLog("  Flow: no steps configured.");
             }
             else
             {
-                _appendLog($"  Flow ({flowSteps.Count} steps):");
+                AppendBotLog($"  Flow ({flowSteps.Count} steps):");
                 for (int i = 0; i < flowSteps.Count; i++)
                 {
                     var step = flowSteps[i];
                     if (step == null) continue;
-                    _appendLog($"    {i + 1}. {DescribeFlowStepForLog(step)}");
+                    AppendBotLog($"    {i + 1}. {DescribeFlowStepForLog(step)}");
                 }
             }
         }
@@ -404,7 +402,7 @@ namespace DriverScanTester.ViewModels
             {
                 case BotFlowStepType.Path:
                     string mode = step.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached
-                        ? $"finish when destination map loaded â†’ map {step.ExpectedDestinationMapNumber}"
+                        ? $"finish when destination map loaded › map {step.ExpectedDestinationMapNumber}"
                         : "finish when last waypoint reached";
                     if (step.Routes != null && step.Routes.Count > 0)
                         return $"Path group ({step.Routes.Count} routes, wait {step.StartDelayMs} ms, {mode})";

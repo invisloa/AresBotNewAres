@@ -953,6 +953,9 @@ namespace DriverScanTester.Services
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool ClientToScreen(nint hWnd, ref POINT lpPoint);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern nint GetForegroundWindow();
+
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT
         {
@@ -980,6 +983,30 @@ namespace DriverScanTester.Services
                 return (rect.Left, rect.Top);
 
             return (0, 0);
+        }
+
+        /// <summary>
+        /// Resolves the game window handle using the known window titles.
+        /// Returns <see cref="nint.Zero"/> when the game window cannot be found.
+        /// </summary>
+        private nint FindGameWindowHandle()
+        {
+            nint hwnd = FindWindow(null, "Legend of Ares");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Ares");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
+            return hwnd;
+        }
+
+        /// <summary>
+        /// True when the game window is currently the foreground (selected) window.
+        /// False when the user switched to another window (e.g. the bot log) or the
+        /// game window cannot be found.
+        /// </summary>
+        private bool IsGameWindowForeground()
+        {
+            nint hwnd = FindGameWindowHandle();
+            return hwnd != nint.Zero && GetForegroundWindow() == hwnd;
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -1149,6 +1176,11 @@ namespace DriverScanTester.Services
         /// re-evaluated. Up to <see cref="SellerMaxFullScans"/> full window sweeps are
         /// attempted. Returns true when IsShopOpen() becomes true at any point.
         ///
+        /// Before each full scan starts, the foreground window is checked: when the
+        /// game window is no longer the selected window (the user switched away,
+        /// e.g. to read the log), a <see cref="BotStopRequestedException"/> is thrown
+        /// so the workflow stops the bot instead of continuing the sweep.
+        ///
         /// All scan points use the actual game-window client rectangle so this works
         /// regardless of window position or resolution.
         /// </summary>
@@ -1175,6 +1207,16 @@ namespace DriverScanTester.Services
 
             for (int scanIndex = 0; scanIndex < maxFullScans; scanIndex++)
             {
+                // Before each full scan, verify the game window is still the selected
+                // (foreground) window. If the user switched away — e.g. to read the
+                // bot log — stop the bot immediately instead of sweeping the window
+                // for many more seconds/minutes.
+                if (!IsGameWindowForeground())
+                {
+                    throw new BotStopRequestedException(
+                        "Game window is not the selected window — stopping the bot (NPC scan aborted).");
+                }
+
                 if (_memory.IsShopOpen())
                 {
                     _log($"ItemSeller: Seller dialog opened before scan #{scanIndex + 1} started.");
@@ -1346,10 +1388,7 @@ namespace DriverScanTester.Services
         {
             originX = 0; originY = 0; width = 0; height = 0;
 
-            nint hwnd = FindWindow(null, "Legend of Ares");
-            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Ares");
-            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
-            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
+            nint hwnd = FindGameWindowHandle();
             if (hwnd == nint.Zero) return false;
 
             if (!GetClientRect(hwnd, out RECT clientRect))

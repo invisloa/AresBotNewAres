@@ -167,6 +167,12 @@ namespace DriverScanTester.Services
         /// <summary>True while the loot-priority hold is active (prevents log spam).</summary>
         private bool _lootPriorityHoldActive = false;
 
+        /// <summary>When the loot-priority post-kill hold started (UtcNow) — for the safety timeout. MinValue = not holding.</summary>
+        private DateTime _lootPriorityHoldSince = DateTime.MinValue;
+
+        /// <summary>True once the loot-priority hold was force-released by the safety timeout (until the loot phase ends).</summary>
+        private bool _lootPriorityHoldTimedOut = false;
+
         // Temporary ghost waypoint tracking
         private readonly List<(float X, float Y)> _ghostWaypoints = new List<(float X, float Y)>();
         private const float GHOST_MATCH_EPSILON = BotConstants.Movement.GhostMatchEpsilon;
@@ -219,6 +225,15 @@ namespace DriverScanTester.Services
         // Baseline position + time while W is held; zero displacement for the timeout = stuck.
         private (float X, float Y)? _lastMoveProgressPos = null;
         private DateTime _lastMoveProgressTime = DateTime.MinValue;
+
+        // Reposition-and-retry escalation (attack not consuming mana): after several
+        // reposition cycles without real movement progress, the bot escalates to the
+        // standard unstuck (reverse-diagonal recovery → ReportAndGoBack after repeated
+        // failures) instead of cycling forever against a phantom target the player
+        // cannot walk away from.
+        private int _repositionRetryCount = 0;
+        private (float X, float Y)? _lastRepositionPos = null;
+        private const int REPOSITION_MAX_ATTEMPTS = 4;
 
         // When stuck in city triggers teleport, wait this long before resuming.
         private DateTime _inCityStuckCooldownUntil = DateTime.MinValue;
@@ -483,6 +498,55 @@ namespace DriverScanTester.Services
                 return;
             }
             _lootPriorityHoldActive = false;
+
+            // ── Loot-priority post-kill hold ──
+            // In loot priority mode, after a mob dies (mob selected → no target) the loot
+            // machine loots until a full scan pass finds no more items (IsLootingActive).
+            // During that phase the bot must NOT select the next target (no TAB / no
+            // attack) and must NOT move to the next waypoint — loot is the priority.
+            if (LootPriorityMode && LootSystemRef != null && LootSystemRef.IsLootingActive)
+            {
+                if (_lootPriorityHoldSince == DateTime.MinValue)
+                {
+                    _lootPriorityHoldSince = DateTime.UtcNow;
+                }
+
+                // Safety timeout: if the loot phase stalls with no items collected for a
+                // long time (e.g. the loot task died or the scan got stuck), release the
+                // hold instead of standing still forever. Active collection keeps
+                // extending the window.
+                bool makingProgress = LootSystemRef.TimeSinceLastItemCollected <
+                    TimeSpan.FromMilliseconds(BotConstants.Delays.LootWaitProgressGraceMs);
+                bool holdTimedOut = !makingProgress &&
+                    (DateTime.UtcNow - _lootPriorityHoldSince).TotalMilliseconds >= BotConstants.Delays.MaxLootWaitMs;
+
+                if (!holdTimedOut)
+                {
+                    if (!_lootPriorityHoldActive)
+                    {
+                        _lootPriorityHoldActive = true;
+                        _combatHandler.ResetState();
+                        _log($"[Tick {_tickCount}] Loot priority — looting everything before next target / waypoint.");
+                    }
+                    ReleaseSkillThree();
+                    StopMoving();
+                    ClearCombatRetargetSearch();
+                    await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                    return;
+                }
+
+                if (!_lootPriorityHoldTimedOut)
+                {
+                    _lootPriorityHoldTimedOut = true;
+                    _log($"[Tick {_tickCount}] Loot-priority hold timed out after {BotConstants.Delays.MaxLootWaitMs}ms without collected items — resuming combat/movement.");
+                }
+            }
+            else
+            {
+                // Loot phase ended (or not loot priority) — reset the hold bookkeeping.
+                _lootPriorityHoldSince = DateTime.MinValue;
+                _lootPriorityHoldTimedOut = false;
+            }
 
             // ── Map change detection ──
             // Each game map has its own navigation file. If the player changed maps,
@@ -777,6 +841,14 @@ namespace DriverScanTester.Services
                     // from the stuck spot. Combat is suppressed while the recovery is
                     // active (_isUnstuckRoutineActive), so TAB/attack cannot interrupt it.
                     StartCombatUnstuck(currX, currY);
+                    return;
+
+                case CombatAction.RepositionAndRetry:
+                    // The attack animation plays but mana is not consumed (attack not
+                    // connecting — phantom/unreachable target, mob HP never drops).
+                    // Walk toward the next waypoint for a short time, then TAB and
+                    // attack the (re-selected) target again.
+                    await RepositionAndRetryAttack(currX, currY, token);
                     return;
 
                 case CombatAction.PotionsUsed:
@@ -1556,6 +1628,78 @@ namespace DriverScanTester.Services
                 : new Waypoint(Waypoint2.X, Waypoint2.Y, GlobalPrecision, BotMode.OnlyMove);
             _log("[Combat] Unreachable mob — starting standard unstuck (reverse-diagonal recovery).");
             StartReverseDiagonalRecovery(currX, currY, target);
+        }
+
+        /// <summary>
+        /// Attack-not-connecting recovery (see <see cref="CombatAction.RepositionAndRetry"/>):
+        /// the attack animation plays but mana is not consumed, so the attack is not
+        /// connecting (phantom/unreachable target — the mob's HP never drops). Release the
+        /// skill, walk toward the next waypoint for a short time to physically reposition,
+        /// then TAB and let the combat handler re-acquire/attack the target on the next tick
+        /// (skill 3 is pressed again as soon as a mob is selected).
+        /// </summary>
+        private async Task RepositionAndRetryAttack(float currX, float currY, CancellationToken token)
+        {
+            ReleaseSkillThree();
+            ClearCombatRetargetSearch();
+
+            // ── Escalation ──
+            // Count consecutive reposition cycles. Real movement progress (the player
+            // actually walked away from the broken spot) resets the counter; repeated
+            // cycles with zero progress mean the player cannot leave (geometry block +
+            // phantom target re-selected by TAB) — escalate to the standard unstuck so
+            // the existing escalation chain (reverse-diagonal → ReportAndGoBack) applies.
+            if (_lastRepositionPos.HasValue)
+            {
+                float moved = GeometryUtils.Distance(currX, currY, _lastRepositionPos.Value.X, _lastRepositionPos.Value.Y);
+                if (moved > BotConstants.Movement.StuckProgressResetDistance)
+                {
+                    _repositionRetryCount = 0;
+                }
+            }
+            else
+            {
+                _lastRepositionPos = (currX, currY);
+            }
+
+            _repositionRetryCount++;
+            if (_repositionRetryCount >= REPOSITION_MAX_ATTEMPTS)
+            {
+                _repositionRetryCount = 0;
+                _lastRepositionPos = null;
+                _log($"[Combat] {REPOSITION_MAX_ATTEMPTS} reposition attempts without escaping the broken target — starting standard unstuck.");
+                StartCombatUnstuck(currX, currY);
+                return;
+            }
+
+            Waypoint target = _waypoints.Count > 0
+                ? _waypoints.Peek()
+                : new Waypoint(Waypoint2.X, Waypoint2.Y, GlobalPrecision, BotMode.OnlyMove);
+
+            int walkMs = BotConstants.Combat.CombatRepositionDurationMs;
+            _log($"[Combat] Attack not consuming mana — repositioning: walk toward waypoint ({target.X:F1},{target.Y:F1}) for {walkMs}ms, then TAB + attack.");
+
+            // Force an immediate camera update to the waypoint direction (fresh segment
+            // bypasses the camera filter) and walk forward for the reposition duration.
+            ResetBearingState();
+            ApplyCameraBearing(GeometryUtils.GetBearingToTargetDeg(currX, currY, target.X, target.Y));
+            StartMoving();
+            try
+            {
+                await Task.Delay(walkMs, token);
+            }
+            finally
+            {
+                StopMoving();
+            }
+
+            // Fresh combat state for the retry: the next tick re-baselines the mana
+            // stuck detection and presses 3 when a target is selected.
+            _combatHandler.ResetState();
+
+            _log("[Combat] Retrying attack — TAB, then attack if a target is selected.");
+            GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
+            await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
         }
 
         [DllImport("user32.dll", SetLastError = true)]

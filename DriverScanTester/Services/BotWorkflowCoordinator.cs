@@ -156,6 +156,12 @@ namespace DriverScanTester.Services
             _repotDetector.MinHp = profile.MinHp;
             _repotDetector.MinMana = profile.MinMana;
 
+            // Weight-based repot only applies with loot priority selected in the profile:
+            // loot fills the bag up to the weight limit, so reaching it means it is time
+            // to repot. Without loot priority the bot just exp's as the profile states
+            // and weight never forces a repot.
+            _repotDetector.WeightRepotEnabled = profile.LootPriority;
+
             // Apply profile potion buy targets
             _repotSystem.HpBuyTarget = profile.HpBuyTarget;
             _repotSystem.ManaBuyTarget = profile.ManaBuyTarget;
@@ -230,6 +236,14 @@ namespace DriverScanTester.Services
                 }, token);
 
                 await RunWorkflowLoop(token);
+            }
+            catch (BotStopRequestedException ex)
+            {
+                // A service requested an immediate stop (e.g. the game window is no
+                // longer the selected window during an NPC scan). Same result as the
+                // user pressing Stop — the finally block performs the cleanup.
+                _log($"[Coordinator] Bot stop requested: {ex.Message}");
+                CurrentPhase = BotPhase.Stopping;
             }
             catch (OperationCanceledException)
             {
@@ -516,6 +530,12 @@ namespace DriverScanTester.Services
             {
                 _repotSystem.Repot();
                 _log("[Repot] Repot completed.");
+            }
+            catch (BotStopRequestedException)
+            {
+                // The game window lost focus during the seller scan — the whole bot
+                // must stop cleanly. Rethrow so StartAsync handles it as a stop.
+                throw;
             }
             catch (Exception ex)
             {
@@ -1176,17 +1196,77 @@ namespace DriverScanTester.Services
         /// (start position, protected map, tolerance) are passed in by the caller —
         /// every route carries its own.
         ///
-        /// When the player is NOT standing on the start coordinates (within the
-        /// tolerance), the bot uses the town teleport scroll, waits for the game to
+        /// Attempt 1: when the player is NOT standing on the start coordinates (within
+        /// the tolerance), the bot uses the town teleport scroll, waits for the game to
         /// settle (<see cref="BotConstants.Delays.PostTeleportUiLoadMs"/> — the ~10 s UI
         /// load wait), then taps W very briefly so the game refreshes the (stale,
         /// pre-teleport) position memory, and immediately verifies (fast polls, ~20 ms
         /// apart) that the current map matches the protected map AND that the player is
-        /// back on the start coordinates (within the tolerance). When the values are
-        /// correct the bot proceeds in a blink of an eye; if the verification never
-        /// passes within the fast window, the check fails (returns false).
+        /// back on the start coordinates (within the tolerance). Every failed
+        /// verification re-taps W for 50 ms and logs the position the bot thinks it is
+        /// at now. When the values are correct the bot proceeds in a blink of an eye.
+        ///
+        /// When the attempt ultimately fails, the check is retried up to
+        /// <see cref="BotConstants.Delays.StartProtectionMaxRetries"/> times: each retry
+        /// waits (15 s, then x10 per retry: 15s → 150s → 1500s), performs a repot and
+        /// starts the whole protection over from scratch. Only when every retry fails
+        /// does the check return false.
         /// </summary>
         private async Task<bool> RunStartProtectionCoreAsync(
+            int startX,
+            int startY,
+            int mapNumber,
+            int tolerance,
+            CancellationToken token)
+        {
+            // Attempt 0 is the initial pass; retries 1..MaxRetries add the wait + repot.
+            for (int retry = 0; retry <= BotConstants.Delays.StartProtectionMaxRetries; retry++)
+            {
+                if (retry > 0)
+                {
+                    // Wait before the retry — 15s, then x10 after each retry
+                    // (15s → 150s → 1500s), so a persistently failing protection
+                    // backs off progressively instead of hammering the server.
+                    double waitSeconds = BotConstants.Delays.StartProtectionRetryBaseWaitSeconds * Math.Pow(10, retry - 1);
+                    _log($"[StartProtection] Protection failed — retry {retry}/{BotConstants.Delays.StartProtectionMaxRetries}: waiting {waitSeconds:F0}s, then repot and start over.");
+                    await Task.Delay(TimeSpan.FromSeconds(waitSeconds), token);
+                    if (token.IsCancellationRequested) return false;
+
+                    await RepotBeforeStartProtectionRetryAsync(token);
+                    if (token.IsCancellationRequested) return false;
+                }
+
+                if (await RunStartProtectionAttemptAsync(startX, startY, mapNumber, tolerance, token))
+                    return true;
+
+                if (token.IsCancellationRequested) return false;
+            }
+
+            _log("[StartProtection] PROTECTION FAILED — the current map/position do not match the expected start position/protected map after all retries. Stopping.");
+            return false;
+        }
+
+        /// <summary>
+        /// One start-protection pass: reads the player position and verifies the current
+        /// map against the protected map.
+        ///
+        /// - Exactly on the start coordinates (within tolerance, on the protected map
+        ///   when one is configured) → proceed immediately.
+        /// - Otherwise the bot FIRST moves for 50 ms and takes 3 position measurements
+        ///   (re-tapping W and logging the position after each failed read) — the
+        ///   position memory only refreshes when the player moves, so a stale read can
+        ///   look like a wrong position without actually being one.
+        /// - Still off and NOT in the city (dungeon/wilderness — the position memory
+        ///   is unreliable there, walking could run into walls) → town teleport, then
+        ///   move 50 ms + 3 measurements again.
+        /// - Final decision: in the city on the protected map → proceed (the check
+        ///   fully ran; in-town walking is safe and the flow's paths handle any offset
+        ///   via the route resync — the whole profile action must run from the
+        ///   beginning even when the player is not exactly on the spawn, e.g. after a
+        ///   repot the player stands at the shop, not the spawn). Anywhere else →
+        ///   fail so the retry/repot chain (15 s, x10 per retry) restarts the flow.
+        /// </summary>
+        private async Task<bool> RunStartProtectionAttemptAsync(
             int startX,
             int startY,
             int mapNumber,
@@ -1196,52 +1276,207 @@ namespace DriverScanTester.Services
             var (x, y, posSuccess) = _memoryService.GetPlayerPosition();
             if (!posSuccess)
             {
-                _log("[StartProtection] Cannot read the player position. Stopping.");
+                _log("[StartProtection] Cannot read the player position.");
                 return false;
             }
 
-            if (Math.Abs(x - startX) <= tolerance &&
-                Math.Abs(y - startY) <= tolerance)
+            int currentMap = _memoryService.GetMapNumber();
+            bool mapConfigured = mapNumber > 0;
+            bool mapMatches = currentMap == mapNumber;
+            bool posMatches = Math.Abs(x - startX) <= tolerance &&
+                              Math.Abs(y - startY) <= tolerance;
+
+            // Exactly on the start position (and map, when one is configured) → done.
+            if ((!mapConfigured || mapMatches) && posMatches)
             {
                 _log($"[StartProtection] Player already on the start position ({x}, {y}). No teleport needed.");
                 return true;
             }
 
-            _log($"[StartProtection] Player at ({x}, {y}) — start position is ({startX}, {startY}) (tolerance {tolerance} tiles). Using the town teleport scroll.");
-            await TeleportToCity(token);
+            // ── Before ANY teleport: move for 50 ms and take 3 position measurements ──
+            // The position memory only refreshes when the player actually moves, so a
+            // stale read can look like a wrong position. A single step + 3 reads can
+            // confirm the real position without burning a teleport scroll.
+            if (await VerifyPositionWithNudgesAsync(startX, startY, mapNumber, tolerance, "before teleport", token))
+                return true;
             if (token.IsCancellationRequested) return false;
 
-            // TeleportToCity already waits PostTeleportUiLoadMs (~10 s) for the game UI
-            // to settle. The player position memory stays STALE (pre-teleport values)
-            // until the player actually moves, so tap W very briefly to force the game
-            // to refresh the coordinates — then verify immediately, no settle wait.
-            _log("[StartProtection] Quick step tap to refresh the position memory...");
+            // Still off. The town teleport scroll only makes sense outside the city —
+            // in town it is a no-op (would just burn a scroll and ~10 s), so it is
+            // skipped there.
+            if (_memoryService.GetIsInCity())
+            {
+                _log($"[StartProtection] Player in the city at ({x}, {y}) — the town teleport is a no-op here, skipped.");
+            }
+            else
+            {
+                _log($"[StartProtection] Player at ({x}, {y}) — start position is ({startX}, {startY}) (map {mapNumber}, tolerance {tolerance} tiles). Using the town teleport scroll.");
+                await TeleportToCity(token);
+                if (token.IsCancellationRequested) return false;
+
+                // After the teleport: move 50 ms + 3 measurements again. TeleportToCity
+                // already waited PostTeleportUiLoadMs (~10 s) for the game UI to settle,
+                // but the position memory stays STALE until the player moves — hence the
+                // step tap and re-verification.
+                if (await VerifyPositionWithNudgesAsync(startX, startY, mapNumber, tolerance, "after teleport", token))
+                    return true;
+                if (token.IsCancellationRequested) return false;
+            }
+
+            // Final decision after the check + recovery fully ran:
+            // - In the city on the protected map → proceed. The check DID run (50 ms
+            //   moves + 3 measurements, teleport attempted where possible); in-town
+            //   walking is safe and the flow's paths (repot path, route resync) handle
+            //   any offset — the whole profile action runs from the beginning even
+            //   when the player is not exactly on the spawn (a repot leaves the player
+            //   at the shop, not the spawn).
+            // - Otherwise (outside the city / wrong map) → the position is unreliable
+            //   and walking could run into walls → fail so the retry/repot chain
+            //   (15 s, x10 per retry) restarts the flow; once the player is back in
+            //   the right city the rule above lets the flow run.
+            if (_memoryService.GetIsInCity() && mapConfigured && mapMatches)
+            {
+                _log($"[StartProtection] Player is in the city on the protected map {currentMap} at ({x}, {y}) — start ({startX}, {startY}) is {Math.Abs(x - startX):F0}/{Math.Abs(y - startY):F0} tiles off, but in-town walking is safe and the flow's paths handle the offset. Proceeding.");
+                return true;
+            }
+
+            _log($"[StartProtection] Player at ({x}, {y}) is not on the protected map {mapNumber} / start ({startX}, {startY}) — failing so the retry/repot chain restarts the flow.");
+            return false;
+        }
+
+        /// <summary>
+        /// Moves for 50 ms (W tap) and takes up to
+        /// <see cref="BotConstants.Delays.StartProtectionVerifyAttempts"/> position
+        /// measurements, re-tapping W and logging the position after each failed read.
+        /// Returns true when a measurement confirms BOTH the protected map and the
+        /// start position. Used before and after any teleport decision — the position
+        /// memory only refreshes when the player moves, so a single step can resolve a
+        /// stale read without teleporting anywhere.
+        /// </summary>
+        private async Task<bool> VerifyPositionWithNudgesAsync(
+            int startX,
+            int startY,
+            int mapNumber,
+            int tolerance,
+            string phase,
+            CancellationToken token)
+        {
+            _log($"[StartProtection] Quick step tap to refresh the position memory ({phase})...");
             await NudgeMoveAsync(token);
             if (token.IsCancellationRequested) return false;
 
+            bool mapConfigured = mapNumber > 0;
             for (int attempt = 1; attempt <= BotConstants.Delays.StartProtectionVerifyAttempts; attempt++)
             {
                 int map = _memoryService.GetMapNumber();
                 var (vx, vy, verifyOk) = _memoryService.GetPlayerPosition();
 
-                bool mapOk = mapNumber <= 0 || map == mapNumber;
+                bool mapOk = !mapConfigured || map == mapNumber;
                 bool posOk = verifyOk &&
                              Math.Abs(vx - startX) <= tolerance &&
                              Math.Abs(vy - startY) <= tolerance;
 
                 if (mapOk && posOk)
                 {
-                    _log($"[StartProtection] Protection OK — map {map}, position ({vx}, {vy}). Proceeding.");
+                    _log($"[StartProtection] Protection OK ({phase}) — map {map}, position ({vx}, {vy}). Proceeding.");
                     return true;
                 }
 
-                _log($"[StartProtection] Verify attempt {attempt}/{BotConstants.Delays.StartProtectionVerifyAttempts} failed — map {map}, position ({vx}, {vy}).");
+                _log($"[StartProtection] Verify attempt {attempt}/{BotConstants.Delays.StartProtectionVerifyAttempts} failed ({phase}) — map {map}, position ({vx}, {vy}).");
+
+                // The bot still thinks the position is wrong — tap W for 50 ms again so
+                // the game refreshes the position memory, then log the position it
+                // thinks it is at now.
+                await NudgeMoveAsync(token);
+                if (token.IsCancellationRequested) return false;
+
+                var (rx, ry, _) = _memoryService.GetPlayerPosition();
+                _log($"[StartProtection] Re-tapped W — position now ({rx}, {ry}).");
+
                 if (attempt < BotConstants.Delays.StartProtectionVerifyAttempts)
                     await Task.Delay(BotConstants.Delays.StartProtectionRetryMs, token);
             }
 
-            _log("[StartProtection] PROTECTION FAILED — the current map/position do not match the expected start position/protected map. Stopping.");
             return false;
+        }
+
+        /// <summary>
+        /// Best-effort repot before a start-protection retry: teleport to the city, WALK
+        /// the profile's repot path to the shop, and ONLY when that path reports success
+        /// (Completed) run the sell/buy sequence — the repot must never pop up while the
+        /// player is still standing somewhere else in the city. Failures are logged but
+        /// never abort the retry chain — the next protection pass re-checks everything.
+        /// </summary>
+        private async Task RepotBeforeStartProtectionRetryAsync(CancellationToken token)
+        {
+            _log("[StartProtection] Repotting before the retry...");
+            try
+            {
+                if (!_memoryService.GetIsInCity())
+                {
+                    _log("[StartProtection] Not in city — teleporting before repot.");
+                    await TeleportToCity(token);
+                    if (token.IsCancellationRequested) return;
+                }
+
+                // Walk to the repot point FIRST using the profile's Repot step path.
+                // The shop sequence runs ONLY after the path completed successfully —
+                // never while the player is still god-knows-where in the city.
+                var repotRoute = GetRepotRouteForRetry();
+                if (repotRoute == null)
+                {
+                    _log("[StartProtection] No repot path available for the retry — skipping the shop sequence.");
+                    return;
+                }
+
+                var result = await RunRouteOnceAsync(repotRoute, "StartProtection retry — repot path", token);
+                if (token.IsCancellationRequested) return;
+
+                if (result != RouteRunResult.Completed)
+                {
+                    _log($"[StartProtection] Repot path '{repotRoute.PathFile}' did not complete ({result}) — the player is not at the repot point, skipping the shop sequence.");
+                    return;
+                }
+
+                if (_profile.DryRunRepot)
+                {
+                    _log("[StartProtection] DryRunRepot=true — skipping the actual shop sequence.");
+                    return;
+                }
+
+                _repotSystem.Repot();
+                _log("[StartProtection] Repot completed.");
+            }
+            catch (BotStopRequestedException)
+            {
+                // The game window lost focus during the seller scan — the whole bot
+                // must stop. Rethrow so StartAsync handles it as a stop; the retry
+                // chain must not continue.
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _log($"[StartProtection] Repot failed: {ex.Message} — continuing with the retry.");
+            }
+        }
+
+        /// <summary>
+        /// Returns the next repot path from the profile's Repot flow step (cycling on
+        /// each call, mirroring <see cref="ExecuteRepotStepAsync"/>), or null when the
+        /// profile has no Repot step / no repot paths configured.
+        /// </summary>
+        private BotRouteStep? GetRepotRouteForRetry()
+        {
+            var repotStep = _profile.FlowSteps?.FirstOrDefault(s => s != null && s.Type == BotFlowStepType.Repot);
+            var repotPaths = repotStep?.RepotPaths ?? new List<BotRouteStep>();
+            if (repotPaths.Count == 0) return null;
+
+            if (_repotPathIndex < 0 || _repotPathIndex >= repotPaths.Count)
+                _repotPathIndex = 0;
+
+            var route = repotPaths[_repotPathIndex];
+            _repotPathIndex = (_repotPathIndex + 1) % repotPaths.Count;
+            return route;
         }
 
         /// <summary>

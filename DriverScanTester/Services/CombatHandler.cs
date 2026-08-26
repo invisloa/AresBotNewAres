@@ -29,7 +29,14 @@ namespace DriverScanTester.Services
         /// player really walks away from the stuck spot. Combat is suppressed while the
         /// unstuck routine is active so TAB/attack cannot interrupt it.
         /// </summary>
-        Unstuck
+        Unstuck,
+        /// <summary>
+        /// The attack animation plays but mana is not consumed for the mana-stuck
+        /// timeout — the attack is NOT connecting (phantom/unreachable target, mob HP
+        /// never drops). The caller must physically reposition: walk toward the next
+        /// waypoint for a short time, then TAB and attack the (re-selected) target again.
+        /// </summary>
+        RepositionAndRetry
     }
 
     /// <summary>
@@ -47,6 +54,7 @@ namespace DriverScanTester.Services
         private const double MOVE_MODE_TAB_INTERVAL_SECONDS = BotConstants.Combat.MoveModeTabIntervalSeconds;
         private const double COMBAT_STUCK_TIMEOUT_MS = BotConstants.Combat.CombatStuckTimeoutMs;
         private const float COMBAT_STUCK_POS_EPSILON = BotConstants.Combat.CombatStuckPosEpsilon;
+        private const double COMBAT_MANA_STUCK_TIMEOUT_MS = BotConstants.Combat.CombatManaStuckTimeoutMs;
 
         // ── State ──
         private bool _wasAttacking;
@@ -197,13 +205,15 @@ namespace DriverScanTester.Services
                 // Any non-idle action, or no mob selected, resets the idle timer
                 _combatIdleStartTime = DateTime.MinValue;
 
-                // ── Combat stuck detection: mana + position unchanged ──
-                // When the player REALLY attacks, the skill consumes mana. Standing still
-                // is the normal combat posture, so a static position alone proves nothing —
-                // but position AND mana both unchanged for the timeout means the player is
-                // NOT actually fighting (unreachable mob / attack not connecting, while the
-                // animation may still play). Trigger the STANDARD unstuck action so the
-                // player really walks away from the stuck spot.
+                // ── Attack-not-connecting detection: mana unchanged ──
+                // A real attack consumes mana (skill) with every swing. If the attack
+                // animation keeps playing (attackVal > 0) but mana does NOT drop for
+                // COMBAT_MANA_STUCK_TIMEOUT_MS, the attack is not connecting — the mob
+                // looks attacked but its HP never drops (phantom/unreachable target).
+                // Position is deliberately NOT part of this check: the attack lunge
+                // animation moves the player every swing, so a static-position test can
+                // never fire while this is happening. The bot must physically reposition:
+                // walk toward the next waypoint for a short time, then TAB and attack again.
                 var healMana = memoryService.GetHealManaValues();
                 if (healMana.value2.HasValue)
                 {
@@ -215,6 +225,22 @@ namespace DriverScanTester.Services
                     _lastManaValue = mana;
                 }
 
+                // Only fire when mana was actually sampled at least once (otherwise the
+                // unreadable-mana case falls through to the position-based check below).
+                if (_lastManaValue != int.MinValue &&
+                    _lastManaChangeAt != DateTime.MinValue &&
+                    (DateTime.Now - _lastManaChangeAt).TotalMilliseconds >= COMBAT_MANA_STUCK_TIMEOUT_MS)
+                {
+                    _log($"[Combat] Mana unchanged for {COMBAT_MANA_STUCK_TIMEOUT_MS:F0}ms while attacking — attack animation plays but no mana consumed (attack not connecting, mob HP not dropping). Repositioning toward next waypoint.");
+                    return CombatAction.RepositionAndRetry;
+                }
+
+                // ── Combat stuck detection fallback: mana + position unchanged ──
+                // Only reachable when the mana read is unavailable (otherwise the mana-only
+                // check above fires first). Position AND mana both unchanged for the longer
+                // timeout means the player is NOT actually fighting (unreachable mob / attack
+                // not connecting, while the animation may still play). Trigger the STANDARD
+                // unstuck action so the player really walks away from the stuck spot.
                 if (_lastCombatPos.HasValue &&
                     GeometryUtils.Distance(currX, currY, _lastCombatPos.Value.X, _lastCombatPos.Value.Y) > COMBAT_STUCK_POS_EPSILON)
                 {

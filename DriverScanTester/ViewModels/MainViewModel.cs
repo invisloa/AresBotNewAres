@@ -317,7 +317,9 @@ namespace DriverScanTester.ViewModels
         {
             try
             {
-                var botVm = new BotViewModel(this, AppendLog);
+                var botVm = new BotViewModel(this);
+                // Route all bot service logs to the Bot window's log from now on.
+                _botLogSink = botVm.AppendBotLog;
                 var win = new Views.BotWindow
                 {
                     DataContext = botVm,
@@ -410,18 +412,18 @@ namespace DriverScanTester.ViewModels
 
             var initialMode = path.Count > 0 ? path[0].Mode : Services.BotMode.OnlyMove;
 
-            var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
-            _movementSystem = new MovementSystem(memoryService, AppendLog, tx, ty, SelectedPrecision, path, initialMode, loop);
+            var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
+            _movementSystem = new MovementSystem(memoryService, AppendBotLog, tx, ty, SelectedPrecision, path, initialMode, loop);
             
             _movementBotCts = new CancellationTokenSource();
             _isMovementBotRunning = true;
             var token = _movementBotCts.Token;
 
             Task.Run(() => MovementBotLoop(token), token);
-            AppendLog($"Bot started with Custom Route ({path.Count} points). Loop: {loop}");
+            AppendBotLog($"Bot started with Custom Route ({path.Count} points). Loop: {loop}");
 
             // 4. Start Heal/Mana
-            _healManaSystem = new HealManaSystem(memoryService, AppendLog);
+            _healManaSystem = new HealManaSystem(memoryService, AppendBotLog);
             _healManaBotCts = new CancellationTokenSource();
             _isHealManaBotRunning = true;
             var hmToken = _healManaBotCts.Token;
@@ -430,14 +432,14 @@ namespace DriverScanTester.ViewModels
             // 5. Start Loot
             if (!_isLootBotRunning)
             {
-                _lootSystem = new LootSystem(memoryService, AppendLog);
+                _lootSystem = new LootSystem(memoryService, AppendBotLog);
                 if (_movementSystem != null)
                     _movementSystem.LootSystemRef = _lootSystem;
                 _lootBotCts = new CancellationTokenSource();
                 _isLootBotRunning = true;
                 var lootToken = _lootBotCts.Token;
                 Task.Run(() => LootBotLoop(lootToken), lootToken);
-                AppendLog("Loot Bot started.");
+                AppendBotLog("Loot Bot started.");
             }
         }
 
@@ -1671,6 +1673,21 @@ namespace DriverScanTester.ViewModels
             LogText += $"[{stamp}] {line}\r\n";
         }
 
+        /// <summary>Optional sink for bot log lines (the Bot window's log). Null when the Bot window is not open.</summary>
+        private Action<string>? _botLogSink;
+
+        /// <summary>
+        /// Routes a bot log line to the bot log (Bot window) when it is open; falls back
+        /// to the main window log when the Bot window is closed so no bot message is lost.
+        /// </summary>
+        public void AppendBotLog(string line)
+        {
+            if (_botLogSink != null)
+                _botLogSink(line);
+            else
+                AppendLog(line);
+        }
+
         private void LogUnsupported(string what) =>
             AppendLog($"{what} not supported by this driver build.");
 
@@ -2684,25 +2701,25 @@ namespace DriverScanTester.ViewModels
                 return;
             }
 
-            var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
-            var repotSystem = new RepotSystem(memoryService, AppendLog);
-            var repotDetector = new RepotDetectorService(AppendLog);
-            var pathLoader = new SavedPathLoader(AppendLog);
-            var pathRunner = new PathRunnerService(memoryService, AppendLog);
+            var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
+            var repotSystem = new RepotSystem(memoryService, AppendBotLog);
+            var repotDetector = new RepotDetectorService(AppendBotLog);
+            var pathLoader = new SavedPathLoader(AppendBotLog);
+            var pathRunner = new PathRunnerService(memoryService, AppendBotLog);
 
             var operationContext = new OperationContext(
                 memoryService,
                 pathRunner,
-                new ItemSellerService(memoryService, AppendLog),
+                new ItemSellerService(memoryService, AppendBotLog),
                 profile,
-                AppendLog,
+                AppendBotLog,
                 FocusGameWindow);
-            var operationRunner = new OperationRunnerService(operationContext, AppendLog);
+            var operationRunner = new OperationRunnerService(operationContext, AppendBotLog);
 
             _workflowCoordinator = new BotWorkflowCoordinator(
                 memoryService, repotSystem, repotDetector, pathLoader, pathRunner, operationRunner,
-                profile, AppendLog, FocusGameWindow);
-            AppendLog($"Starting workflow with profile '{profile.Name}'.");
+                profile, AppendBotLog, FocusGameWindow);
+            AppendBotLog($"Starting workflow with profile '{profile.Name}'.");
 
             _workflowCoordinator.OnPhaseChanged = phaseName =>
             {
@@ -2781,25 +2798,25 @@ namespace DriverScanTester.ViewModels
             }
             if (baseAddr == 0)
             {
-                AppendLog("[Operation Test] Failed to resolve module base.");
+                AppendBotLog("[Operation Test] Failed to resolve module base.");
                 return false;
             }
 
-            var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
-            var pathRunner = new PathRunnerService(memoryService, AppendLog);
+            var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
+            var pathRunner = new PathRunnerService(memoryService, AppendBotLog);
             var profile = _workflowCoordinator?.ActiveProfile ?? new BotProfile();
             var operationContext = new OperationContext(
                 memoryService,
                 pathRunner,
-                new ItemSellerService(memoryService, AppendLog),
+                new ItemSellerService(memoryService, AppendBotLog),
                 profile,
-                AppendLog,
+                AppendBotLog,
                 FocusGameWindow);
-            var operationRunner = new OperationRunnerService(operationContext, AppendLog);
+            var operationRunner = new OperationRunnerService(operationContext, AppendBotLog);
 
             using var cts = new CancellationTokenSource();
             bool ok = await operationRunner.RunOnceAsync(operationName, cts.Token);
-            AppendLog(ok
+            AppendBotLog(ok
                 ? $"[Operation Test] '{operationName}' succeeded."
                 : $"[Operation Test] '{operationName}' failed.");
             return ok;
@@ -2807,19 +2824,19 @@ namespace DriverScanTester.ViewModels
 
         public List<string> ListProfiles()
         {
-            _profileLoader ??= new BotProfileLoader(AppendLog);
+            _profileLoader ??= new BotProfileLoader(AppendBotLog);
             return _profileLoader.ListProfiles();
         }
 
         public BotProfile? LoadProfile(string name)
         {
-            _profileLoader ??= new BotProfileLoader(AppendLog);
+            _profileLoader ??= new BotProfileLoader(AppendBotLog);
             return _profileLoader.LoadProfile(name);
         }
 
         public List<string> ValidateProfile(BotProfile profile)
         {
-            _profileLoader ??= new BotProfileLoader(AppendLog);
+            _profileLoader ??= new BotProfileLoader(AppendBotLog);
             return _profileLoader.ValidateProfile(profile);
         }
 
@@ -3117,7 +3134,7 @@ namespace DriverScanTester.ViewModels
                         _isMovementBotRunning = false;
                         // Also stop loot bot when movement stops
                         ToggleLootBot(false);
-                        AppendLog("Movement Bot stopped.");
+                        AppendBotLog("Movement Bot stopped.");
                     }
                     else
                     {
@@ -3133,14 +3150,14 @@ namespace DriverScanTester.ViewModels
                             _pointerScanner?.RefreshModules();
                             baseAddr = FindModuleInScanner("Ares.exe", true);
                         }
-                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
-                        _movementSystem = new MovementSystem(memoryService, AppendLog, tx, ty, SelectedPrecision, null, SelectedBotMode);
+                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
+                        _movementSystem = new MovementSystem(memoryService, AppendBotLog, tx, ty, SelectedPrecision, null, SelectedBotMode);
         
                         _movementBotCts = new CancellationTokenSource();
                         _isMovementBotRunning = true;
                         var movementToken = _movementBotCts.Token;
                         Task.Run(() => MovementBotLoop(movementToken), movementToken);
-                        AppendLog("Movement Bot started.");
+                        AppendBotLog("Movement Bot started.");
 
                         // Auto-start loot bot when movement starts
                         if (!_isLootBotRunning)
@@ -3160,7 +3177,7 @@ namespace DriverScanTester.ViewModels
                     {
                         _healManaBotCts?.Cancel();
                         _isHealManaBotRunning = false;
-                        AppendLog("Heal/Mana Bot stopped.");
+                        AppendBotLog("Heal/Mana Bot stopped.");
                     }
                     else
                     {
@@ -3174,13 +3191,13 @@ namespace DriverScanTester.ViewModels
                             baseAddr = FindModuleInScanner("Ares.exe", true);
                         }
 
-                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
-                        _healManaSystem = new HealManaSystem(memoryService, AppendLog);
+                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
+                        _healManaSystem = new HealManaSystem(memoryService, AppendBotLog);
                         _healManaBotCts = new CancellationTokenSource();
                         _isHealManaBotRunning = true;
                         var healManaToken = _healManaBotCts.Token;
                         Task.Run(() => HealManaBotLoop(healManaToken), healManaToken);
-                        AppendLog("Heal/Mana Bot started.");
+                        AppendBotLog("Heal/Mana Bot started.");
                     }
                 }
 
@@ -3192,7 +3209,7 @@ namespace DriverScanTester.ViewModels
                     {
                         _lootBotCts?.Cancel();
                         _isLootBotRunning = false;
-                        AppendLog("Loot Bot stopped.");
+                        AppendBotLog("Loot Bot stopped.");
                     }
                     else
                     {
@@ -3206,15 +3223,15 @@ namespace DriverScanTester.ViewModels
                             baseAddr = FindModuleInScanner("Ares.exe", true);
                         }
 
-                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
-                        _lootSystem = new LootSystem(memoryService, AppendLog);
+                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
+                        _lootSystem = new LootSystem(memoryService, AppendBotLog);
                         if (_movementSystem != null)
                             _movementSystem.LootSystemRef = _lootSystem;
                         _lootBotCts = new CancellationTokenSource();
                         _isLootBotRunning = true;
                         var lootToken = _lootBotCts.Token;
                         Task.Run(() => LootBotLoop(lootToken), lootToken);
-                        AppendLog("Loot Bot started.");
+                        AppendBotLog("Loot Bot started.");
                     }
                 }
         
@@ -3223,7 +3240,7 @@ namespace DriverScanTester.ViewModels
                     try
                     {
                         // Initial 5-second delay before bot starts moving
-                        AppendLog("Movement will start in 5 seconds...");
+                        AppendBotLog("Movement will start in 5 seconds...");
                         await Task.Delay(5000, token);
 
                         while (!token.IsCancellationRequested && _isAttached && _movementSystem != null)
@@ -3239,7 +3256,7 @@ namespace DriverScanTester.ViewModels
                             if (_movementSystem.IsZoneBlocked &&
                                 _movementSystem.ZoneBlockedDuration.TotalMilliseconds >= BotConstants.Delays.ZoneBlockAbortMs)
                             {
-                                AppendLog(
+                                AppendBotLog(
                                     $"[MovementBot] Player is in the wrong zone for this path " +
                                     $"(zone-blocked for {_movementSystem.ZoneBlockedDuration.TotalSeconds:F0}s — likely teleported to the city). " +
                                     $"Stopping the bot. Start the profile workflow to auto-repot and resume.");
@@ -3252,14 +3269,14 @@ namespace DriverScanTester.ViewModels
                     catch (TaskCanceledException) { }
                     catch (Exception ex)
                     {
-                        Application.Current?.Dispatcher?.Invoke(() => AppendLog($"Movement Bot error: {ex.Message}"));
+                        Application.Current?.Dispatcher?.Invoke(() => AppendBotLog($"Movement Bot error: {ex.Message}"));
                     }
                     finally
                     {
                         Application.Current?.Dispatcher?.Invoke(() => 
                         {
                             _isMovementBotRunning = false;
-                            AppendLog("Movement Bot loop ended.");
+                            AppendBotLog("Movement Bot loop ended.");
                         });
                         
                         // Persist any pending stuck-cell data before stopping
@@ -3283,14 +3300,14 @@ namespace DriverScanTester.ViewModels
                     catch (TaskCanceledException) { }
                     catch (Exception ex)
                     {
-                        Application.Current?.Dispatcher?.Invoke(() => AppendLog($"Heal/Mana Bot error: {ex.Message}"));
+                        Application.Current?.Dispatcher?.Invoke(() => AppendBotLog($"Heal/Mana Bot error: {ex.Message}"));
                     }
                     finally
                     {
                         Application.Current?.Dispatcher?.Invoke(() =>
                         {
                             _isHealManaBotRunning = false;
-                            AppendLog("Heal/Mana Bot loop ended.");
+                            AppendBotLog("Heal/Mana Bot loop ended.");
                         });
                     }
                 }
@@ -3308,14 +3325,14 @@ namespace DriverScanTester.ViewModels
                     catch (TaskCanceledException) { }
                     catch (Exception ex)
                     {
-                        Application.Current?.Dispatcher?.Invoke(() => AppendLog($"Loot Bot error: {ex.Message}"));
+                        Application.Current?.Dispatcher?.Invoke(() => AppendBotLog($"Loot Bot error: {ex.Message}"));
                     }
                     finally
                     {
                         Application.Current?.Dispatcher?.Invoke(() =>
                         {
                             _isLootBotRunning = false;
-                            AppendLog("Loot Bot loop ended.");
+                            AppendBotLog("Loot Bot loop ended.");
                         });
                     }
                 }
@@ -3333,7 +3350,7 @@ namespace DriverScanTester.ViewModels
                     }
                     if (baseAddr == 0) return (0, 0, false);
 
-                    var mem = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
+                    var mem = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
                     return mem.GetHpMana();
                 }
 
@@ -3347,7 +3364,7 @@ namespace DriverScanTester.ViewModels
                         baseAddr = FindModuleInScanner("Ares.exe", true);
                     }
                     if (baseAddr == 0) return 0;
-                    var mem = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
+                    var mem = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
                     return mem.GetHpPotionCount();
                 }
 
@@ -3361,7 +3378,7 @@ namespace DriverScanTester.ViewModels
                         baseAddr = FindModuleInScanner("Ares.exe", true);
                     }
                     if (baseAddr == 0) return 0;
-                    var mem = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
+                    var mem = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
                     return mem.GetManaPotionCount();
                 }
 

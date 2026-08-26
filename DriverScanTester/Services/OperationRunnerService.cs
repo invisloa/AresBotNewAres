@@ -103,6 +103,13 @@ namespace DriverScanTester.Services
                     : $"[Operation] '{name}' failed.");
                 return ok;
             }
+            catch (BotStopRequestedException)
+            {
+                // The game window lost focus — the whole bot must stop, not just this
+                // attempt. Rethrow so the workflow coordinator handles it as a stop;
+                // the retry loop must not swallow it.
+                throw;
+            }
             catch (OperationCanceledException)
             {
                 if (token.IsCancellationRequested)
