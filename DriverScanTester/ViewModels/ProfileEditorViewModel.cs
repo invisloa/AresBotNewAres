@@ -518,7 +518,8 @@ namespace DriverScanTester.ViewModels
                     .Select(rp => new BotRouteStep
                     {
                         PathFile = rp.PathFile,
-                        StartDelayMs = rp.StartDelayMs
+                        StartDelayMs = rp.StartDelayMs,
+                        StartCheckEnabled = rp.StartCheckEnabled
                     })
                     .ToList()
             };
@@ -529,7 +530,8 @@ namespace DriverScanTester.ViewModels
                     .Select(rp => new BotRouteStep
                     {
                         PathFile = rp.PathFile,
-                        StartDelayMs = rp.StartDelayMs
+                        StartDelayMs = rp.StartDelayMs,
+                        StartCheckEnabled = rp.StartCheckEnabled
                     })
                     .ToList();
 
@@ -731,7 +733,8 @@ namespace DriverScanTester.ViewModels
                     vm.RepotPaths.Add(new BotRouteStepViewModel
                     {
                         PathFile = rp.PathFile ?? "",
-                        StartDelayMs = rp.StartDelayMs
+                        StartDelayMs = rp.StartDelayMs,
+                        StartCheckEnabled = rp.StartCheckEnabled
                     });
                 }
                 foreach (var route in step.Routes ?? new List<BotRouteStep>())
@@ -739,7 +742,8 @@ namespace DriverScanTester.ViewModels
                     vm.Routes.Add(new BotRouteStepViewModel
                     {
                         PathFile = route.PathFile ?? "",
-                        StartDelayMs = route.StartDelayMs
+                        StartDelayMs = route.StartDelayMs,
+                        StartCheckEnabled = route.StartCheckEnabled
                     });
                 }
                 // Legacy single-route Path/ExpLoop steps (Routes empty, PathFile set):
@@ -1056,6 +1060,19 @@ namespace DriverScanTester.ViewModels
         {
             get => _startDelayMs;
             set => SetProperty(ref _startDelayMs, value);
+        }
+
+        /// <summary>
+        /// When true, the bot runs the start-position protection before executing this
+        /// route (teleport to town if not on the profile's start position, then verify
+        /// map + position). Uses the profile's start coordinates, protected map and
+        /// tolerance.
+        /// </summary>
+        private bool _startCheckEnabled = false;
+        public bool StartCheckEnabled
+        {
+            get => _startCheckEnabled;
+            set => SetProperty(ref _startCheckEnabled, value);
         }
     }
 }

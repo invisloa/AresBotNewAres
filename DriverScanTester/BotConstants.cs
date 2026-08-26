@@ -712,11 +712,12 @@ namespace DriverScanTester
             public const int StartProtectionVerifyAttempts = 3;
 
             /// <summary>
-            /// Delay in ms between start-protection verification attempts. Kept very
-            /// short so the whole check reads like a real player: quick tap → instant
-            /// re-check. If the values are already correct the bot proceeds immediately.
+            /// Delay in ms between start-protection verification attempts after the
+            /// quick step tap. Kept extremely short so the whole check reads like a
+            /// real player: quick tap → instant re-check. If the values are already
+            /// correct the bot proceeds immediately.
             /// </summary>
-            public const int StartProtectionRetryMs = 100;
+            public const int StartProtectionRetryMs = 20;
 
             /// <summary>
             /// How long the W key is held during the post-teleport "position refresh"

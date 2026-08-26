@@ -311,7 +311,7 @@
                                     </Style>
                                 </GroupBox.Style>
                                 <StackPanel Margin="3">
-                                    <TextBlock Text="The bot uses the NEXT route in this list every time this step runs (wraps back to the first). Repot: walk to the repot point. Path: walk the route once. ExpLoop: hunt the route until repot is needed. With several routes (e.g. repot 1, 2, 3) the step's route group rotates one route per flow cycle, so a Repot group of 3 and an ExpLoop group of 3 stay in sync: cycle 1 = repot 1 + exp 1, cycle 2 = repot 2 + exp 2, cycle 3 = repot 3 + exp 3."
+                                    <TextBlock Text="The bot uses the NEXT route in this list every time this step runs (wraps back to the first). Repot: walk to the repot point. Path: walk the route once. ExpLoop: hunt the route until repot is needed. With several routes (e.g. repot 1, 2, 3) the step's route group rotates one route per flow cycle, so a Repot group of 3 and an ExpLoop group of 3 stay in sync: cycle 1 = repot 1 + exp 1, cycle 2 = repot 2 + exp 2, cycle 3 = repot 3 + exp 3. The 'Start check' column runs the start-position protection before that route: teleport to town if not on the profile's start position, then verify map + position."
                                                TextWrapping="Wrap" Foreground="Gray" FontSize="10" Margin="0,0,0,6"/>
 
                                     <DataGrid ItemsSource="{Binding SelectedFlowStep.StepRoutes}"
@@ -354,6 +354,10 @@
                                             <!-- Wait (ms) -->
                                             <DataGridTextColumn Header="Wait (ms)" Width="80"
                                                                 Binding="{Binding StartDelayMs, UpdateSourceTrigger=PropertyChanged}"/>
+
+                                            <!-- Start check -->
+                                            <DataGridCheckBoxColumn Header="Start check" Width="75"
+                                                                    Binding="{Binding StartCheckEnabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
                                         </DataGrid.Columns>
                                     </DataGrid>
 

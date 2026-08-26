@@ -381,6 +381,13 @@ namespace DriverScanTester.Services
             var (route, routeIndex) = GetCurrentRoute(step, pool);
             _log($"[Path] Using route {routeIndex + 1}/{pool.Count} — '{route.PathFile}'.");
 
+            if (!await RunRouteStartProtectionAsync(route, token))
+            {
+                _log("[StartProtection] Route start check failed — stopping the workflow.");
+                CurrentPhase = BotPhase.Failed;
+                return false;
+            }
+
             var result = await RunTravelRouteAsync(step, route, _flowIndex + 1, _profile.FlowSteps.Count, token);
             if (token.IsCancellationRequested) return false;
 
@@ -468,6 +475,13 @@ namespace DriverScanTester.Services
 
             var repotPath = repotPaths[_repotPathIndex];
             _log($"[Repot] Walking to repot point using repot path {_repotPathIndex + 1}/{repotPaths.Count} — '{repotPath.PathFile}'.");
+
+            if (!await RunRouteStartProtectionAsync(repotPath, token))
+            {
+                _log("[StartProtection] Route start check failed — stopping the workflow.");
+                CurrentPhase = BotPhase.Failed;
+                return false;
+            }
 
             var result = await RunRouteOnceAsync(repotPath, "Repot path", token);
             if (token.IsCancellationRequested) return false;
@@ -557,6 +571,13 @@ namespace DriverScanTester.Services
 
             var (route, routeIndex) = GetCurrentRoute(step, pool);
             _log($"[ExpLoop] Using route {routeIndex + 1}/{pool.Count} — '{route.PathFile}'.");
+
+            if (!await RunRouteStartProtectionAsync(route, token))
+            {
+                _log("[StartProtection] Route start check failed — stopping the workflow.");
+                CurrentPhase = BotPhase.Failed;
+                return false;
+            }
 
             // Wait once before starting the looping route (not on every cycle).
             await WaitBeforeStepAsync(route.PathFile, route.StartDelayMs, "Exp Loop", token);
@@ -1108,29 +1129,52 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Start-position protection gate, run once when the workflow starts.
-        ///
-        /// When the profile has <see cref="BotProfile.EnableStartPositionCheck"/> disabled
-        /// this returns immediately and the flow starts normally.
-        ///
-        /// When enabled and the player is NOT standing on the profile's start coordinates
-        /// (<see cref="BotProfile.StartPositionX"/>/<see cref="BotProfile.StartPositionY"/>,
-        /// within <see cref="BotProfile.StartPositionTolerance"/> tiles), the bot uses the
-        /// town teleport scroll, waits for the game to settle
-        /// (<see cref="BotConstants.Delays.PostTeleportUiLoadMs"/> — the ~10 s UI load
-        /// wait), then taps W very briefly so the game refreshes the (stale, pre-teleport)
-        /// position memory, and immediately verifies (fast polls, ~100 ms apart) that the
-        /// current map matches the profile's protected map
-        /// (<see cref="BotProfile.ProtectionMapNumber"/>) AND that the player is back on
-        /// the start coordinates (within the tolerance). When the values are correct the
-        /// bot proceeds in a blink of an eye; if the verification never passes within the
-        /// fast window, the workflow stops (returns false).
+        /// Profile-level start-position protection gate, run once when the workflow
+        /// starts. When the profile has <see cref="BotProfile.EnableStartPositionCheck"/>
+        /// disabled this returns immediately and the flow starts normally; otherwise the
+        /// core start-protection check runs.
         /// </summary>
         private async Task<bool> RunStartProtectionAsync(CancellationToken token)
         {
             if (!_profile.EnableStartPositionCheck)
                 return true;
 
+            return await RunStartProtectionCoreAsync(token);
+        }
+
+        /// <summary>
+        /// Runs the start-position protection for one route that has the start check
+        /// enabled (<see cref="BotRouteStep.StartCheckEnabled"/>). Returns true when the
+        /// route may proceed; false when the protection failed and the workflow stops.
+        /// </summary>
+        private async Task<bool> RunRouteStartProtectionAsync(BotRouteStep route, CancellationToken token)
+        {
+            if (route == null || !route.StartCheckEnabled)
+                return true;
+
+            _log($"[StartProtection] Route '{route.PathFile}' has the start check enabled — verifying position before it starts.");
+            return await RunStartProtectionCoreAsync(token);
+        }
+
+        /// <summary>
+        /// Core start-position protection check, used by both the profile-level start
+        /// gate and individual routes with the start check enabled.
+        ///
+        /// When the player is NOT standing on the profile's start coordinates
+        /// (<see cref="BotProfile.StartPositionX"/>/<see cref="BotProfile.StartPositionY"/>,
+        /// within <see cref="BotProfile.StartPositionTolerance"/> tiles), the bot uses the
+        /// town teleport scroll, waits for the game to settle
+        /// (<see cref="BotConstants.Delays.PostTeleportUiLoadMs"/> — the ~10 s UI load
+        /// wait), then taps W very briefly so the game refreshes the (stale, pre-teleport)
+        /// position memory, and immediately verifies (fast polls, ~20 ms apart) that the
+        /// current map matches the profile's protected map
+        /// (<see cref="BotProfile.ProtectionMapNumber"/>) AND that the player is back on
+        /// the start coordinates (within the tolerance). When the values are correct the
+        /// bot proceeds in a blink of an eye; if the verification never passes within the
+        /// fast window, the check fails (returns false).
+        /// </summary>
+        private async Task<bool> RunStartProtectionCoreAsync(CancellationToken token)
+        {
             int tolerance = Math.Max(0, _profile.StartPositionTolerance);
 
             var (x, y, posSuccess) = _memoryService.GetPlayerPosition();
