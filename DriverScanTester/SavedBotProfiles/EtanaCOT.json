@@ -12,11 +12,21 @@
       "RepotPaths": [
         {
           "PathFile": "Etana repot 01.json",
-          "StartDelayMs": 1111
+          "StartDelayMs": 1111,
+          "StartCheckEnabled": true,
+          "StartPositionX": 214,
+          "StartPositionY": 213,
+          "ProtectionMapNumber": 35,
+          "StartPositionTolerance": 3
         },
         {
           "PathFile": "Etana repot 02.json",
-          "StartDelayMs": 1111
+          "StartDelayMs": 1111,
+          "StartCheckEnabled": true,
+          "StartPositionX": 214,
+          "StartPositionY": 213,
+          "ProtectionMapNumber": 35,
+          "StartPositionTolerance": 3
         }
       ]
     },
@@ -27,11 +37,21 @@
       "Routes": [
         {
           "PathFile": "Etana Go COT 01.json",
-          "StartDelayMs": 555
+          "StartDelayMs": 555,
+          "StartCheckEnabled": false,
+          "StartPositionX": 0,
+          "StartPositionY": 0,
+          "ProtectionMapNumber": 0,
+          "StartPositionTolerance": 5
         },
         {
           "PathFile": "Etana Go COT 02.json",
-          "StartDelayMs": 555
+          "StartDelayMs": 555,
+          "StartCheckEnabled": false,
+          "StartPositionX": 0,
+          "StartPositionY": 0,
+          "ProtectionMapNumber": 0,
+          "StartPositionTolerance": 5
         }
       ],
       "CompletionMode": 0,
@@ -54,7 +74,7 @@
   "StartPositionX": 214,
   "StartPositionY": 213,
   "ProtectionMapNumber": 35,
-  "StartPositionTolerance": 5,
+  "StartPositionTolerance": 3,
   "LootPriority": false,
   "TeleportKey": 54,
   "TeleportScanCode": 7,

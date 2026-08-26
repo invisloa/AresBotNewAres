@@ -545,15 +545,37 @@ namespace DriverScanTester.Services
                 errors.Add("MaxTeleportRetries is negative.");
 
             // --- Start position check / protection ---
-            bool anyRouteStartCheck = (profile.FlowSteps ?? new List<BotFlowStep>())
-                .Where(s => s != null)
-                .SelectMany(s => (s.Type == BotFlowStepType.Repot ? s.RepotPaths : s.Routes) ?? new List<BotRouteStep>())
-                .Any(r => r != null && r.StartCheckEnabled);
-
-            if ((profile.EnableStartPositionCheck || anyRouteStartCheck) && profile.ProtectionMapNumber <= 0)
+            if (profile.EnableStartPositionCheck && profile.ProtectionMapNumber <= 0)
                 errors.Add("Start position check: protected map number must be greater than 0. Set the map the player must be on after the start teleport.");
             if (profile.StartPositionTolerance < 0)
                 errors.Add("Start position check: start position tolerance cannot be negative.");
+
+            // Per-route start checks: every route with the start check enabled must
+            // carry its own protected map and a nonnegative tolerance.
+            if (profile.FlowSteps != null)
+            {
+                for (int s = 0; s < profile.FlowSteps.Count; s++)
+                {
+                    var step = profile.FlowSteps[s];
+                    if (step == null) continue;
+
+                    var routes = step.Type == BotFlowStepType.Repot
+                        ? step.RepotPaths ?? new List<BotRouteStep>()
+                        : step.Routes ?? new List<BotRouteStep>();
+
+                    for (int r = 0; r < routes.Count; r++)
+                    {
+                        var route = routes[r];
+                        if (route == null || !route.StartCheckEnabled) continue;
+
+                        string routeLabel = $"Flow step {s + 1} route '{route.PathFile}'";
+                        if (route.ProtectionMapNumber <= 0)
+                            errors.Add($"{routeLabel}: start check enabled but protected map is 0. Set the map the player must be on after the start teleport (own per-route data).");
+                        if (route.StartPositionTolerance < 0)
+                            errors.Add($"{routeLabel}: start position tolerance cannot be negative.");
+                    }
+                }
+            }
 
             return errors;
         }

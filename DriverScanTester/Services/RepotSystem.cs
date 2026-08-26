@@ -57,6 +57,11 @@ namespace DriverScanTester.Services
             return _memoryService.GetHpPotionCount();
         }
 
+        public int GetSorPotionCount()
+        {
+            return _memoryService.GetSorPotionCount();
+        }
+
         public int GetInventoryItemType(int slotIndex)
         {
             return _memoryService.GetInventoryItemType(slotIndex);
@@ -121,18 +126,35 @@ namespace DriverScanTester.Services
         public void BuyPotions()
         {
             _log("Buying Potions...");
-            // City-specific buy positions: Kharon has its own shop layout; everything
-            // else falls back to the Hershal positions.
-            var positions = _memoryService.GetCurrentMap() == ItemSellerService.MapKharon
-                ? RepotMousePositions.mousePositionsForKharonBuying
-                : RepotMousePositions.mousePositionsForHershalBuying;
-
-            for (int i = 0; i < positions.Length; i++)
+            // City-specific buy positions: Kharon, Etana and Hershal each have their
+            // own shop layout; everything else falls back to the Hershal positions.
+            var positions = _memoryService.GetCurrentMap() switch
             {
+                ItemSellerService.MapKharon => RepotMousePositions.mousePositionsForKharonBuying,
+                ItemSellerService.MapEtana => RepotMousePositions.mousePositionsForEtanBuying,
+                _ => RepotMousePositions.mousePositionsForHershalBuying
+            };
+
+            // Buy order is ALWAYS: HP → Mana → Red → White → SOR.
+            // Slot index per potion: 0=mana, 1=red, 2=white, 3=hp, 4=SOR.
+            int[] buyOrder = { 3, 0, 1, 2, 4 };
+
+            foreach (int i in buyOrder)
+            {
+                // Skip slots the city's layout does not have (e.g. no SOR in Kharon/Hershal yet).
+                if (i >= positions.Length)
+                    continue;
+
                 Thread.Sleep(1000);
 
+                // HP Potions (Index 3)
+                if (i == 3 && GetHpPotionCount() < HpBuyTarget)
+                {
+                    ClickCalibrated(positions[i].X, positions[i].Y, 150);
+                    HowManyPotionsToBuy(HpBuyTarget - GetHpPotionCount());
+                }
                 // Mana Potions (Index 0)
-                if (i == 0 && GetManaPotionCount() < ManaBuyTarget)
+                else if (i == 0 && GetManaPotionCount() < ManaBuyTarget)
                 {
                     ClickCalibrated(positions[i].X, positions[i].Y, 150);
                     HowManyPotionsToBuy(ManaBuyTarget - GetManaPotionCount());
@@ -149,11 +171,16 @@ namespace DriverScanTester.Services
                     ClickCalibrated(positions[i].X, positions[i].Y, 150);
                     HowManyPotionsToBuy(WhiteBuyTarget - GetWhitePotionCount());
                 }
-                // HP Potions (Index 3)
-                else if (i == 3 && GetHpPotionCount() < HpBuyTarget)
+                // SOR — Scroll of Return (Index 4, the 5th shop slot right after HP)
+                // The SOR limit is ALWAYS hardcoded (BotConstants.Repot.SorBuyTarget =
+                // 10) — no profile override. The current SOR count is read from the 5th
+                // inventory potion slot (playerBase + 0xFA0), so only the difference is
+                // bought. Only fires when the city's position array actually has a 5th
+                // entry (Etana has it; Kharon/Hershal do not yet).
+                else if (i == 4 && GetSorPotionCount() < BotConstants.Repot.SorBuyTarget)
                 {
                     ClickCalibrated(positions[i].X, positions[i].Y, 150);
-                    HowManyPotionsToBuy(HpBuyTarget - GetHpPotionCount());
+                    HowManyPotionsToBuy(BotConstants.Repot.SorBuyTarget - GetSorPotionCount());
                 }
             }
         }

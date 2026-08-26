@@ -311,9 +311,11 @@ namespace DriverScanTester.ViewModels
         private bool CanCaptureStartPosition => CurrentProfile != null && _capturePosition != null;
 
         /// <summary>
-        /// Fills the start position / protection values from the player's CURRENT
+        /// Fills the start-position / protection values from the player's CURRENT
         /// in-game state: Start X/Y from the current position and the protected map from
-        /// the current map number. Stand on the spot you want the bot to start from.
+        /// the current map number. When a route is selected in the Step routes panel,
+        /// the values are written into THAT route's OWN start-check data; otherwise they
+        /// go into the profile-level start check fields.
         /// </summary>
         private void CaptureStartPosition()
         {
@@ -336,6 +338,24 @@ namespace DriverScanTester.ViewModels
                 return;
             }
 
+            // A selected route in the Step routes panel gets its OWN start-check data.
+            var selectedRoute = SelectedFlowStep?.SelectedStepRoute;
+            if (selectedRoute != null)
+            {
+                selectedRoute.StartPositionX = (int)x;
+                selectedRoute.StartPositionY = (int)y;
+                if (map > 0)
+                {
+                    selectedRoute.ProtectionMapNumber = map;
+                    StatusText = $"Captured start position ({x}, {y}) and protected map {map} into route '{selectedRoute.PathFile}'.";
+                }
+                else
+                {
+                    StatusText = $"Captured start position ({x}, {y}) into route '{selectedRoute.PathFile}'; map read returned 0 — protected map left unchanged.";
+                }
+                return;
+            }
+
             CurrentProfile.StartPositionX = (int)x;
             CurrentProfile.StartPositionY = (int)y;
             OnPropertyChanged(nameof(StartPositionX));
@@ -345,11 +365,11 @@ namespace DriverScanTester.ViewModels
             {
                 CurrentProfile.ProtectionMapNumber = map;
                 OnPropertyChanged(nameof(ProtectionMapNumber));
-                StatusText = $"Captured start position ({x}, {y}) and protected map {map}.";
+                StatusText = $"Captured start position ({x}, {y}) and protected map {map} (profile-level start check).";
             }
             else
             {
-                StatusText = $"Captured start position ({x}, {y}); map read returned 0 — protected map left unchanged.";
+                StatusText = $"Captured start position ({x}, {y}); map read returned 0 — protected map left unchanged (profile-level start check).";
             }
         }
 
@@ -519,7 +539,11 @@ namespace DriverScanTester.ViewModels
                     {
                         PathFile = rp.PathFile,
                         StartDelayMs = rp.StartDelayMs,
-                        StartCheckEnabled = rp.StartCheckEnabled
+                        StartCheckEnabled = rp.StartCheckEnabled,
+                        StartPositionX = rp.StartPositionX,
+                        StartPositionY = rp.StartPositionY,
+                        ProtectionMapNumber = rp.ProtectionMapNumber,
+                        StartPositionTolerance = rp.StartPositionTolerance
                     })
                     .ToList()
             };
@@ -531,7 +555,11 @@ namespace DriverScanTester.ViewModels
                     {
                         PathFile = rp.PathFile,
                         StartDelayMs = rp.StartDelayMs,
-                        StartCheckEnabled = rp.StartCheckEnabled
+                        StartCheckEnabled = rp.StartCheckEnabled,
+                        StartPositionX = rp.StartPositionX,
+                        StartPositionY = rp.StartPositionY,
+                        ProtectionMapNumber = rp.ProtectionMapNumber,
+                        StartPositionTolerance = rp.StartPositionTolerance
                     })
                     .ToList();
 
@@ -734,7 +762,11 @@ namespace DriverScanTester.ViewModels
                     {
                         PathFile = rp.PathFile ?? "",
                         StartDelayMs = rp.StartDelayMs,
-                        StartCheckEnabled = rp.StartCheckEnabled
+                        StartCheckEnabled = rp.StartCheckEnabled,
+                        StartPositionX = rp.StartPositionX,
+                        StartPositionY = rp.StartPositionY,
+                        ProtectionMapNumber = rp.ProtectionMapNumber,
+                        StartPositionTolerance = rp.StartPositionTolerance
                     });
                 }
                 foreach (var route in step.Routes ?? new List<BotRouteStep>())
@@ -743,7 +775,11 @@ namespace DriverScanTester.ViewModels
                     {
                         PathFile = route.PathFile ?? "",
                         StartDelayMs = route.StartDelayMs,
-                        StartCheckEnabled = route.StartCheckEnabled
+                        StartCheckEnabled = route.StartCheckEnabled,
+                        StartPositionX = route.StartPositionX,
+                        StartPositionY = route.StartPositionY,
+                        ProtectionMapNumber = route.ProtectionMapNumber,
+                        StartPositionTolerance = route.StartPositionTolerance
                     });
                 }
                 // Legacy single-route Path/ExpLoop steps (Routes empty, PathFile set):
@@ -898,7 +934,6 @@ namespace DriverScanTester.ViewModels
             {
                 if (SetProperty(ref _type, value))
                 {
-                    OnPropertyChanged(nameof(PathColumnVisibility));
                     OnPropertyChanged(nameof(OperationColumnVisibility));
                     OnPropertyChanged(nameof(PathOnlyColumnVisibility));
                     OnPropertyChanged(nameof(StepRoutes));
@@ -907,12 +942,6 @@ namespace DriverScanTester.ViewModels
                 }
             }
         }
-
-        /// <summary>Visible for Path and ExpLoop steps (the Path combo column).</summary>
-        public System.Windows.Visibility PathColumnVisibility =>
-            (_type == BotFlowStepType.Path || _type == BotFlowStepType.ExpLoop)
-                ? System.Windows.Visibility.Visible
-                : System.Windows.Visibility.Collapsed;
 
         /// <summary>Visible for Operation steps (the Operation combo column).</summary>
         public System.Windows.Visibility OperationColumnVisibility =>
@@ -1064,15 +1093,41 @@ namespace DriverScanTester.ViewModels
 
         /// <summary>
         /// When true, the bot runs the start-position protection before executing this
-        /// route (teleport to town if not on the profile's start position, then verify
-        /// map + position). Uses the profile's start coordinates, protected map and
-        /// tolerance.
+        /// route using THIS route's own data (Start X / Start Y / Map / Tolerance below).
         /// </summary>
         private bool _startCheckEnabled = false;
         public bool StartCheckEnabled
         {
             get => _startCheckEnabled;
             set => SetProperty(ref _startCheckEnabled, value);
+        }
+
+        private int _startPositionX = 0;
+        public int StartPositionX
+        {
+            get => _startPositionX;
+            set => SetProperty(ref _startPositionX, value);
+        }
+
+        private int _startPositionY = 0;
+        public int StartPositionY
+        {
+            get => _startPositionY;
+            set => SetProperty(ref _startPositionY, value);
+        }
+
+        private int _protectionMapNumber = 0;
+        public int ProtectionMapNumber
+        {
+            get => _protectionMapNumber;
+            set => SetProperty(ref _protectionMapNumber, value);
+        }
+
+        private int _startPositionTolerance = 5;
+        public int StartPositionTolerance
+        {
+            get => _startPositionTolerance;
+            set => SetProperty(ref _startPositionTolerance, value);
         }
     }
 }

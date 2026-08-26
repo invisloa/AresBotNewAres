@@ -41,6 +41,7 @@ namespace DriverScanTester.Services
         private const ulong ManaPotionsCountOffset = BotConstants.MemoryOffsets.ManaPotionsCount;
         private const ulong WhitePotionsCountOffset = BotConstants.MemoryOffsets.WhitePotionsCount;
         private const ulong RedPotionsCountOffset = BotConstants.MemoryOffsets.RedPotionsCount;
+        private const ulong SorPotionsCountOffset = BotConstants.MemoryOffsets.SorPotionsCount;
         private const ulong InventoryFirstSlotSellValueOffset = BotConstants.MemoryOffsets.InventoryFirstSlotSellValue;
         private const ulong TargetSelectedOffset = BotConstants.MemoryOffsets.TargetSelected;
         private const ulong AttackSpeed1Offset = BotConstants.MemoryOffsets.AttackSpeed1;
@@ -759,6 +760,18 @@ namespace DriverScanTester.Services
             ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
             if (playerBase == 0) return 0;
             return ReadShort(playerBase + InventorySlotHPCountOffset);
+        }
+
+        /// <summary>
+        /// Reads the SOR (Scroll of Return) count from the 5th potion inventory slot
+        /// (playerBase + 0xFA0) — the slot right after HP/Mana/White/Red
+        /// (0xF20/0xF40/0xF60/0xF80, each slot 0x20 bytes).
+        /// </summary>
+        public int GetSorPotionCount()
+        {
+            ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
+            if (playerBase == 0) return 0;
+            return ReadShort(playerBase + SorPotionsCountOffset);
         }
 
         /// <summary>

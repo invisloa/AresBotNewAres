@@ -32,6 +32,7 @@ namespace DriverScanTester.Services
 
         public const int MapHershal = 17;
         public const int MapKharon = 44;
+        public const int MapEtana = 35;
 
         private static readonly (int MinX, int MaxX, int MinY, int MaxY) HershalShopBounds =
             (1141175465, 1141336640, 1141133820, 1141308147);
@@ -1097,14 +1098,20 @@ namespace DriverScanTester.Services
         /// matching, re-read the value while hovering the ACTUAL seller NPC.</summary>
         public static int SellerPointedValue = 138599240;
 
-        /// <summary>Step in pixels between scan points when sweeping the game window for the seller NPC.</summary>
-        private const int SellerScanStepPx = 40;
+        /// <summary>
+        /// Step in pixels between scan points when sweeping the game window for the
+        /// seller NPC. 17 px ≈ 10% fewer points than the 16 px grid — still ~2.35x
+        /// denser than the original 40 px, so the hover zone cannot slip between points.
+        /// </summary>
+        private const int SellerScanStepPx = 17;
 
         /// <summary>Number of full game-window scans attempted before giving up.</summary>
         private const int SellerMaxFullScans = 5;
 
-        /// <summary>Per-point wait after moving the mouse (ms).</summary>
-        private const int SellerScanPointDelayMs = 100;
+        /// <summary>Per-point wait after moving the mouse (ms). 4 ms per point — a
+        /// slightly longer tick for the game to update the mouseover read while the
+        /// scan stays fast. If the NPC is ever missed, raise this value.</summary>
+        private const int SellerScanPointDelayMs = 4;
 
         /// <summary>
         /// Forces the camera to the known sell view: distance 16720 and vertical 16310.

@@ -1139,44 +1139,57 @@ namespace DriverScanTester.Services
             if (!_profile.EnableStartPositionCheck)
                 return true;
 
-            return await RunStartProtectionCoreAsync(token);
+            return await RunStartProtectionCoreAsync(
+                _profile.StartPositionX,
+                _profile.StartPositionY,
+                _profile.ProtectionMapNumber,
+                Math.Max(0, _profile.StartPositionTolerance),
+                token);
         }
 
         /// <summary>
         /// Runs the start-position protection for one route that has the start check
-        /// enabled (<see cref="BotRouteStep.StartCheckEnabled"/>). Returns true when the
-        /// route may proceed; false when the protection failed and the workflow stops.
+        /// enabled (<see cref="BotRouteStep.StartCheckEnabled"/>), using the ROUTE's OWN
+        /// start position / protected map / tolerance. Returns true when the route may
+        /// proceed; false when the protection failed and the workflow stops.
         /// </summary>
         private async Task<bool> RunRouteStartProtectionAsync(BotRouteStep route, CancellationToken token)
         {
             if (route == null || !route.StartCheckEnabled)
                 return true;
 
-            _log($"[StartProtection] Route '{route.PathFile}' has the start check enabled — verifying position before it starts.");
-            return await RunStartProtectionCoreAsync(token);
+            _log($"[StartProtection] Route '{route.PathFile}' has the start check enabled — verifying position before it starts (own start ({route.StartPositionX}, {route.StartPositionY}), map {route.ProtectionMapNumber}, tolerance {route.StartPositionTolerance}).");
+            return await RunStartProtectionCoreAsync(
+                route.StartPositionX,
+                route.StartPositionY,
+                route.ProtectionMapNumber,
+                Math.Max(0, route.StartPositionTolerance),
+                token);
         }
 
         /// <summary>
         /// Core start-position protection check, used by both the profile-level start
-        /// gate and individual routes with the start check enabled.
+        /// gate and individual routes with the start check enabled. The values checked
+        /// (start position, protected map, tolerance) are passed in by the caller —
+        /// every route carries its own.
         ///
-        /// When the player is NOT standing on the profile's start coordinates
-        /// (<see cref="BotProfile.StartPositionX"/>/<see cref="BotProfile.StartPositionY"/>,
-        /// within <see cref="BotProfile.StartPositionTolerance"/> tiles), the bot uses the
-        /// town teleport scroll, waits for the game to settle
-        /// (<see cref="BotConstants.Delays.PostTeleportUiLoadMs"/> — the ~10 s UI load
-        /// wait), then taps W very briefly so the game refreshes the (stale, pre-teleport)
-        /// position memory, and immediately verifies (fast polls, ~20 ms apart) that the
-        /// current map matches the profile's protected map
-        /// (<see cref="BotProfile.ProtectionMapNumber"/>) AND that the player is back on
-        /// the start coordinates (within the tolerance). When the values are correct the
-        /// bot proceeds in a blink of an eye; if the verification never passes within the
-        /// fast window, the check fails (returns false).
+        /// When the player is NOT standing on the start coordinates (within the
+        /// tolerance), the bot uses the town teleport scroll, waits for the game to
+        /// settle (<see cref="BotConstants.Delays.PostTeleportUiLoadMs"/> — the ~10 s UI
+        /// load wait), then taps W very briefly so the game refreshes the (stale,
+        /// pre-teleport) position memory, and immediately verifies (fast polls, ~20 ms
+        /// apart) that the current map matches the protected map AND that the player is
+        /// back on the start coordinates (within the tolerance). When the values are
+        /// correct the bot proceeds in a blink of an eye; if the verification never
+        /// passes within the fast window, the check fails (returns false).
         /// </summary>
-        private async Task<bool> RunStartProtectionCoreAsync(CancellationToken token)
+        private async Task<bool> RunStartProtectionCoreAsync(
+            int startX,
+            int startY,
+            int mapNumber,
+            int tolerance,
+            CancellationToken token)
         {
-            int tolerance = Math.Max(0, _profile.StartPositionTolerance);
-
             var (x, y, posSuccess) = _memoryService.GetPlayerPosition();
             if (!posSuccess)
             {
@@ -1184,14 +1197,14 @@ namespace DriverScanTester.Services
                 return false;
             }
 
-            if (Math.Abs(x - _profile.StartPositionX) <= tolerance &&
-                Math.Abs(y - _profile.StartPositionY) <= tolerance)
+            if (Math.Abs(x - startX) <= tolerance &&
+                Math.Abs(y - startY) <= tolerance)
             {
                 _log($"[StartProtection] Player already on the start position ({x}, {y}). No teleport needed.");
                 return true;
             }
 
-            _log($"[StartProtection] Player at ({x}, {y}) — start position is ({_profile.StartPositionX}, {_profile.StartPositionY}) (tolerance {tolerance} tiles). Using the town teleport scroll.");
+            _log($"[StartProtection] Player at ({x}, {y}) — start position is ({startX}, {startY}) (tolerance {tolerance} tiles). Using the town teleport scroll.");
             await TeleportToCity(token);
             if (token.IsCancellationRequested) return false;
 
@@ -1208,10 +1221,10 @@ namespace DriverScanTester.Services
                 int map = _memoryService.GetMapNumber();
                 var (vx, vy, verifyOk) = _memoryService.GetPlayerPosition();
 
-                bool mapOk = _profile.ProtectionMapNumber <= 0 || map == _profile.ProtectionMapNumber;
+                bool mapOk = mapNumber <= 0 || map == mapNumber;
                 bool posOk = verifyOk &&
-                             Math.Abs(vx - _profile.StartPositionX) <= tolerance &&
-                             Math.Abs(vy - _profile.StartPositionY) <= tolerance;
+                             Math.Abs(vx - startX) <= tolerance &&
+                             Math.Abs(vy - startY) <= tolerance;
 
                 if (mapOk && posOk)
                 {
@@ -1224,7 +1237,7 @@ namespace DriverScanTester.Services
                     await Task.Delay(BotConstants.Delays.StartProtectionRetryMs, token);
             }
 
-            _log("[StartProtection] PROTECTION FAILED — the current map/position do not match the profile's protection. Stopping.");
+            _log("[StartProtection] PROTECTION FAILED — the current map/position do not match the expected start position/protected map. Stopping.");
             return false;
         }
 

@@ -296,6 +296,9 @@ namespace DriverScanTester
             public const ulong ManaPotionsCount = 0xF40;
             public const ulong WhitePotionsCount = 0xF60;
             public const ulong RedPotionsCount = 0xF80;
+            // SOR (Scroll of Return) count — the 5th potion slot, 0x20 bytes after Red
+            // (0xF80 + 0x20), following the HP/Mana/White/Red slot pattern.
+            public const ulong SorPotionsCount = 0xFA0;
             public const ulong InventoryFirstSlotSellValue = 0x191A;
             public const ulong FirstSellSlotPtr = 0xF1A;
             public const ulong TargetSelected = 0x60;
@@ -603,8 +606,9 @@ namespace DriverScanTester
             public const int DefaultPhaseMs = 100;
 
             // ── Repot delays ──
-            /// <summary>Wait after reaching the repot waypoint before starting the repot sequence.</summary>
-            public const int RepotArrivalWaitMs = 2000;
+            /// <summary>Wait after reaching the repot waypoint before starting the repot sequence.
+            /// 5 ms — just a minimal tick, the fast NPC scan starts almost immediately.</summary>
+            public const int RepotArrivalWaitMs = 5;
 
             /// <summary>Initial delay before opening shop.</summary>
             public const int OpenShopInitialMs = 1000;
@@ -880,6 +884,14 @@ namespace DriverScanTester
 
             /// <summary>HP potion target count (buy up to this many).</summary>
             public const int HpBuyTarget = 120;
+
+            /// <summary>
+            /// SOR (Scroll of Return) buy target — ALWAYS hardcoded to 10, bought on
+            /// every repot. Intentionally NOT a profile setting: the SOR limit is fixed.
+            /// The current SOR count is read from the 5th potion inventory slot
+            /// (playerBase + 0xFA0) and only the difference up to 10 is bought.
+            /// </summary>
+            public const int SorBuyTarget = 10;
 
             /// <summary>Maximum teleport retries before giving up.</summary>
             public const int MaxTeleportRetries = 3;
