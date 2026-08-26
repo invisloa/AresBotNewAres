@@ -1,4 +1,5 @@
 ﻿using DriverScanTester.Models;
+using DriverScanTester.Services;
 using DriverScanTester.Utils;
 using System;
 using System.Windows.Input;
@@ -13,7 +14,6 @@ namespace DriverScanTester.ViewModels
 
         private string _hpThresholdText = HealMana.HpThreshold.ToString();
         private string _manaThresholdText = HealMana.MpThreshold.ToString();
-        private string _manualSellSlotText = "6";
         private string _currentHp = "--";
         private string _currentMana = "--";
         private string _hpPotCount = "--";
@@ -25,6 +25,12 @@ namespace DriverScanTester.ViewModels
         private bool _isWorkflowRunning;
         private string _workflowPhaseText = "Idle";
         private System.Threading.Timer _statsTimer;
+
+        // Test Method control
+        private System.Collections.ObjectModel.ObservableCollection<string> _availableOperationNames = new();
+        private string? _selectedOperationName;
+        private string _operationTestStatus = "Idle";
+        private bool _isOperationTestRunning;
 
         // Profile selection
         private System.Collections.ObjectModel.ObservableCollection<string> _profileNames = new();
@@ -39,37 +45,10 @@ namespace DriverScanTester.ViewModels
             RunBotCommand = new RelayCommand(_ => RunBot(), _ => _main.IsAttached);
             StopBotCommand = new RelayCommand(_ => StopAllBots(), _ => _main.IsAttached && (IsMovementBotRunning || IsHealManaBotRunning || IsLootBotRunning));
             ToggleHealManaBotCommand = new RelayCommand(_ => ToggleHealManaBot(), _ => _main.IsAttached);
-            ToggleLootBotCommand = new RelayCommand(_ => ToggleLootBot(), _ => _main.IsAttached);
             OpenPathEditorCommand = new RelayCommand(_ => _main.OpenPathEditorInternal(), _ => _main.IsAttached);
-            TestLootCommand = new RelayCommand(_ => _main.TestLootScan(), _ => _main.IsAttached);
-            TestScanAreaCommand = new RelayCommand(_ => _main.TestScanArea(), _ => _main.IsAttached);
             CaptureNpcMouseOverCommand = new RelayCommand(_ => _main.CaptureNpcMouseOver(), _ => _main.IsAttached);
             CaptureItemMouseOverCommand = new RelayCommand(_ => _main.CaptureItemMouseOver(), _ => _main.IsAttached);
-            TestSellCommand = new RelayCommand(_ => {
-                int ox = 0, oy = 0;
-                if (!string.IsNullOrEmpty(SelectedProfileName))
-                {
-                    var p = _main.LoadProfile(SelectedProfileName);
-                    if (p != null) { ox = p.WindowOffsetX; oy = p.WindowOffsetY; }
-                }
-                _main.TestSell(ox, oy);
-            }, _ => _main.IsAttached);
-            TestSellSpecificSlotCommand = new RelayCommand(_ => {
-                if (int.TryParse(ManualSellSlotText, out int slot))
-                {
-                    int ox = 0, oy = 0;
-                    if (!string.IsNullOrEmpty(SelectedProfileName))
-                    {
-                        var p = _main.LoadProfile(SelectedProfileName);
-                        if (p != null) { ox = p.WindowOffsetX; oy = p.WindowOffsetY; }
-                    }
-                    _main.TestSellSpecificSlot(slot, ox, oy);
-                }
-                else
-                {
-                    _appendLog("Invalid slot number for Test Sell.");
-                }
-            }, _ => _main.IsAttached);
+            TestOperationCommand = new RelayCommand(_ => RunOperationTest(), _ => _main.IsAttached && !IsOperationTestRunning);
             ClearBotLogCommand = new RelayCommand(_ => BotLogText = "");
 
             // Route Workflow commands
@@ -77,6 +56,8 @@ namespace DriverScanTester.ViewModels
             StopWorkflowCommand = new RelayCommand(_ => _main.StopWorkflow(), _ => _main.IsAttached);
             RefreshProfilesCommand = new RelayCommand(_ => RefreshProfiles(), _ => _main.IsAttached);
             ValidateProfileCommand = new RelayCommand(_ => ValidateSelectedProfile(), _ => _main.IsAttached);
+
+            BuildAvailableOperationNames();
 
             _statsTimer = new System.Threading.Timer(_ => RefreshStats(), null, 0, 1000);
         }
@@ -105,12 +86,6 @@ namespace DriverScanTester.ViewModels
                         _main.HealManaThreshold2 = val;
                 }
             }
-        }
-
-        public string ManualSellSlotText
-        {
-            get => _manualSellSlotText;
-            set => SetProperty(ref _manualSellSlotText, value);
         }
 
         public string CurrentHp
@@ -191,14 +166,10 @@ namespace DriverScanTester.ViewModels
         public ICommand RunBotCommand { get; }
         public ICommand StopBotCommand { get; }
         public ICommand ToggleHealManaBotCommand { get; }
-        public ICommand ToggleLootBotCommand { get; }
         public ICommand OpenPathEditorCommand { get; }
-        public ICommand TestLootCommand { get; }
-        public ICommand TestScanAreaCommand { get; }
         public ICommand CaptureNpcMouseOverCommand { get; }
         public ICommand CaptureItemMouseOverCommand { get; }
-        public ICommand TestSellCommand { get; }
-        public ICommand TestSellSpecificSlotCommand { get; }
+        public ICommand TestOperationCommand { get; }
         public ICommand ClearBotLogCommand { get; }
 
         // Route Workflow commands
@@ -236,6 +207,85 @@ namespace DriverScanTester.ViewModels
         public bool CanStartWorkflow =>
             !string.IsNullOrWhiteSpace(SelectedProfileName);
 
+        // ──────────────────── Test Method control ────────────────────
+
+        /// <summary>
+        /// Operation names selectable in the Test Method control. Populated from
+        /// the <see cref="BotOperations"/> registry.
+        /// </summary>
+        public System.Collections.ObjectModel.ObservableCollection<string> AvailableOperationNames =>
+            _availableOperationNames;
+
+        public string? SelectedOperationName
+        {
+            get => _selectedOperationName;
+            set
+            {
+                if (SetProperty(ref _selectedOperationName, value))
+                    System.Windows.Input.CommandManager.InvalidateRequerySuggested();
+            }
+        }
+
+        /// <summary>Result text of the last operation test run ("Idle", "Running…", "Success", "Failed", "Error").</summary>
+        public string OperationTestStatus
+        {
+            get => _operationTestStatus;
+            set => SetProperty(ref _operationTestStatus, value);
+        }
+
+        public bool IsOperationTestRunning
+        {
+            get => _isOperationTestRunning;
+            set
+            {
+                if (SetProperty(ref _isOperationTestRunning, value))
+                    System.Windows.Input.CommandManager.InvalidateRequerySuggested();
+            }
+        }
+
+        private void BuildAvailableOperationNames()
+        {
+            _availableOperationNames.Clear();
+            foreach (var name in BotOperations.KnownNames)
+                _availableOperationNames.Add(name);
+
+            if (_availableOperationNames.Count > 0)
+                SelectedOperationName = _availableOperationNames[0];
+        }
+
+        /// <summary>
+        /// Runs the selected bot operation once (outside of the workflow) so it can
+        /// be tested from the control panel. The result is shown in
+        /// <see cref="OperationTestStatus"/> and logged to the bot log.
+        /// </summary>
+        private async void RunOperationTest()
+        {
+            if (string.IsNullOrWhiteSpace(SelectedOperationName))
+            {
+                _appendLog("[Operation Test] No operation selected.");
+                OperationTestStatus = "No operation selected";
+                return;
+            }
+
+            IsOperationTestRunning = true;
+            OperationTestStatus = "Running…";
+            _appendLog($"[Operation Test] Starting '{SelectedOperationName}'...");
+            try
+            {
+                bool ok = await _main.TestOperationAsync(SelectedOperationName);
+                OperationTestStatus = ok ? "Success" : "Failed";
+            }
+            catch (Exception ex)
+            {
+                OperationTestStatus = "Error";
+                _appendLog($"[Operation Test] Error: {ex.Message}");
+            }
+            finally
+            {
+                IsOperationTestRunning = false;
+            }
+        }
+
         private void RunBot()
         {
             _main.RunBot();
@@ -249,11 +299,6 @@ namespace DriverScanTester.ViewModels
         private void ToggleHealManaBot()
         {
             _main.ToggleHealManaBotInternal();
-        }
-
-        private void ToggleLootBot()
-        {
-            _main.ToggleLootBotInternal();
         }
 
         private void RefreshProfiles()

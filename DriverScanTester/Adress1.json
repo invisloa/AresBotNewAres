@@ -1,5 +1,13 @@
 [
   {
+    "AddressText": "[[Ares.exe \u002B 0x486BE8] \u002B 0xBC] \u002B 0xE8",
+    "NameText": "S_IsDialogOpen1",
+    "ValueText": "",
+    "ValueType": 2,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
     "AddressText": "[Ares.exe \u002B 0x4853E8] \u002B 0xC",
     "NameText": "S_IsSellerPointed 143850200 ",
     "ValueText": "",

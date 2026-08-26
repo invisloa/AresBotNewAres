@@ -352,6 +352,13 @@ namespace DriverScanTester
             public const ulong InventoryTestPtr = 0x242CB5;
             public const ulong InventoryTestSub = 0xF0;
 
+            // Dialog box open state (S_IsDialogOpen1), rooted at the UI window pointer
+            // [Ares.exe + 0x486BE8]:
+            //   S_IsDialogOpen1 = [[UiWindow] + 0xBC] + 0xE8   (== 1 → dialog open)
+            // Confirmed as the reliable flag; used by GameMemoryService.IsDialogOpen().
+            public const int DialogOpenPtr = 0xBC;
+            public const int DialogOpen1 = 0xE8;
+
             // Loot
             public const ulong CurrentItemHighlightedType = 0x8C9Fd0;
             public const int PositionX = 0x23c;

@@ -5,7 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:vm="clr-namespace:DriverScanTester.ViewModels"
         mc:Ignorable="d"
-        Title="Bot Control Panel" Height="650" Width="900"
+        Title="Bot Control Panel" Height="680" Width="920"
         WindowStartupLocation="CenterOwner">
     <Grid Margin="10">
         <Grid.RowDefinitions>
@@ -20,17 +20,18 @@
         <!-- Row 0: Status Bar -->
         <Border Grid.Row="0" BorderBrush="#FF007ACC" BorderThickness="2" CornerRadius="4" Padding="8" Margin="0,0,0,10" Background="#FFF0F8FF">
             <WrapPanel Orientation="Horizontal">
-                <TextBlock Text="Status: " FontWeight="Bold" VerticalAlignment="Center"/>
-                <Ellipse x:Name="MovementStatusDot" Width="14" Height="14" Fill="{Binding IsMovementBotRunning, Converter={x:Null}}" VerticalAlignment="Center" Margin="3,0" Visibility="Collapsed"/>
-                <TextBlock Text="Move: " FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
-                <TextBlock Text="{Binding IsMovementBotRunning, StringFormat={}{0}}" VerticalAlignment="Center" Width="50"/>
-                <TextBlock Text="Heal: " FontWeight="Bold" VerticalAlignment="Center" Margin="10,0,0,0"/>
-                <TextBlock Text="{Binding IsHealManaBotRunning, StringFormat={}{0}}" VerticalAlignment="Center" Width="50"/>
-                <TextBlock Text="Loot: " FontWeight="Bold" VerticalAlignment="Center" Margin="10,0,0,0"/>
-                <TextBlock Text="{Binding IsLootBotRunning, StringFormat={}{0}}" VerticalAlignment="Center" Width="50"/>
+                <TextBlock Text="Status:" FontWeight="Bold" VerticalAlignment="Center"/>
+                <TextBlock Text="Move:" FontWeight="Bold" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                <TextBlock Text="{Binding IsMovementBotRunning}" VerticalAlignment="Center" Width="40"/>
+                <TextBlock Text="Heal:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
+                <TextBlock Text="{Binding IsHealManaBotRunning}" VerticalAlignment="Center" Width="40"/>
+                <TextBlock Text="Loot:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
+                <TextBlock Text="{Binding IsLootBotRunning}" VerticalAlignment="Center" Width="40"/>
+                <TextBlock Text="Workflow:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
+                <TextBlock Text="{Binding IsWorkflowRunning}" VerticalAlignment="Center" Width="40"/>
                 <Separator Width="1" Margin="15,2" Background="LightGray"/>
-                <TextBlock Text="Any bot running: " FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
-                <TextBlock Text="{Binding IsAnyBotRunning}" VerticalAlignment="Center" FontWeight="Bold" Foreground="{Binding IsAnyBotRunning, Converter={x:Null}}" Width="40"/>
+                <TextBlock Text="Any bot running:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
+                <TextBlock Text="{Binding IsAnyBotRunning}" VerticalAlignment="Center" FontWeight="Bold" Width="40"/>
                 <Separator Width="1" Margin="15,2" Background="LightGray"/>
                 <Button Content="STOP ALL BOTS" Command="{Binding StopBotCommand}" Width="120" Margin="5,0" Background="#FFFFD0D0" FontWeight="Bold"/>
             </WrapPanel>
@@ -48,23 +49,9 @@
                 <StackPanel>
                     <WrapPanel Orientation="Horizontal" Margin="5">
                         <Button Content="RUN BOT" Command="{Binding RunBotCommand}" Width="100" Margin="2" Background="#FFDEFFDE" FontWeight="Bold"/>
+                        <Button Content="Path Editor" Command="{Binding OpenPathEditorCommand}" Width="100" Margin="10,2,2,2" Background="#FFF0F0FF"/>
                     </WrapPanel>
-                    <WrapPanel Orientation="Horizontal" Margin="5">
-                        <Button Content="Path Editor" Command="{Binding OpenPathEditorCommand}" Width="100" Margin="2" Background="#FFF0F0FF"/>
-                        <Button Content="Test Sell All" Command="{Binding TestSellCommand}" Width="100" Margin="10,2,2,2" Background="#FFFFF0D0" FontWeight="Bold"/>
-                    </WrapPanel>
-                    <Separator Margin="5,2"/>
-                    <Grid Margin="5,2">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Text="Test Slot:" VerticalAlignment="Center" Margin="0,0,5,0" FontSize="11" FontWeight="Bold"/>
-                        <TextBox Grid.Column="1" Text="{Binding ManualSellSlotText, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,5,0" VerticalAlignment="Center"/>
-                        <Button Grid.Column="2" Content="Sell One" Command="{Binding TestSellSpecificSlotCommand}" Width="80" Background="#FFFFF0D0" FontWeight="Bold"/>
-                    </Grid>
-                    <TextBlock Text="* Slots 0-5 skip; Tab 1=0-35, Tab 2=36-71" 
+                    <TextBlock Text="Running the movement bot auto-starts the loot bot (hotkey End stops it)."
                                FontSize="9" Foreground="Gray" Margin="5,0,0,5" TextWrapping="Wrap" FontStyle="Italic"/>
                 </StackPanel>
             </GroupBox>
@@ -85,7 +72,7 @@
                     <WrapPanel Orientation="Horizontal" Margin="5">
                         <Button Content="Toggle Heal/Mana Bot" Command="{Binding ToggleHealManaBotCommand}" Width="160" Margin="2" Background="#FFFFF0D0"/>
                         <TextBlock Text="Status:" VerticalAlignment="Center" Margin="10,0,5,0"/>
-                        <TextBlock Text="{Binding IsHealManaBotRunning}" VerticalAlignment="Center" FontWeight="Bold" Foreground="{Binding IsHealManaBotRunning, Converter={x:Null}}"/>
+                        <TextBlock Text="{Binding IsHealManaBotRunning}" VerticalAlignment="Center" FontWeight="Bold"/>
                     </WrapPanel>
                 </StackPanel>
             </GroupBox>
@@ -94,7 +81,6 @@
         <!-- Row 2: Route Workflow -->
         <GroupBox Grid.Row="2" Header="Route Workflow" Margin="0,0,0,10" BorderBrush="#FF3399FF" BorderThickness="1">
             <StackPanel>
-                <!-- Row within groupbox: Profile selection + workflow actions -->
                 <WrapPanel Orientation="Horizontal" Margin="5,3">
                     <TextBlock Text="Profile:" FontWeight="Bold" VerticalAlignment="Center"/>
                     <ComboBox ItemsSource="{Binding ProfileNames}"
@@ -111,7 +97,6 @@
                     <Button Content="Stop" Command="{Binding StopWorkflowCommand}"
                             Width="70" Margin="3,2" Background="#FFFFD0D0" FontWeight="Bold"/>
                 </WrapPanel>
-                <!-- Row within groupbox: Status + Current stage -->
                 <WrapPanel Orientation="Horizontal" Margin="5,0,5,3">
                     <TextBlock Text="Running:" FontWeight="Bold" VerticalAlignment="Center"/>
                     <TextBlock Text="{Binding IsWorkflowRunning}" VerticalAlignment="Center" Width="30" Margin="3,0"/>
@@ -126,32 +111,57 @@
             </StackPanel>
         </GroupBox>
 
-        <!-- Row 3: Loot Bot + Current Stats -->
+        <!-- Row 3: Test Method + Calibration -->
         <Grid Grid.Row="3" Margin="0,0,0,10">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
-            <!-- Loot Bot -->
-            <GroupBox Header="Loot Bot (HotKey: End)" Grid.Column="0" Margin="0,0,5,0">
+            <!-- Test Method -->
+            <GroupBox Header="Test Method" Grid.Column="0" Margin="0,0,5,0" BorderBrush="#FFFF8800" BorderThickness="1">
                 <StackPanel>
                     <WrapPanel Orientation="Horizontal" Margin="5">
-                        <Button Content="Toggle Loot Bot" Command="{Binding ToggleLootBotCommand}" Width="150" Margin="2" Background="#FFF0D0FF"/>
-                        <TextBlock Text="Status:" VerticalAlignment="Center" Margin="10,0,5,0"/>
-                        <TextBlock Text="{Binding IsLootBotRunning}" VerticalAlignment="Center" FontWeight="Bold"/>
+                        <TextBlock Text="Operation:" FontWeight="Bold" VerticalAlignment="Center"/>
+                        <ComboBox ItemsSource="{Binding AvailableOperationNames}"
+                                  SelectedItem="{Binding SelectedOperationName}"
+                                  Width="170" VerticalAlignment="Center" Margin="5,0"
+                                  IsTextSearchEnabled="True"/>
+                        <Button Content="TEST" Command="{Binding TestOperationCommand}" Width="80"
+                                Margin="5,0" Background="#FFFFD080" FontWeight="Bold"/>
                     </WrapPanel>
-                    <Button Content="Test Loot" Command="{Binding TestLootCommand}" Width="120" Margin="5,0,5,5" HorizontalAlignment="Left" Background="#FFF0D0FF"/>
-                    <Button Content="Test Scan Area" Command="{Binding TestScanAreaCommand}" Width="120" Margin="5,0,5,5" HorizontalAlignment="Left" Background="#FFF0D0FF"/>
                     <WrapPanel Orientation="Horizontal" Margin="5,0,5,5">
-                        <Button Content="Mouseover NPC" Command="{Binding CaptureNpcMouseOverCommand}" Width="120" Margin="0,0,5,0" Background="#FFE0E0FF" ToolTip="Najedz kursorem na NPC (sprzedawce, u ktorego bot ma sprzedawac) i kliknij. Zapisze pelny dump wartosci do MouseOverValues_Log.txt i ustawi SellerPointedValue."/>
-                        <Button Content="Mouseover Item" Command="{Binding CaptureItemMouseOverCommand}" Width="120" Margin="0" Background="#FFE0E0FF" ToolTip="Najedz kursorem na item (loot) i kliknij. Zapisze pelny dump wartosci do MouseOverValues_Log.txt i ustawi LootMouseOverValue."/>
+                        <TextBlock Text="Result:" FontWeight="Bold" VerticalAlignment="Center"/>
+                        <TextBlock Text="{Binding OperationTestStatus}" VerticalAlignment="Center" Margin="5,0"
+                                   FontWeight="Bold" Foreground="#FF007ACC" MinWidth="80"/>
                     </WrapPanel>
+                    <TextBlock Text="Runs the selected bot operation once (e.g. Enter_COT) with the same services as the workflow."
+                               FontSize="9" Foreground="Gray" Margin="5,0,0,5" TextWrapping="Wrap" FontStyle="Italic"/>
                 </StackPanel>
             </GroupBox>
 
-            <!-- Current Stats -->
-            <GroupBox Header="Live Player Stats" Grid.Column="1" Margin="5,0,0,0">
+            <!-- Calibration -->
+            <GroupBox Header="Calibration" Grid.Column="1" Margin="5,0,0,0" BorderBrush="#FFE0E0E0" BorderThickness="1">
+                <StackPanel>
+                    <WrapPanel Orientation="Horizontal" Margin="5">
+                        <Button Content="Mouseover NPC" Command="{Binding CaptureNpcMouseOverCommand}" Width="130" Margin="0,0,5,0" Background="#FFE0E0FF" ToolTip="Najedz kursorem na NPC (sprzedawce, u ktorego bot ma sprzedawac) i kliknij. Zapisze pelny dump wartosci do MouseOverValues_Log.txt i ustawi SellerPointedValue."/>
+                        <Button Content="Mouseover Item" Command="{Binding CaptureItemMouseOverCommand}" Width="130" Margin="0" Background="#FFE0E0FF" ToolTip="Najedz kursorem na item (loot) i kliknij. Zapisze pelny dump wartosci do MouseOverValues_Log.txt i ustawi LootMouseOverValue."/>
+                    </WrapPanel>
+                    <TextBlock Text="Hover the target NPC / item in the game, then click to capture the mouseover value. Saved to MouseCalibration.json and restored on restart."
+                               FontSize="9" Foreground="Gray" Margin="5,0,0,5" TextWrapping="Wrap" FontStyle="Italic"/>
+                </StackPanel>
+            </GroupBox>
+        </Grid>
+
+        <!-- Row 4: Live Player Stats + Hotkeys -->
+        <Grid Grid.Row="4" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Live Player Stats -->
+            <GroupBox Header="Live Player Stats" Grid.Column="0" Margin="0,0,5,0">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
@@ -159,36 +169,40 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Grid.Column="0" Margin="5">
                         <TextBlock FontWeight="Bold" Text="HP" Margin="0,0,0,2"/>
-                        <TextBlock Text="{Binding CurrentHp}" FontSize="20" Foreground="#FFCC0000"/>
-                        <TextBlock FontWeight="Bold" Text="Mana" Margin="0,10,0,2"/>
-                        <TextBlock Text="{Binding CurrentMana}" FontSize="20" Foreground="#FF0000CC"/>
+                        <TextBlock Text="{Binding CurrentHp}" FontSize="18" Foreground="#FFCC0000"/>
+                        <TextBlock FontWeight="Bold" Text="Mana" Margin="0,8,0,2"/>
+                        <TextBlock Text="{Binding CurrentMana}" FontSize="18" Foreground="#FF0000CC"/>
                     </StackPanel>
                     <StackPanel Grid.Column="1" Margin="5">
                         <TextBlock FontWeight="Bold" Text="HP Potions" Margin="0,0,0,2"/>
-                        <TextBlock Text="{Binding HpPotCount}" FontSize="20"/>
-                        <TextBlock FontWeight="Bold" Text="Mana Potions" Margin="0,10,0,2"/>
-                        <TextBlock Text="{Binding ManaPotCount}" FontSize="20"/>
+                        <TextBlock Text="{Binding HpPotCount}" FontSize="18"/>
+                        <TextBlock FontWeight="Bold" Text="Mana Potions" Margin="0,8,0,2"/>
+                        <TextBlock Text="{Binding ManaPotCount}" FontSize="18"/>
                     </StackPanel>
                 </Grid>
             </GroupBox>
+
+            <!-- Hotkeys -->
+            <GroupBox Header="Hotkeys" Grid.Column="1" Margin="5,0,0,0">
+                <StackPanel>
+                    <WrapPanel Orientation="Horizontal" Margin="8,4">
+                        <TextBlock FontWeight="Bold" Width="70">Home</TextBlock>
+                        <TextBlock>- Toggle Movement Bot</TextBlock>
+                    </WrapPanel>
+                    <WrapPanel Orientation="Horizontal" Margin="8,4">
+                        <TextBlock FontWeight="Bold" Width="70">Page Up</TextBlock>
+                        <TextBlock>- Toggle Heal/Mana Bot</TextBlock>
+                    </WrapPanel>
+                    <WrapPanel Orientation="Horizontal" Margin="8,4">
+                        <TextBlock FontWeight="Bold" Width="70">End</TextBlock>
+                        <TextBlock>- Toggle Loot Bot</TextBlock>
+                    </WrapPanel>
+                </StackPanel>
+            </GroupBox>
         </Grid>
 
-        <!-- Row 4: Hotkeys Info -->
-        <GroupBox Grid.Row="4" Header="Hotkeys" Margin="0,0,0,10">
-            <WrapPanel Orientation="Horizontal">
-                <TextBlock Margin="10,2" FontWeight="Bold">Home</TextBlock>
-                <TextBlock Margin="2,2">- Toggle Movement Bot</TextBlock>
-                <Separator Width="1" Margin="20,2" Background="LightGray"/>
-                <TextBlock Margin="10,2" FontWeight="Bold">Page Up</TextBlock>
-                <TextBlock Margin="2,2">- Toggle Heal/Mana Bot</TextBlock>
-                <Separator Width="1" Margin="20,2" Background="LightGray"/>
-                <TextBlock Margin="10,2" FontWeight="Bold">End</TextBlock>
-                <TextBlock Margin="2,2">- Toggle Loot Bot</TextBlock>
-            </WrapPanel>
-        </GroupBox>
-
         <!-- Row 5: Bot-Specific Log -->
-        <GroupBox Grid.Row="5" Header="Bot Log" Margin="0,0,0,5" Height="100">
+        <GroupBox Grid.Row="5" Header="Bot Log" Margin="0,0,0,5">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>

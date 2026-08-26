@@ -70,6 +70,10 @@ namespace DriverScanTester.Services
         private const int ShopWindowOffset1 = BotConstants.MemoryOffsets.ShopWindow1;
         private const int InventoryOpenOffset = BotConstants.MemoryOffsets.InventoryOpen;
 
+        // --- Dialog box open state (S_IsDialogOpen1) ---
+        private const int DialogOpenPtrOffset = BotConstants.MemoryOffsets.DialogOpenPtr;
+        private const int DialogOpen1Offset = BotConstants.MemoryOffsets.DialogOpen1;
+
         private const int SellerWindow2MOffset = BotConstants.MemoryOffsets.SellerWindow2M;
         private const int InventoryWindow2MOffset = BotConstants.MemoryOffsets.InventoryWindow2M;
         private const int StorageWindow2MOffset = BotConstants.MemoryOffsets.StorageWindow2M;
@@ -723,6 +727,23 @@ namespace DriverScanTester.Services
             ulong shopWindow = GetShopWindowAddress();
             if (shopWindow == 0) return false;
             return ReadByte(shopWindow + (ulong)ShopWindowOffset1) == 1;
+        }
+
+        /// <summary>
+        /// Checks whether an NPC/game dialog box is open using the confirmed
+        /// S_IsDialogOpen1 address (rooted at UiWindow [Ares.exe + 0x486BE8]):
+        ///   S_IsDialogOpen1 = [[UiWindow] + 0xBC] + 0xE8   (== 1 → dialog open)
+        /// A broken pointer chain counts as "not open".
+        /// </summary>
+        public bool IsDialogOpen()
+        {
+            ulong uiWindow = GetUiWindowAddress();
+            if (uiWindow == 0) return false;
+
+            ulong dialogPtr = ReadPointer(uiWindow + (ulong)DialogOpenPtrOffset);
+            if (dialogPtr == 0) return false;
+
+            return ReadByte(dialogPtr + (ulong)DialogOpen1Offset) == 1;
         }
 
         public bool IsInventoryOpen()

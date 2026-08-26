@@ -532,6 +532,9 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Operation step: runs the named custom operation with the runner's retry policy.
+        /// When the operation ultimately fails (returns false, e.g. Enter_COT could not
+        /// find the NPC), the flow restarts from the beginning — i.e. the bot goes back
+        /// to the Repot step and starts the whole flow over instead of failing hard.
         /// </summary>
         private async Task<bool> ExecuteOperationStepAsync(BotFlowStep step, CancellationToken token)
         {
@@ -544,8 +547,8 @@ namespace DriverScanTester.Services
 
             if (!await RunOperationWithRetryAsync(step.OperationName, token))
             {
-                _log($"[Operation] Operation '{step.OperationName}' failed after retries. Failing.");
-                CurrentPhase = BotPhase.Failed;
+                _log($"[Operation] Operation '{step.OperationName}' failed after retries. Restarting the flow from the start (repot + start over).");
+                _flowIndex = 0;
                 return false;
             }
 

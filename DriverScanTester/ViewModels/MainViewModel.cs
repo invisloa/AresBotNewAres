@@ -192,7 +192,6 @@ namespace DriverScanTester.ViewModels
         public ICommand ShowMatchesCommand { get; }
         public ICommand PointerScanCommand { get; }
         public ICommand RunBotCommand { get; }
-        public ICommand RunLootBotCommand { get; }
         public ICommand OpenPathEditorCommand { get; }
         public ICommand OpenBotWindowCommand { get; }
         public ICommand ClearLogCommand { get; }
@@ -282,7 +281,6 @@ namespace DriverScanTester.ViewModels
             ShowHexWindowCommand = new RelayCommand(_ => ShowHexWindow(), _ => _isAttached);
             PointerScanCommand = new RelayCommand(_ => OpenPointerScanFromMain(), _ => _isAttached && _pointerScanner != null);
             RunBotCommand = new RelayCommand(_ => ToggleMovementBot(), _ => _isAttached);
-            RunLootBotCommand = new RelayCommand(_ => ToggleLootBot(), _ => _isAttached);
             OpenPathEditorCommand = new RelayCommand(_ => OpenPathEditor(), _ => _isAttached);
             OpenBotWindowCommand = new RelayCommand(_ => OpenBotWindow(), _ => _isAttached);
             ClearLogCommand = new RelayCommand(_ => LogText = "", _ => true);
@@ -2603,9 +2601,7 @@ namespace DriverScanTester.ViewModels
         private const int VK_PRIOR = 0x21; // Page Up
         private const int VK_HOME = 0x24;  // Home
         private const int VK_END = 0x23;   // End
-        private const int VK_RETURN = 0x0D; // Enter
         private const int SW_RESTORE = 9;
-        private const int KEYEVENTF_KEYUP = 0x0002;
 
         private bool _isMovementBotRunning;
         public bool IsMovementBotRunningInternal => _isMovementBotRunning;
@@ -2751,6 +2747,62 @@ namespace DriverScanTester.ViewModels
             AppendLog("Workflow stop requested. Window offset reset.");
             OnPropertyChanged(nameof(IsWorkflowRunning));
             OnPropertyChanged(nameof(WorkflowPhaseText));
+        }
+
+        /// <summary>
+        /// Runs a named custom bot operation (see <see cref="BotOperations"/>) once,
+        /// outside of the workflow, to test it from the Bot control panel.
+        /// Builds the same service stack as <see cref="StartWorkflow"/> and uses the
+        /// workflow's active profile when available (falls back to a default profile).
+        /// Returns true when the operation reported success.
+        /// </summary>
+        public async Task<bool> TestOperationAsync(string operationName)
+        {
+            if (!_isAttached) { AppendLog("[Operation Test] Attach first."); return false; }
+            if (string.IsNullOrWhiteSpace(operationName))
+            {
+                AppendLog("[Operation Test] No operation selected.");
+                return false;
+            }
+            if (!BotOperations.IsKnown(operationName))
+            {
+                AppendLog($"[Operation Test] Unknown operation '{operationName}'. Check the BotOperations.Operations registry.");
+                return false;
+            }
+
+            FocusGameWindow();
+            DetectAndSetWindowOffset();
+
+            ulong baseAddr = FindModuleInScanner("Ares.exe", false);
+            if (baseAddr == 0)
+            {
+                _pointerScanner?.RefreshModules();
+                baseAddr = FindModuleInScanner("Ares.exe", true);
+            }
+            if (baseAddr == 0)
+            {
+                AppendLog("[Operation Test] Failed to resolve module base.");
+                return false;
+            }
+
+            var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
+            var pathRunner = new PathRunnerService(memoryService, AppendLog);
+            var profile = _workflowCoordinator?.ActiveProfile ?? new BotProfile();
+            var operationContext = new OperationContext(
+                memoryService,
+                pathRunner,
+                new ItemSellerService(memoryService, AppendLog),
+                profile,
+                AppendLog,
+                FocusGameWindow);
+            var operationRunner = new OperationRunnerService(operationContext, AppendLog);
+
+            using var cts = new CancellationTokenSource();
+            bool ok = await operationRunner.RunOnceAsync(operationName, cts.Token);
+            AppendLog(ok
+                ? $"[Operation Test] '{operationName}' succeeded."
+                : $"[Operation Test] '{operationName}' failed.");
+            return ok;
         }
 
         public List<string> ListProfiles()
@@ -2902,75 +2954,6 @@ namespace DriverScanTester.ViewModels
                     ToggleMovementBot();
                 }
 
-                public void TestLootScan()
-                {
-                    if (!_isAttached) { AppendLog("Attach first."); return; }
-
-                    FocusGameWindow();
-
-                    ulong baseAddr = FindModuleInScanner("Ares.exe", false);
-                    if (baseAddr == 0)
-                    {
-                        _pointerScanner?.RefreshModules();
-                        baseAddr = FindModuleInScanner("Ares.exe", true);
-                    }
-                    if (baseAddr == 0)
-                    {
-                        AppendLog("Failed to resolve module base for Test Loot.");
-                        return;
-                    }
-
-                    try
-                    {
-                        AppendLog("=== Test Loot: Focusing window, scanning in 3 seconds... ===");
-                        System.Threading.Thread.Sleep(3000);
-
-                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
-                        var loot = new DriverScanTester.Services.LootSystem(memoryService, AppendLog);
-                        AppendLog("=== Test Loot: Starting single scan ===");
-                        loot.PerformSingleScan();
-                        AppendLog("=== Test Loot: Completed ===");
-                    }
-                    catch (Exception ex)
-                    {
-                        AppendLog($"=== Test Loot FAILED: {ex.Message} ===");
-                    }
-                }
-
-                public void TestScanArea()
-                {
-                    if (!_isAttached) { AppendLog("Attach first."); return; }
-
-                    FocusGameWindow();
-
-                    ulong baseAddr = FindModuleInScanner("Ares.exe", false);
-                    if (baseAddr == 0)
-                    {
-                        _pointerScanner?.RefreshModules();
-                        baseAddr = FindModuleInScanner("Ares.exe", true);
-                    }
-                    if (baseAddr == 0)
-                    {
-                        AppendLog("Failed to resolve module base for Test Scan Area.");
-                        return;
-                    }
-
-                    try
-                    {
-                        AppendLog("=== Test Scan Area: Focusing window, tracing in 3 seconds... ===");
-                        System.Threading.Thread.Sleep(3000);
-
-                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
-                        var loot = new DriverScanTester.Services.LootSystem(memoryService, AppendLog);
-                        loot.TestScanAreaVisualization();
-                        AppendLog("=== Test Scan Area: Completed ===");
-                    }
-                    catch (Exception ex)
-                    {
-                        AppendLog($"=== Test Scan Area FAILED: {ex.Message} ===");
-                    }
-                }
-
                 /// <summary>
                 /// Captures the full mouseover dump while the cursor hovers an NPC.
                 /// Saves the dump to MouseOverValues_Log.txt for later analysis and sets
@@ -3111,242 +3094,6 @@ namespace DriverScanTester.ViewModels
                     }
                 }
 
-                public void TestSell(int profileOffsetX = 0, int profileOffsetY = 0)
-                {
-                    if (!_isAttached) { AppendLog("Attach first."); return; }
-
-                    FocusGameWindow();
-                    DetectAndSetWindowOffset(profileOffsetX, profileOffsetY);
-
-                    ulong baseAddr = FindModuleInScanner("Ares.exe", false);
-                    if (baseAddr == 0)
-                    {
-                        _pointerScanner?.RefreshModules();
-                        baseAddr = FindModuleInScanner("Ares.exe", true);
-                    }
-                    if (baseAddr == 0)
-                    {
-                        AppendLog("Failed to resolve module base for TestSell.");
-                        return;
-                    }
-
-                    try
-                    {
-                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
-                        var seller = new ItemSellerService(memoryService, AppendLog);
-                        AppendLog("=== Test Sell: Starting ===");
-                        seller.SellItemsByMouseMove();
-                        AppendLog("=== Test Sell: Completed ===");
-
-                        // ── Repot phase after successful sell ──
-                        RepotAfterSellForTest(15, memoryService, AppendLog);
-                    }
-                    catch (Exception ex)
-                    {
-                        AppendLog($"=== Test Sell FAILED: {ex.Message} ===");
-                    }
-                }
-
-                public void TestSellSpecificSlot(int realSlot, int profileOffsetX = 0, int profileOffsetY = 0)
-                {
-                    if (!_isAttached) { AppendLog("Attach first."); return; }
-
-                    FocusGameWindow();
-                    DetectAndSetWindowOffset(profileOffsetX, profileOffsetY);
-
-                    ulong baseAddr = FindModuleInScanner("Ares.exe", false);
-                    if (baseAddr == 0)
-                    {
-                        _pointerScanner?.RefreshModules();
-                        baseAddr = FindModuleInScanner("Ares.exe", true);
-                    }
-                    if (baseAddr == 0)
-                    {
-                        AppendLog("Failed to resolve module base for TestSellSpecificSlot.");
-                        return;
-                    }
-
-                    try
-                    {
-                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendLog);
-                        var seller = new ItemSellerService(memoryService, AppendLog);
-                        AppendLog($"=== Test Sell Specific Slot {realSlot}: Starting ===");
-                        seller.SellSpecificSlot(realSlot);
-                        AppendLog($"=== Test Sell Specific Slot {realSlot}: Completed ===");
-                    }
-                    catch (Exception ex)
-                    {
-                        AppendLog($"=== Test Sell Specific Slot {realSlot} FAILED: {ex.Message} ===");
-                    }
-                }
-
-                // ═══════════════════════════════════════════════════════════
-                //  REPOT AFTER SELL TEST
-                // ═══════════════════════════════════════════════════════════
-
-                private enum PotionType
-                {
-                    Hp,
-                    Mana,
-                    White,
-                    Red
-                }
-
-                private sealed class PotionShopClickPoint
-                {
-                    public PotionType PotionType { get; init; }
-                    public int RelativeX { get; init; }
-                    public int RelativeY { get; init; }
-                    /// <summary>Scroll of Return entry: no potion-count check, always buys 5.</summary>
-                    public bool IsSor { get; init; }
-                }
-
-                [DllImport("user32.dll", SetLastError = true)]
-                private static extern bool GetWindowRect(nint hWnd, out RECT lpRect);
-
-                [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-                private static extern nint FindWindow(string lpClassName, string lpWindowName);
-
-                [DllImport("user32.dll")]
-                private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
-
-                private struct RECT
-                {
-                    public int Left;
-                    public int Top;
-                    public int Right;
-                    public int Bottom;
-                }
-
-                /// <summary>
-                /// Gets the game window rectangle in screen coordinates.
-                /// The seller/shop dialog is a child UI element within this window;
-                /// its position is derived from the game window rect.
-                /// Returns a zero rect when the game window cannot be found.
-                /// </summary>
-                private RECT GetSellerDialogRect()
-                {
-                    nint hwnd = FindWindow(null, "Legend of Ares");
-                    if (hwnd == nint.Zero) hwnd = FindWindow(null, "Ares");
-                    if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
-                    if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
-                    if (hwnd != nint.Zero && GetWindowRect(hwnd, out RECT rect))
-                        return rect;
-                    return new RECT { Left = 0, Top = 0, Right = 0, Bottom = 0 };
-                }
-
-                /// <summary>
-                /// After the Test Sell completes, buies each potion type up to <paramref name="targetCount"/>
-                /// using the already-open seller/shop dialog.
-                /// Hardcoded for this test: HP, Mana, White, Red potions, target 15 each.
-                /// </summary>
-                private void RepotAfterSellForTest(int targetCount, GameMemoryService memory, Action<string> log)
-                {
-                    log("Starting repot after sell test");
-
-                    // The seller/shop dialog must still be open after selling
-                    if (!memory.IsShopOpen())
-                    {
-                        log("Repot: Seller/shop dialog is not open after sell. Cannot buy potions.");
-                        return;
-                    }
-
-                    RECT shopRect = GetSellerDialogRect();
-                    if (shopRect.Right == 0 && shopRect.Bottom == 0)
-                    {
-                        log("Repot: Could not determine seller dialog rectangle. Cannot buy potions.");
-                        return;
-                    }
-
-                    // Potion shop click points — offsets relative to the game window.
-                    // Kharon absolute screen coordinates → relative (absolute - window 445,105),
-                    // user-calibrated (2026-08-03):
-                    //   HP:    (990, 185) → relative (545, 80)
-                    //   Mana:  (990, 300) → relative (545, 195)
-                    //   White: (990, 375) → relative (545, 270)
-                    //   Red:   (990, 415) → relative (545, 310)
-                    //   SOR:   (990, 490) → relative (545, 385)
-                    var potionPoints = new PotionShopClickPoint[]
-                    {
-                        new() { PotionType = PotionType.Mana,  RelativeX = 545, RelativeY = 195 },
-                        new() { PotionType = PotionType.Red,   RelativeX = 545, RelativeY = 310 },
-                        new() { PotionType = PotionType.White, RelativeX = 545, RelativeY = 270 },
-                        new() { PotionType = PotionType.Hp,    RelativeX = 545, RelativeY = 80 },
-                        new() { PotionType = PotionType.Mana,  RelativeX = 545, RelativeY = 385, IsSor = true }, // SOR (Scroll of Return)
-                    };
-
-                    // Quantity input click position (old absolute 1295,530 → relative to window (445,105): 850,425)
-                    const int quantityInputRelX = 850;
-                    const int quantityInputRelY = 425;
-
-                    const int buyClickDelayMs = 200;
-                    const int buyPauseMs = 1000;
-
-                    foreach (var point in potionPoints)
-                    {
-                        if (!memory.IsShopOpen())
-                        {
-                            log("Repot: Shop dialog closed during potion buying. Stopping.");
-                            break;
-                        }
-
-                        // SOR entry has no potion count check — always buy 5 scrolls.
-                        // (Flagged explicitly instead of the old broken RelativeY==253 check,
-                        // which never matched the actual SOR point and would have treated it
-                        // as a Mana purchase.)
-                        bool isSor = point.IsSor;
-                        int currentCount = isSor ? 0 : point.PotionType switch
-                        {
-                            PotionType.Hp => memory.GetHpPotionCount(),
-                            PotionType.Mana => memory.GetManaPotionCount(),
-                            PotionType.White => memory.GetWhitePotionCount(),
-                            PotionType.Red => memory.GetRedPotionCount(),
-                            _ => 0
-                        };
-
-                        int amountToBuy = isSor ? 5 : Math.Max(0, targetCount - currentCount);
-                        log(isSor
-                            ? $"SOR: buying {amountToBuy}"
-                            : $"Potion {point.PotionType}: current {currentCount}, target {targetCount}, buying {amountToBuy}");
-
-                        if (amountToBuy <= 0)
-                            continue;
-
-                        // 1. Left-click the shop potion item to open the buy dialog
-                        int shopScreenX = shopRect.Left + point.RelativeX;
-                        int shopScreenY = shopRect.Top + point.RelativeY;
-                        MouseOperations.MoveAndLeftClickAbsolute(shopScreenX, shopScreenY, buyClickDelayMs);
-
-                        // 2. Left-click the quantity input field
-                        int inputScreenX = shopRect.Left + quantityInputRelX;
-                        int inputScreenY = shopRect.Top + quantityInputRelY;
-                        MouseOperations.MoveAndLeftClickAbsolute(inputScreenX, inputScreenY, buyClickDelayMs);
-
-                        // 3. Type the quantity digits
-                        string amountStr = amountToBuy.ToString();
-                        foreach (char c in amountStr)
-                        {
-                            byte vk = (byte)(0x30 + (c - '0')); // VK_0..VK_9
-                            keybd_event(vk, 0, 0, 0);
-                            Thread.Sleep(50);
-                            keybd_event(vk, 0, KEYEVENTF_KEYUP, 0);
-                            Thread.Sleep(100);
-                        }
-
-                        // 4. Press ENTER to confirm purchase (zamiast klikania myszka)
-                        Thread.Sleep(300);
-                        keybd_event(VK_RETURN, 0, 0, 0);
-                        Thread.Sleep(50);
-                        keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
-                        Thread.Sleep(500);
-
-                        // 5. Pause before next potion type
-                        Thread.Sleep(buyPauseMs);
-                    }
-
-                    log("Repot after sell test finished");
-                }
-
                 public void StopAllBotsInternal()
                 {
                     ToggleMovementBot(false);
@@ -3436,8 +3183,6 @@ namespace DriverScanTester.ViewModels
                         AppendLog("Heal/Mana Bot started.");
                     }
                 }
-
-                public void ToggleLootBotInternal() => ToggleLootBot();
 
                 private void ToggleLootBot(bool? forceState = null)
                 {

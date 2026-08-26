@@ -38,6 +38,7 @@ namespace DriverScanTester.Services
                 ["TalkToNpc"] = TalkToNpc,
                 ["WaitForInCity"] = WaitForInCity,
                 ["GoInsideCOT"] = GoInsideCOT,
+                ["Enter_COT"] = EnterCOT,
             };
 
         /// <summary>All registered operation names, for the profile editor and validation.</summary>
@@ -144,7 +145,7 @@ namespace DriverScanTester.Services
 
             // 2. Wait for the popup to appear and verify it is open.
             await Task.Delay(1000, token);
-            if (!ctx.Memory.IsShopOpen())
+            if (!ctx.Memory.IsDialogOpen())
             {
                 ctx.Log("[Operation] GoInsideCOT: NPC popup did not open. Aborting.");
                 return false;
@@ -171,10 +172,81 @@ namespace DriverScanTester.Services
             return false;
         }
 
+        /// <summary>
+        /// Enters the COT (Cave of Trials) by clicking the "enter" option in its
+        /// entry NPC dialog:
+        ///   1. Scan the game window for the NPC — exactly ONE full sweep (same
+        ///      mouseover scan as the repot flow). No NPC found → return false
+        ///      (the workflow then repots and starts the flow all over).
+        ///   2. Wait 200 ms, then verify the NPC dialog opened (S_IsDialogOpen1,
+        ///      == 1 counts as open).
+        ///   3. Move the mouse to the "enter" option at calibrated (570, 565)
+        ///      (default window position) and left-click it.
+        ///   4. Wait 50 ms, check the dialog is still open, then click the same
+        ///      position again.
+        ///   5. Wait 2 s for the teleport, then succeed only when the map changed.
+        /// </summary>
+        public static async Task<bool> EnterCOT(OperationContext ctx, CancellationToken token)
+        {
+            ctx.Log("[Operation] Enter_COT: starting.");
+            ctx.FocusGameWindow();
+
+            // Remember the map we are on — success means this map changes.
+            int previousMap = ctx.Memory.GetMapNumber();
+            ctx.Log($"[Operation] Enter_COT: current map before entering: {previousMap}.");
+
+            // 1. Scan for the NPC and right-click it — one full scan only.
+            //    If the NPC is not found, fail so the workflow repots and starts over.
+            if (!ctx.ItemSeller.ScanAndRightClickNpc(maxFullScans: 1))
+            {
+                ctx.Log("[Operation] Enter_COT: NPC not found after one full scan. Aborting.");
+                return false;
+            }
+
+            // 2. Wait 200 ms for the popup to appear, then verify it is open.
+            await Task.Delay(200, token);
+            if (!ctx.Memory.IsDialogOpen())
+            {
+                ctx.Log("[Operation] Enter_COT: NPC dialog did not open. Aborting.");
+                return false;
+            }
+            ctx.Log("[Operation] Enter_COT: NPC dialog is open.");
+
+            // 3. Move the mouse to the "enter" option (calibrated 570, 565) and left-click it.
+            ClickAtCalibrated(ctx, CotEnterClickX, CotEnterClickY, logPrefix: "Enter_COT");
+
+            // 4. Wait 50 ms, confirm the dialog is still open, then click again.
+            await Task.Delay(50, token);
+            if (ctx.Memory.IsDialogOpen())
+            {
+                ctx.Log("[Operation] Enter_COT: NPC dialog still open — clicking the option again.");
+                ClickAtCalibrated(ctx, CotEnterClickX, CotEnterClickY, logPrefix: "Enter_COT");
+            }
+            else
+            {
+                ctx.Log("[Operation] Enter_COT: NPC dialog closed after the first click — option already activated.");
+            }
+
+            // 5. Wait 2 s for the teleport, then verify the map actually changed.
+            await Task.Delay(2000, token);
+            int currentMap = ctx.Memory.GetMapNumber();
+            ctx.Log($"[Operation] Enter_COT: map after entering: {currentMap}.");
+
+            if (currentMap != previousMap)
+            {
+                ctx.Log("[Operation] Enter_COT: map changed — success.");
+                return true;
+            }
+
+            ctx.Log("[Operation] Enter_COT: map did not change. Failed.");
+            return false;
+        }
+
         // ─────────────────── COT calibrated-click helpers ───────────────────
 
         /// <summary>The "enter" button position in the COT NPC dialog, in calibrated
-        /// absolute coordinates (reference window origin 445,105).</summary>
+        /// absolute coordinates (reference window origin 445,105). Shared by
+        /// <see cref="GoInsideCOT"/> and <see cref="EnterCOT"/>.</summary>
         private const int CotEnterClickX = 570;
         private const int CotEnterClickY = 565;
 
@@ -202,10 +274,10 @@ namespace DriverScanTester.Services
             return (calibratedX, calibratedY);
         }
 
-        private static void ClickAtCalibrated(OperationContext ctx, int calibratedX, int calibratedY, int delay = 200)
+        private static void ClickAtCalibrated(OperationContext ctx, int calibratedX, int calibratedY, int delay = 200, string logPrefix = "GoInsideCOT")
         {
             var (screenX, screenY) = CalibratedToScreen(calibratedX, calibratedY);
-            ctx.Log($"[GoInsideCOT] Clicking calibrated ({calibratedX},{calibratedY}) → screen ({screenX},{screenY}).");
+            ctx.Log($"[{logPrefix}] Clicking calibrated ({calibratedX},{calibratedY}) → screen ({screenX},{screenY}).");
             MouseOperations.MoveAndLeftClickAbsolute(screenX, screenY, delay);
         }
 

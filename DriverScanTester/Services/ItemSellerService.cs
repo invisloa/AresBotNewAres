@@ -123,7 +123,12 @@ namespace DriverScanTester.Services
         /// inspects the resulting NPC dialog itself. Returns true when the NPC was
         /// found and right-clicked (or the dialog is already open).
         /// </summary>
-        public bool ScanAndRightClickNpc()
+        /// <param name="maxFullScans">
+        /// How many full window sweeps to attempt before giving up. Defaults to
+        /// <see cref="SellerMaxFullScans"/>; pass 1 to make exactly one full scan
+        /// (used by the COT entry operations — no NPC found after one sweep = fail).
+        /// </param>
+        public bool ScanAndRightClickNpc(int maxFullScans = SellerMaxFullScans)
         {
             SetSellCameraView();
 
@@ -133,7 +138,7 @@ namespace DriverScanTester.Services
                 return true;
             }
 
-            return TryOpenSellerDialogByScanning(clickShopOption: false);
+            return TryOpenSellerDialogByScanning(clickShopOption: false, maxFullScans: maxFullScans);
         }
 
         public void SellItemsByMouseMove()
@@ -1147,7 +1152,7 @@ namespace DriverScanTester.Services
         /// All scan points use the actual game-window client rectangle so this works
         /// regardless of window position or resolution.
         /// </summary>
-        private bool TryOpenSellerDialogByScanning(bool clickShopOption = true)
+        private bool TryOpenSellerDialogByScanning(bool clickShopOption = true, int maxFullScans = SellerMaxFullScans)
         {
             if (_memory.IsShopOpen())
             {
@@ -1166,9 +1171,9 @@ namespace DriverScanTester.Services
             int step = Math.Max(1, SellerScanStepPx);
             int maxRadius = Math.Max(clientWidth, clientHeight); // spiral upper bound
 
-            _log($"ItemSeller: Starting seller mouseover scan. client=({clientOriginX},{clientOriginY}) size=({clientWidth}x{clientHeight}), step={step}px.");
+            _log($"ItemSeller: Starting seller mouseover scan. client=({clientOriginX},{clientOriginY}) size=({clientWidth}x{clientHeight}), step={step}px, maxFullScans={maxFullScans}.");
 
-            for (int scanIndex = 0; scanIndex < SellerMaxFullScans; scanIndex++)
+            for (int scanIndex = 0; scanIndex < maxFullScans; scanIndex++)
             {
                 if (_memory.IsShopOpen())
                 {
@@ -1176,7 +1181,7 @@ namespace DriverScanTester.Services
                     return true;
                 }
 
-                _log($"ItemSeller: Seller scan #{scanIndex + 1}/{SellerMaxFullScans} — center-outward spiral.");
+                _log($"ItemSeller: Seller scan #{scanIndex + 1}/{maxFullScans} — center-outward spiral.");
 
                 // Square spiral: start at center, then expand outward in concentric squares.
                 // A square spiral guarantees we cover the whole window when radius >= max dim.
@@ -1231,7 +1236,7 @@ namespace DriverScanTester.Services
                     }
                 }
 
-                _log($"ItemSeller: Seller scan #{scanIndex + 1}/{SellerMaxFullScans} finished — no S_IsSellerPointed=={SellerPointedValue} match ({pointsThisScan} points checked).");
+                _log($"ItemSeller: Seller scan #{scanIndex + 1}/{maxFullScans} finished — no S_IsSellerPointed=={SellerPointedValue} match ({pointsThisScan} points checked).");
             }
 
             return clickShopOption && _memory.IsShopOpen();

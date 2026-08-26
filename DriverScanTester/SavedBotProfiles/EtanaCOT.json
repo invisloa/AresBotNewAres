@@ -58,6 +58,36 @@
       "ExpectedDestinationMapNumber": 0,
       "OperationName": "",
       "RepotPaths": []
+    },
+    {
+      "Type": 2,
+      "PathFile": "",
+      "StartDelayMs": 0,
+      "Routes": [],
+      "CompletionMode": 0,
+      "ExpectedDestinationMapNumber": 0,
+      "OperationName": "Enter_COT",
+      "RepotPaths": []
+    },
+    {
+      "Type": 3,
+      "PathFile": "COT LEVEL 1.json",
+      "StartDelayMs": 2000,
+      "Routes": [
+        {
+          "PathFile": "COT LEVEL 1.json",
+          "StartDelayMs": 2000,
+          "StartCheckEnabled": false,
+          "StartPositionX": 0,
+          "StartPositionY": 0,
+          "ProtectionMapNumber": 0,
+          "StartPositionTolerance": 5
+        }
+      ],
+      "CompletionMode": 0,
+      "ExpectedDestinationMapNumber": 0,
+      "OperationName": "",
+      "RepotPaths": []
     }
   ],
   "MinHpPotions": 10,
@@ -75,7 +105,7 @@
   "StartPositionY": 213,
   "ProtectionMapNumber": 35,
   "StartPositionTolerance": 3,
-  "LootPriority": false,
+  "LootPriority": true,
   "TeleportKey": 54,
   "TeleportScanCode": 7,
   "MaxTeleportRetries": 3,
