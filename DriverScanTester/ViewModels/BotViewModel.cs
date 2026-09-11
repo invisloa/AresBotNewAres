@@ -57,6 +57,11 @@ namespace DriverScanTester.ViewModels
 
             BuildAvailableOperationNames();
 
+            // Load the saved profiles immediately so the list is populated when the
+            // window opens â€” no manual Refresh click needed (Refresh still exists for
+            // picking up profiles added while the window is open).
+            RefreshProfiles();
+
             _statsTimer = new System.Threading.Timer(_ => RefreshStats(), null, 0, 1000);
         }
 
@@ -205,7 +210,7 @@ namespace DriverScanTester.ViewModels
         public bool CanStartWorkflow =>
             !string.IsNullOrWhiteSpace(SelectedProfileName);
 
-        // ¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦ Test Method control ¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦
+        // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Test Method control ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 
         /// <summary>
         /// Operation names selectable in the Test Method control. Populated from
@@ -224,7 +229,7 @@ namespace DriverScanTester.ViewModels
             }
         }
 
-        /// <summary>Result text of the last operation test run ("Idle", "Running…", "Success", "Failed", "Error").</summary>
+        /// <summary>Result text of the last operation test run ("Idle", "Runningï¿½", "Success", "Failed", "Error").</summary>
         public string OperationTestStatus
         {
             get => _operationTestStatus;
@@ -266,7 +271,7 @@ namespace DriverScanTester.ViewModels
             }
 
             IsOperationTestRunning = true;
-            OperationTestStatus = "Running…";
+            OperationTestStatus = "Runningï¿½";
             AppendBotLog($"[Operation Test] Starting '{SelectedOperationName}'...");
             try
             {
@@ -371,7 +376,7 @@ namespace DriverScanTester.ViewModels
                 foreach (var error in errors)
                     AppendBotLog(" - " + error);
                 AppendBotLog("Workflow NOT started. Fix profile errors first.");
-                ValidationText = "Validation FAILED — check main log.";
+                ValidationText = "Validation FAILED ï¿½ check main log.";
                 return;
             }
 
@@ -402,7 +407,7 @@ namespace DriverScanTester.ViewModels
             {
                 case BotFlowStepType.Path:
                     string mode = step.CompletionMode == TravelRouteCompletionMode.ExpectedMapReached
-                        ? $"finish when destination map loaded › map {step.ExpectedDestinationMapNumber}"
+                        ? $"finish when destination map loaded ï¿½ map {step.ExpectedDestinationMapNumber}"
                         : "finish when last waypoint reached";
                     if (step.Routes != null && step.Routes.Count > 0)
                         return $"Path group ({step.Routes.Count} routes, wait {step.StartDelayMs} ms, {mode})";

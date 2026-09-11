@@ -88,10 +88,10 @@ namespace DriverScanTester.Services
         /// starts immediately instead of TABbing to check for more mobs first. The loot
         /// machine waits ~200ms for the drops to appear, then area-loots / pixel-scans
         /// until everything is collected (<see cref="IsLootingActive"/>); only then may
-        /// the combat system select the next target and movement resume. The loot machine
-        /// ALWAYS keeps scanning during combat (it never cancels on mob selection) — but
-        /// the attack is only interrupted when an item is actually found and collected
-        /// (<see cref="IsCollecting"/>), never during plain scanning.
+        /// the combat system select the next target and movement resume. While a mob is
+        /// TARGETED the loot machine pauses completely (no scans during combat — it just
+        /// waits), and a mob selected mid-loot interrupts the loot phase so combat takes
+        /// over; the next kill re-arms it.
         /// </summary>
         public bool LootPriorityMode { get; set; } = false;
 
@@ -478,15 +478,29 @@ namespace DriverScanTester.Services
                 }
             }
 
-            // ── A selected mob does NOT cancel loot ──
-            // The loot machine keeps scanning while the character is attacking. The scan
-            // only LOOKS for items (mouseover check); the attack continues undisturbed
-            // until an item is actually found — only then does collection start
-            // (IsCollecting) and the movement system suspends the attack.
+            // ── A selected mob pauses loot ──
+            // While a mob is targeted (combat in progress) the loot machine does NOT
+            // scan — it just waits for the fight to end. Looting while fighting looks
+            // unnatural. Loot resumes when the mob dies (death detection above) or the
+            // target is lost.
             if (isMobSelected)
             {
                 // Remember the selection for mob-death detection.
                 _wasMobSelectedPrev = true;
+
+                if (_lootState != LootMachineState.Idle)
+                {
+                    StopScanSpacebarSpam();
+                    _lootState = LootMachineState.Idle;
+                    _consecutiveEmptySpacePresses = 0;
+                }
+
+                // A mob selected mid-loot interrupts the loot phase — combat takes
+                // over and the next kill re-arms the phase.
+                IsLootingActive = false;
+
+                await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                return;
             }
 
             // ── Loot state machine ──
@@ -694,9 +708,9 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// True when the loot machine must abort its current action immediately:
-        /// the player entered the city. A selected mob NEVER aborts loot — the scan
-        /// keeps running during combat and only interrupts it when an item is found
-        /// (see <see cref="IsCollecting"/> and the movement system's hold).
+        /// the player entered the city. A selected mob never reaches this point —
+        /// the top of <see cref="Update"/> pauses the loot machine entirely while a
+        /// mob is targeted.
         /// </summary>
         private bool ShouldAbortLoot() => _memoryService.GetIsInCity();
 

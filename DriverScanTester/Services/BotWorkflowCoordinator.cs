@@ -397,8 +397,8 @@ namespace DriverScanTester.Services
 
             if (!await RunRouteStartProtectionAsync(route, token))
             {
-                _log("[StartProtection] Route start check failed — stopping the workflow.");
-                CurrentPhase = BotPhase.Failed;
+                _log("[StartProtection] Route start check failed — resetting the flow from the beginning.");
+                _flowIndex = 0;
                 return false;
             }
 
@@ -492,8 +492,8 @@ namespace DriverScanTester.Services
 
             if (!await RunRouteStartProtectionAsync(repotPath, token))
             {
-                _log("[StartProtection] Route start check failed — stopping the workflow.");
-                CurrentPhase = BotPhase.Failed;
+                _log("[StartProtection] Route start check failed — resetting the flow from the beginning.");
+                _flowIndex = 0;
                 return false;
             }
 
@@ -597,8 +597,8 @@ namespace DriverScanTester.Services
 
             if (!await RunRouteStartProtectionAsync(route, token))
             {
-                _log("[StartProtection] Route start check failed — stopping the workflow.");
-                CurrentPhase = BotPhase.Failed;
+                _log("[StartProtection] Route start check failed — resetting the flow from the beginning.");
+                _flowIndex = 0;
                 return false;
             }
 
@@ -1256,15 +1256,13 @@ namespace DriverScanTester.Services
         ///   (re-tapping W and logging the position after each failed read) — the
         ///   position memory only refreshes when the player moves, so a stale read can
         ///   look like a wrong position without actually being one.
-        /// - Still off and NOT in the city (dungeon/wilderness — the position memory
-        ///   is unreliable there, walking could run into walls) → town teleport, then
-        ///   move 50 ms + 3 measurements again.
-        /// - Final decision: in the city on the protected map → proceed (the check
-        ///   fully ran; in-town walking is safe and the flow's paths handle any offset
-        ///   via the route resync — the whole profile action must run from the
-        ///   beginning even when the player is not exactly on the spawn, e.g. after a
-        ///   repot the player stands at the shop, not the spawn). Anywhere else →
-        ///   fail so the retry/repot chain (15 s, x10 per retry) restarts the flow.
+        /// - Still off → the bot USES THE TOWN TELEPORT SCROLL (it works from anywhere,
+        ///   even in the city — it puts the player back at the town spawn), then moves
+        ///   50 ms + 3 measurements again.
+        /// - Still off after the scroll → the check is BAD: the player is not within
+        ///   the configured tolerance, so the step must NOT run — the caller resets the
+        ///   flow from the beginning (the retry/repot chain with growing waits applies
+        ///   first: 15 s, x10 per retry).
         /// </summary>
         private async Task<bool> RunStartProtectionAttemptAsync(
             int startX,
@@ -1289,7 +1287,7 @@ namespace DriverScanTester.Services
             // Exactly on the start position (and map, when one is configured) → done.
             if ((!mapConfigured || mapMatches) && posMatches)
             {
-                _log($"[StartProtection] Player already on the start position ({x}, {y}). No teleport needed.");
+                _log($"[StartProtection] Player already on the start position — HERE ({x}, {y}) matches EXPECTED ({startX}, {startY}), map {currentMap}. No teleport needed.");
                 return true;
             }
 
@@ -1301,46 +1299,26 @@ namespace DriverScanTester.Services
                 return true;
             if (token.IsCancellationRequested) return false;
 
-            // Still off. The town teleport scroll only makes sense outside the city —
-            // in town it is a no-op (would just burn a scroll and ~10 s), so it is
-            // skipped there.
-            if (_memoryService.GetIsInCity())
-            {
-                _log($"[StartProtection] Player in the city at ({x}, {y}) — the town teleport is a no-op here, skipped.");
-            }
-            else
-            {
-                _log($"[StartProtection] Player at ({x}, {y}) — start position is ({startX}, {startY}) (map {mapNumber}, tolerance {tolerance} tiles). Using the town teleport scroll.");
-                await TeleportToCity(token);
-                if (token.IsCancellationRequested) return false;
+            // Still off → use the town teleport scroll. It works from anywhere (even in
+            // the city — it returns the player to the town spawn), so it is ALWAYS
+            // pressed instead of walking on foot toward a far-away waypoint (walls may
+            // be on the way).
+            _log($"[StartProtection] Player at ({x}, {y}) — start position is ({startX}, {startY}) (map {mapNumber}, tolerance {tolerance} tiles). Using the town teleport scroll.");
+            await TeleportToCity(token);
+            if (token.IsCancellationRequested) return false;
 
-                // After the teleport: move 50 ms + 3 measurements again. TeleportToCity
-                // already waited PostTeleportUiLoadMs (~10 s) for the game UI to settle,
-                // but the position memory stays STALE until the player moves — hence the
-                // step tap and re-verification.
-                if (await VerifyPositionWithNudgesAsync(startX, startY, mapNumber, tolerance, "after teleport", token))
-                    return true;
-                if (token.IsCancellationRequested) return false;
-            }
-
-            // Final decision after the check + recovery fully ran:
-            // - In the city on the protected map → proceed. The check DID run (50 ms
-            //   moves + 3 measurements, teleport attempted where possible); in-town
-            //   walking is safe and the flow's paths (repot path, route resync) handle
-            //   any offset — the whole profile action runs from the beginning even
-            //   when the player is not exactly on the spawn (a repot leaves the player
-            //   at the shop, not the spawn).
-            // - Otherwise (outside the city / wrong map) → the position is unreliable
-            //   and walking could run into walls → fail so the retry/repot chain
-            //   (15 s, x10 per retry) restarts the flow; once the player is back in
-            //   the right city the rule above lets the flow run.
-            if (_memoryService.GetIsInCity() && mapConfigured && mapMatches)
-            {
-                _log($"[StartProtection] Player is in the city on the protected map {currentMap} at ({x}, {y}) — start ({startX}, {startY}) is {Math.Abs(x - startX):F0}/{Math.Abs(y - startY):F0} tiles off, but in-town walking is safe and the flow's paths handle the offset. Proceeding.");
+            // After the teleport: move 50 ms + 3 measurements again. TeleportToCity
+            // already waited PostTeleportUiLoadMs (~10 s) for the game UI to settle,
+            // but the position memory stays STALE until the player moves — hence the
+            // step tap and re-verification.
+            if (await VerifyPositionWithNudgesAsync(startX, startY, mapNumber, tolerance, "after teleport", token))
                 return true;
-            }
+            if (token.IsCancellationRequested) return false;
 
-            _log($"[StartProtection] Player at ({x}, {y}) is not on the protected map {mapNumber} / start ({startX}, {startY}) — failing so the retry/repot chain restarts the flow.");
+            // Still off → check BAD. The player is NOT within the configured tolerance
+            // even after the scroll — the step must NOT run; the caller resets the
+            // flow from the beginning (or the retry/repot chain takes over).
+            _log($"[StartProtection] CHECK BAD — HERE ({x}, {y}) map {currentMap} | EXPECTED ({startX}, {startY}) map {mapNumber} | off {Math.Abs(x - startX):F0}/{Math.Abs(y - startY):F0} tiles (tol {tolerance}) even after the town teleport. Not proceeding to the next step.");
             return false;
         }
 
@@ -1378,11 +1356,11 @@ namespace DriverScanTester.Services
 
                 if (mapOk && posOk)
                 {
-                    _log($"[StartProtection] Protection OK ({phase}) — map {map}, position ({vx}, {vy}). Proceeding.");
+                    _log($"[StartProtection] Protection OK ({phase}) — HERE ({vx}, {vy}) matches EXPECTED ({startX}, {startY}), map {map}. Proceeding.");
                     return true;
                 }
 
-                _log($"[StartProtection] Verify attempt {attempt}/{BotConstants.Delays.StartProtectionVerifyAttempts} failed ({phase}) — map {map}, position ({vx}, {vy}).");
+                _log($"[StartProtection] Verify attempt {attempt}/{BotConstants.Delays.StartProtectionVerifyAttempts} failed ({phase}) — HERE ({vx}, {vy}) | EXPECTED ({startX}, {startY}) | off {Math.Abs(vx - startX):F0}/{Math.Abs(vy - startY):F0} tiles (tol {tolerance}) | map {map} (expected {mapNumber}).");
 
                 // The bot still thinks the position is wrong — tap W for 50 ms again so
                 // the game refreshes the position memory, then log the position it
@@ -1391,7 +1369,7 @@ namespace DriverScanTester.Services
                 if (token.IsCancellationRequested) return false;
 
                 var (rx, ry, _) = _memoryService.GetPlayerPosition();
-                _log($"[StartProtection] Re-tapped W — position now ({rx}, {ry}).");
+                _log($"[StartProtection] Re-tapped W — HERE ({rx}, {ry}) | EXPECTED ({startX}, {startY}).");
 
                 if (attempt < BotConstants.Delays.StartProtectionVerifyAttempts)
                     await Task.Delay(BotConstants.Delays.StartProtectionRetryMs, token);

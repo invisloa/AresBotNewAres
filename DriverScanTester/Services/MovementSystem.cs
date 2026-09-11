@@ -119,6 +119,14 @@ namespace DriverScanTester.Services
         private bool _isInitialized = false;
         private bool _goalReached = false;
 
+        // ── Loop direction (ping-pong for open paths) ──
+        // True = currently walking forward (index 0 → N-1).
+        // False = currently walking back (index N-1 → 0).
+        // Only used when LoopPath is true and the path is open
+        // (end-to-start gap > LoopClosureMaxDistance). Closed loops keep
+        // jumping straight from end to start.
+        private bool _loopForward = true;
+
         // ── Final-waypoint standby ──
         // When the last waypoint is reached on a non-loop path, instead of stopping
         // completely the bot enters standby.  For Attack/AttackAndLoot modes it keeps
@@ -365,6 +373,19 @@ namespace DriverScanTester.Services
                     _log($"[Path] #{index}: ({p.X:F1}, {p.Y:F1}) Precision:{p.Precision} Mode:{p.Mode} CamLock:{p.CameraDistanceLock} AtkDis:{p.AttackDisengageDistance}");
                     index++;
                 }
+
+                if (LoopPath && _initialPath.Count >= 2)
+                {
+                    float gap = LoopEndToStartDistance();
+                    if (gap <= BotConstants.Movement.LoopClosureMaxDistance)
+                    {
+                        _log($"[Loop] Closed circular loop (end→start gap {gap:F1} <= {BotConstants.Movement.LoopClosureMaxDistance:F1}) — wrap jumps straight to start.");
+                    }
+                    else
+                    {
+                        _log($"[Loop] Open path (end→start gap {gap:F1} > {BotConstants.Movement.LoopClosureMaxDistance:F1}) — ping-pong mode: bot walks back along the recorded points instead of cutting straight to start.");
+                    }
+                }
             }
             else
             {
@@ -503,7 +524,9 @@ namespace DriverScanTester.Services
             // In loot priority mode, after a mob dies (mob selected → no target) the loot
             // machine loots until a full scan pass finds no more items (IsLootingActive).
             // During that phase the bot must NOT select the next target (no TAB / no
-            // attack) and must NOT move to the next waypoint — loot is the priority.
+            // attack) and must NOT move to the next waypoint — loot is the priority:
+            // targeting and movement wait until the loot scan is finished and no loot
+            // is found.
             if (LootPriorityMode && LootSystemRef != null && LootSystemRef.IsLootingActive)
             {
                 if (_lootPriorityHoldSince == DateTime.MinValue)
@@ -511,13 +534,12 @@ namespace DriverScanTester.Services
                     _lootPriorityHoldSince = DateTime.UtcNow;
                 }
 
-                // Safety timeout: if the loot phase stalls with no items collected for a
-                // long time (e.g. the loot task died or the scan got stuck), release the
-                // hold instead of standing still forever. Active collection keeps
-                // extending the window.
-                bool makingProgress = LootSystemRef.TimeSinceLastItemCollected <
-                    TimeSpan.FromMilliseconds(BotConstants.Delays.LootWaitProgressGraceMs);
-                bool holdTimedOut = !makingProgress &&
+                // The hold is released ONLY when the loot scan finished with no items
+                // (IsLootingActive false) or when the loot machine is no longer
+                // actively scanning/collecting (e.g. the loot task died) — while the
+                // machine is mid-scan the bot must keep waiting, never interrupt it.
+                bool scanning = LootSystemRef.IsLootCycleActive;
+                bool holdTimedOut = !scanning &&
                     (DateTime.UtcNow - _lootPriorityHoldSince).TotalMilliseconds >= BotConstants.Delays.MaxLootWaitMs;
 
                 if (!holdTimedOut)
@@ -526,7 +548,7 @@ namespace DriverScanTester.Services
                     {
                         _lootPriorityHoldActive = true;
                         _combatHandler.ResetState();
-                        _log($"[Tick {_tickCount}] Loot priority — looting everything before next target / waypoint.");
+                        _log($"[Tick {_tickCount}] Loot priority — waiting for the loot scan to finish (no targeting / no waypoint movement).");
                     }
                     ReleaseSkillThree();
                     StopMoving();
@@ -538,7 +560,7 @@ namespace DriverScanTester.Services
                 if (!_lootPriorityHoldTimedOut)
                 {
                     _lootPriorityHoldTimedOut = true;
-                    _log($"[Tick {_tickCount}] Loot-priority hold timed out after {BotConstants.Delays.MaxLootWaitMs}ms without collected items — resuming combat/movement.");
+                    _log($"[Tick {_tickCount}] Loot-priority hold timed out after {BotConstants.Delays.MaxLootWaitMs}ms with the loot machine idle — resuming combat/movement.");
                 }
             }
             else
@@ -1297,6 +1319,45 @@ namespace DriverScanTester.Services
 
             if (LoopPath && _initialPath.Count > 0)
             {
+                // Open paths must NOT jump straight from end to start — that leg was
+                // never recorded and usually cuts through walls (e.g. 113 units in the
+                // reported log). Walk back along the recorded points instead.
+                if (!IsClosedLoop() && _initialPath.Count >= 2)
+                {
+                    if (_loopForward)
+                    {
+                        // Just finished the forward leg (at index N-1) — go back.
+                        _loopForward = false;
+                        for (int i = _initialPath.Count - 2; i >= 0; i--)
+                        {
+                            _waypoints.Enqueue(_initialPath[i]);
+                        }
+
+                        var next = _waypoints.Peek();
+                        _log($"[WpQueue] End of open path reached. Ping-pong: walking BACK ({_waypoints.Count} waypoints, next=({next.X:F1},{next.Y:F1})).");
+                    }
+                    else
+                    {
+                        // Just finished the backward leg (at index 0) — go forward.
+                        _loopForward = true;
+                        for (int i = 1; i < _initialPath.Count; i++)
+                        {
+                            _waypoints.Enqueue(_initialPath[i]);
+                        }
+
+                        var next = _waypoints.Peek();
+                        _log($"[WpQueue] Start of open path reached. Ping-pong: walking FORWARD ({_waypoints.Count} waypoints, next=({next.X:F1},{next.Y:F1})).");
+                    }
+
+                    // Reset standby flag — we are looping, not staying at the final waypoint.
+                    _finalStandbyActive = false;
+
+                    ResetBearingState();
+                    ResetActionStuckTracking();
+                    ResetCombatStateForWaypointChange();
+                    return;
+                }
+
                 _log($"[WpQueue] End of path reached. Looping back to start ({_initialPath.Count} waypoints).");
 
                 foreach (var p in _initialPath)
@@ -1322,6 +1383,30 @@ namespace DriverScanTester.Services
                 _log("[WpQueue] Final waypoint reached — entering standby mode.");
                 _log($"[WpQueue] Standby: mode={_finalStandbyMode}, pos=({_finalStandbyX:F1},{_finalStandbyY:F1}), AtkDis={_finalStandbyAtkDis}");
             }
+        }
+
+        /// <summary>
+        /// Straight-line distance between the first and the last waypoint of the
+        /// recorded path. Used to decide between a closed circular loop and an open
+        /// ping-pong (there-and-back) loop.
+        /// </summary>
+        private float LoopEndToStartDistance()
+        {
+            if (_initialPath.Count < 2) return 0f;
+            var first = _initialPath[0];
+            var last = _initialPath[_initialPath.Count - 1];
+            return GeometryUtils.Distance(first.X, first.Y, last.X, last.Y);
+        }
+
+        /// <summary>
+        /// True when the recorded loop is closed (end near start), so jumping
+        /// straight from end to start is safe. False for open paths, where the
+        /// bot must walk back along the recorded points.
+        /// </summary>
+        private bool IsClosedLoop()
+        {
+            if (_initialPath.Count < 2) return true;
+            return LoopEndToStartDistance() <= BotConstants.Movement.LoopClosureMaxDistance;
         }
 
         private bool IsGhostWaypoint(Waypoint waypoint)
@@ -1998,9 +2083,11 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Rebuilds <see cref="_waypoints"/> from <paramref name="startIndex"/> to the end of
-        /// <see cref="_initialPath"/>. Does nothing if the new target is effectively the same
-        /// as the current queue peek (within 0.5 distance). Clears relevant state on change.
+        /// Rebuilds <see cref="_waypoints"/> from <paramref name="startIndex"/> onwards.
+        /// For forward legs (or non-loop / closed loops) the queue runs to the end of
+        /// <see cref="_initialPath"/>; for the backward leg of an open ping-pong loop it
+        /// runs back down to index 0. Does nothing if the new target is effectively the
+        /// same as the current queue peek (within 0.5 distance). Clears relevant state on change.
         /// </summary>
         /// <returns>
         /// <see cref="RouteResyncResult.TerminalSkip"/> if <paramref name="startIndex"/> is invalid;
@@ -2027,15 +2114,29 @@ namespace DriverScanTester.Services
                 }
             }
 
+            bool goBackward = LoopPath && !IsClosedLoop() && !_loopForward;
+
             int oldCount = _waypoints.Count;
             _waypoints.Clear();
 
-            for (int i = startIndex; i < _initialPath.Count; i++)
+            if (goBackward)
             {
-                _waypoints.Enqueue(_initialPath[i]);
-            }
+                for (int i = startIndex; i >= 0; i--)
+                {
+                    _waypoints.Enqueue(_initialPath[i]);
+                }
 
-            _log($"[RouteResync] Queue rebuilt: oldCount={oldCount} newCount={_waypoints.Count} startIndex={startIndex}");
+                _log($"[RouteResync] Queue rebuilt BACKWARD: oldCount={oldCount} newCount={_waypoints.Count} startIndex={startIndex}");
+            }
+            else
+            {
+                for (int i = startIndex; i < _initialPath.Count; i++)
+                {
+                    _waypoints.Enqueue(_initialPath[i]);
+                }
+
+                _log($"[RouteResync] Queue rebuilt: oldCount={oldCount} newCount={_waypoints.Count} startIndex={startIndex}");
+            }
 
             // Reset movement state since the target changed
             ResetBearingState();
@@ -2090,17 +2191,20 @@ namespace DriverScanTester.Services
             float bestT = 0f;
 
             int normalSegmentCount = _initialPath.Count - 1;
-            int segmentCount = normalSegmentCount + (LoopPath ? 1 : 0);
+            // The wrap segment (last → first) only exists for CLOSED loops. For open
+            // ping-pong loops it would cut straight through unrecorded terrain.
+            bool useWrapSegment = LoopPath && IsClosedLoop();
+            int segmentCount = normalSegmentCount + (useWrapSegment ? 1 : 0);
 
             for (int i = 0; i < segmentCount; i++)
             {
                 int idxA = i;
                 int idxB = i + 1;
 
-                // Handle wrap-around segment for loop paths: last waypoint -> first waypoint
+                // Handle wrap-around segment for closed loop paths: last waypoint -> first waypoint
                 if (i >= normalSegmentCount)
                 {
-                    if (LoopPath)
+                    if (useWrapSegment)
                     {
                         idxA = _initialPath.Count - 1;
                         idxB = 0;
@@ -2129,8 +2233,8 @@ namespace DriverScanTester.Services
                 else if (dist <= bestDist + tieEpsilon && currentTargetIdx >= 0)
                 {
                     // Tie-breaker: prefer segment whose end index is closer to the current queue target
-                    int segmentEndIdx = (LoopPath && idxA == _initialPath.Count - 1) ? 0 : idxA + 1;
-                    int bestEndIdx = (LoopPath && bestSegmentStart == _initialPath.Count - 1) ? 0 : bestSegmentStart + 1;
+                    int segmentEndIdx = (useWrapSegment && idxA == _initialPath.Count - 1) ? 0 : idxA + 1;
+                    int bestEndIdx = (useWrapSegment && bestSegmentStart == _initialPath.Count - 1) ? 0 : bestSegmentStart + 1;
 
                     int newDiff = Math.Abs(segmentEndIdx - currentTargetIdx);
                     int bestDiff = Math.Abs(bestEndIdx - currentTargetIdx);
@@ -2152,26 +2256,47 @@ namespace DriverScanTester.Services
             }
 
             // ── Determine next waypoint index ──
+            // Open ping-pong loops keep the current travel direction: the forward leg
+            // targets increasing indices, the backward leg targets decreasing ones.
             string reason;
             int nextWpIndex;
 
             float maxSegDist = BotConstants.Movement.RouteResyncMaxSegmentDistance;
+            bool openLoopBackward = LoopPath && !IsClosedLoop() && !_loopForward;
 
             if (bestDist > maxSegDist)
             {
-                // Fallback: player is far from all segments — go to nearest waypoint
+                // Fallback: player is far from all segments — go to nearest waypoint.
+                // RebuildWaypointQueueFromIndex applies the current leg direction.
                 nextWpIndex = FindNearestWaypointIndex(currX, currY);
-                reason = $"fallback-nearest-wp d={bestDist:F2}";
+                reason = $"fallback-nearest-wp d={bestDist:F2} dir={(openLoopBackward ? "backward" : "forward")}";
+            }
+            else if (openLoopBackward)
+            {
+                // Backward leg: segment i->i+1 is travelled B→A (decreasing index).
+                // t≈0 means almost at A — skip one more backwards.
+                float nearStartT = 1f - BotConstants.Movement.RouteResyncVeryCloseToSegmentEndT;
+                if (bestT <= nearStartT)
+                {
+                    nextWpIndex = bestSegmentStart - 1;
+                    if (nextWpIndex < 0) nextWpIndex = 0;
+                    reason = "near-start-of-segment-backward";
+                }
+                else
+                {
+                    nextWpIndex = bestSegmentStart;
+                    reason = "nearest-segment-backward";
+                }
             }
             else if (bestT >= BotConstants.Movement.RouteResyncVeryCloseToSegmentEndT)
             {
                 // Very close to the end of this segment — skip to the next segment
-                if (LoopPath && bestSegmentStart == _initialPath.Count - 1)
+                if (useWrapSegment && bestSegmentStart == _initialPath.Count - 1)
                 {
                     // Wrap segment: last->first. End = 0, next after end = 1.
                     nextWpIndex = 1;
                 }
-                else if (LoopPath && bestSegmentStart == _initialPath.Count - 2)
+                else if (useWrapSegment && bestSegmentStart == _initialPath.Count - 2)
                 {
                     // Last normal segment before wrap (N-2 -> N-1). Next after end wraps to 0.
                     nextWpIndex = 0;
@@ -2181,7 +2306,7 @@ namespace DriverScanTester.Services
                     nextWpIndex = bestSegmentStart + 2;
                 }
 
-                if (!LoopPath && nextWpIndex >= _initialPath.Count)
+                if ((!LoopPath || !useWrapSegment) && nextWpIndex >= _initialPath.Count)
                     nextWpIndex = _initialPath.Count - 1;
 
                 reason = "near-end-of-segment";
@@ -2189,7 +2314,7 @@ namespace DriverScanTester.Services
             else
             {
                 // In the middle or near the start — go to end of this segment
-                if (LoopPath && bestSegmentStart == _initialPath.Count - 1)
+                if (useWrapSegment && bestSegmentStart == _initialPath.Count - 1)
                 {
                     // Wrap segment: last->first. End = 0.
                     nextWpIndex = 0;
@@ -2199,7 +2324,7 @@ namespace DriverScanTester.Services
                     nextWpIndex = bestSegmentStart + 1;
                 }
 
-                if (!LoopPath && nextWpIndex >= _initialPath.Count)
+                if ((!LoopPath || !useWrapSegment) && nextWpIndex >= _initialPath.Count)
                     nextWpIndex = _initialPath.Count - 1;
 
                 reason = "nearest-segment";

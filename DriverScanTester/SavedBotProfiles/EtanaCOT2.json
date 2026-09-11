@@ -1,0 +1,114 @@
+{
+  "Name": "EtanaCOT2",
+  "FlowSteps": [
+    {
+      "Type": 1,
+      "PathFile": "",
+      "StartDelayMs": 0,
+      "Routes": [],
+      "CompletionMode": 0,
+      "ExpectedDestinationMapNumber": 0,
+      "OperationName": "",
+      "RepotPaths": [
+        {
+          "PathFile": "Etana repot 01.json",
+          "StartDelayMs": 1111,
+          "StartCheckEnabled": true,
+          "StartPositionX": 214,
+          "StartPositionY": 213,
+          "ProtectionMapNumber": 35,
+          "StartPositionTolerance": 3
+        },
+        {
+          "PathFile": "Etana repot 02.json",
+          "StartDelayMs": 1111,
+          "StartCheckEnabled": true,
+          "StartPositionX": 214,
+          "StartPositionY": 213,
+          "ProtectionMapNumber": 35,
+          "StartPositionTolerance": 3
+        }
+      ]
+    },
+    {
+      "Type": 0,
+      "PathFile": "Etana Go COT 01.json",
+      "StartDelayMs": 555,
+      "Routes": [
+        {
+          "PathFile": "Etana Go COT 01.json",
+          "StartDelayMs": 555,
+          "StartCheckEnabled": false,
+          "StartPositionX": 0,
+          "StartPositionY": 0,
+          "ProtectionMapNumber": 0,
+          "StartPositionTolerance": 5
+        },
+        {
+          "PathFile": "Etana Go COT 02.json",
+          "StartDelayMs": 555,
+          "StartCheckEnabled": false,
+          "StartPositionX": 0,
+          "StartPositionY": 0,
+          "ProtectionMapNumber": 0,
+          "StartPositionTolerance": 5
+        }
+      ],
+      "CompletionMode": 0,
+      "ExpectedDestinationMapNumber": 0,
+      "OperationName": "",
+      "RepotPaths": []
+    },
+    {
+      "Type": 2,
+      "PathFile": "",
+      "StartDelayMs": 0,
+      "Routes": [],
+      "CompletionMode": 0,
+      "ExpectedDestinationMapNumber": 0,
+      "OperationName": "Enter_COT",
+      "RepotPaths": []
+    },
+    {
+      "Type": 3,
+      "PathFile": "COT LEVEL 2.json",
+      "StartDelayMs": 2000,
+      "Routes": [
+        {
+          "PathFile": "COT LEVEL 2.json",
+          "StartDelayMs": 2000,
+          "StartCheckEnabled": true,
+          "StartPositionX": 127,
+          "StartPositionY": 145,
+          "ProtectionMapNumber": 36,
+          "StartPositionTolerance": 5
+        }
+      ],
+      "CompletionMode": 0,
+      "ExpectedDestinationMapNumber": 0,
+      "OperationName": "",
+      "RepotPaths": []
+    }
+  ],
+  "MinHpPotions": 5,
+  "MinManaPotions": 5,
+  "MaxWeightRatio": 0.9,
+  "MinHp": 1444,
+  "MinMana": 155,
+  "HpBuyTarget": 25,
+  "ManaBuyTarget": 25,
+  "RedBuyTarget": 4,
+  "WhiteBuyTarget": 4,
+  "DryRunRepot": false,
+  "EnableStartPositionCheck": true,
+  "StartPositionX": 214,
+  "StartPositionY": 213,
+  "ProtectionMapNumber": 35,
+  "StartPositionTolerance": 3,
+  "LootPriority": true,
+  "TeleportKey": 54,
+  "TeleportScanCode": 7,
+  "MaxTeleportRetries": 3,
+  "WindowOffsetX": 0,
+  "WindowOffsetY": 0
+}

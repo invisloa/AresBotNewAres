@@ -264,6 +264,15 @@ namespace DriverScanTester
 
             /// <summary>Distance epsilon for segment tie-breaking: if two segments have dist within this value, prefer the one closer to current target.</summary>
             public const float RouteResyncTieDistanceEpsilon = 1.0f;
+
+            /// <summary>
+            /// Maximum end-to-start gap (game tiles) for a loop path to be treated as a
+            /// closed circular loop. When the last waypoint is this close (or closer) to
+            /// the first one, looping jumps straight from end to start. When the gap is
+            /// larger the path is open and looping walks back along the recorded points
+            /// (ping-pong / patrol) instead of cutting straight through walls.
+            /// </summary>
+            public const float LoopClosureMaxDistance = 20.0f;
         }
 
         // ════════════════════════════════════════════════════════════════
