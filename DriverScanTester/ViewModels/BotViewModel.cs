@@ -36,6 +36,10 @@ namespace DriverScanTester.ViewModels
         private string? _selectedProfileName;
         private string _validationText = "";
 
+        // Run-duration timer (minutes). Empty / 0 / invalid = run indefinitely.
+        private string _runDurationMinutesText = "";
+        private string _runTimeRemainingText = "unlimited";
+
         public BotViewModel(MainViewModel main)
         {
             _main = main;
@@ -207,6 +211,37 @@ namespace DriverScanTester.ViewModels
             set => SetProperty(ref _validationText, value);
         }
 
+        /// <summary>
+        /// Run-duration limit in minutes, typed by the user before pressing Start.
+        /// Empty, zero or invalid means the bot runs indefinitely.
+        /// </summary>
+        public string RunDurationMinutesText
+        {
+            get => _runDurationMinutesText;
+            set => SetProperty(ref _runDurationMinutesText, value);
+        }
+
+        /// <summary>Human-readable countdown to the automatic stop ("unlimited" when no timer is armed).</summary>
+        public string RunTimeRemainingText
+        {
+            get => _runTimeRemainingText;
+            set => SetProperty(ref _runTimeRemainingText, value);
+        }
+
+        /// <summary>Parses <see cref="RunDurationMinutesText"/>; returns 0 when empty/invalid (run indefinitely).</summary>
+        private double ParseRunDurationMinutes()
+        {
+            var t = (RunDurationMinutesText ?? "").Trim();
+            if (string.IsNullOrEmpty(t)) return 0;
+            if (double.TryParse(t, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.CurrentCulture, out double v) ||
+                double.TryParse(t, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out v))
+            {
+                if (v < 0 || double.IsNaN(v) || double.IsInfinity(v)) return 0;
+                return v;
+            }
+            return 0;
+        }
+
         public bool CanStartWorkflow =>
             !string.IsNullOrWhiteSpace(SelectedProfileName);
 
@@ -292,11 +327,14 @@ namespace DriverScanTester.ViewModels
         private void RunBot()
         {
             _main.RunBot();
+            double minutes = ParseRunDurationMinutes();
+            if (minutes > 0)
+                _main.StartAutoStopTimer(minutes, "Bot");
         }
 
         private void StopAllBots()
         {
-            _main.StopAllBotsInternal();
+            _main.StopAllActions("manual stop");
         }
 
         private void ToggleHealManaBot()
@@ -381,6 +419,10 @@ namespace DriverScanTester.ViewModels
             }
 
             _main.StartWorkflow(profile);
+
+            double runMinutes = ParseRunDurationMinutes();
+            if (runMinutes > 0 && _main.IsAttached)
+                _main.StartAutoStopTimer(runMinutes, "Workflow");
 
             AppendBotLog($"Workflow started with profile '{profile.Name}'.");
 
@@ -471,6 +513,14 @@ namespace DriverScanTester.ViewModels
                 // Sync workflow state from MainViewModel
                 IsWorkflowRunning = _main.IsWorkflowRunning;
                 WorkflowPhaseText = _main.WorkflowPhaseText;
+
+                // Run-duration countdown (updated every second with the stats poll).
+                var remaining = _main.GetAutoStopRemaining();
+                RunTimeRemainingText = remaining == null
+                    ? "unlimited"
+                    : remaining.Value.TotalHours >= 1
+                        ? $"{(int)remaining.Value.TotalHours}:{remaining.Value.Minutes:D2}:{remaining.Value.Seconds:D2} left"
+                        : $"{remaining.Value.Minutes:D2}:{remaining.Value.Seconds:D2} left";
             });
         }
 

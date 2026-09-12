@@ -47,6 +47,16 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// True when the HP potion stock is at/below the configured minimum —
+        /// i.e. the repot (and the teleport back to the city) is needed because
+        /// of low HP potions. Used to trigger the low-HP-potions screenshot.
+        /// </summary>
+        public bool IsLowHpPotions(GameSnapshot snapshot)
+        {
+            return snapshot.HpPotions <= MinHpPotions;
+        }
+
+        /// <summary>
         /// Checks if the player needs to repot based on the snapshot.
         /// </summary>
         public bool NeedsRepot(GameSnapshot snapshot)

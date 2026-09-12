@@ -96,10 +96,20 @@
                             Width="70" Margin="2" Background="#FFDEFFDE" FontWeight="Bold"/>
                     <Button Content="Stop" Command="{Binding StopWorkflowCommand}"
                             Width="70" Margin="3,2" Background="#FFFFD0D0" FontWeight="Bold"/>
+                    <Separator Width="1" Margin="5,2" Background="LightGray"/>
+                    <TextBlock Text="Run for (min):" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,3,0"
+                               ToolTip="Optional run-duration limit. Empty or 0 = run indefinitely. When the time expires every bot action is stopped automatically."/>
+                    <TextBox Width="60" VerticalAlignment="Center" Margin="0,0"
+                             Text="{Binding RunDurationMinutesText, UpdateSourceTrigger=PropertyChanged}"
+                             ToolTip="Type minutes (e.g. 90). Empty or 0 = run indefinitely. Applies to Start below and to RUN BOT."/>
                 </WrapPanel>
                 <WrapPanel Orientation="Horizontal" Margin="5,0,5,3">
                     <TextBlock Text="Running:" FontWeight="Bold" VerticalAlignment="Center"/>
                     <TextBlock Text="{Binding IsWorkflowRunning}" VerticalAlignment="Center" Width="30" Margin="3,0"/>
+                    <Separator Width="1" Margin="10,2" Background="LightGray"/>
+                    <TextBlock Text="Auto-stop in:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,3,0"/>
+                    <TextBlock Text="{Binding RunTimeRemainingText}" VerticalAlignment="Center" FontWeight="Bold"
+                               Foreground="#FF007ACC" MinWidth="90"/>
                     <Separator Width="1" Margin="10,2" Background="LightGray"/>
                     <TextBlock Text="Current stage:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,3,0"/>
                     <TextBlock Text="{Binding WorkflowPhaseText}" VerticalAlignment="Center" FontWeight="Bold"

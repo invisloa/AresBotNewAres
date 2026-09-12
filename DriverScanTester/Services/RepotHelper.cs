@@ -143,11 +143,25 @@ namespace DriverScanTester.Services
         {
             if (_repotStage == 0)
             {
-                _log("Repot Routine: Starting. Pressing 6 (Town Teleport).");
-                _stopMoving();
-                GameInput.PressKey(GameInput.VK_6, GameInput.SCAN_6);
-                _repotStageStartTime = DateTime.Now;
-                _repotStage = 1;
+                // Already in the city (e.g. manually running a repot path inside the
+                // city): teleporting is pointless — go straight to the repot point
+                // instead of freezing movement for the full teleport wait.
+                if (_memoryService.GetIsInCity())
+                {
+                    int cityMap = _memoryService.GetMapNumber();
+                    _log($"Repot Routine: Already in city (Map: {cityMap}). Skipping teleport. Calling GoToRepotPoint.");
+                    GoToRepotPoint(cityMap);
+                    _repotStage = 2;
+                    _repotStageStartTime = DateTime.Now;
+                }
+                else
+                {
+                    _log("Repot Routine: Starting. Pressing 6 (Town Teleport).");
+                    _stopMoving();
+                    GameInput.PressKey(GameInput.VK_6, GameInput.SCAN_6);
+                    _repotStageStartTime = DateTime.Now;
+                    _repotStage = 1;
+                }
             }
             else if (_repotStage == 1)
             {
@@ -162,6 +176,7 @@ namespace DriverScanTester.Services
                         _log($"Repot Routine: Player is in city (Map: {cityMap}). Calling GoToRepotPoint.");
                         GoToRepotPoint(cityMap);
                         _repotStage = 2;
+                        _repotStageStartTime = DateTime.Now;
                     }
                     else
                     {
@@ -169,6 +184,15 @@ namespace DriverScanTester.Services
                         _isRepotting = false;
                     }
                 }
+            }
+            else if (_repotStage == 2)
+            {
+                // GoToRepotPoint is a stub (logs "Not Implemented") — the repot has
+                // nothing more to do here. Clear the flag so movement resumes instead
+                // of blocking every tick forever with "Repotting — skip move".
+                _log("Repot Routine: Done. Resuming movement.");
+                _isRepotting = false;
+                _repotStage = 0;
             }
         }
 

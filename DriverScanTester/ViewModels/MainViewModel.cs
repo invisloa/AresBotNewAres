@@ -429,8 +429,15 @@ namespace DriverScanTester.ViewModels
             var hmToken = _healManaBotCts.Token;
             Task.Run(() => HealManaBotLoop(hmToken), hmToken);
 
-            // 5. Start Loot
-            if (!_isLootBotRunning)
+            // 5. Start Loot — skipped entirely for OnlyMove-only paths (mandatory move: no loot/attack).
+            // Heal stays always on (step 4, separate task). Mixed paths still start loot,
+            // but LootBotLoop + MovementSystem suspend it while an OnlyMove waypoint is active.
+            bool needsLoot = path.Exists(p => p.Mode == Services.BotMode.MoveAndAttackAndLoot);
+            if (!needsLoot)
+            {
+                AppendBotLog("Loot Bot not started (OnlyMove-only path — mandatory move, no loot/attack).");
+            }
+            else if (!_isLootBotRunning)
             {
                 _lootSystem = new LootSystem(memoryService, AppendBotLog);
                 if (_movementSystem != null)
@@ -2638,6 +2645,13 @@ namespace DriverScanTester.ViewModels
         private Task? _workflowTask;
         private BotProfileLoader? _profileLoader;
 
+        // --- Run-duration auto-stop timer ---
+        // Optional deadline ("run for N minutes") armed from the Bot window. When it
+        // expires, every bot action is stopped (workflow + movement/heal/loot).
+        // Null means no timer is armed (run indefinitely).
+        private CancellationTokenSource? _autoStopCts;
+        private DateTime? _autoStopAt;
+
         public bool IsWorkflowRunning => _workflowCoordinator?.IsRunning ?? false;
 
         /// <summary>
@@ -2753,6 +2767,7 @@ namespace DriverScanTester.ViewModels
 
         public void StopWorkflow()
         {
+            CancelAutoStopTimer();
             if (_workflowCoordinator == null)
             {
                 AppendLog("No workflow to stop.");
@@ -2764,6 +2779,117 @@ namespace DriverScanTester.ViewModels
             AppendLog("Workflow stop requested. Window offset reset.");
             OnPropertyChanged(nameof(IsWorkflowRunning));
             OnPropertyChanged(nameof(WorkflowPhaseText));
+        }
+
+        /// <summary>
+        /// Remaining time until the run-duration timer expires. Null when no timer
+        /// is armed or it already expired.
+        /// </summary>
+        public TimeSpan? GetAutoStopRemaining()
+        {
+            var at = _autoStopAt;
+            if (at == null) return null;
+            var remaining = at.Value - DateTime.Now;
+            if (remaining <= TimeSpan.Zero) return null;
+            return remaining;
+        }
+
+        /// <summary>
+        /// Arms the run-duration timer: after <paramref name="minutes"/> every bot
+        /// action is stopped (workflow + movement/heal/loot). Non-positive values
+        /// clear the timer (run indefinitely). Replaces any previously armed timer.
+        /// </summary>
+        public void StartAutoStopTimer(double minutes, string source)
+        {
+            CancelAutoStopTimer();
+            if (minutes <= 0 || double.IsNaN(minutes) || double.IsInfinity(minutes)) return;
+            // Cap so the 1s-poll loop below never overflows and typos (e.g. 99999)
+            // cannot trap the bot for weeks: 24h max.
+            if (minutes > 1440) minutes = 1440;
+
+            var deadline = DateTime.Now.AddMinutes(minutes);
+            var cts = new CancellationTokenSource();
+            _autoStopAt = deadline;
+            _autoStopCts = cts;
+            AppendBotLog($"[AutoStop] {source} will stop automatically in {minutes:G} min (at {deadline:HH:mm:ss}).");
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    while (!cts.Token.IsCancellationRequested)
+                    {
+                        var left = deadline - DateTime.Now;
+                        if (left <= TimeSpan.Zero) break;
+                        var wait = left.TotalMilliseconds > 1000 ? 1000 : (int)left.TotalMilliseconds;
+                        if (wait <= 0) break;
+                        await Task.Delay(wait, cts.Token);
+                    }
+                    if (cts.Token.IsCancellationRequested) return;
+                }
+                catch (TaskCanceledException) { return; }
+                catch (OperationCanceledException) { return; }
+
+                // Only fire if this timer is still the armed one (not replaced/cancelled).
+                if (!ReferenceEquals(_autoStopCts, cts)) return;
+                _autoStopAt = null;
+                _autoStopCts = null;
+                StopAllActions($"run-duration limit reached ({minutes:G} min)");
+            });
+        }
+
+        /// <summary>
+        /// Cancels a pending run-duration timer, if any. The bot keeps running.
+        /// </summary>
+        public void CancelAutoStopTimer()
+        {
+            var cts = _autoStopCts;
+            _autoStopCts = null;
+            _autoStopAt = null;
+            if (cts != null)
+            {
+                try { cts.Cancel(); } catch { }
+                cts.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Stops every bot action: the route workflow plus the movement/heal/loot
+        /// bots, and clears the run-duration timer. Used for manual "stop all" and
+        /// for the automatic stop when the run-duration timer expires.
+        /// </summary>
+        public void StopAllActions(string reason)
+        {
+            CancelAutoStopTimer();
+            AppendBotLog($"[AutoStop] Stopping every bot action ({reason}).");
+            try
+            {
+                if (_workflowCoordinator != null)
+                {
+                    _workflowCoordinator.Stop();
+                    MouseOperations.ResetWindowOffset();
+                    _workflowTask = null;
+                }
+            }
+            catch (Exception ex)
+            {
+                AppendBotLog($"[AutoStop] Workflow stop error: {ex.Message}");
+            }
+            try
+            {
+                StopAllBotsInternal();
+            }
+            catch (Exception ex)
+            {
+                AppendBotLog($"[AutoStop] Bots stop error: {ex.Message}");
+            }
+            // May run on the timer's background thread — marshal to the UI thread
+            // like the coordinator callbacks do.
+            System.Windows.Application.Current?.Dispatcher?.Invoke(() =>
+            {
+                OnPropertyChanged(nameof(IsWorkflowRunning));
+                OnPropertyChanged(nameof(WorkflowPhaseText));
+            });
         }
 
         /// <summary>
@@ -3113,6 +3239,7 @@ namespace DriverScanTester.ViewModels
 
                 public void StopAllBotsInternal()
                 {
+                    CancelAutoStopTimer();
                     ToggleMovementBot(false);
                     ToggleHealManaBot(false);
                     ToggleLootBot(false);
@@ -3159,8 +3286,9 @@ namespace DriverScanTester.ViewModels
                         Task.Run(() => MovementBotLoop(movementToken), movementToken);
                         AppendBotLog("Movement Bot started.");
 
-                        // Auto-start loot bot when movement starts
-                        if (!_isLootBotRunning)
+                        // Auto-start loot bot when movement starts — except for OnlyMove
+                        // (mandatory move: no loot/attack). Heal is independent and unaffected.
+                        if (!_isLootBotRunning && SelectedBotMode == Services.BotMode.MoveAndAttackAndLoot)
                         {
                             ToggleLootBot(true);
                         }
@@ -3318,6 +3446,14 @@ namespace DriverScanTester.ViewModels
                     {
                         while (!token.IsCancellationRequested && _isAttached && _lootSystem != null)
                         {
+                            // OnlyMove is mandatory above all movement-option actions:
+                            // never try to loot while the current waypoint is OnlyMove.
+                            // Heal stays always on (separate HealMana task).
+                            if (_movementSystem?.IsMoveOnlyActive == true)
+                            {
+                                await Task.Delay(10, token);
+                                continue;
+                            }
                             await _lootSystem.Update(token);
                             await Task.Delay(10, token); // Update rate for loot
                         }

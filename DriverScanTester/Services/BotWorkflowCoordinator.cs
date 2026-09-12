@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -32,6 +35,21 @@ namespace DriverScanTester.Services
 
         [DllImport("user32.dll")]
         private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern nint FindWindow(string lpClassName, string lpWindowName);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool GetClientRect(nint hWnd, out RECT lpRect);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool ClientToScreen(nint hWnd, ref POINT lpPoint);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT { public int X; public int Y; }
 
         private const int KEYEVENTF_KEYUP = BotConstants.Keyboard.KeyEventKeyUp;
 
@@ -458,6 +476,7 @@ namespace DriverScanTester.Services
             if (!_memoryService.GetIsInCity())
             {
                 _log("[Repot] Not in city. Teleporting before repot.");
+                CaptureLowHpPotionsScreenshotIfNeeded();
                 await TeleportToCity(token);
                 if (!_memoryService.GetIsInCity())
                 {
@@ -645,6 +664,14 @@ namespace DriverScanTester.Services
                     {
                         while (!expToken.IsCancellationRequested && lootSystem != null)
                         {
+                            // OnlyMove is mandatory above all movement-option actions:
+                            // never try to loot (or attack) while the current waypoint
+                            // is OnlyMove. Heal stays always on (separate task).
+                            if (_pathRunner.CurrentMovement?.IsMoveOnlyActive == true)
+                            {
+                                await Task.Delay(BotConstants.Delays.LootUpdateMs, expToken);
+                                continue;
+                            }
                             await lootSystem.Update(expToken);
                             await Task.Delay(BotConstants.Delays.LootUpdateMs, expToken);
                         }
@@ -693,6 +720,8 @@ namespace DriverScanTester.Services
                     if (_repotDetector.NeedsRepot(snapshot))
                     {
                         _log("[ExpLoop] Repot condition detected. Stopping exp loop.");
+                        if (_repotDetector.IsLowHpPotions(snapshot))
+                            CaptureLowHpPotionsScreenshot(snapshot);
                         repotNeeded = true;
                         expCts.Cancel();
                         break;
@@ -1470,6 +1499,80 @@ namespace DriverScanTester.Services
             keybd_event(BotConstants.Keyboard.VkW, BotConstants.Keyboard.ScanW, 0, 0);
             await Task.Delay(BotConstants.Delays.StartProtectionNudgeKeyDownMs, token);
             keybd_event(BotConstants.Keyboard.VkW, BotConstants.Keyboard.ScanW, KEYEVENTF_KEYUP, 0);
+        }
+
+        /// <summary>
+        /// Takes a fresh snapshot and captures a low-HP-potions screenshot when the
+        /// teleport is needed because of low HP potions. Used right before teleporting
+        /// from the Repot step (which can be reached without going through ExpLoop,
+        /// e.g. the flow starts with an empty potion stock).
+        /// </summary>
+        private void CaptureLowHpPotionsScreenshotIfNeeded()
+        {
+            try
+            {
+                var snapshot = _memoryService.GetSnapshot();
+                if (_repotDetector.IsLowHpPotions(snapshot))
+                    CaptureLowHpPotionsScreenshot(snapshot);
+            }
+            catch (Exception ex)
+            {
+                _log($"[Repot] Failed to check HP potions before screenshot: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Captures a screenshot of the game window and saves it to Screenshots/LowHpPotions/
+        /// when the bot needs to teleport because of low HP potions.
+        /// Mirrors HealManaSystem.CaptureDeathScreenshot and MovementSystem.CaptureStuckScreenshot.
+        /// </summary>
+        private void CaptureLowHpPotionsScreenshot(GameSnapshot snapshot)
+        {
+            try
+            {
+                _log($"[Repot] Low HP potions ({snapshot.HpPotions} <= {_repotDetector.MinHpPotions}) — capturing screenshot before teleport.");
+
+                nint hwnd = FindWindow(null, "Legend of Ares");
+                if (hwnd == nint.Zero) hwnd = FindWindow(null, "Ares");
+                if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
+                if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
+
+                int captureX = 0, captureY = 0, captureW = BotConstants.Loot.BitmapWidth, captureH = BotConstants.Loot.BitmapHeight;
+
+                if (hwnd != nint.Zero)
+                {
+                    if (GetClientRect(hwnd, out RECT clientRect))
+                    {
+                        POINT topLeft = new POINT { X = 0, Y = 0 };
+                        if (ClientToScreen(hwnd, ref topLeft))
+                        {
+                            captureX = topLeft.X;
+                            captureY = topLeft.Y;
+                            captureW = clientRect.Right - clientRect.Left;
+                            captureH = clientRect.Bottom - clientRect.Top;
+                        }
+                    }
+                }
+
+                using (Bitmap bitmap = new Bitmap(captureW, captureH))
+                using (Graphics graphics = Graphics.FromImage(bitmap))
+                {
+                    graphics.CopyFromScreen(captureX, captureY, 0, 0, bitmap.Size);
+
+                    string screenshotsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", "Screenshots", "LowHpPotions");
+                    Directory.CreateDirectory(screenshotsDir);
+
+                    string fileName = $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.png";
+                    string filePath = Path.Combine(screenshotsDir, fileName);
+
+                    bitmap.Save(filePath, ImageFormat.Png);
+                    _log($"[Repot] Low HP potions screenshot saved: {filePath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                _log($"[Repot] Failed to capture low HP potions screenshot: {ex.Message}");
+            }
         }
 
         /// <summary>

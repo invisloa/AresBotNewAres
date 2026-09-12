@@ -172,6 +172,39 @@ namespace DriverScanTester.Services
         /// </summary>
         public bool LootPriorityMode { get; set; } = false;
 
+        /// <summary>
+        /// Current effective movement mode (final-standby mode when in standby,
+        /// otherwise the current waypoint's mode). Empty queue defaults to OnlyMove.
+        /// Thread-safe for parallel loot-task reads (defaults to OnlyMove on race).
+        /// </summary>
+        public BotMode CurrentMode
+        {
+            get
+            {
+                try
+                {
+                    if (_finalStandbyActive)
+                        return _finalStandbyMode;
+                    if (_waypoints.Count > 0)
+                        return _waypoints.Peek().Mode;
+                }
+                catch (InvalidOperationException)
+                {
+                    // Queue raced (peek on empty) from the parallel loot task — safest
+                    // default is OnlyMove (suppress loot, keep moving).
+                }
+                return BotMode.OnlyMove;
+            }
+        }
+
+        /// <summary>
+        /// True when the current effective mode is OnlyMove. OnlyMove is mandatory
+        /// above all movement-option actions: while true, movement must not attempt
+        /// to loot or attack. Heal stays always on (it is not a movement action and
+        /// runs in its own HealManaSystem task).
+        /// </summary>
+        public bool IsMoveOnlyActive => CurrentMode == BotMode.OnlyMove;
+
         /// <summary>True while the loot-priority hold is active (prevents log spam).</summary>
         private bool _lootPriorityHoldActive = false;
 
@@ -497,6 +530,25 @@ namespace DriverScanTester.Services
                 return;
             }
 
+            // ── OnlyMove is mandatory above all movement-option actions ──
+            // While the current waypoint (or final standby) is OnlyMove, the bot must
+            // not try to loot or attack. Every loot hold below is skipped so waypoint
+            // movement is never suspended for a pickup/scan. Heal stays always on —
+            // it is not a movement action and runs in its own HealManaSystem task.
+            bool moveOnlyActive = IsMoveOnlyActive;
+            if (moveOnlyActive)
+            {
+                _lootPriorityHoldActive = false;
+                _lootPriorityHoldSince = DateTime.MinValue;
+                _lootPriorityHoldTimedOut = false;
+                if (LootSystemRef != null && (LootSystemRef.IsCollecting || LootSystemRef.IsLootingActive))
+                {
+                    if (_tickCount % _stateLogInterval == 0)
+                        _log($"[Tick {_tickCount}] OnlyMove active — ignoring loot (mandatory move, no loot/attack).");
+                }
+            }
+            else
+            {
             // ── Loot collection interrupts combat/movement ──
             // The loot system scans for ground items WHILE the character keeps attacking
             // (scanning alone never interrupts the attack). Only when the scan actually
@@ -569,6 +621,7 @@ namespace DriverScanTester.Services
                 _lootPriorityHoldSince = DateTime.MinValue;
                 _lootPriorityHoldTimedOut = false;
             }
+            }
 
             // ── Map change detection ──
             // Each game map has its own navigation file. If the player changed maps,
@@ -582,7 +635,8 @@ namespace DriverScanTester.Services
             }
 
             // ── Attack speed / potion check ──
-            if (_combatHandler.CheckAttackSpeed(_memoryService))
+            // Suppressed while OnlyMove is active (mandatory move: no combat actions).
+            if (!moveOnlyActive && _combatHandler.CheckAttackSpeed(_memoryService))
             {
                 _log($"[Tick {_tickCount}] Speed {BotConstants.SpeedPotion.AttackSpeedThreshold} — using potions");
                 _log("[Key] 7 (pot1)");
