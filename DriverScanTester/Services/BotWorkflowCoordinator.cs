@@ -748,6 +748,17 @@ namespace DriverScanTester.Services
                 catch (OperationCanceledException) { }
             }
 
+            // Phase-boundary guarantee: the EXP loop may have been interrupted while
+            // the combat attack key (3) was held — MovementSystem holds it across ticks
+            // and only releases it on a later combat tick, which never runs once the
+            // loop is cancelled. Release combat-owned keys through the existing
+            // ownership mechanism BEFORE handing control to the next flow step
+            // (Repot/teleport), so the "[Key] 3 up" log always precedes the Repot
+            // phase. Idempotent: the PathRunner finally performs the same cleanup
+            // centrally for cancellation/exception paths, so a duplicate call here
+            // sends nothing when the key is already released.
+            _pathRunner.CurrentMovement?.ReleaseCombatKeys();
+
             _pathRunner.Stop();
             _log("[ExpLoop] Exp hunting loop ended.");
 

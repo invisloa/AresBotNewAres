@@ -122,6 +122,14 @@ namespace DriverScanTester.Services
             {
                 // Persist any pending stuck-cell data before stopping
                 _movementSystem?.SaveLocalMap();
+                // Centralized input cleanup for every termination path (normal
+                // completion, cancellation, exception, phase change): StopMoving
+                // releases W/A/D, ReleaseCombatKeys releases the combat-owned
+                // attack key (3) via the existing ownership flag. Both are
+                // idempotent, so an EXP → Repot interruption while 3 is held
+                // can never leak it into the Repot phase. The "[Key] 3 up"
+                // release log therefore always precedes "[PathRunner] Path stopped."
+                _movementSystem?.ReleaseCombatKeys();
                 _movementSystem?.StopMoving();
                 _log("[PathRunner] Path stopped.");
             }
@@ -131,10 +139,14 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Stops the current movement immediately and persists any pending navigation data.
+        /// Also releases combat-owned held keys (attack skill 3) through the existing
+        /// ownership mechanism, so an externally requested stop can never leave the
+        /// attack key held for the next workflow phase. Idempotent.
         /// </summary>
         public void Stop()
         {
             _movementSystem?.SaveLocalMap();
+            _movementSystem?.ReleaseCombatKeys();
             _movementSystem?.StopMoving();
         }
     }

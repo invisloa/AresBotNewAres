@@ -1978,6 +1978,28 @@ namespace DriverScanTester.Services
 
         // ── Skill 3 management ──
 
+        /// <summary>
+        /// True while the combat attack key (skill 3) is logically held down.
+        /// Exposed so hosts and tests can verify cleanup through the existing
+        /// ownership state instead of duplicating key-state tracking.
+        /// </summary>
+        public bool IsAttackKeyHeld => _isSkillThreeHeld;
+
+        /// <summary>
+        /// Releases combat-owned held keys (currently the attack skill 3).
+        /// Idempotent: calling it when no combat key is held sends nothing and
+        /// leaves the next combat cycle unaffected.
+        /// Must be called before another workflow phase takes control (e.g. the
+        /// EXP → Repot handoff) so a combat key held at interruption time can
+        /// never leak across the phase boundary. Uses the existing
+        /// <see cref="_isSkillThreeHeld"/> ownership flag and the existing
+        /// "[Key] 3 up" release logging — no second tracking, no per-tick key-ups.
+        /// </summary>
+        public void ReleaseCombatKeys()
+        {
+            ReleaseSkillThree();
+        }
+
         private void ReleaseSkillThree()
         {
             if (_isSkillThreeHeld)
