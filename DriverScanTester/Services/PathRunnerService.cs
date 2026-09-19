@@ -5,6 +5,17 @@ using System.Threading.Tasks;
 
 namespace DriverScanTester.Services
 {
+    public enum PathRunStopReason
+    {
+        None,
+        Completed,
+        Cancelled,
+        ZoneBlocked,
+        CityStuck,
+        WaypointRepotRequested,
+        Error
+    }
+
     /// <summary>
     /// Runs a MovementSystem on a given set of waypoints.
     /// Abstracts away the MovementSystem lifecycle so both the old MainViewModel
@@ -14,14 +25,21 @@ namespace DriverScanTester.Services
     {
         private readonly GameMemoryService _memoryService;
         private readonly Action<string> _log;
+        private readonly bool _enableWaypointSpecialRecoveries;
         private MovementSystem? _movementSystem;
 
         public MovementSystem? CurrentMovement => _movementSystem;
+        public WaypointRecoveryExecutor? WaypointRecoveryExecutor { get; set; }
+        public PathRunStopReason LastStopReason { get; private set; } = PathRunStopReason.None;
 
-        public PathRunnerService(GameMemoryService memoryService, Action<string> log)
+        public PathRunnerService(
+            GameMemoryService memoryService,
+            Action<string> log,
+            bool enableWaypointSpecialRecoveries = true)
         {
             _memoryService = memoryService;
             _log = log;
+            _enableWaypointSpecialRecoveries = enableWaypointSpecialRecoveries;
         }
 
         /// <summary>
@@ -37,9 +55,11 @@ namespace DriverScanTester.Services
             bool loop,
             CancellationToken token)
         {
+            LastStopReason = PathRunStopReason.None;
             if (waypoints == null || waypoints.Count == 0)
             {
                 _log("[PathRunner] No waypoints provided.");
+                LastStopReason = PathRunStopReason.Error;
                 return false;
             }
 
@@ -54,9 +74,11 @@ namespace DriverScanTester.Services
                 precision: MovementPrecision.Medium,
                 customPath: waypoints,
                 initialMode: initialMode,
-                loopPath: loop)
+                loopPath: loop,
+                enableWaypointSpecialRecoveries: _enableWaypointSpecialRecoveries)
             {
-                InternalRepotEnabled = false // External coordinator handles repot
+                InternalRepotEnabled = false, // External coordinator handles repot
+                WaypointRecoveryExecutor = WaypointRecoveryExecutor
             };
 
             _log($"[PathRunner] Started path with {waypoints.Count} points, loop={loop}.");
@@ -68,10 +90,18 @@ namespace DriverScanTester.Services
                 {
                     await _movementSystem.Update(token);
 
+                    if (_movementSystem.IsWaypointRepotRequested)
+                    {
+                        LastStopReason = PathRunStopReason.WaypointRepotRequested;
+                        _log("[WaypointRecovery] Workflow route stopped for waypoint Repot request.");
+                        return false;
+                    }
+
                     // Check for terminal stop AFTER update so standby mode keeps running.
                     if (_movementSystem.IsGoalReached)
                     {
                         _log("[PathRunner] Path completed (goal reached terminal).");
+                        LastStopReason = PathRunStopReason.Completed;
                         return true;
                     }
 
@@ -82,6 +112,7 @@ namespace DriverScanTester.Services
                     if (!loop && _movementSystem.IsFinalStandbyActive)
                     {
                         _log("[PathRunner] Path completed (final waypoint standby).");
+                        LastStopReason = PathRunStopReason.Completed;
                         return true;
                     }
 
@@ -93,6 +124,7 @@ namespace DriverScanTester.Services
                     if (_movementSystem.IsZoneBlocked &&
                         _movementSystem.ZoneBlockedDuration.TotalMilliseconds >= BotConstants.Delays.ZoneBlockAbortMs)
                     {
+                        LastStopReason = PathRunStopReason.ZoneBlocked;
                         _log($"[PathRunner] Zone-blocked for {_movementSystem.ZoneBlockedDuration.TotalSeconds:F0}s — aborting path (player likely in the wrong zone).");
                         return false;
                     }
@@ -103,25 +135,30 @@ namespace DriverScanTester.Services
                     if (_movementSystem.IsCityStuckFatal)
                     {
                         _log("[PathRunner] City-stuck escalation fired — aborting path (coordinator will retry from the city).");
+                        LastStopReason = PathRunStopReason.CityStuck;
                         return false;
                     }
 
                     await Task.Delay(BotConstants.Delays.PathRunnerTickMs, token);
                 }
                 _log("[PathRunner] Loop exited due to cancellation request.");
+                LastStopReason = PathRunStopReason.Cancelled;
             }
             catch (OperationCanceledException)
             {
                 // Expected on cancellation
+                LastStopReason = PathRunStopReason.Cancelled;
             }
             catch (Exception ex)
             {
                 _log($"[PathRunner] Error: {ex.Message}");
+                LastStopReason = PathRunStopReason.Error;
             }
             finally
             {
                 // Persist any pending stuck-cell data before stopping
                 _movementSystem?.SaveLocalMap();
+                _movementSystem?.CancelWaypointSpecialRecovery();
                 // Centralized input cleanup for every termination path (normal
                 // completion, cancellation, exception, phase change): StopMoving
                 // releases W/A/D, ReleaseCombatKeys releases the combat-owned
@@ -146,6 +183,7 @@ namespace DriverScanTester.Services
         public void Stop()
         {
             _movementSystem?.SaveLocalMap();
+            _movementSystem?.CancelWaypointSpecialRecovery();
             _movementSystem?.ReleaseCombatKeys();
             _movementSystem?.StopMoving();
         }

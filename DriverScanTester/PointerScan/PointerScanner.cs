@@ -1081,7 +1081,7 @@ namespace DriverScanTester.PointerScan
                 };
             }
 
-            internal static PointerChain Create(PointerScanResult terminalResult, ulong finalTarget)
+            public static PointerChain Create(PointerScanResult terminalResult, ulong finalTarget)
             {
                 if (terminalResult.Module == null)
                 {

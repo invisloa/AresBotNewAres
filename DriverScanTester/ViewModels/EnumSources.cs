@@ -14,6 +14,9 @@ namespace DriverScanTester.ViewModels
         public static System.Array BotModes { get; } =
             System.Enum.GetValues(typeof(BotMode));
 
+        public static System.Array WaypointStuckRecoveryTypes { get; } =
+            System.Enum.GetValues(typeof(WaypointStuckRecoveryType));
+
         public static System.Array LockPriorities { get; } =
             System.Enum.GetValues(typeof(LockPriority));
 

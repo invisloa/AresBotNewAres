@@ -276,6 +276,15 @@ namespace DriverScanTester
         }
 
         // ════════════════════════════════════════════════════════════════
+        //  WAYPOINT SPECIAL RECOVERY
+        // ════════════════════════════════════════════════════════════════
+        public static class WaypointRecovery
+        {
+            /// <summary>Total budget for one AttackMob search-and-attack recovery.</summary>
+            public const int AttackMobTimeoutMs = 20_000;
+        }
+
+        // ════════════════════════════════════════════════════════════════
         //  WAYPOINT REACH THRESHOLDS — per precision level (game tiles)
         // ════════════════════════════════════════════════════════════════
         public static class WaypointThresholds

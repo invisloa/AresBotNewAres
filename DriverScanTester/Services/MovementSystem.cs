@@ -35,6 +35,15 @@ namespace DriverScanTester.Services
         Both
     }
 
+    public enum WaypointStuckRecoveryType
+    {
+        Default = 0,
+        Repot = 1,
+        Operation = 2,
+        RecoveryPath = 3,
+        AttackMob = 4
+    }
+
     public struct Waypoint
     {
         public const short DefaultCameraDistanceLock = BotConstants.Camera.DefaultDistanceLock;
@@ -47,6 +56,10 @@ namespace DriverScanTester.Services
         public short CameraDistanceLock { get; set; }
         public short AttackDisengageDistance { get; set; }
         public ZoneRestriction ZoneRestriction { get; set; }
+        public WaypointStuckRecoveryType StuckRecoveryType { get; set; }
+        public string StuckRecoveryOperation { get; set; }
+        public string StuckRecoveryPath { get; set; }
+        public short StuckRecoveryMobCameraDistance { get; set; }
 
         public Waypoint(
             float x,
@@ -55,7 +68,11 @@ namespace DriverScanTester.Services
             BotMode mode,
             short cameraDistanceLock = DefaultCameraDistanceLock,
             short attackDisengageDistance = DefaultAttackDisengageDistance,
-            ZoneRestriction zoneRestriction = ZoneRestriction.OutsideOnly)
+            ZoneRestriction zoneRestriction = ZoneRestriction.OutsideOnly,
+            WaypointStuckRecoveryType stuckRecoveryType = WaypointStuckRecoveryType.Default,
+            string stuckRecoveryOperation = "",
+            string stuckRecoveryPath = "",
+            short stuckRecoveryMobCameraDistance = DefaultCameraDistanceLock)
         {
             X = x;
             Y = y;
@@ -64,6 +81,10 @@ namespace DriverScanTester.Services
             CameraDistanceLock = cameraDistanceLock;
             AttackDisengageDistance = attackDisengageDistance;
             ZoneRestriction = zoneRestriction;
+            StuckRecoveryType = stuckRecoveryType;
+            StuckRecoveryOperation = stuckRecoveryOperation;
+            StuckRecoveryPath = stuckRecoveryPath;
+            StuckRecoveryMobCameraDistance = stuckRecoveryMobCameraDistance;
         }
     }
 
@@ -73,6 +94,9 @@ namespace DriverScanTester.Services
         private readonly Action<string> _log;
         private readonly CombatHandler _combatHandler;
         private readonly RepotHelper _repotHelper;
+        private readonly bool _enableWaypointSpecialRecoveries;
+
+        public WaypointRecoveryExecutor? WaypointRecoveryExecutor { get; set; }
 
         public MovementPrecision GlobalPrecision { get; set; } = MovementPrecision.Medium;
         public bool LoopPath { get; set; } = false;
@@ -80,6 +104,20 @@ namespace DriverScanTester.Services
         /// <summary>If true (default), MovementSystem handles repot internally (legacy mode).
         /// When false, the external BotWorkflowCoordinator is responsible for repot decisions.</summary>
         public bool InternalRepotEnabled { get; set; } = true;
+
+        private bool _isWaypointSpecialRecoveryActive;
+        private bool _waypointRepotRequested;
+        private WaypointMobRecovery? _waypointMobRecovery;
+        private Waypoint? _activeSpecialRecoveryTarget;
+        private bool _specialRecoveryAttempted;
+        private (float X, float Y)? _specialRecoveryAnchor;
+        private float _specialRecoveryTargetX;
+        private float _specialRecoveryTargetY;
+
+        public bool IsWaypointSpecialRecoveryActive =>
+            _isWaypointSpecialRecoveryActive || _waypointMobRecovery?.IsActive == true;
+
+        public bool IsWaypointRepotRequested => _waypointRepotRequested;
 
         /// <summary>Returns true when the final goal waypoint has been reached (non-loop path).</summary>
         public bool IsGoalReached => _goalReached;
@@ -369,12 +407,24 @@ namespace DriverScanTester.Services
         private CombatRetargetCameraStage _combatRetargetCameraStage = CombatRetargetCameraStage.None;
         private bool _combatRetargetAwaitingSelection = false;
 
-        public MovementSystem(GameMemoryService memoryService, Action<string> log, float targetX, float targetY, MovementPrecision precision = MovementPrecision.Medium, IEnumerable<Waypoint>? customPath = null, BotMode initialMode = BotMode.OnlyMove, bool loopPath = false)
+        public MovementSystem(
+            GameMemoryService memoryService,
+            Action<string> log,
+            float targetX,
+            float targetY,
+            MovementPrecision precision = MovementPrecision.Medium,
+            IEnumerable<Waypoint>? customPath = null,
+            BotMode initialMode = BotMode.OnlyMove,
+            bool loopPath = false,
+            bool enableWaypointSpecialRecoveries = true,
+            WaypointRecoveryExecutor? waypointRecoveryExecutor = null)
         {
             _memoryService = memoryService;
             _log = log;
             _combatHandler = new CombatHandler(log);
             _repotHelper = new RepotHelper(memoryService, log, StopMoving, () => _goalReached = true);
+            _enableWaypointSpecialRecoveries = enableWaypointSpecialRecoveries;
+            WaypointRecoveryExecutor = waypointRecoveryExecutor;
             Waypoint2 = (targetX, targetY);
             GlobalPrecision = precision;
             LoopPath = loopPath;
@@ -448,6 +498,21 @@ namespace DriverScanTester.Services
 
 
             token.ThrowIfCancellationRequested();
+
+            // AttackMob is the only special recovery that remains tick-driven. External
+            // operation/recovery-path actions await inside the confirmed-stuck dispatcher,
+            // so this guard also prevents normal route/combat logic from competing with one.
+            if (_waypointMobRecovery != null)
+            {
+                var (recoveryX, recoveryY, recoveryPositionRead) = _memoryService.GetPlayerPosition();
+                TickWaypointMobRecovery(
+                    recoveryPositionRead ? recoveryX : float.NaN,
+                    recoveryPositionRead ? recoveryY : float.NaN);
+                return;
+            }
+
+            if (_isWaypointSpecialRecoveryActive)
+                return;
 
             // ── In-city stuck cooldown ──
             // After 3 stuck attempts in city, bot presses 6 and waits 10 minutes.
@@ -781,12 +846,7 @@ namespace DriverScanTester.Services
                     {
                         _log($"[CombatRetarget] Mob selected at camera {cameraDistanceToApply}. Starting attack.");
                         ClearCombatRetargetSearch();
-                        if (!_isSkillThreeHeld)
-                        {
-                            _log("[Key] 3 hold (attack skill)");
-                            GameInput.keybd_event(GameInput.VK_3, GameInput.SCAN_3, 0, 0);
-                            _isSkillThreeHeld = true;
-                        }
+                        HoldSkillThree();
 
                         if (_isMovingForward)
                         {
@@ -893,12 +953,7 @@ namespace DriverScanTester.Services
                     return;
 
                 case CombatAction.Attack:
-                    if (!_isSkillThreeHeld)
-                    {
-                        _log("[Key] 3 hold (attack skill)");
-                        GameInput.keybd_event(GameInput.VK_3, GameInput.SCAN_3, 0, 0);
-                        _isSkillThreeHeld = true;
-                    }
+                    HoldSkillThree();
                     if (_isMovingForward)
                     {
                         StopMoving();
@@ -1109,6 +1164,20 @@ namespace DriverScanTester.Services
                 float distNow = GeometryUtils.Distance(currX, currY, target.X, target.Y);
                 float thresholdNow = GetEffectiveWaypointReachThreshold(target);
 
+                if (_specialRecoveryAttempted &&
+                    (Math.Abs(target.X - _specialRecoveryTargetX) > 0.01f ||
+                     Math.Abs(target.Y - _specialRecoveryTargetY) > 0.01f))
+                {
+                    ResetSpecialRecoveryAttempt();
+                }
+                else if (_specialRecoveryAttempted && _specialRecoveryAnchor.HasValue &&
+                         GeometryUtils.Distance(currX, currY, _specialRecoveryAnchor.Value.X, _specialRecoveryAnchor.Value.Y) >=
+                         BotConstants.Movement.StuckProgressResetDistance)
+                {
+                    _log("[WaypointRecovery] Special recovery guard reset after real movement progress.");
+                    ResetSpecialRecoveryAttempt();
+                }
+
                 // Reset stuck counter only when the player has actually moved away from the
                 // position where the last stuck attempt began (real progress). Proximity to
                 // the target alone must NOT reset it — otherwise a bot stuck right next to its
@@ -1155,7 +1224,7 @@ namespace DriverScanTester.Services
                     _stuckDetector.IsActionStuck(currX, currY, target, _isMovingForward))
                 {
                     _log($"[ActionStuck] Action={currentAction} while moving. Starting ReverseDiagonalRecovery.");
-                    StartReverseDiagonalRecovery(currX, currY, target);
+                    await HandleConfirmedNavigationStuckAsync(currX, currY, target, token, "ActionStuck");
                     return;
                 }
 
@@ -1179,7 +1248,7 @@ namespace DriverScanTester.Services
                                 _log($"[NoProgress] Moved {movedSince:F2} units in {BotConstants.Movement.NoProgressTimeoutMs} ms while W held (action={currentAction}) — treating as stuck.");
                                 _lastMoveProgressPos = null;
                                 _lastMoveProgressTime = DateTime.MinValue;
-                                StartReverseDiagonalRecovery(currX, currY, target);
+                                await HandleConfirmedNavigationStuckAsync(currX, currY, target, token, "NoProgress");
                                 return;
                             }
                         }
@@ -1332,6 +1401,7 @@ namespace DriverScanTester.Services
 
                 _waypoints.Dequeue();
                 _log($"[AdvWp] #{wpIndex} ({target.X:F1},{target.Y:F1}) reached{ghostTag} ✓ | Queue: {_waypoints.Count}");
+                ResetSpecialRecoveryAttempt();
                 _consecutiveStuckAttempts = 0; // reset stuck counter — we made progress
                 _lastStuckAttemptPos = null;
                 ResetBearingState();
@@ -1406,6 +1476,7 @@ namespace DriverScanTester.Services
                     // Reset standby flag — we are looping, not staying at the final waypoint.
                     _finalStandbyActive = false;
 
+                    ResetSpecialRecoveryAttempt();
                     ResetBearingState();
                     ResetActionStuckTracking();
                     ResetCombatStateForWaypointChange();
@@ -1424,6 +1495,7 @@ namespace DriverScanTester.Services
                 // Reset standby flag — we are looping, not staying at the final waypoint.
                 _finalStandbyActive = false;
 
+                ResetSpecialRecoveryAttempt();
                 ResetBearingState();
                 ResetActionStuckTracking();
                 ResetCombatStateForWaypointChange();
@@ -1689,6 +1761,190 @@ namespace DriverScanTester.Services
             _combatHandler.ResetState();
             ClearCombatRetargetSearch();
             ReleaseSkillThree();
+        }
+
+        private void ResetSpecialRecoveryAttempt()
+        {
+            _specialRecoveryAttempted = false;
+            _specialRecoveryAnchor = null;
+            _specialRecoveryTargetX = 0f;
+            _specialRecoveryTargetY = 0f;
+        }
+
+        private void PrepareSpecialRecovery(Waypoint target)
+        {
+            _activeSpecialRecoveryTarget = target;
+            _isWaypointSpecialRecoveryActive = true;
+            _isUnstuckRoutineActive = true;
+            StopMoving();
+            ReleaseSkillThree();
+            ClearCombatRetargetSearch();
+            _combatHandler.ResetState();
+            _lastMoveProgressPos = null;
+            _lastMoveProgressTime = DateTime.MinValue;
+            ResetActionStuckTracking();
+        }
+
+        private void FinishSpecialRecovery(Waypoint target, bool succeeded)
+        {
+            _waypointMobRecovery?.Stop();
+            _waypointMobRecovery = null;
+            StopMoving();
+            ReleaseSkillThree();
+            ClearCombatRetargetSearch();
+            _combatHandler.ResetState();
+            ResetActionStuckTracking();
+            _lastMoveProgressPos = null;
+            _lastMoveProgressTime = DateTime.MinValue;
+            _memoryService.SetCameraDistance(target.CameraDistanceLock);
+            _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+            if (succeeded)
+            {
+                ResetBearingState();
+                _routeResyncPendingAfterCombat = true;
+            }
+
+            _activeSpecialRecoveryTarget = null;
+            _isWaypointSpecialRecoveryActive = false;
+            _isUnstuckRoutineActive = false;
+        }
+
+        private async Task HandleConfirmedNavigationStuckAsync(
+            float currX,
+            float currY,
+            Waypoint target,
+            CancellationToken token,
+            string source)
+        {
+            // This branch deliberately remains the direct legacy path. Do not put
+            // special-recovery preparation before it: Default must have the same
+            // escalation/counter/reverse-diagonal behavior as current master.
+            if (!_enableWaypointSpecialRecoveries ||
+                target.StuckRecoveryType == WaypointStuckRecoveryType.Default)
+            {
+                StartReverseDiagonalRecovery(currX, currY, target);
+                return;
+            }
+
+            if (_specialRecoveryAttempted)
+            {
+                _log("[WaypointRecovery] Special recovery already attempted at this stuck location with no real progress — using standard unstuck.");
+                StartReverseDiagonalRecovery(currX, currY, target);
+                return;
+            }
+
+            _specialRecoveryAttempted = true;
+            _specialRecoveryAnchor = (currX, currY);
+            _specialRecoveryTargetX = target.X;
+            _specialRecoveryTargetY = target.Y;
+            _log($"[WaypointRecovery] Stuck at waypoint ({target.X:F1},{target.Y:F1}), configured={target.StuckRecoveryType}, source={source}.");
+
+            if (target.StuckRecoveryType == WaypointStuckRecoveryType.Repot)
+            {
+                PrepareSpecialRecovery(target);
+                if (InternalRepotEnabled)
+                {
+                    _log("[WaypointRecovery] Repot requested by waypoint (manual mode).");
+                    _repotHelper.ReportAndGoBack();
+                    FinishSpecialRecovery(target, succeeded: false);
+                }
+                else
+                {
+                    _log("[WaypointRecovery] Repot requested by waypoint.");
+                    _waypointRepotRequested = true;
+                    FinishSpecialRecovery(target, succeeded: false);
+                }
+                return;
+            }
+
+            if (target.StuckRecoveryType == WaypointStuckRecoveryType.AttackMob)
+            {
+                PrepareSpecialRecovery(target);
+                _waypointMobRecovery = new WaypointMobRecovery(
+                    _memoryService,
+                    _log,
+                    StopMoving,
+                    HoldSkillThree,
+                    ReleaseSkillThree);
+                _waypointMobRecovery.Start(currX, currY, target.StuckRecoveryMobCameraDistance);
+                return;
+            }
+
+            PrepareSpecialRecovery(target);
+            bool succeeded = false;
+            try
+            {
+                if (WaypointRecoveryExecutor != null)
+                {
+                    succeeded = target.StuckRecoveryType == WaypointStuckRecoveryType.Operation
+                        ? await WaypointRecoveryExecutor.RunOperationAsync(target.StuckRecoveryOperation, token)
+                        : await WaypointRecoveryExecutor.RunRecoveryPathAsync(target.StuckRecoveryPath, token);
+                }
+                else
+                {
+                    _log("[WaypointRecovery] No recovery executor is configured.");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                FinishSpecialRecovery(target, succeeded: false);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _log($"[WaypointRecovery] Special recovery threw: {ex.Message}");
+            }
+
+            if (succeeded)
+            {
+                _log($"[WaypointRecovery] {target.StuckRecoveryType} succeeded — resuming original route.");
+                FinishSpecialRecovery(target, succeeded: true);
+                return;
+            }
+
+            _log("[WaypointRecovery] Special recovery failed — falling back to standard unstuck.");
+            FinishSpecialRecovery(target, succeeded: false);
+            StartReverseDiagonalRecovery(currX, currY, target);
+        }
+
+        private void TickWaypointMobRecovery(float currX, float currY)
+        {
+            if (_waypointMobRecovery == null)
+                return;
+
+            WaypointMobRecoveryResult result = _waypointMobRecovery.Tick(currX, currY);
+            if (result == WaypointMobRecoveryResult.InProgress)
+                return;
+
+            Waypoint target = _activeSpecialRecoveryTarget ??
+                (_waypoints.Count > 0
+                    ? _waypoints.Peek()
+                    : new Waypoint(Waypoint2.X, Waypoint2.Y, GlobalPrecision, BotMode.OnlyMove));
+
+            _waypointMobRecovery = null;
+            if (result == WaypointMobRecoveryResult.Recovered)
+            {
+                FinishSpecialRecovery(target, succeeded: true);
+                return;
+            }
+
+            _log("[WaypointRecovery] AttackMob timed out — falling back to standard unstuck.");
+            FinishSpecialRecovery(target, succeeded: false);
+            StartReverseDiagonalRecovery(currX, currY, target);
+        }
+
+        public void CancelWaypointSpecialRecovery()
+        {
+            if (_waypointMobRecovery != null)
+            {
+                _waypointMobRecovery.Stop();
+                _waypointMobRecovery = null;
+            }
+
+            if (_isWaypointSpecialRecoveryActive && _activeSpecialRecoveryTarget.HasValue)
+            {
+                FinishSpecialRecovery(_activeSpecialRecoveryTarget.Value, succeeded: false);
+            }
         }
 
         /// <summary>
@@ -2000,6 +2256,16 @@ namespace DriverScanTester.Services
             ReleaseSkillThree();
         }
 
+        private void HoldSkillThree()
+        {
+            if (_isSkillThreeHeld)
+                return;
+
+            _log("[Key] 3 hold (attack skill)");
+            GameInput.keybd_event(GameInput.VK_3, GameInput.SCAN_3, 0, 0);
+            _isSkillThreeHeld = true;
+        }
+
         private void ReleaseSkillThree()
         {
             if (_isSkillThreeHeld)
@@ -2218,6 +2484,7 @@ namespace DriverScanTester.Services
             ResetBearingState();
             ResetActionStuckTracking();
             ResetCombatStateForWaypointChange();
+            ResetSpecialRecoveryAttempt();
             _consecutiveStuckAttempts = 0;
             _lastStuckAttemptPos = null;
 

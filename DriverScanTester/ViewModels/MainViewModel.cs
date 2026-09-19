@@ -413,7 +413,26 @@ namespace DriverScanTester.ViewModels
             var initialMode = path.Count > 0 ? path[0].Mode : Services.BotMode.OnlyMove;
 
             var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
-            _movementSystem = new MovementSystem(memoryService, AppendBotLog, tx, ty, SelectedPrecision, path, initialMode, loop);
+            var pathLoader = new SavedPathLoader(AppendBotLog);
+            var profile = _workflowCoordinator?.ActiveProfile ?? new BotProfile();
+            var itemSeller = new ItemSellerService(memoryService, AppendBotLog);
+            var waypointRecoveryExecutor = new WaypointRecoveryExecutor(
+                memoryService,
+                pathLoader,
+                itemSeller,
+                profile,
+                AppendBotLog,
+                FocusGameWindow);
+            _movementSystem = new MovementSystem(
+                memoryService,
+                AppendBotLog,
+                tx,
+                ty,
+                SelectedPrecision,
+                path,
+                initialMode,
+                loop,
+                waypointRecoveryExecutor: waypointRecoveryExecutor);
             
             _movementBotCts = new CancellationTokenSource();
             _isMovementBotRunning = true;
@@ -2720,11 +2739,20 @@ namespace DriverScanTester.ViewModels
             var repotDetector = new RepotDetectorService(AppendBotLog);
             var pathLoader = new SavedPathLoader(AppendBotLog);
             var pathRunner = new PathRunnerService(memoryService, AppendBotLog);
+            var itemSeller = new ItemSellerService(memoryService, AppendBotLog);
+            var waypointRecoveryExecutor = new WaypointRecoveryExecutor(
+                memoryService,
+                pathLoader,
+                itemSeller,
+                profile,
+                AppendBotLog,
+                FocusGameWindow);
+            pathRunner.WaypointRecoveryExecutor = waypointRecoveryExecutor;
 
             var operationContext = new OperationContext(
                 memoryService,
                 pathRunner,
-                new ItemSellerService(memoryService, AppendBotLog),
+                itemSeller,
                 profile,
                 AppendBotLog,
                 FocusGameWindow);
@@ -3411,6 +3439,8 @@ namespace DriverScanTester.ViewModels
                         _movementSystem?.SaveLocalMap();
 
                         // Ensure movement stops even on cancellation
+                        _movementSystem?.CancelWaypointSpecialRecovery();
+                        _movementSystem?.ReleaseCombatKeys();
                         _movementSystem?.StopMoving();
                     }
                 }
@@ -3449,6 +3479,11 @@ namespace DriverScanTester.ViewModels
                             // OnlyMove is mandatory above all movement-option actions:
                             // never try to loot while the current waypoint is OnlyMove.
                             // Heal stays always on (separate HealMana task).
+                            if (_movementSystem?.IsWaypointSpecialRecoveryActive == true)
+                            {
+                                await Task.Delay(10, token);
+                                continue;
+                            }
                             if (_movementSystem?.IsMoveOnlyActive == true)
                             {
                                 await Task.Delay(10, token);

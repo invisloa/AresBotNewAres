@@ -91,6 +91,9 @@ namespace DriverScanTester.ViewModels
             set => SetProperty(ref _availableSegments, value);
         }
 
+        public IReadOnlyList<string> AvailableWaypointRecoveryOperations { get; } =
+            BotOperations.KnownNames;
+
         private string? _selectedAvailableSegment;
         public string? SelectedAvailableSegment
         {
@@ -406,7 +409,18 @@ namespace DriverScanTester.ViewModels
 
         private void RunEditorPath()
         {
-            var list = Points.Select(p => new DriverScanTester.Services.Waypoint(p.X, p.Y, p.Precision, p.Mode, p.CameraDistanceLock, p.AttackDisengageDistance, p.ZoneRestriction)).ToList();
+            var list = Points.Select(p => new DriverScanTester.Services.Waypoint(
+                p.X,
+                p.Y,
+                p.Precision,
+                p.Mode,
+                p.CameraDistanceLock,
+                p.AttackDisengageDistance,
+                p.ZoneRestriction,
+                p.StuckRecoveryType,
+                p.StuckRecoveryOperation,
+                p.StuckRecoveryPath,
+                p.StuckRecoveryMobCameraDistance)).ToList();
             OnRunPath?.Invoke(list, LoopRoute);
             StatusText = "Running current editor path...";
         }

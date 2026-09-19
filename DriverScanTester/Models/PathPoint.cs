@@ -14,6 +14,12 @@ namespace DriverScanTester.Models
         public short CameraDistanceLock { get; set; } = DefaultCameraDistanceLock;
         public short AttackDisengageDistance { get; set; } = DefaultAttackDisengageDistance;
         public ZoneRestriction ZoneRestriction { get; set; } = ZoneRestriction.OutsideOnly;
+        public WaypointStuckRecoveryType StuckRecoveryType { get; set; }
+            = WaypointStuckRecoveryType.Default;
+        public string StuckRecoveryOperation { get; set; } = "";
+        public string StuckRecoveryPath { get; set; } = "";
+        public short StuckRecoveryMobCameraDistance { get; set; }
+            = DefaultCameraDistanceLock;
 
         public PathPoint() { }
         public PathPoint(
@@ -23,7 +29,11 @@ namespace DriverScanTester.Models
             BotMode mode = BotMode.OnlyMove,
             short cameraDistanceLock = DefaultCameraDistanceLock,
             short attackDisengageDistance = DefaultAttackDisengageDistance,
-            ZoneRestriction zoneRestriction = ZoneRestriction.OutsideOnly)
+            ZoneRestriction zoneRestriction = ZoneRestriction.OutsideOnly,
+            WaypointStuckRecoveryType stuckRecoveryType = WaypointStuckRecoveryType.Default,
+            string stuckRecoveryOperation = "",
+            string stuckRecoveryPath = "",
+            short stuckRecoveryMobCameraDistance = DefaultCameraDistanceLock)
         { 
             X = x; 
             Y = y; 
@@ -32,6 +42,10 @@ namespace DriverScanTester.Models
             CameraDistanceLock = cameraDistanceLock;
             AttackDisengageDistance = attackDisengageDistance;
             ZoneRestriction = zoneRestriction;
+            StuckRecoveryType = stuckRecoveryType;
+            StuckRecoveryOperation = stuckRecoveryOperation;
+            StuckRecoveryPath = stuckRecoveryPath;
+            StuckRecoveryMobCameraDistance = stuckRecoveryMobCameraDistance;
         }
     }
 }

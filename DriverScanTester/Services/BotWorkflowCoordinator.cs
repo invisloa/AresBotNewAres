@@ -434,6 +434,11 @@ namespace DriverScanTester.Services
                 case TravelRouteRunResult.Cancelled:
                     return false;
 
+                case TravelRouteRunResult.WaypointRepotRequested:
+                    if (!RedirectToRepotStep("waypoint special recovery requested Repot"))
+                        return false;
+                    return false;
+
                 case TravelRouteRunResult.Incomplete:
                     _pathStepRetryCount++;
                     if (_pathStepRetryCount >= BotConstants.Repot.MaxMoveToRepotRetries)
@@ -518,6 +523,11 @@ namespace DriverScanTester.Services
 
             var result = await RunRouteOnceAsync(repotPath, "Repot path", token);
             if (token.IsCancellationRequested) return false;
+
+            if (result == RouteRunResult.WaypointRepotRequested)
+            {
+                _log("[WaypointRecovery] Repot was requested inside the Repot step path; treating it as a failed repot-path attempt.");
+            }
 
             if (result != RouteRunResult.Completed)
             {
@@ -672,6 +682,11 @@ namespace DriverScanTester.Services
                                 await Task.Delay(BotConstants.Delays.LootUpdateMs, expToken);
                                 continue;
                             }
+                            if (_pathRunner.CurrentMovement?.IsWaypointSpecialRecoveryActive == true)
+                            {
+                                await Task.Delay(BotConstants.Delays.LootUpdateMs, expToken);
+                                continue;
+                            }
                             await lootSystem.Update(expToken);
                             await Task.Delay(BotConstants.Delays.LootUpdateMs, expToken);
                         }
@@ -689,12 +704,31 @@ namespace DriverScanTester.Services
 
             bool repotNeeded = false;
             bool cityDetected = false;
+            bool waypointRepotRequested = false;
             int inCityConsecutiveReads = 0;
             try
             {
                 while (!expToken.IsCancellationRequested)
                 {
+                    if (pathTask.IsCompleted &&
+                        _pathRunner.LastStopReason == PathRunStopReason.WaypointRepotRequested)
+                    {
+                        waypointRepotRequested = true;
+                        _log("[WaypointRecovery] ExpLoop path completed for a waypoint Repot request.");
+                        expCts.Cancel();
+                        break;
+                    }
+
                     await Task.Delay(BotConstants.Delays.ExpLoopRepotCheckIntervalMs, expToken);
+
+                    if (pathTask.IsCompleted &&
+                        _pathRunner.LastStopReason == PathRunStopReason.WaypointRepotRequested)
+                    {
+                        waypointRepotRequested = true;
+                        _log("[WaypointRecovery] ExpLoop path completed for a waypoint Repot request.");
+                        expCts.Cancel();
+                        break;
+                    }
 
                     var snapshot = _memoryService.GetSnapshot();
 
@@ -765,6 +799,14 @@ namespace DriverScanTester.Services
             if (token.IsCancellationRequested)
                 return false;
 
+            if (waypointRepotRequested ||
+                _pathRunner.LastStopReason == PathRunStopReason.WaypointRepotRequested)
+            {
+                AdvanceRoute(step, pool);
+                RedirectToRepotStep("ExpLoop waypoint Repot request");
+                return false;
+            }
+
             // The flow simply advances to the next step (and wraps around at the end).
             // The Repot step is responsible for returning to the city and refilling, so a
             // flow like Repot → ... → ExpLoop → Operation (after hunt) → Repot works:
@@ -776,10 +818,37 @@ namespace DriverScanTester.Services
 
         // ======================== Helpers ========================
 
+        private bool RedirectToRepotStep(string reason)
+        {
+            var steps = _profile.FlowSteps;
+            if (steps == null || steps.Count == 0)
+            {
+                _log($"[WaypointRecovery] Cannot redirect to Repot ({reason}): profile has no flow steps.");
+                CurrentPhase = BotPhase.Failed;
+                return false;
+            }
+
+            for (int offset = 1; offset <= steps.Count; offset++)
+            {
+                int candidate = (_flowIndex + offset) % steps.Count;
+                if (steps[candidate]?.Type != BotFlowStepType.Repot)
+                    continue;
+
+                _flowIndex = candidate;
+                _log($"[WaypointRecovery] Redirecting workflow to Repot step {candidate + 1}/{steps.Count}: {reason}.");
+                return true;
+            }
+
+            _log($"[WaypointRecovery] Configuration error: no Repot step exists; cannot redirect ({reason}).");
+            CurrentPhase = BotPhase.Failed;
+            return false;
+        }
+
         private enum RouteRunResult
         {
             Completed,
             MissingSegment,
+            WaypointRepotRequested,
             Incomplete
         }
 
@@ -787,6 +856,7 @@ namespace DriverScanTester.Services
         {
             Completed,
             MissingSegment,
+            WaypointRepotRequested,
             Incomplete,
             ExpectedMapNotReached,
             UnexpectedMapReached,
@@ -922,6 +992,9 @@ namespace DriverScanTester.Services
             else
                 _log($"[Coordinator] {stageName}: path did not complete.");
 
+            if (!completed && _pathRunner.LastStopReason == PathRunStopReason.WaypointRepotRequested)
+                return RouteRunResult.WaypointRepotRequested;
+
             return completed ? RouteRunResult.Completed : RouteRunResult.Incomplete;
         }
 
@@ -990,6 +1063,9 @@ namespace DriverScanTester.Services
                     _log($"[Path] Step {stepIndex}/{stepCount}: path completed (final waypoint).");
                 else
                     _log($"[Path] Step {stepIndex}/{stepCount}: path did not complete.");
+
+                if (!completed && _pathRunner.LastStopReason == PathRunStopReason.WaypointRepotRequested)
+                    return TravelRouteRunResult.WaypointRepotRequested;
 
                 return completed ? TravelRouteRunResult.Completed : TravelRouteRunResult.Incomplete;
             }
@@ -1090,6 +1166,13 @@ namespace DriverScanTester.Services
 
             // The path finished before the expected destination map was confirmed:
             // give the portal a bounded grace period to activate.
+            if (_pathRunner.LastStopReason == PathRunStopReason.WaypointRepotRequested)
+            {
+                _log("[WaypointRecovery] Portal route stopped for a waypoint Repot request; skipping portal grace period.");
+                _pathRunner.Stop();
+                return TravelRouteRunResult.WaypointRepotRequested;
+            }
+
             _log($"[Path] Step {stepIndex}/{stepCount}: path finished before destination map confirmed. Waiting grace period for portal transition...");
             _pathRunner.Stop();
 

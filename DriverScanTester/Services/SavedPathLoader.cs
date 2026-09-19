@@ -53,7 +53,18 @@ namespace DriverScanTester.Services
                 var waypoints = new List<Waypoint>();
                 foreach (var pt in segment.Points)
                 {
-                    waypoints.Add(new Waypoint(pt.X, pt.Y, pt.Precision, pt.Mode, pt.CameraDistanceLock, pt.AttackDisengageDistance, pt.ZoneRestriction));
+                    waypoints.Add(new Waypoint(
+                        pt.X,
+                        pt.Y,
+                        pt.Precision,
+                        pt.Mode,
+                        pt.CameraDistanceLock,
+                        pt.AttackDisengageDistance,
+                        pt.ZoneRestriction,
+                        pt.StuckRecoveryType,
+                        pt.StuckRecoveryOperation,
+                        pt.StuckRecoveryPath,
+                        pt.StuckRecoveryMobCameraDistance));
                 }
 
                 _log($"[SavedPathLoader] Loaded '{segmentFileName}': {waypoints.Count} points.");
