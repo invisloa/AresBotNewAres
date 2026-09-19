@@ -752,7 +752,7 @@ namespace DriverScanTester
             /// flag becomes readable; moving immediately makes the client ignore input
             /// and the bot misreads the still-loading state as stuck.
             /// </summary>
-            public const int PostTeleportUiLoadMs = 10000;
+            public const int PostTeleportUiLoadMs = 5000;
 
             // ── Start position check / protection ──
             /// <summary>

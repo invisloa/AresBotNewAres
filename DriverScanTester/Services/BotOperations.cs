@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -39,6 +39,7 @@ namespace DriverScanTester.Services
                 ["WaitForInCity"] = WaitForInCity,
                 ["GoInsideCOT"] = GoInsideCOT,
                 ["Enter_COT"] = EnterCOT,
+                ["EtanaRepotUnstuck"] = EtanaRepotUnstuck,
             };
 
         /// <summary>All registered operation names, for the profile editor and validation.</summary>
@@ -240,6 +241,53 @@ namespace DriverScanTester.Services
 
             ctx.Log("[Operation] Enter_COT: map did not change. Failed.");
             return false;
+        }
+
+        /// <summary>
+        /// Hardcoded camera yaw captured LIVE at the Etana teleport landing spot
+        /// (player 214,213, map 35, in city) on 2026-09-19: raw 0x3FC96E22.
+        /// ~1.5736735 rad / ~90.16 deg — facing East toward the repot path.
+        /// Written as raw bits via <see cref="GameMemoryService.WriteCameraAngleInt"/>
+        /// so the exact captured facing is restored bit-for-bit.
+        /// </summary>
+        private const int EtanaRepotCameraAngleBits = 1070165538; // 0x3FC96E22
+
+        /// <summary>
+        /// Etana repot unstuck for the post-teleport stale-coordinates bug:
+        /// right after the teleport the game does not refresh the player position
+        /// memory, so no bearing can be computed. Etana has only one teleport landing
+        /// spot, so the fix is to point the camera at the hardcoded captured yaw
+        /// (the direction the character faces at the landing) and simply walk
+        /// forward to force the position to refresh:
+        ///   1. Set the camera to the hardcoded captured angle.
+        ///   2. Hold W (walk forward) for 2 seconds.
+        ///   3. Release W and return (always true unless cancelled).
+        /// </summary>
+        public static async Task<bool> EtanaRepotUnstuck(OperationContext ctx, CancellationToken token)
+        {
+            ctx.Log("[Operation] EtanaRepotUnstuck: starting (hardcoded camera + 2s walk). ");
+            ctx.FocusGameWindow();
+
+            // 1. Point the camera at the hardcoded captured value (exact bits).
+            ctx.Log($"[Operation] EtanaRepotUnstuck: setting camera to hardcoded 0x{EtanaRepotCameraAngleBits:X8}.");
+            ctx.Memory.WriteCameraAngleInt(EtanaRepotCameraAngleBits);
+            await Task.Delay(100, token);
+
+            // 2. Walk forward for 2 seconds. W is released in the finally block so
+            //    the key can never get stuck down on cancel/timeout.
+            ctx.Log("[Operation] EtanaRepotUnstuck: walking forward for 2s (W down). ");
+            GameInput.keybd_event(GameInput.VK_W, GameInput.SCAN_W, 0, 0);
+            try
+            {
+                await Task.Delay(2700, token);
+            }
+            finally
+            {
+                GameInput.keybd_event(GameInput.VK_W, GameInput.SCAN_W, (uint)GameInput.KEYEVENTF_KEYUP, 0);
+            }
+
+            ctx.Log("[Operation] EtanaRepotUnstuck: done (W up). ");
+            return true;
         }
 
         // ─────────────────── COT calibrated-click helpers ───────────────────

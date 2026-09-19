@@ -60,6 +60,19 @@ namespace DriverScanTester.Services
         public string StuckRecoveryOperation { get; set; }
         public string StuckRecoveryPath { get; set; }
         public short StuckRecoveryMobCameraDistance { get; set; }
+        /// <summary>
+        /// Named bot operation (see <see cref="BotOperations"/>) executed once when
+        /// this waypoint is reached, before the route continues. Empty = none.
+        /// Saved per-point in the path file, so operations can live on the path itself
+        /// instead of only as profile flow steps.
+        /// </summary>
+        public string OnArrivalOperation { get; set; }
+        /// <summary>
+        /// When true, this entry is a standalone method step, not a position: it runs
+        /// in path order regardless of where the player currently is (no distance
+        /// check), then the route continues. X/Y and movement fields are ignored.
+        /// </summary>
+        public bool IsOperationStep { get; set; }
 
         public Waypoint(
             float x,
@@ -72,7 +85,9 @@ namespace DriverScanTester.Services
             WaypointStuckRecoveryType stuckRecoveryType = WaypointStuckRecoveryType.Default,
             string stuckRecoveryOperation = "",
             string stuckRecoveryPath = "",
-            short stuckRecoveryMobCameraDistance = DefaultCameraDistanceLock)
+            short stuckRecoveryMobCameraDistance = DefaultCameraDistanceLock,
+            string onArrivalOperation = "",
+            bool isOperationStep = false)
         {
             X = x;
             Y = y;
@@ -85,6 +100,8 @@ namespace DriverScanTester.Services
             StuckRecoveryOperation = stuckRecoveryOperation;
             StuckRecoveryPath = stuckRecoveryPath;
             StuckRecoveryMobCameraDistance = stuckRecoveryMobCameraDistance;
+            OnArrivalOperation = onArrivalOperation;
+            IsOperationStep = isOperationStep;
         }
     }
 
@@ -453,7 +470,8 @@ namespace DriverScanTester.Services
                 int index = 1;
                 foreach (var p in _initialPath)
                 {
-                    _log($"[Path] #{index}: ({p.X:F1}, {p.Y:F1}) Precision:{p.Precision} Mode:{p.Mode} CamLock:{p.CameraDistanceLock} AtkDis:{p.AttackDisengageDistance}");
+                    string methodTag = p.IsOperationStep ? $" METHOD:{p.OnArrivalOperation} (no position check)" : "";
+                    _log($"[Path] #{index}: ({p.X:F1}, {p.Y:F1}) Precision:{p.Precision} Mode:{p.Mode} CamLock:{p.CameraDistanceLock} AtkDis:{p.AttackDisengageDistance}{methodTag}");
                     index++;
                 }
 
@@ -726,7 +744,7 @@ namespace DriverScanTester.Services
             if (!_initialResyncDone && _waypoints.Count > 0 && _initialPath.Count >= 2)
             {
                 _log($"[Tick {_tickCount}] Initial position=({currX:F1},{currY:F1}) — finding optimal starting waypoint...");
-                var result = RouteResyncFromCurrentPosition(currX, currY);
+                var result = RouteResyncFromCurrentPosition(currX, currY, isInitialResync: true);
                 _log($"[Tick {_tickCount}] Initial waypoint optimisation result={result} queue={_waypoints.Count}");
                 _initialResyncDone = true;
             }
@@ -1137,13 +1155,13 @@ namespace DriverScanTester.Services
                 // Check final-waypoint soft completion
                 if (IsLastWaypoint() && distToTarget <= FINAL_GOAL_SOFT_RADIUS)
                 {
-                    if (CheckFinalGoalSoftCompletion(currX, currY, activeTarget, distToTarget))
+                    if (await CheckFinalGoalSoftCompletion(currX, currY, activeTarget, distToTarget, token))
                     {
                         return;
                     }
                 }
 
-                AdvanceReachedWaypoints(currX, currY);
+                await AdvanceReachedWaypoints(currX, currY, token);
 
                 if (_goalReached)
                 {
@@ -1341,7 +1359,7 @@ namespace DriverScanTester.Services
         /// For the final waypoint: if the bot is within FINAL_GOAL_SOFT_RADIUS and
         /// has stalled (no progress) for FINAL_GOAL_STALL_TIME, complete the goal.
         /// </summary>
-        private bool CheckFinalGoalSoftCompletion(float currX, float currY, Waypoint target, float distToTarget)
+        private async Task<bool> CheckFinalGoalSoftCompletion(float currX, float currY, Waypoint target, float distToTarget, CancellationToken token)
         {
             float reachThreshold = GetEffectiveWaypointReachThreshold(target);
             float effectiveThreshold = Math.Max(reachThreshold, FINAL_GOAL_SOFT_RADIUS);
@@ -1358,7 +1376,7 @@ namespace DriverScanTester.Services
             if (distToTarget <= effectiveThreshold && stallTime >= FINAL_GOAL_STALL_TIME)
             {
                 _log($"[FinalGoal] Soft complete d:{distToTarget:F2} <= {effectiveThreshold:F2} stall:{stallTime:F1}s >= {FINAL_GOAL_STALL_TIME:F1}s");
-                AdvanceReachedWaypoints(currX, currY);
+                await AdvanceReachedWaypoints(currX, currY, token);
                 return true;
             }
 
@@ -1378,7 +1396,7 @@ namespace DriverScanTester.Services
         //  WAYPOINT ADVANCEMENT (preserved)
         // ========================================================================
 
-        private bool AdvanceReachedWaypoints(float currX, float currY)
+        private async Task<bool> AdvanceReachedWaypoints(float currX, float currY, CancellationToken token)
         {
             bool advanced = false;
             int wpIndex = 0;
@@ -1388,19 +1406,42 @@ namespace DriverScanTester.Services
                 var target = _waypoints.Peek();
                 wpIndex++;
 
-                float dist = GeometryUtils.Distance(currX, currY, target.X, target.Y);
-                float threshold = GetEffectiveWaypointReachThreshold(target);
-
-                if (dist > threshold)
-                {
-                    break;
-                }
-
                 bool isGhost = IsGhostWaypoint(target);
                 string ghostTag = isGhost ? " [GHOST]" : "";
 
+                // Standalone method steps run in path order regardless of where the
+                // player currently is — no distance check, X/Y are ignored.
+                // Positional waypoints must actually be reached first.
+                if (!target.IsOperationStep)
+                {
+                    float dist = GeometryUtils.Distance(currX, currY, target.X, target.Y);
+                    float threshold = GetEffectiveWaypointReachThreshold(target);
+
+                    if (dist > threshold)
+                    {
+                        break;
+                    }
+                }
+
                 _waypoints.Dequeue();
-                _log($"[AdvWp] #{wpIndex} ({target.X:F1},{target.Y:F1}) reached{ghostTag} ✓ | Queue: {_waypoints.Count}");
+                if (target.IsOperationStep)
+                    _log($"[AdvWp] #{wpIndex} method-step '{target.OnArrivalOperation}'{ghostTag} → run (no position check) | Queue: {_waypoints.Count}");
+                else
+                    _log($"[AdvWp] #{wpIndex} ({target.X:F1},{target.Y:F1}) reached{ghostTag} ✓ | Queue: {_waypoints.Count}");
+
+                // Per-waypoint arrival operation: a named bot operation stored on the
+                // path point itself (e.g. EtanaRepotUnstuck). Runs once on arrival
+                // (or unconditionally for method steps), before the route continues.
+                // Ghost duplicates never trigger it.
+                if (!isGhost && !string.IsNullOrWhiteSpace(target.OnArrivalOperation))
+                {
+                    await RunArrivalOperationAsync(target, token);
+                }
+                else if (target.IsOperationStep && !isGhost)
+                {
+                    _log($"[AdvWp] WARNING: method-step #{wpIndex} has NO method assigned — nothing to run (pick one in Path Editor, On Arrival column).");
+                }
+
                 ResetSpecialRecoveryAttempt();
                 _consecutiveStuckAttempts = 0; // reset stuck counter — we made progress
                 _lastStuckAttemptPos = null;
@@ -1427,6 +1468,40 @@ namespace DriverScanTester.Services
             }
 
             return advanced;
+        }
+
+        /// <summary>
+        /// Runs a waypoint's <see cref="Waypoint.OnArrivalOperation"/> through the
+        /// waypoint recovery executor (same operation runner as stuck-recovery and
+        /// profile flow steps). Movement is stopped first so the operation owns the
+        /// inputs; tracking state is reset afterwards because the operation may have
+        /// moved the player (e.g. a 2 s unstuck walk). A failed operation only logs —
+        /// the route continues. Cancellation propagates to the caller.
+        /// </summary>
+        private async Task RunArrivalOperationAsync(Waypoint target, CancellationToken token)
+        {
+            string opName = target.OnArrivalOperation;
+            if (WaypointRecoveryExecutor == null)
+            {
+                _log($"[OnArrival] Waypoint ({target.X:F1},{target.Y:F1}) wants operation '{opName}' but no recovery executor is configured — skipping.");
+                return;
+            }
+
+            _log($"[OnArrival] Waypoint ({target.X:F1},{target.Y:F1}) — running operation '{opName}'.");
+            StopMoving();
+            ReleaseSkillThree();
+            ClearCombatRetargetSearch();
+            _combatHandler.ResetState();
+
+            bool succeeded = await WaypointRecoveryExecutor.RunOperationAsync(opName, token);
+            _log(succeeded
+                ? $"[OnArrival] Operation '{opName}' completed — resuming route."
+                : $"[OnArrival] Operation '{opName}' failed — resuming route anyway.");
+
+            StopMoving();
+            ReleaseSkillThree();
+            ResetBearingState();
+            ResetActionStuckTracking();
         }
 
 
@@ -2410,10 +2485,15 @@ namespace DriverScanTester.Services
         {
             if (_initialPath.Count == 0) return 0;
 
-            int bestIdx = 0;
+            // Method steps have no meaningful position — only positional waypoints
+            // participate. Returns -1 when there is no positional waypoint at all
+            // (the rebuild then reports TerminalSkip and the queue is left alone).
+            int bestIdx = -1;
             float bestDist = float.MaxValue;
             for (int i = 0; i < _initialPath.Count; i++)
             {
+                if (_initialPath[i].IsOperationStep)
+                    continue;
                 float d = GeometryUtils.Distance(currX, currY, _initialPath[i].X, _initialPath[i].Y);
                 if (d < bestDist)
                 {
@@ -2436,7 +2516,7 @@ namespace DriverScanTester.Services
         /// <see cref="RouteResyncResult.SameTarget"/> if the new target equals the current queue peek;
         /// <see cref="RouteResyncResult.Applied"/> if the queue was rebuilt.
         /// </returns>
-        private RouteResyncResult RebuildWaypointQueueFromIndex(int startIndex, Waypoint oldTarget)
+        private RouteResyncResult RebuildWaypointQueueFromIndex(int startIndex, Waypoint oldTarget, bool preserveLeadingMethodSteps = false)
         {
             if (startIndex < 0 || startIndex >= _initialPath.Count)
             {
@@ -2472,6 +2552,24 @@ namespace DriverScanTester.Services
             }
             else
             {
+                // Leading method steps (index < startIndex) never ran yet on the
+                // initial resync — keep them at the head so they execute in path
+                // order with no position check. On later resyncs they already ran.
+                if (preserveLeadingMethodSteps)
+                {
+                    int preserved = 0;
+                    for (int i = 0; i < startIndex; i++)
+                    {
+                        if (_initialPath[i].IsOperationStep)
+                        {
+                            _waypoints.Enqueue(_initialPath[i]);
+                            preserved++;
+                        }
+                    }
+                    if (preserved > 0)
+                        _log($"[RouteResync] Preserved {preserved} leading method-step(s) before index {startIndex}.");
+                }
+
                 for (int i = startIndex; i < _initialPath.Count; i++)
                 {
                     _waypoints.Enqueue(_initialPath[i]);
@@ -2497,7 +2595,7 @@ namespace DriverScanTester.Services
         /// next target accordingly.
         /// </summary>
         /// <returns>RouteResyncResult indicating whether the queue was changed or why it was skipped.</returns>
-        private RouteResyncResult RouteResyncFromCurrentPosition(float currX, float currY)
+        private RouteResyncResult RouteResyncFromCurrentPosition(float currX, float currY, bool isInitialResync = false)
         {
             // ── Guard conditions ──
             if (_initialPath.Count < 2)
@@ -2560,6 +2658,11 @@ namespace DriverScanTester.Services
 
                 var a = _initialPath[idxA];
                 var b = _initialPath[idxB];
+
+                // Method steps have no meaningful position — resync geometry is
+                // purely positional, so segments touching one are skipped.
+                if (a.IsOperationStep || b.IsOperationStep)
+                    continue;
 
                 var (_, _, t, dist) = GeometryUtils.ProjectPointOnSegment(
                     currX, currY, a.X, a.Y, b.X, b.Y);
@@ -2688,7 +2791,7 @@ namespace DriverScanTester.Services
             _log($"[RouteResync] bestSegment={bestSegmentStart}->{bestSegmentEnd} t={bestT:F2} dist={bestDist:F2} nextIndex={nextWpIndex} reason={reason}");
             _log($"[RouteResync] oldTarget=({oldTarget.X:F1},{oldTarget.Y:F1}) newTarget=({_initialPath[nextWpIndex].X:F1},{_initialPath[nextWpIndex].Y:F1})");
 
-            return RebuildWaypointQueueFromIndex(nextWpIndex, oldTarget);
+            return RebuildWaypointQueueFromIndex(nextWpIndex, oldTarget, preserveLeadingMethodSteps: isInitialResync);
         }
 
         // ========================================================================

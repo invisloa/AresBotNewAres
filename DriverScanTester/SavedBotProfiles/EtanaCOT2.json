@@ -13,7 +13,7 @@
         {
           "PathFile": "Etana repot 01.json",
           "StartDelayMs": 1111,
-          "StartCheckEnabled": true,
+          "StartCheckEnabled": false,
           "StartPositionX": 214,
           "StartPositionY": 213,
           "ProtectionMapNumber": 35,
@@ -22,11 +22,20 @@
         {
           "PathFile": "Etana repot 02.json",
           "StartDelayMs": 1111,
-          "StartCheckEnabled": true,
+          "StartCheckEnabled": false,
           "StartPositionX": 214,
           "StartPositionY": 213,
           "ProtectionMapNumber": 35,
           "StartPositionTolerance": 3
+        },
+        {
+          "PathFile": "Etana repot 03.json",
+          "StartDelayMs": 1111,
+          "StartCheckEnabled": false,
+          "StartPositionX": 214,
+          "StartPositionY": 0,
+          "ProtectionMapNumber": 0,
+          "StartPositionTolerance": 5
         }
       ]
     },
@@ -113,7 +122,7 @@
   "StartPositionX": 214,
   "StartPositionY": 213,
   "ProtectionMapNumber": 35,
-  "StartPositionTolerance": 3,
+  "StartPositionTolerance": 1111,
   "LootPriority": true,
   "TeleportKey": 54,
   "TeleportScanCode": 7,

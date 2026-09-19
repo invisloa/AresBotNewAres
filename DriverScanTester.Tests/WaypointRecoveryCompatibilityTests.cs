@@ -81,6 +81,93 @@ namespace DriverScanTester.Tests
             Assert.Equal("", point.StuckRecoveryOperation);
             Assert.Equal("", point.StuckRecoveryPath);
             Assert.Equal(PathPoint.DefaultCameraDistanceLock, point.StuckRecoveryMobCameraDistance);
+            Assert.Equal("", point.OnArrivalOperation);
+            Assert.False(point.IsOperationStep);
+        }
+
+        [Fact]
+        public async Task MethodStepRunsUnconditionallyRegardlessOfPlayerPosition()
+        {
+            var lines = new List<string>();
+            var memory = CreateStubMemory(lines.Add);
+            var path = new List<Waypoint>
+            {
+                new Waypoint(0, 0, MovementPrecision.Medium, BotMode.OnlyMove,
+                    onArrivalOperation: "EtanaRepotUnstuck",
+                    isOperationStep: true),
+                new Waypoint(5000, 5000, MovementPrecision.Medium, BotMode.OnlyMove)
+            };
+            var movement = new MovementSystem(
+                memory,
+                lines.Add,
+                5000,
+                5000,
+                customPath: path,
+                loopPath: false,
+                enableWaypointSpecialRecoveries: true)
+            {
+                InternalRepotEnabled = false
+            };
+
+            var advance = typeof(MovementSystem).GetMethod(
+                "AdvanceReachedWaypoints",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(advance);
+            // Player stands at (100,100) — thousands of tiles from every point.
+            // A positional waypoint would NOT advance here; the method step must
+            // still fire unconditionally as the 1st path point.
+            var advancedObj = advance!.Invoke(movement, new object[] { 100f, 100f, CancellationToken.None });
+            Assert.NotNull(advancedObj);
+            Assert.True(await (Task<bool>)advancedObj!);
+            Assert.Contains(lines, line => line.Contains("method-step") && line.Contains("EtanaRepotUnstuck"));
+            Assert.Contains(lines, line => line.Contains("no recovery executor"));
+        }
+
+        [Fact]
+        public async Task InitialResyncPreservesLeadingMethodStep()
+        {
+            // Exact scenario from the Etana repot log: a method step is the 1st path
+            // point, the player stands at the teleport landing (213,213). The initial
+            // resync must NOT drop the method step — it has to stay at the head of
+            // the rebuilt queue and execute with no position check.
+            var lines = new List<string>();
+            var memory = CreateStubMemory(lines.Add);
+            var path = new List<Waypoint>
+            {
+                new Waypoint(0, 0, MovementPrecision.Medium, BotMode.OnlyMove,
+                    onArrivalOperation: "EtanaRepotUnstuck",
+                    isOperationStep: true),
+                new Waypoint(227, 213, MovementPrecision.Accurate, BotMode.OnlyMove),
+                new Waypoint(250, 198, MovementPrecision.Accurate, BotMode.OnlyMove),
+                new Waypoint(263, 196, MovementPrecision.Accurate, BotMode.OnlyMove)
+            };
+            var movement = new MovementSystem(
+                memory,
+                lines.Add,
+                263,
+                196,
+                customPath: path,
+                loopPath: false,
+                enableWaypointSpecialRecoveries: true)
+            {
+                InternalRepotEnabled = false
+            };
+
+            var resync = typeof(MovementSystem).GetMethod(
+                "RouteResyncFromCurrentPosition",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(resync);
+            resync!.Invoke(movement, new object[] { 213f, 213f, true });
+            Assert.Contains(lines, line => line.Contains("Preserved 1 leading method-step"));
+
+            var advance = typeof(MovementSystem).GetMethod(
+                "AdvanceReachedWaypoints",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(advance);
+            var advancedObj = advance!.Invoke(movement, new object[] { 213f, 213f, CancellationToken.None });
+            Assert.NotNull(advancedObj);
+            Assert.True(await (Task<bool>)advancedObj!);
+            Assert.Contains(lines, line => line.Contains("method-step") && line.Contains("EtanaRepotUnstuck"));
         }
 
         [Fact]
@@ -317,9 +404,9 @@ namespace DriverScanTester.Tests
                 "AdvanceReachedWaypoints",
                 BindingFlags.Instance | BindingFlags.NonPublic);
             Assert.NotNull(advance);
-            var advancedObj = advance!.Invoke(movement, new object[] { 5000f, 5000f });
+            var advancedObj = advance!.Invoke(movement, new object[] { 5000f, 5000f, CancellationToken.None });
             Assert.NotNull(advancedObj);
-            Assert.True((bool)advancedObj!);
+            Assert.True(await (Task<bool>)advancedObj!);
 
             // After the waypoint change the special recovery must be eligible again.
             await DispatchAsync(movement, secondTarget);
@@ -346,6 +433,40 @@ namespace DriverScanTester.Tests
             Assert.False(movement.IsWaypointSpecialRecoveryActive);
             Assert.DoesNotContain(lines, line => line.Contains("[ReverseDiagonal] Started."));
             Assert.Contains(lines, line => line.Contains("[WaypointRecovery] Repot requested by waypoint"));
+        }
+
+        [Fact]
+        public async Task EmptyMethodStepWarnsLoudlyInsteadOfSilentlySkipping()
+        {
+            var lines = new List<string>();
+            var memory = CreateStubMemory(lines.Add);
+            var path = new List<Waypoint>
+            {
+                new Waypoint(0, 0, MovementPrecision.Medium, BotMode.OnlyMove,
+                    onArrivalOperation: "",
+                    isOperationStep: true),
+                new Waypoint(5000, 5000, MovementPrecision.Medium, BotMode.OnlyMove)
+            };
+            var movement = new MovementSystem(
+                memory,
+                lines.Add,
+                5000,
+                5000,
+                customPath: path,
+                loopPath: false,
+                enableWaypointSpecialRecoveries: true)
+            {
+                InternalRepotEnabled = false
+            };
+
+            var advance = typeof(MovementSystem).GetMethod(
+                "AdvanceReachedWaypoints",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(advance);
+            var advancedObj = advance!.Invoke(movement, new object[] { 100f, 100f, CancellationToken.None });
+            Assert.NotNull(advancedObj);
+            Assert.True(await (Task<bool>)advancedObj!);
+            Assert.Contains(lines, line => line.Contains("WARNING") && line.Contains("NO method assigned"));
         }
     }
 }

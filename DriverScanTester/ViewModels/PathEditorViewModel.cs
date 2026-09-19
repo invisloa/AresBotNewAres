@@ -124,11 +124,13 @@ namespace DriverScanTester.ViewModels
         // --- Commands ---
         // Editor
         public ICommand AddPointCommand { get; }
+        public ICommand AddMethodStepCommand { get; }
         public ICommand RemovePointCommand { get; }
         public ICommand MovePointUpCommand { get; }
         public ICommand MovePointDownCommand { get; }
         public ICommand CapturePositionCommand { get; }
         public ICommand ClearPathCommand { get; }
+        public ICommand ClearArrivalOperationCommand { get; }
         public ICommand SaveSegmentCommand { get; }
         public ICommand LoadSegmentCommand { get; } // Load into editor
         public ICommand DeleteSegmentCommand { get; }
@@ -158,11 +160,13 @@ namespace DriverScanTester.ViewModels
 
             // Editor Commands
             AddPointCommand = new RelayCommand(_ => AddPoint());
+            AddMethodStepCommand = new RelayCommand(_ => AddMethodStep());
             RemovePointCommand = new RelayCommand(_ => RemovePoint(), _ => SelectedPoint != null);
             MovePointUpCommand = new RelayCommand(_ => MovePoint(-1), _ => SelectedPoint != null);
             MovePointDownCommand = new RelayCommand(_ => MovePoint(1), _ => SelectedPoint != null);
             CapturePositionCommand = new RelayCommand(_ => CapturePosition());
             ClearPathCommand = new RelayCommand(_ => Points.Clear());
+            ClearArrivalOperationCommand = new RelayCommand(_ => ClearArrivalOperation(), _ => SelectedPoint != null);
             SaveSegmentCommand = new RelayCommand(_ => SaveSegment());
             LoadSegmentCommand = new RelayCommand(_ => LoadSegmentIntoEditor(), _ => !string.IsNullOrEmpty(SelectedAvailableSegment));
             DeleteSegmentCommand = new RelayCommand(_ => DeleteSegment(), _ => !string.IsNullOrEmpty(SelectedAvailableSegment));
@@ -225,11 +229,38 @@ namespace DriverScanTester.ViewModels
             StatusText = $"Added new point (0,0) with cam lock {cameraDistanceLock} and attack disengage {attackDisengageDistance}.";
         }
 
+        private void AddMethodStep()
+        {
+            var pt = new PathPoint(
+                0,
+                0,
+                SegmentPrecision,
+                SegmentBotMode,
+                GetSegmentCameraDistanceLock(),
+                GetSegmentAttackDisengageDistance(),
+                SegmentZoneRestriction)
+            {
+                IsOperationStep = true
+            };
+            Points.Add(pt);
+            SelectedPoint = pt;
+            StatusText = "Added standalone method step — pick the method in 'Selected point – method on arrival', then Save.";
+        }
+
         private void RemovePoint()
         {
             if (SelectedPoint != null)
             {
                 Points.Remove(SelectedPoint);
+            }
+        }
+
+        private void ClearArrivalOperation()
+        {
+            if (SelectedPoint != null)
+            {
+                SelectedPoint.OnArrivalOperation = "";
+                StatusText = "Cleared on-arrival method for the selected point.";
             }
         }
 
@@ -329,6 +360,9 @@ namespace DriverScanTester.ViewModels
                 string json = JsonSerializer.Serialize(segment);
                 File.WriteAllText(path, json);
                 StatusText = $"Saved '{cleanName}' ({Points.Count} points with per-point precision/mode/cam lock/attack disengage, loop={LoopRoute}).";
+                int emptyMethodSteps = Points.Count(p => p.IsOperationStep && string.IsNullOrWhiteSpace(p.OnArrivalOperation));
+                if (emptyMethodSteps > 0)
+                    StatusText += $" WARNING: {emptyMethodSteps} method step(s) have no method assigned and will do nothing — pick one in On Arrival!";
                 RefreshLibrary();
             }
             catch (Exception ex)
@@ -420,7 +454,9 @@ namespace DriverScanTester.ViewModels
                 p.StuckRecoveryType,
                 p.StuckRecoveryOperation,
                 p.StuckRecoveryPath,
-                p.StuckRecoveryMobCameraDistance)).ToList();
+                p.StuckRecoveryMobCameraDistance,
+                p.OnArrivalOperation ?? "",
+                p.IsOperationStep)).ToList();
             OnRunPath?.Invoke(list, LoopRoute);
             StatusText = "Running current editor path...";
         }

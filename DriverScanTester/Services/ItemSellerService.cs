@@ -1320,16 +1320,34 @@ namespace DriverScanTester.Services
             MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.RightDown);
             Thread.Sleep(50);
             MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.RightUp);
-            // Wait for the NPC dialog to fully render before we click anything —
-            // clicking too early hits nothing.
-            Thread.Sleep(1000);
+            // Wait for the NPC dialog (S_IsDialogOpen1 == 1) to actually render
+            // before clicking anything — clicking while dialog == 0 hits empty
+            // ground (left-click = walk) and sends the player off in a random
+            // direction. Poll instead of a fixed sleep so slow renders are handled.
+            const int dialogTimeoutMs = 200;
+            const int dialogPollMs = 20;
+            int dialogWaitedMs = 0;
+            while (!_memory.IsDialogOpen() && dialogWaitedMs < dialogTimeoutMs)
+            {
+                Thread.Sleep(dialogPollMs);
+                dialogWaitedMs += dialogPollMs;
+            }
 
             if (!clickShopOption)
             {
                 // Caller only wanted the NPC found and right-clicked (e.g. a custom
                 // operation that will handle the dialog itself).
-                _log("ItemSeller: NPC found and right-clicked (no dialog option clicked).");
+                _log($"ItemSeller: NPC found and right-clicked (no dialog option clicked). IsDialogOpen={_memory.IsDialogOpen()} after {dialogWaitedMs}ms.");
                 return true;
+            }
+
+            // GATE: only click the "Shop" option when the dialog is confirmed open.
+            // Without this, a missed/slow dialog means ClickShopOptionInDialog()
+            // clicks air at (145,460) and the player walks away.
+            if (!_memory.IsDialogOpen())
+            {
+                _log($"ItemSeller: NPC dialog did NOT open (S_IsDialogOpen1 != 1 after {dialogTimeoutMs}ms) — skipping Shop-option click, continuing scan.");
+                return false;
             }
 
             // The right-click only opens the context menu — we still need to click the

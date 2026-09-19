@@ -31,29 +31,31 @@
                     <GroupBox Header="Current Path Points" Grid.Column="0">
                         <DataGrid ItemsSource="{Binding Points}" AutoGenerateColumns="False" 
                                   SelectedItem="{Binding SelectedPoint}" CanUserAddRows="False"
-                                  MinWidth="1050" ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                                  HorizontalAlignment="Stretch"
+                                  ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                                  ScrollViewer.VerticalScrollBarVisibility="Auto">
                             <DataGrid.Columns>
-                                <DataGridTextColumn Header="X" Binding="{Binding X}" Width="*"/>
-                                <DataGridTextColumn Header="Y" Binding="{Binding Y}" Width="*"/>
+                                <DataGridTextColumn Header="X" Binding="{Binding X}" Width="65" MinWidth="65"/>
+                                <DataGridTextColumn Header="Y" Binding="{Binding Y}" Width="65" MinWidth="65"/>
                                 <DataGridComboBoxColumn Header="Precision" 
                                     ItemsSource="{Binding Source={x:Static vm:EnumSources.MovementPrecisions}}"
-                                    SelectedItemBinding="{Binding Precision}" Width="*"/>
+                                    SelectedItemBinding="{Binding Precision}" Width="85" MinWidth="85"/>
                                 <DataGridComboBoxColumn Header="Mode" 
                                     ItemsSource="{Binding Source={x:Static vm:EnumSources.BotModes}}"
-                                    SelectedItemBinding="{Binding Mode}" Width="*"/>
+                                    SelectedItemBinding="{Binding Mode}" Width="125" MinWidth="125"/>
                                 <DataGridComboBoxColumn Header="Zone" 
                                     ItemsSource="{Binding Source={x:Static vm:EnumSources.ZoneRestrictions}}"
-                                    SelectedItemBinding="{Binding ZoneRestriction}" Width="*"/>
+                                    SelectedItemBinding="{Binding ZoneRestriction}" Width="100" MinWidth="100"/>
                                 <DataGridTextColumn Header="Cam Lock"
                                     Binding="{Binding CameraDistanceLock, UpdateSourceTrigger=PropertyChanged}"
-                                    Width="*"/>
+                                    Width="80" MinWidth="80"/>
                                 <DataGridTextColumn Header="Atk Dis"
                                     Binding="{Binding AttackDisengageDistance, UpdateSourceTrigger=PropertyChanged}"
-                                    Width="*"/>
+                                    Width="70" MinWidth="70"/>
                                 <DataGridComboBoxColumn Header="Stuck Recovery"
                                     ItemsSource="{Binding Source={x:Static vm:EnumSources.WaypointStuckRecoveryTypes}}"
                                     SelectedItemBinding="{Binding StuckRecoveryType, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                    Width="110" MinWidth="110"/>
+                                    Width="115" MinWidth="115"/>
                                 <DataGridTemplateColumn Header="Operation" Width="130" MinWidth="130">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
@@ -63,7 +65,19 @@
                                         </DataTemplate>
                                     </DataGridTemplateColumn.CellTemplate>
                                 </DataGridTemplateColumn>
-                                <DataGridTemplateColumn Header="Recovery Path" Width="150" MinWidth="150">
+                                <DataGridCheckBoxColumn Header="Method Step"
+                                    Binding="{Binding IsOperationStep, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                    Width="80" MinWidth="80"/>
+                                <DataGridTemplateColumn Header="On Arrival" Width="130" MinWidth="130">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <ComboBox ItemsSource="{Binding DataContext.AvailableWaypointRecoveryOperations, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                      SelectedItem="{Binding OnArrivalOperation, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                      BorderThickness="0" Background="Transparent" Margin="2,0"/>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                                <DataGridTemplateColumn Header="Recovery Path" Width="160" MinWidth="160">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
                                             <ComboBox ItemsSource="{Binding DataContext.AvailableSegments, RelativeSource={RelativeSource AncestorType=DataGrid}}"
@@ -93,6 +107,9 @@
                                 <Button Grid.Column="1" Content="Remove" Command="{Binding RemovePointCommand}" Margin="2,0,0,0"/>
                             </Grid>
 
+                            <Button Content="Add Method Step" Command="{Binding AddMethodStepCommand}" Margin="0,0,0,5" Padding="3"
+                                    ToolTip="Appends a standalone method step (runs in path order with no position check). Pick the method in 'Selected point – method on arrival'."/>
+
                             <Grid Margin="0,0,0,10">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*"/>
@@ -102,7 +119,23 @@
                                 <Button Grid.Column="1" Content="Move Down" Command="{Binding MovePointDownCommand}" Margin="2,0,0,0"/>
                             </Grid>
 
-                            <Button Content="Clear All Points" Command="{Binding ClearPathCommand}" Margin="0,0,0,20"/>
+                            <Button Content="Clear All Points" Command="{Binding ClearPathCommand}" Margin="0,0,0,10"/>
+
+                            <GroupBox Header="Selected point – method on arrival" Margin="0,0,0,10">
+                                <StackPanel Margin="5">
+                                    <CheckBox Content="Standalone method step (ignore position)"
+                                              IsChecked="{Binding SelectedPoint.IsOperationStep, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                              Margin="0,0,0,5"
+                                              ToolTip="When checked, this row is a bare method step: it runs in path order no matter where the player is (no distance check, X/Y ignored). This is how a method becomes the 1st point of a path."/>
+                                    <ComboBox ItemsSource="{Binding AvailableWaypointRecoveryOperations}"
+                                              SelectedItem="{Binding SelectedPoint.OnArrivalOperation, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                              Margin="0,0,0,5" Padding="3"
+                                              ToolTip="Method that runs once when the bot reaches the selected point (e.g. EtanaRepotUnstuck). Stored in the path file on Save."/>
+                                    <Button Content="Clear Method" Command="{Binding ClearArrivalOperationCommand}" Margin="0,0,0,5"/>
+                                    <TextBlock Text="Method-step rows run in sequence with no position check; normal rows run their method once on arrival. Save the path to keep it. Same list as the grid's On Arrival column."
+                                               TextWrapping="Wrap" Foreground="Gray" FontSize="10"/>
+                                </StackPanel>
+                            </GroupBox>
 
                             <CheckBox Content="Loop Path" IsChecked="{Binding LoopRoute}" Margin="0,0,0,10" ToolTip="Start over from first point when finished"/>
 
