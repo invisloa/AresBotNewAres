@@ -220,14 +220,15 @@
                 </Grid.RowDefinitions>
                 <Button Grid.Row="0" Content="Clear Log" Command="{Binding ClearBotLogCommand}"
                         HorizontalAlignment="Right" Padding="6,1" FontSize="10" Margin="0,0,0,2" Cursor="Hand"/>
-                <TextBox Grid.Row="1" Text="{Binding BotLogText, Mode=OneWay}"
+                <TextBox Grid.Row="1" x:Name="BotLogBox" Text="{Binding BotLogText, Mode=OneWay}"
                          IsReadOnly="True"
                          VerticalScrollBarVisibility="Auto"
                          HorizontalScrollBarVisibility="Auto"
                          TextWrapping="NoWrap"
                          FontFamily="Consolas"
                          FontSize="10"
-                         Background="#FFF9F9F9"/>
+                         Background="#FFF9F9F9"
+                         TextChanged="BotLogBox_TextChanged"/>
             </Grid>
         </GroupBox>
     </Grid>

@@ -263,6 +263,9 @@ namespace DriverScanTester.Services
         /// <summary>True while the loot-priority hold is active (prevents log spam).</summary>
         private bool _lootPriorityHoldActive = false;
 
+        /// <summary>Last time the loot-priority hold progress was logged (throttles the per-tick wait log to ~1/s).</summary>
+        private DateTime _lootPriorityHoldLogLast = DateTime.MinValue;
+
         /// <summary>When the loot-priority post-kill hold started (UtcNow) — for the safety timeout. MinValue = not holding.</summary>
         private DateTime _lootPriorityHoldSince = DateTime.MinValue;
 
@@ -593,7 +596,7 @@ namespace DriverScanTester.Services
                 string modeStr = "none";
                 if (_waypoints.Count > 0) modeStr = _waypoints.Peek().Mode.ToString();
                 var camAngle = _memoryService.GetCameraAngle();
-                _log($"[State] T:{_tickCount} Q:{_waypoints.Count} M:{modeStr} Fwd:{_isMovingForward} Unst:{_isUnstuckRoutineActive} Goal:{_goalReached} Loop:{LoopPath} Cam:{camAngle}");
+                _log($"[State] T:{_tickCount} Q:{_waypoints.Count} M:{modeStr} Fwd:{_isMovingForward} Unst:{_isUnstuckRoutineActive} Goal:{_goalReached} Loop:{LoopPath} Cam:{camAngle} Act:{_memoryService.GetCurrentAction()}");
             }
 
             // ── Repot / Report-and-go-back ──
@@ -645,7 +648,8 @@ namespace DriverScanTester.Services
                 {
                     _lootPriorityHoldActive = true;
                     _combatHandler.ResetState();
-                    _log($"[Tick {_tickCount}] Loot item found — suspending combat while collecting.");
+                    _lootPriorityHoldLogLast = DateTime.UtcNow;
+                    _log($"[Tick {_tickCount}] Loot item found — suspending combat while collecting (cycle={LootSystemRef.IsLootCycleActive}).");
                 }
                 ReleaseSkillThree();
                 StopMoving();
@@ -653,7 +657,10 @@ namespace DriverScanTester.Services
                 await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
                 return;
             }
-            _lootPriorityHoldActive = false;
+            // NOTE: no _lootPriorityHoldActive reset here — the flag is shared with the
+            // loot-priority post-kill hold below and resetting it every tick caused the
+            // "waiting for the loot scan" line to spam once per tick. It is cleared in
+            // the else branch when the loot phase actually ends.
 
             // ── Loot-priority post-kill hold ──
             // In loot priority mode, after a mob dies (mob selected → no target) the loot
@@ -683,7 +690,14 @@ namespace DriverScanTester.Services
                     {
                         _lootPriorityHoldActive = true;
                         _combatHandler.ResetState();
-                        _log($"[Tick {_tickCount}] Loot priority — waiting for the loot scan to finish (no targeting / no waypoint movement).");
+                        _lootPriorityHoldLogLast = DateTime.UtcNow;
+                        _log($"[Tick {_tickCount}] Loot priority — hold START, waiting for loot scan (cycle={LootSystemRef.IsLootCycleActive}, scan={LootSystemRef.IsScanActive}).");
+                    }
+                    else if ((DateTime.UtcNow - _lootPriorityHoldLogLast).TotalSeconds >= 1.0)
+                    {
+                        _lootPriorityHoldLogLast = DateTime.UtcNow;
+                        double holdMs = (DateTime.UtcNow - _lootPriorityHoldSince).TotalMilliseconds;
+                        _log($"[Tick {_tickCount}] Loot priority — still waiting {holdMs:F0}ms (cycle={LootSystemRef.IsLootCycleActive}, scan={LootSystemRef.IsScanActive}, collecting={LootSystemRef.IsCollecting}).");
                     }
                     ReleaseSkillThree();
                     StopMoving();
@@ -703,6 +717,7 @@ namespace DriverScanTester.Services
                 // Loot phase ended (or not loot priority) — reset the hold bookkeeping.
                 _lootPriorityHoldSince = DateTime.MinValue;
                 _lootPriorityHoldTimedOut = false;
+                _lootPriorityHoldActive = false;
             }
             }
 
@@ -754,15 +769,16 @@ namespace DriverScanTester.Services
                 _initialResyncDone = true;
             }
 
-            // Log position every 5 ticks
-            if (_tickCount % 5 == 0)
-            {
-                _log($"[Tick {_tickCount}] @ ({currX:F1},{currY:F1}) Cam:{_memoryService.GetCameraAngle()}");
-            }
-
             byte currentAction = _memoryService.GetCurrentAction();
             int attackStatus = _memoryService.GetAttackStatus();
             bool mobSelected = _memoryService.IsMobSelected();
+
+            // Log position every 5 ticks (action bytes included — key for stuck diagnosis:
+            // 25=idle, 27/3=running, 28=being hit, 39=attacking).
+            if (_tickCount % 5 == 0)
+            {
+                _log($"[Tick {_tickCount}] @ ({currX:F1},{currY:F1}) Act:{currentAction} Mob:{mobSelected} AtkSt:{attackStatus} Cam:{_memoryService.GetCameraAngle()}");
+            }
 
             BotMode currentMode = BotMode.OnlyMove;
             float manhattanDistanceToTarget = 0f;
@@ -1295,7 +1311,8 @@ namespace DriverScanTester.Services
                 if (_tickCount % _stateLogInterval == 0)
                 {
                     string ghostFlag = IsGhostWaypoint(target) ? " [GHOST]" : "";
-                    _log($"[Route] T:{_tickCount} WP{ghostFlag}({target.X:F1},{target.Y:F1}) d:{distNow:F2} th:{thresholdNow:F2} M:{target.Mode} P:{target.Precision} Cam:{_memoryService.GetCameraAngle()}");
+                    float brgToWp = GeometryUtils.GetBearingToTargetDeg(currX, currY, target.X, target.Y);
+                    _log($"[Route] T:{_tickCount} WP{ghostFlag}({target.X:F1},{target.Y:F1}) d:{distNow:F2} th:{thresholdNow:F2} Brg:{brgToWp:F1}deg Act:{currentAction} Mob:{mobSelected} M:{target.Mode} P:{target.Precision} Cam:{_memoryService.GetCameraAngle()}");
                 }
 
                 // Track healthy movement bearing for escape direction
@@ -1661,7 +1678,7 @@ namespace DriverScanTester.Services
             // ── Camera update filter ──
             if (ShouldUpdateCamera(cameraRadians, isFreshSegment, out _))
             {
-                _log($"[Camera] Apply target={cameraRadians:F4}rad last={_cameraLastAppliedAngle:F4}rad diff={CircularGameAngleDiff(cameraRadians, _cameraLastAppliedAngle):F4}");
+                _log($"[Camera] Apply brg={bearingDeg:F1}deg target={cameraRadians:F4}rad last={_cameraLastAppliedAngle:F4}rad diff={CircularGameAngleDiff(cameraRadians, _cameraLastAppliedAngle):F4}");
                 _memoryService.SetCameraAngle(cameraRadians);
                 _cameraLastAppliedAngle = cameraRadians;
                 _lastCameraUpdateTime = DateTime.Now;
@@ -1687,7 +1704,7 @@ namespace DriverScanTester.Services
 
             if (ShouldUpdateCamera(cameraRadians, isFreshSegment, out _))
             {
-                _log($"[Camera] Apply target={cameraRadians:F4}rad last={_cameraLastAppliedAngle:F4}rad diff={CircularGameAngleDiff(cameraRadians, _cameraLastAppliedAngle):F4}");
+                _log($"[Camera] Apply brg={bearingDeg:F1}deg target={cameraRadians:F4}rad last={_cameraLastAppliedAngle:F4}rad diff={CircularGameAngleDiff(cameraRadians, _cameraLastAppliedAngle):F4} (no W)");
                 _memoryService.SetCameraAngle(cameraRadians);
                 _cameraLastAppliedAngle = cameraRadians;
                 _lastCameraUpdateTime = DateTime.Now;

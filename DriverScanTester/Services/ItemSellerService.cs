@@ -1314,7 +1314,7 @@ namespace DriverScanTester.Services
             if (pointed != SellerPointedValue)
                 return false;
 
-            _log($"ItemSeller: S_IsSellerPointed=={SellerPointedValue} detected at client ({clientX},{clientY}) screen ({screenX},{screenY}) [scan {scanIndex + 1}, point {pointIndex}]. Right-clicking to open the NPC dialog.");
+            _log($"ItemSeller: S_IsSellerPointed=={SellerPointedValue} (0x{(uint)SellerPointedValue:X8}) detected at client ({clientX},{clientY}) screen ({screenX},{screenY}) [scan {scanIndex + 1}, point {pointIndex}]. Right-clicking to open the NPC dialog.");
 
             // Right-click the seller NPC to open its context menu (Shop / Storage / etc.).
             MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.RightDown);
@@ -1369,7 +1369,7 @@ namespace DriverScanTester.Services
                 // loading. Give the inventory an extra 500ms to populate so the
                 // existing sell logic doesn't click into an empty/half-loaded grid.
                 Thread.Sleep(500);
-                _log("ItemSeller: Shop window opened via mouseover scan + dialog click.");
+                _log($"ItemSeller: Shop window opened via mouseover scan + dialog click (scan {scanIndex + 1}, point {pointIndex}).");
                 return true;
             }
 

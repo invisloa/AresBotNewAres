@@ -123,6 +123,16 @@ namespace DriverScanTester.Services
         /// <summary>Previous tick's IsMobSelected value — used to detect mob death.</summary>
         private bool _wasMobSelectedPrev = false;
 
+        /// <summary>When the last mob-kill was detected (UtcNow) — for elapsed-time logging through the loot chain.</summary>
+        private DateTime _lastKillAt = DateTime.MinValue;
+
+        /// <summary>Elapsed-time suffix for loot-chain logs ("" when no recent kill).</summary>
+        private string KillElapsed()
+        {
+            if (_lastKillAt == DateTime.MinValue) return "";
+            return $" (+{(DateTime.UtcNow - _lastKillAt).TotalMilliseconds:F0}ms since kill)";
+        }
+
         // ── Client-area tracking (window-position independent) ──
         private int _clientOriginX;
         private int _clientOriginY;
@@ -461,6 +471,7 @@ namespace DriverScanTester.Services
             if (_wasMobSelectedPrev && !isMobSelected)
             {
                 _wasMobSelectedPrev = false;
+                _lastKillAt = DateTime.UtcNow;
                 if (LootPriorityMode)
                 {
                     _log($"[Loot] Mob killed (loot priority) — waiting {BotConstants.Delays.LootPostKillDelayMs}ms for drops, then looting everything.");
@@ -554,7 +565,7 @@ namespace DriverScanTester.Services
                         if (ShouldAbortLoot()) { _lootState = LootMachineState.Idle; break; }
                         Thread.Sleep(30);
                         GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
-                        _log("[Loot] Spacebar pressed x3 (area loot).");
+                        _log($"[Loot] Spacebar x3 (round {_consecutiveEmptySpacePresses + 1}/3{KillElapsed()}).");
 
                         // Wait ~100ms for the game to process the pickup,
                         // then check if anything was collected.
@@ -570,7 +581,7 @@ namespace DriverScanTester.Services
                         if (checksumAfter != _inventoryChecksumBefore)
                         {
                             // Items were collected — press spacebar again soon.
-                            _log("[Loot] Items collected — repeating spacebar.");
+                            _log($"[Loot] Items collected (chk {_inventoryChecksumBefore} → {checksumAfter}) — repeating spacebar{KillElapsed()}.");
                             _lastItemCollectedAt = DateTime.UtcNow;
                             _consecutiveEmptySpacePresses = 0;
                             _nextActionTime = DateTime.UtcNow.AddMilliseconds(50);
@@ -582,7 +593,7 @@ namespace DriverScanTester.Services
                             if (_consecutiveEmptySpacePresses >= MaxEmptySpacePressesBeforeScan)
                             {
                                 // No more items via spacebar → switch to scan after 100ms delay.
-                                _log("[Loot] No more items via spacebar — switching to pixel scan in 100ms.");
+                                _log($"[Loot] No more items via spacebar ({_consecutiveEmptySpacePresses} empty, chk {checksumAfter}) — switching to pixel scan in 100ms{KillElapsed()}.");
                                 _consecutiveEmptySpacePresses = 0;
                                 _lootState = LootMachineState.Scan;
                                 _nextActionTime = DateTime.UtcNow.AddMilliseconds(100);
@@ -590,6 +601,7 @@ namespace DriverScanTester.Services
                             else
                             {
                                 // Try spacebar again after a brief pause.
+                                _log($"[Loot] Space check empty ({_consecutiveEmptySpacePresses}/{MaxEmptySpacePressesBeforeScan}, chk {checksumAfter}) — retry in {BotConstants.Delays.LootSpacePressMs}ms{KillElapsed()}.");
                                 _nextActionTime = DateTime.UtcNow.AddMilliseconds(
                                     BotConstants.Delays.LootSpacePressMs);
                                 _lootState = LootMachineState.AreaLoot;
@@ -633,8 +645,9 @@ namespace DriverScanTester.Services
                             // Full scan pass finished with no items — enter ScanComplete and
                             // hold briefly so the movement system can walk away before the
                             // next area-loot cycle restarts.
-                            _log("[Loot] Scan complete — no more visible items.");
+                            _log($"[Loot] Scan complete — no more visible items{KillElapsed()}.");
                             IsLootingActive = false;
+                            _lastKillAt = DateTime.MinValue;
                             _lootState = LootMachineState.ScanComplete;
                             _scanCompleteUntil = DateTime.UtcNow.AddMilliseconds(
                                 BotConstants.Delays.LootScanCompleteHoldMs);
@@ -810,6 +823,8 @@ namespace DriverScanTester.Services
 
                             if (_wasSodDetected)
                             {
+                                var (foundSx, foundSy) = BitmapLocalToScreen(x, y);
+                                _log($"[Loot] {regionName}: item hit at bitmap ({x},{y}) → screen ({foundSx},{foundSy}), {whiteCount} white px so far{KillElapsed()}.");
                                 return true;
                             }
                         }

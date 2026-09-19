@@ -36,6 +36,9 @@ namespace DriverScanTester.ViewModels
         private string _rangeRadiusText = string.Empty;
         private string _pointerTargetText = string.Empty;
         private string _logText = "";
+        private readonly Queue<string> _logLines = new();
+        private const int MaxLogLines = 500;
+        private readonly object _logLock = new();
         private string _botTargetXText = "766";
         private string _botTargetYText = "190";
         private string _subScan1Text = "";
@@ -283,7 +286,7 @@ namespace DriverScanTester.ViewModels
             RunBotCommand = new RelayCommand(_ => ToggleMovementBot(), _ => _isAttached);
             OpenPathEditorCommand = new RelayCommand(_ => OpenPathEditor(), _ => _isAttached);
             OpenBotWindowCommand = new RelayCommand(_ => OpenBotWindow(), _ => _isAttached);
-            ClearLogCommand = new RelayCommand(_ => LogText = "", _ => true);
+            ClearLogCommand = new RelayCommand(_ => ClearLog(), _ => true);
 
             // Restore the last mouseover calibration ('Mouseover NPC' / 'Mouseover Item')
             // from disk so the bot works without re-calibrating after an app restart.
@@ -1695,8 +1698,22 @@ namespace DriverScanTester.ViewModels
         private void AppendLog(string line)
         {
             if (string.IsNullOrEmpty(line)) return;
-            var stamp = DateTime.Now.ToString("HH:mm:ss");
-            LogText += $"[{stamp}] {line}\r\n";
+            var stamp = DateTime.Now.ToString("HH:mm:ss.fff");
+            lock (_logLock)
+            {
+                _logLines.Enqueue($"[{stamp}] {line}");
+                while (_logLines.Count > MaxLogLines) _logLines.Dequeue();
+                LogText = string.Join("\r\n", _logLines) + "\r\n";
+            }
+        }
+
+        private void ClearLog()
+        {
+            lock (_logLock)
+            {
+                _logLines.Clear();
+                LogText = "";
+            }
         }
 
         /// <summary>Optional sink for bot log lines (the Bot window's log). Null when the Bot window is not open.</summary>

@@ -18,6 +18,9 @@ namespace DriverScanTester.ViewModels
         private string _hpPotCount = "--";
         private string _manaPotCount = "--";
         private string _botLogText = "";
+        private readonly Queue<string> _botLogLines = new();
+        private const int MaxBotLogLines = 500;
+        private readonly object _botLogLock = new();
         private bool _isMovementBotRunning;
         private bool _isHealManaBotRunning;
         private bool _isLootBotRunning;
@@ -51,7 +54,7 @@ namespace DriverScanTester.ViewModels
             CaptureNpcMouseOverCommand = new RelayCommand(_ => _main.CaptureNpcMouseOver(), _ => _main.IsAttached);
             CaptureItemMouseOverCommand = new RelayCommand(_ => _main.CaptureItemMouseOver(), _ => _main.IsAttached);
             TestOperationCommand = new RelayCommand(_ => RunOperationTest(), _ => _main.IsAttached && !IsOperationTestRunning);
-            ClearBotLogCommand = new RelayCommand(_ => BotLogText = "");
+            ClearBotLogCommand = new RelayCommand(_ => ClearBotLog());
 
             // Route Workflow commands
             StartWorkflowCommand = new RelayCommand(_ => StartWorkflowWithProfile(), _ => _main.IsAttached && CanStartWorkflow);
@@ -527,8 +530,22 @@ namespace DriverScanTester.ViewModels
         public void AppendBotLog(string line)
         {
             if (string.IsNullOrEmpty(line)) return;
-            var stamp = DateTime.Now.ToString("HH:mm:ss");
-            BotLogText += $"[{stamp}] {line}\r\n";
+            var stamp = DateTime.Now.ToString("HH:mm:ss.fff");
+            lock (_botLogLock)
+            {
+                _botLogLines.Enqueue($"[{stamp}] {line}");
+                while (_botLogLines.Count > MaxBotLogLines) _botLogLines.Dequeue();
+                BotLogText = string.Join("\r\n", _botLogLines) + "\r\n";
+            }
+        }
+
+        private void ClearBotLog()
+        {
+            lock (_botLogLock)
+            {
+                _botLogLines.Clear();
+                BotLogText = "";
+            }
         }
     }
 }
