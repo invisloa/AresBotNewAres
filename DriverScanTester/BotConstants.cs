@@ -963,6 +963,21 @@ namespace DriverScanTester
 
             /// <summary>Maximum retries for opening shop window.</summary>
             public const int OpenShopRetries = 10;
+
+            /// <summary>
+            /// Delay before redoing the full repot after the post-repot potion
+            /// verification fails (the shop buy is fire-and-forget and may silently
+            /// miss). 5 minutes — the bot waits safely in the city, then runs the
+            /// whole repot step from the top (teleport check + walk + shop + buy).
+            /// </summary>
+            public const int PostRepotVerifyRetryDelayMs = 300_000;
+
+            /// <summary>
+            /// Maximum post-repot verification failures before the workflow fails
+            /// visibly instead of retrying forever (e.g. the shop never fulfills
+            /// the buy — no gold, wrong layout — and every retry would fail the same way).
+            /// </summary>
+            public const int MaxPostRepotVerifyRetries = 3;
         }
 
         // ════════════════════════════════════════════════════════════════

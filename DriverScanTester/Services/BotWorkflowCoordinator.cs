@@ -99,6 +99,13 @@ namespace DriverScanTester.Services
 
         private int _teleportRetryCount;
 
+        /// <summary>
+        /// Consecutive post-repot verification failures (potion counts below the
+        /// profile buy targets after the shop buy). After the max the workflow
+        /// fails visibly instead of retrying forever.
+        /// </summary>
+        private int _postRepotVerifyRetryCount;
+
         /// <summary>Current phase of the bot workflow.</summary>
         public BotPhase CurrentPhase
         {
@@ -209,6 +216,7 @@ namespace DriverScanTester.Services
             _moveToRepotRetryCount = 0;
             _pathStepRetryCount = 0;
             _teleportRetryCount = 0;
+            _postRepotVerifyRetryCount = 0;
 
             _focusGameWindow();
             _log("[Coordinator] Workflow started.");
@@ -575,6 +583,49 @@ namespace DriverScanTester.Services
 
             var snapshot = _memoryService.GetSnapshot();
             _log($"[Repot] Post-repot: HP Pots: {snapshot.HpPotions}, Mana Pots: {snapshot.ManaPotions}");
+
+            // Post-repot verification: the shop buy is fire-and-forget (a missed
+            // click or a rejected quantity leaves the count unchanged), so a silent
+            // buy failure must not look like success — otherwise the bot walks back
+            // to exp with 0 potions. On mismatch: wait 5 minutes, then redo the
+            // whole repot step from the top (teleport check + walk + shop + buy),
+            // exactly like an exp-triggered repot. Already in the city, the teleport
+            // phase is a no-op (no scroll wasted).
+            int redPots = _memoryService.GetRedPotionCount();
+            int whitePots = _memoryService.GetWhitePotionCount();
+            if (snapshot.HpPotions < _profile.HpBuyTarget ||
+                snapshot.ManaPotions < _profile.ManaBuyTarget ||
+                redPots < _profile.RedBuyTarget ||
+                whitePots < _profile.WhiteBuyTarget)
+            {
+                _postRepotVerifyRetryCount++;
+                if (_postRepotVerifyRetryCount >= BotConstants.Repot.MaxPostRepotVerifyRetries)
+                {
+                    _log($"[Repot] Potion targets still not met after {_postRepotVerifyRetryCount} tries " +
+                         $"(HP {snapshot.HpPotions}/{_profile.HpBuyTarget}, Mana {snapshot.ManaPotions}/{_profile.ManaBuyTarget}, " +
+                         $"Red {redPots}/{_profile.RedBuyTarget}, White {whitePots}/{_profile.WhiteBuyTarget}). Giving up.");
+                    _postRepotVerifyRetryCount = 0;
+                    CurrentPhase = BotPhase.Failed;
+                    return false;
+                }
+                _log($"[Repot] Potion targets not met " +
+                     $"(HP {snapshot.HpPotions}/{_profile.HpBuyTarget}, Mana {snapshot.ManaPotions}/{_profile.ManaBuyTarget}, " +
+                     $"Red {redPots}/{_profile.RedBuyTarget}, White {whitePots}/{_profile.WhiteBuyTarget}) — " +
+                     $"waiting {BotConstants.Repot.PostRepotVerifyRetryDelayMs / 60000} min before redoing the full repot " +
+                     $"(attempt {_postRepotVerifyRetryCount}/{BotConstants.Repot.MaxPostRepotVerifyRetries}).");
+                try
+                {
+                    await Task.Delay(BotConstants.Repot.PostRepotVerifyRetryDelayMs, token);
+                }
+                catch (OperationCanceledException)
+                {
+                    return false;
+                }
+                if (token.IsCancellationRequested)
+                    return false;
+                return false; // stay on this step: next run starts from the top (teleport check + walk + shop + buy)
+            }
+            _postRepotVerifyRetryCount = 0;
 
             return true;
         }
