@@ -138,6 +138,17 @@ namespace DriverScanTester.Services
         /// <summary>Fires whenever the current flow step description changes.</summary>
         public Action<string>? OnCurrentStepChanged { get; set; }
 
+        /// <summary>Fires whenever a full repot-&gt;exp cycle completes (with the new total).</summary>
+        public Action<int>? OnCycleCompleted { get; set; }
+
+        /// <summary>
+        /// How many full repot-&gt;exp cycles the bot has completed in this run.
+        /// Incremented each time an ExpLoop step finishes its hunting session and the
+        /// flow advances (i.e. repot happened earlier in the flow, exp is now done).
+        /// Resets on every workflow start (new coordinator instance per run).
+        /// </summary>
+        public int CompletedCycles { get; private set; }
+
         /// <summary>Fires when the workflow stops.</summary>
         public Action? OnStopped { get; set; }
 
@@ -902,7 +913,9 @@ namespace DriverScanTester.Services
             // flow like Repot → ... → ExpLoop → Operation (after hunt) → Repot works:
             // after hunting, any following steps run, and the cycle returns to Repot.
             AdvanceRoute(step, pool);
-            _log("[ExpLoop] Advancing to the next flow step.");
+            CompletedCycles++;
+            _log($"[ExpLoop] Full repot->exp cycle #{CompletedCycles} completed. Advancing to the next flow step.");
+            OnCycleCompleted?.Invoke(CompletedCycles);
             return true;
         }
 

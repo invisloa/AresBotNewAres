@@ -965,6 +965,14 @@ namespace DriverScanTester
             public const int OpenShopRetries = 10;
 
             /// <summary>
+            /// Slot reserve: the last potion of each type (HP / mana / red / white)
+            /// is never drunk — one must always stay so the inventory slot keeps
+            /// its place. Drinking a potion type is allowed only while its count
+            /// is strictly above this value.
+            /// </summary>
+            public const int PotionSlotReserve = 1;
+
+            /// <summary>
             /// Delay before redoing the full repot after the post-repot potion
             /// verification fails (the shop buy is fire-and-forget and may silently
             /// miss). 5 minutes — the bot waits safely in the city, then runs the

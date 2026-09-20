@@ -14,6 +14,13 @@ namespace DriverScanTester.Services
         private readonly GameMemoryService _memoryService;
         private readonly Action<string> _log;
         private bool _wasDead;
+        /// <summary>
+        /// One-shot flags for the slot-reserve log: while HP/mana potions sit at the
+        /// reserve (1), the drink key is skipped and this suppresses the repeat log
+        /// until drinking resumes or the need goes away.
+        /// </summary>
+        private bool _hpReserveLogged;
+        private bool _manaReserveLogged;
 
         // Constants for heal/mana
         private const int VK_1 = BotConstants.HealMana.Vk1;
@@ -49,7 +56,6 @@ namespace DriverScanTester.Services
             _memoryService = memoryService;
             _log = log;
         }
-
         public async Task Update(CancellationToken token)
         {
             try
@@ -73,17 +79,53 @@ namespace DriverScanTester.Services
                 }
 
                 // --- Logic for '2' ---
+                // Slot reserve: the last mana potion is never drunk — one must stay
+                // so the inventory slot keeps its place.
                 if (val2.HasValue && val2.Value < Threshold2)
                 {
-                    _log($"Threshold met for key 2. Value: {val2.Value}. Pressing key.");
-                    await PressKey(VK_2, SCAN_CODE_2, token);
+                    if (_memoryService.GetManaPotionCount() <= BotConstants.Repot.PotionSlotReserve)
+                    {
+                        if (!_manaReserveLogged)
+                        {
+                            _log($"[HealMana] Mana low ({val2.Value}) but only the slot-reserve potion is left — not drinking.");
+                            _manaReserveLogged = true;
+                        }
+                    }
+                    else
+                    {
+                        _manaReserveLogged = false;
+                        _log($"Threshold met for key 2. Value: {val2.Value}. Pressing key.");
+                        await PressKey(VK_2, SCAN_CODE_2, token);
+                    }
+                }
+                else
+                {
+                    _manaReserveLogged = false;
                 }
 
                 // --- Logic for '1' ---
+                // Slot reserve: the last HP potion is never drunk — one must stay
+                // so the inventory slot keeps its place.
                 if (val1.HasValue && val1.Value < Threshold1)
                 {
-                    _log($"Threshold met for key 1. Value: {val1.Value}. Pressing key.");
-                    await PressKey(VK_1, SCAN_CODE_1, token);
+                    if (_memoryService.GetHpPotionCount() <= BotConstants.Repot.PotionSlotReserve)
+                    {
+                        if (!_hpReserveLogged)
+                        {
+                            _log($"[HealMana] HP low ({val1.Value}) but only the slot-reserve potion is left — not drinking.");
+                            _hpReserveLogged = true;
+                        }
+                    }
+                    else
+                    {
+                        _hpReserveLogged = false;
+                        _log($"Threshold met for key 1. Value: {val1.Value}. Pressing key.");
+                        await PressKey(VK_1, SCAN_CODE_1, token);
+                    }
+                }
+                else
+                {
+                    _hpReserveLogged = false;
                 }
             }
             catch (TaskCanceledException) { }

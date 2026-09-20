@@ -2726,6 +2726,12 @@ namespace DriverScanTester.ViewModels
         public BotProfile? ActiveProfile => _workflowCoordinator?.ActiveProfile;
 
         /// <summary>
+        /// How many full repot-&gt;exp cycles the workflow has completed in this run.
+        /// Shown in the Bot Control Panel next to the current stage.
+        /// </summary>
+        public int WorkflowCycleCount => _workflowCoordinator?.CompletedCycles ?? 0;
+
+        /// <summary>
         /// Starts the route workflow (Stage 1 Repot, Stage 2 Go to EXP chain,
         /// Stage 3 EXP Path) for the given profile. Requires a non-null valid profile;
         /// there is no no-profile fallback mode.
@@ -2796,6 +2802,13 @@ namespace DriverScanTester.ViewModels
                 System.Windows.Application.Current?.Dispatcher?.Invoke(() =>
                 {
                     OnPropertyChanged(nameof(WorkflowPhaseText));
+                });
+            };
+            _workflowCoordinator.OnCycleCompleted = count =>
+            {
+                System.Windows.Application.Current?.Dispatcher?.Invoke(() =>
+                {
+                    OnPropertyChanged(nameof(WorkflowCycleCount));
                 });
             };
             _workflowCoordinator.OnStopped = () =>

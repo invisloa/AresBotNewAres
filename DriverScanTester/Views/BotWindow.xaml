@@ -115,6 +115,11 @@
                     <TextBlock Text="{Binding WorkflowPhaseText}" VerticalAlignment="Center" FontWeight="Bold"
                                Foreground="#FF007ACC" MinWidth="140"/>
                     <Separator Width="1" Margin="10,2" Background="LightGray"/>
+                    <TextBlock Text="Cycles (repot&#8594;exp):" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,3,0"
+                               ToolTip="How many full repot→exp cycles the bot has completed in this run. Resets on every Start."/>
+                    <TextBlock Text="{Binding WorkflowCycleCount}" VerticalAlignment="Center" FontWeight="Bold"
+                               Foreground="#FF007ACC" MinWidth="30"/>
+                    <Separator Width="1" Margin="10,2" Background="LightGray"/>
                     <TextBlock Text="Validation:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,3,0"/>
                     <TextBlock Text="{Binding ValidationText}" VerticalAlignment="Center" Foreground="Gray" FontSize="10"/>
                 </WrapPanel>

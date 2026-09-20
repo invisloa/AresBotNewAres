@@ -405,6 +405,12 @@ namespace DriverScanTester.Services
         private bool _isMovingForward = false;
         private bool _isSkillThreeHeld = false;
         private bool _attackSuppressedForCurrentWaypoint = false;
+        /// <summary>
+        /// One-shot flag for the speed-pot slot-reserve log: while red or white
+        /// potions sit at the reserve (1), keys 7+8 are skipped and this suppresses
+        /// the repeat log until drinking resumes.
+        /// </summary>
+        private bool _speedPotReserveLogged = false;
         private int _startMoveCount = 0;
         private int _stopMoveCount = 0;
         private static readonly Random _rng = new Random();
@@ -778,12 +784,32 @@ namespace DriverScanTester.Services
             // CheckAttackSpeed throttles itself to once per CheckIntervalSeconds.
             if (_combatHandler.CheckAttackSpeed(_memoryService))
             {
-                _log($"[Tick {_tickCount}] Speed pot buff missing (atkSpd={_combatHandler.LastAttackSpeed}, need!={BotConstants.SpeedPotion.AttackSpeedThreshold}) — using potions (keys 7+8)");
-                _log("[Key] 7 (pot1)");
-                GameInput.PressKey(GameInput.VK_7, GameInput.SCAN_7);
-                await Task.Delay(BotConstants.SpeedPotion.PostPotionDelayMs, token);
-                _log("[Key] 8 (pot2)");
-                GameInput.PressKey(GameInput.VK_8, GameInput.SCAN_8);
+                // Slot reserve: the last red/white potion is never drunk — one of each
+                // must stay so the inventory slots keep their places. The 7:red / 8:white
+                // mapping is not pinned down anywhere in code, so when EITHER type is at
+                // reserve both keys are skipped — a mapping-independent rule that can never
+                // eat the last potion of the wrong type. Buff is sacrificed to save the slot.
+                int redPots = _memoryService.GetRedPotionCount();
+                int whitePots = _memoryService.GetWhitePotionCount();
+                if (redPots <= BotConstants.Repot.PotionSlotReserve ||
+                    whitePots <= BotConstants.Repot.PotionSlotReserve)
+                {
+                    if (!_speedPotReserveLogged)
+                    {
+                        _log($"[Tick {_tickCount}] Speed pot buff missing but potions at slot reserve (red={redPots}, white={whitePots}) — keeping last potions, skipping keys 7+8.");
+                        _speedPotReserveLogged = true;
+                    }
+                }
+                else
+                {
+                    _speedPotReserveLogged = false;
+                    _log($"[Tick {_tickCount}] Speed pot buff missing (atkSpd={_combatHandler.LastAttackSpeed}, need!={BotConstants.SpeedPotion.AttackSpeedThreshold}) — using potions (keys 7+8)");
+                    _log("[Key] 7 (pot1)");
+                    GameInput.PressKey(GameInput.VK_7, GameInput.SCAN_7);
+                    await Task.Delay(BotConstants.SpeedPotion.PostPotionDelayMs, token);
+                    _log("[Key] 8 (pot2)");
+                    GameInput.PressKey(GameInput.VK_8, GameInput.SCAN_8);
+                }
             }
 
             var (currX, currY, success) = _memoryService.GetPlayerPosition();
