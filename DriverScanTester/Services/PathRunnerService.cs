@@ -13,6 +13,7 @@ namespace DriverScanTester.Services
         ZoneBlocked,
         CityStuck,
         WaypointRepotRequested,
+        ReportAndGoBack,
         Error
     }
 
@@ -89,6 +90,16 @@ namespace DriverScanTester.Services
                 while (!token.IsCancellationRequested)
                 {
                     await _movementSystem.Update(token);
+
+                    // ReportAndGoBack teleport: the old route is dead. Abort immediately
+                    // (no 10s ZoneBlock wait, no city-poll delay) so the coordinator can
+                    // discard the stale Exp queue and start Repot from its first command.
+                    if (_movementSystem.IsReportAndGoBackRequested)
+                    {
+                        LastStopReason = PathRunStopReason.ReportAndGoBack;
+                        _log("[PathRunner] ReportAndGoBack teleport requested — aborting path (coordinator will start Repot from scratch).");
+                        return false;
+                    }
 
                     if (_movementSystem.IsWaypointRepotRequested)
                     {

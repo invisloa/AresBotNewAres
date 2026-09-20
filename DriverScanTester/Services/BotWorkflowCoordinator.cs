@@ -705,27 +705,47 @@ namespace DriverScanTester.Services
             bool repotNeeded = false;
             bool cityDetected = false;
             bool waypointRepotRequested = false;
+            bool reportAndGoBackDetected = false;
             int inCityConsecutiveReads = 0;
+            DateTime lastRepotCheckAt = DateTime.MinValue;
             try
             {
+                // Fast poll (500ms) for teleport / path-abort / city so a ReportAndGoBack
+                // teleport kills the stale Exp route immediately instead of running the old
+                // unstuck in town for seconds. The expensive repot-condition check stays
+                // throttled to ExpLoopRepotCheckIntervalMs.
                 while (!expToken.IsCancellationRequested)
                 {
-                    if (pathTask.IsCompleted &&
-                        _pathRunner.LastStopReason == PathRunStopReason.WaypointRepotRequested)
+                    if (CheckExpPathTeleportAbort(pathTask, out bool isWaypointRepot))
                     {
-                        waypointRepotRequested = true;
-                        _log("[WaypointRecovery] ExpLoop path completed for a waypoint Repot request.");
+                        if (isWaypointRepot)
+                        {
+                            waypointRepotRequested = true;
+                            _log("[WaypointRecovery] ExpLoop path completed for a waypoint Repot request.");
+                        }
+                        else
+                        {
+                            reportAndGoBackDetected = true;
+                            _log("[ExpLoop] ReportAndGoBack teleport detected — stopping exp loop, going to Repot from scratch.");
+                        }
                         expCts.Cancel();
                         break;
                     }
 
-                    await Task.Delay(BotConstants.Delays.ExpLoopRepotCheckIntervalMs, expToken);
+                    await Task.Delay(500, expToken);
 
-                    if (pathTask.IsCompleted &&
-                        _pathRunner.LastStopReason == PathRunStopReason.WaypointRepotRequested)
+                    if (CheckExpPathTeleportAbort(pathTask, out bool isWaypointRepotAfter))
                     {
-                        waypointRepotRequested = true;
-                        _log("[WaypointRecovery] ExpLoop path completed for a waypoint Repot request.");
+                        if (isWaypointRepotAfter)
+                        {
+                            waypointRepotRequested = true;
+                            _log("[WaypointRecovery] ExpLoop path completed for a waypoint Repot request.");
+                        }
+                        else
+                        {
+                            reportAndGoBackDetected = true;
+                            _log("[ExpLoop] ReportAndGoBack teleport detected — stopping exp loop, going to Repot from scratch.");
+                        }
                         expCts.Cancel();
                         break;
                     }
@@ -750,6 +770,10 @@ namespace DriverScanTester.Services
                     {
                         inCityConsecutiveReads = 0;
                     }
+
+                    if ((DateTime.UtcNow - lastRepotCheckAt).TotalMilliseconds < BotConstants.Delays.ExpLoopRepotCheckIntervalMs)
+                        continue;
+                    lastRepotCheckAt = DateTime.UtcNow;
 
                     if (_repotDetector.NeedsRepot(snapshot))
                     {
@@ -807,6 +831,21 @@ namespace DriverScanTester.Services
                 return false;
             }
 
+            // Teleport during Exp (ReportAndGoBack stuck-escalation or any city teleport):
+            // the old Exp queue is dead. Never advance to the next flow step (e.g. an
+            // Operation) — jump straight to Repot so it starts from its first command.
+            if (reportAndGoBackDetected ||
+                _pathRunner.LastStopReason == PathRunStopReason.ReportAndGoBack ||
+                cityDetected)
+            {
+                AdvanceRoute(step, pool);
+                RedirectToRepotStep(reportAndGoBackDetected ||
+                    _pathRunner.LastStopReason == PathRunStopReason.ReportAndGoBack
+                    ? "ExpLoop ReportAndGoBack teleport"
+                    : "ExpLoop city teleport");
+                return false;
+            }
+
             // The flow simply advances to the next step (and wraps around at the end).
             // The Repot step is responsible for returning to the city and refilling, so a
             // flow like Repot → ... → ExpLoop → Operation (after hunt) → Repot works:
@@ -817,6 +856,32 @@ namespace DriverScanTester.Services
         }
 
         // ======================== Helpers ========================
+
+        /// <summary>
+        /// Fast teleport-abort check for the ExpLoop monitor. Returns true when the Exp
+        /// path is dead because of a teleport/repot escalation and the loop must stop
+        /// immediately (old route discarded, coordinator goes straight to Repot).
+        /// </summary>
+        /// <param name="pathTask">The running PathRunner task.</param>
+        /// <param name="isWaypointRepot">True = waypoint Repot request, false = ReportAndGoBack teleport.</param>
+        private bool CheckExpPathTeleportAbort(System.Threading.Tasks.Task pathTask, out bool isWaypointRepot)
+        {
+            isWaypointRepot = false;
+            // Flag is set by MovementSystem the same tick the teleport key (6) is pressed —
+            // faster than waiting for PathRunner to return.
+            if (_pathRunner.CurrentMovement?.IsReportAndGoBackRequested == true)
+                return true;
+            if (pathTask == null || !pathTask.IsCompleted)
+                return false;
+            if (_pathRunner.LastStopReason == PathRunStopReason.WaypointRepotRequested)
+            {
+                isWaypointRepot = true;
+                return true;
+            }
+            if (_pathRunner.LastStopReason == PathRunStopReason.ReportAndGoBack)
+                return true;
+            return false;
+        }
 
         private bool RedirectToRepotStep(string reason)
         {
@@ -1616,9 +1681,8 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Captures a screenshot of the game window and saves it to Screenshots/LowHpPotions/
-        /// when the bot needs to teleport because of low HP potions.
-        /// Mirrors HealManaSystem.CaptureDeathScreenshot and MovementSystem.CaptureStuckScreenshot.
+        /// Captures ALL screens (full virtual screen across every monitor) and saves it
+        /// to Screenshots/LowHpPotions/ when the bot needs to teleport because of low HP potions.
         /// </summary>
         private void CaptureLowHpPotionsScreenshot(GameSnapshot snapshot)
         {
@@ -1626,32 +1690,12 @@ namespace DriverScanTester.Services
             {
                 _log($"[Repot] Low HP potions ({snapshot.HpPotions} <= {_repotDetector.MinHpPotions}) — capturing screenshot before teleport.");
 
-                nint hwnd = FindWindow(null, "Legend of Ares");
-                if (hwnd == nint.Zero) hwnd = FindWindow(null, "Ares");
-                if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
-                if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
+                var virtualScreen = System.Windows.Forms.SystemInformation.VirtualScreen;
 
-                int captureX = 0, captureY = 0, captureW = BotConstants.Loot.BitmapWidth, captureH = BotConstants.Loot.BitmapHeight;
-
-                if (hwnd != nint.Zero)
-                {
-                    if (GetClientRect(hwnd, out RECT clientRect))
-                    {
-                        POINT topLeft = new POINT { X = 0, Y = 0 };
-                        if (ClientToScreen(hwnd, ref topLeft))
-                        {
-                            captureX = topLeft.X;
-                            captureY = topLeft.Y;
-                            captureW = clientRect.Right - clientRect.Left;
-                            captureH = clientRect.Bottom - clientRect.Top;
-                        }
-                    }
-                }
-
-                using (Bitmap bitmap = new Bitmap(captureW, captureH))
+                using (Bitmap bitmap = new Bitmap(virtualScreen.Width, virtualScreen.Height))
                 using (Graphics graphics = Graphics.FromImage(bitmap))
                 {
-                    graphics.CopyFromScreen(captureX, captureY, 0, 0, bitmap.Size);
+                    graphics.CopyFromScreen(virtualScreen.X, virtualScreen.Y, 0, 0, bitmap.Size);
 
                     string screenshotsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", "Screenshots", "LowHpPotions");
                     Directory.CreateDirectory(screenshotsDir);

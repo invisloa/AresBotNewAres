@@ -1699,12 +1699,15 @@ namespace DriverScanTester.ViewModels
         {
             if (string.IsNullOrEmpty(line)) return;
             var stamp = DateTime.Now.ToString("HH:mm:ss.fff");
+            var stamped = $"[{stamp}] {line}";
             lock (_logLock)
             {
-                _logLines.Enqueue($"[{stamp}] {line}");
+                _logLines.Enqueue(stamped);
                 while (_logLines.Count > MaxLogLines) _logLines.Dequeue();
                 LogText = string.Join("\r\n", _logLines) + "\r\n";
             }
+            // Unlimited file log (UI keeps only the last 500 lines).
+            BotFileLogger.AppendLine(stamped);
         }
 
         private void ClearLog()

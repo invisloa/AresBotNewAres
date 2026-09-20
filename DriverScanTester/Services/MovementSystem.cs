@@ -165,6 +165,14 @@ namespace DriverScanTester.Services
         /// </summary>
         public bool IsCityStuckFatal => _isCityStuckFatal;
 
+        /// <summary>
+        /// True while a ReportAndGoBack teleport was requested (town scroll pressed).
+        /// In workflow mode (InternalRepotEnabled=false) the old route + old unstuck are
+        /// dead from this moment: PathRunner must abort the path so the coordinator can
+        /// start Repot from scratch instead of continuing the stale Exp route in town.
+        /// </summary>
+        public bool IsReportAndGoBackRequested => _repotHelper.IsReportAndGoBackActive;
+
         // Obstacle
         private (float X, float Y) Waypoint2;
 
@@ -535,6 +543,31 @@ namespace DriverScanTester.Services
             if (_isWaypointSpecialRecoveryActive)
                 return;
 
+            // ── ReportAndGoBack teleport (workflow mode): full reset, hold movement ──
+            // In workflow mode (InternalRepotEnabled=false) RepotHelper.EvaluateRepotTick
+            // does nothing, so the flag must be checked directly. While the teleport is
+            // pending the old route + old unstuck are dead: stop everything, discard
+            // stuck counters / reverse-diagonal / progress baselines, and do NOT run
+            // ActionStuck / NoProgress / MoveTowards on the stale waypoint. PathRunner
+            // aborts the path via IsReportAndGoBackRequested so the coordinator starts
+            // Repot from its first command. Legacy mode (InternalRepotEnabled=true) is
+            // still handled by EvaluateRepotTick below (15s wait + goal reached).
+            if (!InternalRepotEnabled && _repotHelper.IsReportAndGoBackActive)
+            {
+                if (_isMovingForward || _isSkillThreeHeld || _isUnstuckRoutineActive ||
+                    _reverseDiagonalRecovery.IsActive || _consecutiveStuckAttempts != 0)
+                {
+                    ResetStuckAndUnstuckState("report-and-go-back-active");
+                    _log($"[Tick {_tickCount}] ReportAndGoBack active — old route/unstuck discarded, movement held for coordinator Repot.");
+                }
+                if (_isMovingForward || _isSkillThreeHeld)
+                {
+                    StopMoving();
+                    ReleaseSkillThree();
+                }
+                return;
+            }
+
             // ── In-city stuck cooldown ──
             // After 3 stuck attempts in city, bot presses 6 and waits 10 minutes.
             if (DateTime.Now < _inCityStuckCooldownUntil)
@@ -727,16 +760,25 @@ namespace DriverScanTester.Services
             int currentMapId = _memoryService.GetMapNumber();
             if (currentMapId != _currentMapId)
             {
-                _log($"[Tick {_tickCount}] Map: {_currentMapId} → {currentMapId}");
+                int oldMapId = _currentMapId;
+                _log($"[Tick {_tickCount}] Map: {oldMapId} → {currentMapId}");
                 _localNavigationMap.ChangeMap(currentMapId);
                 _currentMapId = currentMapId;
+                // Teleport / map change invalidates everything from the old map:
+                // bearings, stuck positions and progress baselines. Discard them so the
+                // old Exp unstuck never continues on the new (city) map.
+                ResetStuckAndUnstuckState($"map-change {oldMapId}->{currentMapId}");
             }
 
-            // ── Attack speed / potion check ──
-            // Suppressed while OnlyMove is active (mandatory move: no combat actions).
-            if (!moveOnlyActive && _combatHandler.CheckAttackSpeed(_memoryService))
+            // ── Attack speed / potion check (keys 7+8 = red/white speed pots) ──
+            // Runs in EVERY mode, including OnlyMove/city: the white pot gives run
+            // speed, which is exactly what city walking needs. Previously this was
+            // suppressed under OnlyMove, so the bot never rebuffed speed pots while
+            // walking the city (repot/shop paths) even with the buff missing.
+            // CheckAttackSpeed throttles itself to once per CheckIntervalSeconds.
+            if (_combatHandler.CheckAttackSpeed(_memoryService))
             {
-                _log($"[Tick {_tickCount}] Speed {BotConstants.SpeedPotion.AttackSpeedThreshold} — using potions");
+                _log($"[Tick {_tickCount}] Speed pot buff missing (atkSpd={_combatHandler.LastAttackSpeed}, need!={BotConstants.SpeedPotion.AttackSpeedThreshold}) — using potions (keys 7+8)");
                 _log("[Key] 7 (pot1)");
                 GameInput.PressKey(GameInput.VK_7, GameInput.SCAN_7);
                 await Task.Delay(BotConstants.SpeedPotion.PostPotionDelayMs, token);
@@ -1847,6 +1889,33 @@ namespace DriverScanTester.Services
             _stuckDetector.ResetTracking();
         }
 
+        /// <summary>
+        /// Full reset of everything tied to the previous route/position: reverse-diagonal
+        /// recovery, consecutive-stuck counter, stuck/progress baselines, reposition
+        /// escalation, pending resync and combat state. Used on ReportAndGoBack teleport
+        /// and on map change, where bearings / stuck positions from the old map are invalid
+        /// and continuing them in town is the bug (old Exp unstuck running on Repot map).
+        /// </summary>
+        private void ResetStuckAndUnstuckState(string reason)
+        {
+            _reverseDiagonalRecovery.Stop();
+            _isUnstuckRoutineActive = false;
+            _consecutiveStuckAttempts = 0;
+            _lastStuckAttemptPos = null;
+            ResetActionStuckTracking();
+            _lastMoveProgressPos = null;
+            _lastMoveProgressTime = DateTime.MinValue;
+            _repositionRetryCount = 0;
+            _lastRepositionPos = null;
+            _routeResyncPendingAfterCombat = false;
+            _attackSuppressedForCurrentWaypoint = false;
+            _combatHandler.ResetState();
+            ClearCombatRetargetSearch();
+            ReleaseSkillThree();
+            StopMoving();
+            _log($"[Unstuck] Full reset ({reason}) — old route/unstuck discarded.");
+        }
+
         private void ResetCombatStateForWaypointChange()
         {
             _attackSuppressedForCurrentWaypoint = false;
@@ -2202,7 +2271,7 @@ namespace DriverScanTester.Services
         private struct POINT { public int X; public int Y; }
 
         /// <summary>
-        /// Finds the game window and captures its client area as a PNG file
+        /// Captures ALL screens (full virtual screen across every monitor) as a PNG file
         /// in Screenshots/Stuck/ with the current date/time.
         /// Called before triggering ReportAndGoBack after too many consecutive stuck attempts.
         /// </summary>
@@ -2210,32 +2279,12 @@ namespace DriverScanTester.Services
         {
             try
             {
-                nint hwnd = FindWindow(null, "Legend of Ares");
-                if (hwnd == nint.Zero) hwnd = FindWindow(null, "Ares");
-                if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
-                if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
+                var virtualScreen = System.Windows.Forms.SystemInformation.VirtualScreen;
 
-                int captureX = 0, captureY = 0, captureW = BotConstants.Loot.BitmapWidth, captureH = BotConstants.Loot.BitmapHeight;
-
-                if (hwnd != nint.Zero)
-                {
-                    if (GetClientRect(hwnd, out RECT clientRect))
-                    {
-                        POINT topLeft = new POINT { X = 0, Y = 0 };
-                        if (ClientToScreen(hwnd, ref topLeft))
-                        {
-                            captureX = topLeft.X;
-                            captureY = topLeft.Y;
-                            captureW = clientRect.Right - clientRect.Left;
-                            captureH = clientRect.Bottom - clientRect.Top;
-                        }
-                    }
-                }
-
-                using (Bitmap bitmap = new Bitmap(captureW, captureH))
+                using (Bitmap bitmap = new Bitmap(virtualScreen.Width, virtualScreen.Height))
                 using (Graphics graphics = Graphics.FromImage(bitmap))
                 {
-                    graphics.CopyFromScreen(captureX, captureY, 0, 0, bitmap.Size);
+                    graphics.CopyFromScreen(virtualScreen.X, virtualScreen.Y, 0, 0, bitmap.Size);
 
                     string screenshotsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", "Screenshots", "Stuck");
                     Directory.CreateDirectory(screenshotsDir);

@@ -277,9 +277,9 @@ namespace DriverScanTester.Services
             //    the key can never get stuck down on cancel/timeout.
             ctx.Log("[Operation] EtanaRepotUnstuck: walking forward for 2s (W down). ");
             GameInput.keybd_event(GameInput.VK_W, GameInput.SCAN_W, 0, 0);
-            try
+            try666
             {
-                await Task.Delay(2700, token);
+                await Task.Delay(2400, token);
             }
             finally
             {

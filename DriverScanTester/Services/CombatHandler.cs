@@ -93,6 +93,9 @@ namespace DriverScanTester.Services
             _log = log;
         }
 
+        /// <summary>Last attack-speed value read by <see cref="CheckAttackSpeed"/> (short.MinValue = never read).</summary>
+        public short LastAttackSpeed { get; private set; } = short.MinValue;
+
         /// <summary>
         /// Checks whether it is time to drink attack-speed potions.
         /// Returns true when potion keys should be pressed.
@@ -102,6 +105,7 @@ namespace DriverScanTester.Services
             if ((DateTime.Now - _lastAttackSpeedCheck).TotalSeconds >= BotConstants.SpeedPotion.CheckIntervalSeconds)
             {
                 short attackSpeed = memoryService.GetAttackSpeed();
+                LastAttackSpeed = attackSpeed;
                 _lastAttackSpeedCheck = DateTime.Now;
                 return attackSpeed == BotConstants.SpeedPotion.AttackSpeedThreshold;
             }
