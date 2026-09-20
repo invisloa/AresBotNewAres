@@ -43,12 +43,37 @@ namespace DriverScanTester.Services
             }
         }
 
+        /// <summary>
+        /// Dedicated Logs folder outside the build output, so a rebuild (which wipes
+        /// bin/Debug) never deletes the logs. Dev run (bin/Debug/...) → project-root
+        /// Logs (next to Screenshots); published/single-file run → Logs next to the exe.
+        /// </summary>
+        private static string ResolveLogsDir()
+        {
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            try
+            {
+                string devLogs = Path.GetFullPath(Path.Combine(baseDir, "..", "..", "..", "Logs"));
+                string projectDir = Path.GetDirectoryName(devLogs) ?? "";
+                // Dev layout check: ...\DriverScanTester\bin\Debug\net8.0-windows →
+                // project dir holds the .csproj (same convention as Screenshots).
+                if (Directory.Exists(Path.Combine(projectDir, "SavedPaths")) ||
+                    File.Exists(Path.Combine(projectDir, "DriverScanTester.csproj")))
+                    return devLogs;
+            }
+            catch
+            {
+                // Fall through to exe-local Logs.
+            }
+            return Path.Combine(baseDir, "Logs");
+        }
+
         private static string EnsureInitializedLocked()
         {
             if (_filePath != null)
                 return _filePath;
 
-            string logsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
+            string logsDir = ResolveLogsDir();
             Directory.CreateDirectory(logsDir);
 
             string fileName = $"bot_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.txt";
