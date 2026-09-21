@@ -23,6 +23,9 @@ namespace DriverScanTester.Services
         private readonly OperationContext _ctx;
         private readonly Action<string> _log;
 
+        /// <summary>Shared pause switch. While paused, retries hold between attempts.</summary>
+        public BotPauseController? PauseController { get; set; }
+
         public OperationRunnerService(OperationContext ctx, Action<string> log)
         {
             _ctx = ctx;
@@ -55,6 +58,14 @@ namespace DriverScanTester.Services
 
             for (int attempt = 1; attempt <= MaxAttempts; attempt++)
             {
+                if (PauseController?.IsPaused == true)
+                {
+                    _log($"[Operation] '{name}' paused — holding before attempt {attempt}/{MaxAttempts}.");
+                    await PauseController.WaitIfPausedAsync(token);
+                    if (token.IsCancellationRequested) return false;
+                    _log($"[Operation] '{name}' resumed.");
+                }
+
                 if (await RunOnceAsync(name, token))
                     return true;
 
@@ -64,7 +75,10 @@ namespace DriverScanTester.Services
                 if (attempt < MaxAttempts)
                 {
                     _log($"[Operation] '{name}' attempt {attempt}/{MaxAttempts} failed. Retrying in {RetryDelayMs} ms...");
-                    await Task.Delay(RetryDelayMs, token);
+                    if (PauseController != null)
+                        await PauseController.PausableDelayAsync(RetryDelayMs, token);
+                    else
+                        await Task.Delay(RetryDelayMs, token);
                 }
                 else
                 {

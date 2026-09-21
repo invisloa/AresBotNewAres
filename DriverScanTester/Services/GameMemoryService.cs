@@ -1067,6 +1067,26 @@ namespace DriverScanTester.Services
             return (hp, mana);
         }
 
+        /// <summary>
+        /// Attempts to read the player's current mana. Returns false when the pointer
+        /// chain is broken OR the memory read itself fails — so callers can tell a real
+        /// mana value of 0 apart from a failed read (ReadShort would silently return 0).
+        /// </summary>
+        public bool TryGetMana(out short mana)
+        {
+            mana = 0;
+            ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
+            if (playerBase == 0) return false;
+
+            byte[] buf = new byte[2];
+            if (_read(_pid, playerBase + ManaOffset, buf, out uint bytesRead) && bytesRead == 2)
+            {
+                mana = BitConverter.ToInt16(buf, 0);
+                return true;
+            }
+            return false;
+        }
+
         public int GetAnimation1()
         {
             ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);

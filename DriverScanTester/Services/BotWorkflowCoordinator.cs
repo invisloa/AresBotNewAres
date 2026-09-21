@@ -158,6 +158,61 @@ namespace DriverScanTester.Services
         /// <summary>The active profile.</summary>
         public BotProfile ActiveProfile => _profile;
 
+        /// <summary>
+        /// Shared pause switch (set by MainViewModel). While paused the workflow holds
+        /// its position: flow index, route rotation and retry counters are kept, so
+        /// resume continues with the same step. Null = never paused.
+        /// </summary>
+        public BotPauseController? PauseController { get; set; }
+
+        private bool _pauseLogged;
+
+        /// <summary>
+        /// Releases held movement/combat inputs immediately (called on Pause so the
+        /// character halts instead of running while the loops suspend).
+        /// </summary>
+        public void RequestPauseInputRelease()
+        {
+            try { _pathRunner.CurrentMovement?.StopMoving(); } catch { }
+            try { _pathRunner.CurrentMovement?.ReleaseCombatKeys(); } catch { }
+        }
+
+        /// <summary>
+        /// Pause checkpoint: suspends the workflow in place until resumed. Flow state
+        /// (step index, route rotation, retry counters) is preserved.
+        /// </summary>
+        private async Task WaitIfPausedAsync(CancellationToken token)
+        {
+            if (PauseController == null || !PauseController.IsPaused) return;
+            if (!_pauseLogged)
+            {
+                _log("[Coordinator] Paused — holding workflow position.");
+                _pauseLogged = true;
+            }
+            RequestPauseInputRelease();
+            await PauseController.WaitIfPausedAsync(token);
+            if (!token.IsCancellationRequested)
+            {
+                _log("[Coordinator] Resumed — continuing workflow.");
+                _focusGameWindow();
+            }
+            _pauseLogged = false;
+        }
+
+        /// <summary>Delay whose countdown freezes while paused (see BotPauseController).</summary>
+        private Task PausableDelayAsync(int millisecondsDelay, CancellationToken token)
+            => PauseController != null
+                ? PauseController.PausableDelayAsync(millisecondsDelay, token)
+                : Task.Delay(millisecondsDelay, token);
+
+        private Task PausableDelayAsync(TimeSpan delay, CancellationToken token)
+        {
+            long ms = (long)delay.TotalMilliseconds;
+            if (ms < 0) ms = 0;
+            if (ms > int.MaxValue) ms = int.MaxValue;
+            return PausableDelayAsync((int)ms, token);
+        }
+
         // ======================== Constructor ========================
 
         /// <summary>
@@ -261,8 +316,14 @@ namespace DriverScanTester.Services
                     {
                         while (!token.IsCancellationRequested && healSystem != null)
                         {
+                            if (PauseController?.IsPaused == true)
+                            {
+                                await PauseController.WaitIfPausedAsync(token);
+                                if (token.IsCancellationRequested) break;
+                                continue;
+                            }
                             await healSystem.Update(token);
-                            await Task.Delay(100, token); // Update rate for heal/mana
+                            await PausableDelayAsync(100, token); // Update rate for heal/mana
                         }
                     }
                     catch (OperationCanceledException) { }
@@ -347,13 +408,16 @@ namespace DriverScanTester.Services
         {
             while (!token.IsCancellationRequested)
             {
+                await WaitIfPausedAsync(token);
+                if (token.IsCancellationRequested) break;
+
                 if (CurrentPhase == BotPhase.Stopping)
                     break;
 
                 if (CurrentPhase == BotPhase.Failed)
                 {
                     _log("[Coordinator] Bot in Failed state. Manual restart required.");
-                    await Task.Delay(BotConstants.Delays.FailedStateMs, token);
+                    await PausableDelayAsync(BotConstants.Delays.FailedStateMs, token);
                     continue;
                 }
 
@@ -385,7 +449,7 @@ namespace DriverScanTester.Services
                 // When !advance the step already moved _flowIndex itself (e.g. a failed
                 // Path step restarted the flow from the beginning, or the step failed).
 
-                await Task.Delay(BotConstants.Delays.WorkflowMainLoopMs, token);
+                await PausableDelayAsync(BotConstants.Delays.WorkflowMainLoopMs, token);
             }
         }
 
@@ -397,6 +461,9 @@ namespace DriverScanTester.Services
         /// </summary>
         private async Task<bool> ExecuteFlowStepAsync(BotFlowStep step, CancellationToken token)
         {
+            await WaitIfPausedAsync(token);
+            if (token.IsCancellationRequested) return false;
+
             switch (step.Type)
             {
                 case BotFlowStepType.Path:
@@ -626,7 +693,7 @@ namespace DriverScanTester.Services
                      $"(attempt {_postRepotVerifyRetryCount}/{BotConstants.Repot.MaxPostRepotVerifyRetries}).");
                 try
                 {
-                    await Task.Delay(BotConstants.Repot.PostRepotVerifyRetryDelayMs, token);
+                    await PausableDelayAsync(BotConstants.Repot.PostRepotVerifyRetryDelayMs, token);
                 }
                 catch (OperationCanceledException)
                 {
@@ -741,16 +808,16 @@ namespace DriverScanTester.Services
                             // is OnlyMove. Heal stays always on (separate task).
                             if (_pathRunner.CurrentMovement?.IsMoveOnlyActive == true)
                             {
-                                await Task.Delay(BotConstants.Delays.LootUpdateMs, expToken);
+                                await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
                                 continue;
                             }
                             if (_pathRunner.CurrentMovement?.IsWaypointSpecialRecoveryActive == true)
                             {
-                                await Task.Delay(BotConstants.Delays.LootUpdateMs, expToken);
+                                await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
                                 continue;
                             }
                             await lootSystem.Update(expToken);
-                            await Task.Delay(BotConstants.Delays.LootUpdateMs, expToken);
+                            await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
                         }
                     }
                     catch (OperationCanceledException) { }
@@ -778,6 +845,9 @@ namespace DriverScanTester.Services
                 // throttled to ExpLoopRepotCheckIntervalMs.
                 while (!expToken.IsCancellationRequested)
                 {
+                    await WaitIfPausedAsync(token);
+                    if (token.IsCancellationRequested || expToken.IsCancellationRequested) break;
+
                     if (CheckExpPathTeleportAbort(pathTask, out bool isWaypointRepot))
                     {
                         if (isWaypointRepot)
@@ -794,7 +864,7 @@ namespace DriverScanTester.Services
                         break;
                     }
 
-                    await Task.Delay(500, expToken);
+                    await PausableDelayAsync(500, expToken);
 
                     if (CheckExpPathTeleportAbort(pathTask, out bool isWaypointRepotAfter))
                     {
@@ -1082,7 +1152,7 @@ namespace DriverScanTester.Services
             if (startDelayMs <= 0) return;
 
             _log($"[Coordinator] {stepName}: waiting {startDelayMs} ms before start...");
-            await Task.Delay(startDelayMs, token);
+            await PausableDelayAsync(startDelayMs, token);
         }
 
         /// <summary>
@@ -1166,7 +1236,7 @@ namespace DriverScanTester.Services
             if (route.StartDelayMs > 0)
             {
                 _log($"[Path] Step {stepIndex}/{stepCount}: waiting {route.StartDelayMs} ms before start...");
-                await Task.Delay(route.StartDelayMs, token);
+                await PausableDelayAsync(route.StartDelayMs, token);
             }
 
             _log($"[Path] Step {stepIndex}/{stepCount}:");
@@ -1255,7 +1325,7 @@ namespace DriverScanTester.Services
                 if (pathTask.IsCompleted)
                     break; // path finished before the map changed — handled by the grace period below
 
-                await Task.Delay(BotConstants.Delays.MapTransitionPollMs, routeToken);
+                await PausableDelayAsync(BotConstants.Delays.MapTransitionPollMs, routeToken);
 
                 int map = _memoryService.GetMapNumber();
                 if (map == 0)
@@ -1309,7 +1379,7 @@ namespace DriverScanTester.Services
             int graceConsecutiveReads = 0;
             while (DateTime.UtcNow < graceDeadline)
             {
-                await Task.Delay(BotConstants.Delays.MapTransitionPollMs, token);
+                await PausableDelayAsync(BotConstants.Delays.MapTransitionPollMs, token);
                 if (token.IsCancellationRequested)
                     return TravelRouteRunResult.Cancelled;
 
@@ -1351,7 +1421,7 @@ namespace DriverScanTester.Services
             var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
             while (DateTime.UtcNow < deadline)
             {
-                await Task.Delay(BotConstants.Delays.MapTransitionPollMs, token);
+                await PausableDelayAsync(BotConstants.Delays.MapTransitionPollMs, token);
 
                 int map = _memoryService.GetMapNumber();
                 if (map != 0)
@@ -1377,7 +1447,7 @@ namespace DriverScanTester.Services
 
             while (DateTime.UtcNow < deadline)
             {
-                await Task.Delay(BotConstants.Delays.MapTransitionPollMs, token);
+                await PausableDelayAsync(BotConstants.Delays.MapTransitionPollMs, token);
                 if (token.IsCancellationRequested)
                     return TravelRouteRunResult.Cancelled;
 
@@ -1481,7 +1551,7 @@ namespace DriverScanTester.Services
                     // backs off progressively instead of hammering the server.
                     double waitSeconds = BotConstants.Delays.StartProtectionRetryBaseWaitSeconds * Math.Pow(10, retry - 1);
                     _log($"[StartProtection] Protection failed — retry {retry}/{BotConstants.Delays.StartProtectionMaxRetries}: waiting {waitSeconds:F0}s, then repot and start over.");
-                    await Task.Delay(TimeSpan.FromSeconds(waitSeconds), token);
+                    await PausableDelayAsync(TimeSpan.FromSeconds(waitSeconds), token);
                     if (token.IsCancellationRequested) return false;
 
                     await RepotBeforeStartProtectionRetryAsync(token);
@@ -1624,7 +1694,7 @@ namespace DriverScanTester.Services
                 _log($"[StartProtection] Re-tapped W — HERE ({rx}, {ry}) | EXPECTED ({startX}, {startY}).");
 
                 if (attempt < BotConstants.Delays.StartProtectionVerifyAttempts)
-                    await Task.Delay(BotConstants.Delays.StartProtectionRetryMs, token);
+                    await PausableDelayAsync(BotConstants.Delays.StartProtectionRetryMs, token);
             }
 
             return false;
@@ -1716,11 +1786,14 @@ namespace DriverScanTester.Services
         /// </summary>
         private async Task NudgeMoveAsync(CancellationToken token)
         {
+            await WaitIfPausedAsync(token);
+            if (token.IsCancellationRequested) return;
+
             _focusGameWindow();
 
             _log($"[StartProtection] Tapping W for {BotConstants.Delays.StartProtectionNudgeKeyDownMs} ms...");
             keybd_event(BotConstants.Keyboard.VkW, BotConstants.Keyboard.ScanW, 0, 0);
-            await Task.Delay(BotConstants.Delays.StartProtectionNudgeKeyDownMs, token);
+            await PausableDelayAsync(BotConstants.Delays.StartProtectionNudgeKeyDownMs, token);
             keybd_event(BotConstants.Keyboard.VkW, BotConstants.Keyboard.ScanW, KEYEVENTF_KEYUP, 0);
         }
 
@@ -1783,6 +1856,9 @@ namespace DriverScanTester.Services
         /// </summary>
         private async Task TeleportToCity(CancellationToken token)
         {
+            await WaitIfPausedAsync(token);
+            if (token.IsCancellationRequested) return;
+
             byte vk = (byte)_profile.TeleportKey;
             byte scan = (byte)_profile.TeleportScanCode;
 
@@ -1792,13 +1868,13 @@ namespace DriverScanTester.Services
 
             _log($"[Teleport] Pressing key (vk={vk}) for town teleport...");
             keybd_event(vk, scan, 0, 0);
-            await Task.Delay(BotConstants.Delays.TeleportKeyDownMs, token);
+            await PausableDelayAsync(BotConstants.Delays.TeleportKeyDownMs, token);
             keybd_event(vk, scan, KEYEVENTF_KEYUP, 0);
 
             bool arrived = false;
             for (int i = 0; i < BotConstants.Delays.TeleportWaitIterations; i++)
             {
-                await Task.Delay(BotConstants.Delays.TeleportWaitIterationMs, token);
+                await PausableDelayAsync(BotConstants.Delays.TeleportWaitIterationMs, token);
                 if (_memoryService.GetIsInCity())
                 {
                     _log("[Teleport] Arrived in city.");
@@ -1814,7 +1890,7 @@ namespace DriverScanTester.Services
             // in-city flag becomes readable. Starting to move immediately makes the client
             // ignore input and the bot misreads the still-loading state as stuck (action=1).
             _log($"[Teleport] Waiting {BotConstants.Delays.PostTeleportUiLoadMs} ms for the game UI to load...");
-            await Task.Delay(BotConstants.Delays.PostTeleportUiLoadMs, token);
+            await PausableDelayAsync(BotConstants.Delays.PostTeleportUiLoadMs, token);
         }
     }
 }

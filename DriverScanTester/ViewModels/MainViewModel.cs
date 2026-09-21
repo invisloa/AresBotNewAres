@@ -292,6 +292,16 @@ namespace DriverScanTester.ViewModels
             // from disk so the bot works without re-calibrating after an app restart.
             LoadSavedMouseCalibration();
 
+            PauseController.PauseChanged += paused =>
+            {
+                System.Windows.Application.Current?.Dispatcher?.Invoke(() =>
+                {
+                    OnPropertyChanged(nameof(IsBotPaused));
+                    OnPropertyChanged(nameof(IsWorkflowRunning));
+                    OnPropertyChanged(nameof(WorkflowPhaseText));
+                });
+            };
+
             StartHotkeyListener();
         }
 
@@ -390,6 +400,8 @@ namespace DriverScanTester.ViewModels
 
         private void StartBotWithPath(List<DriverScanTester.Services.Waypoint> path, bool loop)
         {
+            // A previous run may have been stopped while paused — always start unpaused.
+            PauseController.Resume();
             // 1. Stop existing
             if (_isMovementBotRunning || _isHealManaBotRunning || _isLootBotRunning)
             {
@@ -2691,6 +2703,67 @@ namespace DriverScanTester.ViewModels
         private CancellationTokenSource? _autoStopCts;
         private DateTime? _autoStopAt;
 
+        // --- Pause / Resume ---
+        // Pause never cancels anything: every bot loop suspends in place at its next
+        // pause checkpoint, so Resume continues exactly where the bot was paused
+        // (same workflow step, same waypoint, same retry counters). One shared
+        // controller is passed to the workflow coordinator + path runner; the simple
+        // movement/heal/loot loops use it directly.
+        public BotPauseController PauseController { get; } = new();
+
+        /// <summary>True while the bot is paused (all bot loops suspended in place).</summary>
+        public bool IsBotPaused => PauseController.IsPaused;
+
+        /// <summary>
+        /// Freezes every running bot loop in place. Safe to call when nothing runs
+        /// (no-op with a log). Resume with <see cref="ResumeAllBots"/>.
+        /// </summary>
+        public void PauseAllBots()
+        {
+            bool anythingRunning = _isMovementBotRunning || _isHealManaBotRunning || _isLootBotRunning
+                || (_workflowCoordinator?.IsRunning == true);
+            if (!anythingRunning)
+            {
+                AppendBotLog("Pause requested but no bot is running.");
+                return;
+            }
+            if (PauseController.IsPaused) return;
+            PauseController.Pause();
+            // Release held inputs immediately so the character halts instead of
+            // running / attacking while the loops suspend at their next checkpoint.
+            try { _movementSystem?.StopMoving(); } catch { }
+            try { _movementSystem?.ReleaseCombatKeys(); } catch { }
+            try { _workflowCoordinator?.RequestPauseInputRelease(); } catch { }
+            AppendBotLog("[Pause] Bot paused — resume with Unpause to continue where it stopped.");
+        }
+
+        /// <summary>Resumes every paused bot loop where it was paused.</summary>
+        public void ResumeAllBots()
+        {
+            if (!PauseController.IsPaused)
+            {
+                AppendBotLog("Resume requested but the bot is not paused.");
+                return;
+            }
+            FocusGameWindow();
+            PauseController.Resume();
+            AppendBotLog("[Pause] Bot resumed — continuing where it was paused.");
+        }
+
+        public void TogglePause()
+        {
+            if (PauseController.IsPaused) ResumeAllBots();
+            else PauseAllBots();
+        }
+
+        /// <summary>Releases held movement/combat inputs (pause path + stop path).</summary>
+        private void ReleaseAllBotInputs()
+        {
+            try { _movementSystem?.StopMoving(); } catch { }
+            try { _movementSystem?.ReleaseCombatKeys(); } catch { }
+            try { _workflowCoordinator?.RequestPauseInputRelease(); } catch { }
+        }
+
         public bool IsWorkflowRunning => _workflowCoordinator?.IsRunning ?? false;
 
         /// <summary>
@@ -2718,6 +2791,9 @@ namespace DriverScanTester.ViewModels
                 var stepText = _workflowCoordinator?.CurrentStepText;
                 if (!string.IsNullOrEmpty(stepText))
                     baseText += $" — {stepText}";
+
+                if (PauseController.IsPaused && (_workflowCoordinator?.IsRunning == true))
+                    baseText = "Paused — " + baseText;
 
                 return baseText;
             }
@@ -2786,7 +2862,14 @@ namespace DriverScanTester.ViewModels
 
             _workflowCoordinator = new BotWorkflowCoordinator(
                 memoryService, repotSystem, repotDetector, pathLoader, pathRunner, operationRunner,
-                profile, AppendBotLog, FocusGameWindow);
+                profile, AppendBotLog, FocusGameWindow)
+            {
+                PauseController = PauseController
+            };
+            pathRunner.PauseController = PauseController;
+            operationRunner.PauseController = PauseController;
+            // A previous run may have been stopped while paused — always start unpaused.
+            PauseController.Resume();
             AppendBotLog($"Starting workflow with profile '{profile.Name}'.");
 
             _workflowCoordinator.OnPhaseChanged = phaseName =>
@@ -2824,22 +2907,26 @@ namespace DriverScanTester.ViewModels
 
             OnPropertyChanged(nameof(IsWorkflowRunning));
             OnPropertyChanged(nameof(WorkflowPhaseText));
+            OnPropertyChanged(nameof(WorkflowCycleCount));
         }
 
         public void StopWorkflow()
         {
             CancelAutoStopTimer();
+            PauseController.Resume();
             if (_workflowCoordinator == null)
             {
                 AppendLog("No workflow to stop.");
                 return;
             }
+            ReleaseAllBotInputs();
             _workflowCoordinator.Stop();
             MouseOperations.ResetWindowOffset();
             _workflowTask = null;
             AppendLog("Workflow stop requested. Window offset reset.");
             OnPropertyChanged(nameof(IsWorkflowRunning));
             OnPropertyChanged(nameof(WorkflowPhaseText));
+            OnPropertyChanged(nameof(WorkflowCycleCount));
         }
 
         /// <summary>
@@ -2880,6 +2967,15 @@ namespace DriverScanTester.ViewModels
                 {
                     while (!cts.Token.IsCancellationRequested)
                     {
+                        // Freeze the countdown while paused: push the deadline forward
+                        // by the waited slice so "run for N min" means N min of running.
+                        if (PauseController.IsPaused)
+                        {
+                            await Task.Delay(1000, cts.Token);
+                            deadline = deadline.AddSeconds(1);
+                            _autoStopAt = deadline;
+                            continue;
+                        }
                         var left = deadline - DateTime.Now;
                         if (left <= TimeSpan.Zero) break;
                         var wait = left.TotalMilliseconds > 1000 ? 1000 : (int)left.TotalMilliseconds;
@@ -2922,6 +3018,7 @@ namespace DriverScanTester.ViewModels
         public void StopAllActions(string reason)
         {
             CancelAutoStopTimer();
+            PauseController.Resume();
             AppendBotLog($"[AutoStop] Stopping every bot action ({reason}).");
             try
             {
@@ -3301,6 +3398,8 @@ namespace DriverScanTester.ViewModels
                 public void StopAllBotsInternal()
                 {
                     CancelAutoStopTimer();
+                    PauseController.Resume();
+                    ReleaseAllBotInputs();
                     ToggleMovementBot(false);
                     ToggleHealManaBot(false);
                     ToggleLootBot(false);
@@ -3327,8 +3426,9 @@ namespace DriverScanTester.ViewModels
                     else
                     {
                         if (!_isAttached) { AppendLog("Attach first."); return; }
+                        // A previous run may have been stopped while paused — always start unpaused.
+                        PauseController.Resume();
                         FocusGameWindow();
-
                         if (!float.TryParse(BotTargetXText, out float tx)) tx = 5000;
                         if (!float.TryParse(BotTargetYText, out float ty)) ty = 5000;
         
@@ -3430,10 +3530,22 @@ namespace DriverScanTester.ViewModels
                     {
                         // Initial 5-second delay before bot starts moving
                         AppendBotLog("Movement will start in 5 seconds...");
-                        await Task.Delay(5000, token);
+                        await PauseController.PausableDelayAsync(5000, token);
 
                         while (!token.IsCancellationRequested && _isAttached && _movementSystem != null)
                         {
+                            // Pause checkpoint: suspend in place (inputs already released
+                            // by PauseAllBots); resume continues with the same waypoint state.
+                            if (PauseController.IsPaused)
+                            {
+                                _movementSystem.StopMoving();
+                                _movementSystem.ReleaseCombatKeys();
+                                await PauseController.WaitIfPausedAsync(token);
+                                if (token.IsCancellationRequested) break;
+                                FocusGameWindow();
+                                continue;
+                            }
+
                             await _movementSystem.Update(token);
 
                             // Zone-block watchdog (same as PathRunnerService): if the player
@@ -3452,7 +3564,7 @@ namespace DriverScanTester.ViewModels
                                 break;
                             }
 
-                            await Task.Delay(100, token); // Update rate
+                            await PauseController.PausableDelayAsync(100, token); // Update rate
                         }
                     }
                     catch (TaskCanceledException) { }
@@ -3484,8 +3596,14 @@ namespace DriverScanTester.ViewModels
                     {
                         while (!token.IsCancellationRequested && _isAttached && _healManaSystem != null)
                         {
+                            if (PauseController.IsPaused)
+                            {
+                                await PauseController.WaitIfPausedAsync(token);
+                                if (token.IsCancellationRequested) break;
+                                continue;
+                            }
                             await _healManaSystem.Update(token);
-                            await Task.Delay(100, token); // Update rate for heal/mana
+                            await PauseController.PausableDelayAsync(100, token); // Update rate for heal/mana
                         }
                     }
                     catch (TaskCanceledException) { }
@@ -3509,21 +3627,27 @@ namespace DriverScanTester.ViewModels
                     {
                         while (!token.IsCancellationRequested && _isAttached && _lootSystem != null)
                         {
+                            if (PauseController.IsPaused)
+                            {
+                                await PauseController.WaitIfPausedAsync(token);
+                                if (token.IsCancellationRequested) break;
+                                continue;
+                            }
                             // OnlyMove is mandatory above all movement-option actions:
                             // never try to loot while the current waypoint is OnlyMove.
                             // Heal stays always on (separate HealMana task).
                             if (_movementSystem?.IsWaypointSpecialRecoveryActive == true)
                             {
-                                await Task.Delay(10, token);
+                                await PauseController.PausableDelayAsync(10, token);
                                 continue;
                             }
                             if (_movementSystem?.IsMoveOnlyActive == true)
                             {
-                                await Task.Delay(10, token);
+                                await PauseController.PausableDelayAsync(10, token);
                                 continue;
                             }
                             await _lootSystem.Update(token);
-                            await Task.Delay(10, token); // Update rate for loot
+                            await PauseController.PausableDelayAsync(10, token); // Update rate for loot
                         }
                     }
                     catch (TaskCanceledException) { }

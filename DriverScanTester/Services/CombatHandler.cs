@@ -66,12 +66,14 @@ namespace DriverScanTester.Services
         // ── Combat stuck detection (mana + position based) ──
         // A real attack consumes mana (skill 3), and standing still is the normal combat
         // posture — so a static position alone proves nothing. But position AND mana both
-        // unchanged for the timeout means the player is NOT actually fighting (unreachable
+        // stale for the timeout means the player is NOT actually fighting (unreachable
         // mob / attack not connecting, while the animation may still play). That triggers
         // the standard unstuck action.
-        /// <summary>Last time the mana value changed while a mob was selected (MinValue = not yet sampled).</summary>
+        // NOTE: mana regenerates over time and potions raise it — only a DECREASE proves
+        // the skill actually consumed mana (attack connecting). Increases are ignored.
+        /// <summary>Last time mana DROPPED (was consumed) while a mob was selected (MinValue = not yet sampled).</summary>
         private DateTime _lastManaChangeAt = DateTime.MinValue;
-        /// <summary>Previous mana sample (for change detection).</summary>
+        /// <summary>Previous mana sample (for consumption detection — decreases only).</summary>
         private int _lastManaValue = int.MinValue;
         /// <summary>Last time the player position changed while a mob was selected.</summary>
         private DateTime _lastCombatPosChangeAt = DateTime.MinValue;
@@ -209,7 +211,7 @@ namespace DriverScanTester.Services
                 // Any non-idle action, or no mob selected, resets the idle timer
                 _combatIdleStartTime = DateTime.MinValue;
 
-                // ── Attack-not-connecting detection: mana unchanged ──
+                // ── Attack-not-connecting detection: mana not consumed ──
                 // A real attack consumes mana (skill) with every swing. If the attack
                 // animation keeps playing (attackVal > 0) but mana does NOT drop for
                 // COMBAT_MANA_STUCK_TIMEOUT_MS, the attack is not connecting — the mob
@@ -218,11 +220,15 @@ namespace DriverScanTester.Services
                 // animation moves the player every swing, so a static-position test can
                 // never fire while this is happening. The bot must physically reposition:
                 // walk toward the next waypoint for a short time, then TAB and attack again.
-                var healMana = memoryService.GetHealManaValues();
-                if (healMana.value2.HasValue)
+                //
+                // IMPORTANT: only a mana DECREASE counts as attack progress. Natural
+                // mana regeneration / mana potions raise the value; treating those as
+                // progress used to reset the stall timer forever (a slow +1 MP regen
+                // every few seconds) so the phantom-attack hang never triggered a
+                // reposition or unstuck.
+                if (memoryService.TryGetMana(out short mana))
                 {
-                    int mana = healMana.value2.Value;
-                    if (_lastManaValue != int.MinValue && mana != _lastManaValue)
+                    if (_lastManaValue != int.MinValue && mana < _lastManaValue)
                     {
                         _lastManaChangeAt = DateTime.Now;
                     }
@@ -235,7 +241,7 @@ namespace DriverScanTester.Services
                     _lastManaChangeAt != DateTime.MinValue &&
                     (DateTime.Now - _lastManaChangeAt).TotalMilliseconds >= COMBAT_MANA_STUCK_TIMEOUT_MS)
                 {
-                    _log($"[Combat] Mana unchanged for {COMBAT_MANA_STUCK_TIMEOUT_MS:F0}ms while attacking — attack animation plays but no mana consumed (attack not connecting, mob HP not dropping). Repositioning toward next waypoint.");
+                    _log($"[Combat] Mana not consumed for {COMBAT_MANA_STUCK_TIMEOUT_MS:F0}ms while attacking (last mana {_lastManaValue}) — attack animation plays but no mana consumed (attack not connecting, mob HP not dropping). Repositioning toward next waypoint.");
                     return CombatAction.RepositionAndRetry;
                 }
 

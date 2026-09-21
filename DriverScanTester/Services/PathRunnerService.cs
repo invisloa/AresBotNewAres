@@ -29,6 +29,13 @@ namespace DriverScanTester.Services
         private readonly bool _enableWaypointSpecialRecoveries;
         private MovementSystem? _movementSystem;
 
+        /// <summary>
+        /// Shared pause switch. When set, the path loop suspends in place (inputs
+        /// released) without discarding the MovementSystem, so resume continues with
+        /// the same waypoint queue. Null = never paused.
+        /// </summary>
+        public BotPauseController? PauseController { get; set; }
+
         public MovementSystem? CurrentMovement => _movementSystem;
         public WaypointRecoveryExecutor? WaypointRecoveryExecutor { get; set; }
         public PathRunStopReason LastStopReason { get; private set; } = PathRunStopReason.None;
@@ -87,8 +94,27 @@ namespace DriverScanTester.Services
             try
             {
                 _log("[PathRunner] Entering main loop.");
+                bool pauseLogged = false;
                 while (!token.IsCancellationRequested)
                 {
+                    // Pause checkpoint: hold the route in place. MovementSystem keeps its
+                    // waypoint queue, so resume continues with the same waypoint.
+                    if (PauseController?.IsPaused == true)
+                    {
+                        if (!pauseLogged)
+                        {
+                            _log("[PathRunner] Paused — holding route position.");
+                            pauseLogged = true;
+                        }
+                        _movementSystem?.StopMoving();
+                        _movementSystem?.ReleaseCombatKeys();
+                        await PauseController.WaitIfPausedAsync(token);
+                        if (token.IsCancellationRequested) break;
+                        _log("[PathRunner] Resumed — continuing route.");
+                        pauseLogged = false;
+                        continue;
+                    }
+
                     await _movementSystem.Update(token);
 
                     // ReportAndGoBack teleport: the old route is dead. Abort immediately
@@ -150,7 +176,9 @@ namespace DriverScanTester.Services
                         return false;
                     }
 
-                    await Task.Delay(BotConstants.Delays.PathRunnerTickMs, token);
+                    await (PauseController != null
+                        ? PauseController.PausableDelayAsync(BotConstants.Delays.PathRunnerTickMs, token)
+                        : Task.Delay(BotConstants.Delays.PathRunnerTickMs, token));
                 }
                 _log("[PathRunner] Loop exited due to cancellation request.");
                 LastStopReason = PathRunStopReason.Cancelled;

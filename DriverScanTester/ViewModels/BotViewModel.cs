@@ -25,6 +25,7 @@ namespace DriverScanTester.ViewModels
         private bool _isHealManaBotRunning;
         private bool _isLootBotRunning;
         private bool _isWorkflowRunning;
+        private bool _isBotPaused;
         private string _workflowPhaseText = "Idle";
         private System.Threading.Timer _statsTimer;
 
@@ -49,6 +50,8 @@ namespace DriverScanTester.ViewModels
 
             RunBotCommand = new RelayCommand(_ => RunBot(), _ => _main.IsAttached);
             StopBotCommand = new RelayCommand(_ => StopAllBots(), _ => _main.IsAttached && (IsMovementBotRunning || IsHealManaBotRunning || IsLootBotRunning));
+            PauseBotCommand = new RelayCommand(_ => PauseBots(), _ => _main.IsAttached && !IsBotPaused && (IsMovementBotRunning || IsHealManaBotRunning || IsLootBotRunning || IsWorkflowRunning));
+            ResumeBotCommand = new RelayCommand(_ => ResumeBots(), _ => _main.IsAttached && IsBotPaused);
             ToggleHealManaBotCommand = new RelayCommand(_ => ToggleHealManaBot(), _ => _main.IsAttached);
             OpenPathEditorCommand = new RelayCommand(_ => _main.OpenPathEditorInternal(), _ => _main.IsAttached);
             CaptureNpcMouseOverCommand = new RelayCommand(_ => _main.CaptureNpcMouseOver(), _ => _main.IsAttached);
@@ -57,8 +60,10 @@ namespace DriverScanTester.ViewModels
             ClearBotLogCommand = new RelayCommand(_ => ClearBotLog());
 
             // Route Workflow commands
-            StartWorkflowCommand = new RelayCommand(_ => StartWorkflowWithProfile(), _ => _main.IsAttached && CanStartWorkflow);
+            StartWorkflowCommand = new RelayCommand(_ => StartWorkflowWithProfile(), _ => _main.IsAttached && CanStartWorkflow && !IsBotPaused);
             StopWorkflowCommand = new RelayCommand(_ => _main.StopWorkflow(), _ => _main.IsAttached);
+            PauseWorkflowCommand = new RelayCommand(_ => PauseBots(), _ => _main.IsAttached && !IsBotPaused && IsWorkflowRunning);
+            ResumeWorkflowCommand = new RelayCommand(_ => ResumeBots(), _ => _main.IsAttached && IsBotPaused && IsWorkflowRunning);
             RefreshProfilesCommand = new RelayCommand(_ => RefreshProfiles(), _ => _main.IsAttached);
             ValidateProfileCommand = new RelayCommand(_ => ValidateSelectedProfile(), _ => _main.IsAttached);
 
@@ -160,6 +165,17 @@ namespace DriverScanTester.ViewModels
 
         public bool IsAnyBotRunning => IsMovementBotRunning || IsHealManaBotRunning || IsLootBotRunning;
 
+        /// <summary>True while every bot loop is suspended in place (Pause pressed).</summary>
+        public bool IsBotPaused
+        {
+            get => _isBotPaused;
+            set
+            {
+                if (SetProperty(ref _isBotPaused, value))
+                    System.Windows.Input.CommandManager.InvalidateRequerySuggested();
+            }
+        }
+
         // Route Workflow properties
         public bool IsWorkflowRunning
         {
@@ -175,6 +191,8 @@ namespace DriverScanTester.ViewModels
 
         public ICommand RunBotCommand { get; }
         public ICommand StopBotCommand { get; }
+        public ICommand PauseBotCommand { get; }
+        public ICommand ResumeBotCommand { get; }
         public ICommand ToggleHealManaBotCommand { get; }
         public ICommand OpenPathEditorCommand { get; }
         public ICommand CaptureNpcMouseOverCommand { get; }
@@ -185,6 +203,8 @@ namespace DriverScanTester.ViewModels
         // Route Workflow commands
         public ICommand StartWorkflowCommand { get; }
         public ICommand StopWorkflowCommand { get; }
+        public ICommand PauseWorkflowCommand { get; }
+        public ICommand ResumeWorkflowCommand { get; }
         public ICommand RefreshProfilesCommand { get; }
         public ICommand ValidateProfileCommand { get; }
 
@@ -479,6 +499,7 @@ namespace DriverScanTester.ViewModels
             IsMovementBotRunning = _main.IsMovementBotRunningInternal;
             IsHealManaBotRunning = _main.IsHealManaBotRunningInternal;
             IsLootBotRunning = _main.IsLootBotRunningInternal;
+            IsBotPaused = _main.IsBotPaused;
 
             HpThresholdText = _main.HealManaThreshold1.ToString();
             ManaThresholdText = _main.HealManaThreshold2.ToString();
@@ -512,6 +533,7 @@ namespace DriverScanTester.ViewModels
                 IsMovementBotRunning = _main.IsMovementBotRunningInternal;
                 IsHealManaBotRunning = _main.IsHealManaBotRunningInternal;
                 IsLootBotRunning = _main.IsLootBotRunningInternal;
+                IsBotPaused = _main.IsBotPaused;
 
                 // Sync workflow state from MainViewModel
                 IsWorkflowRunning = _main.IsWorkflowRunning;
@@ -549,6 +571,18 @@ namespace DriverScanTester.ViewModels
                 _botLogLines.Clear();
                 BotLogText = "";
             }
+        }
+
+        private void PauseBots()
+        {
+            _main.PauseAllBots();
+            IsBotPaused = _main.IsBotPaused;
+        }
+
+        private void ResumeBots()
+        {
+            _main.ResumeAllBots();
+            IsBotPaused = _main.IsBotPaused;
         }
     }
 }

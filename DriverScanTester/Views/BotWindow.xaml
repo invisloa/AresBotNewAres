@@ -32,7 +32,13 @@
                 <Separator Width="1" Margin="15,2" Background="LightGray"/>
                 <TextBlock Text="Any bot running:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
                 <TextBlock Text="{Binding IsAnyBotRunning}" VerticalAlignment="Center" FontWeight="Bold" Width="40"/>
+                <TextBlock Text="Paused:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
+                <TextBlock Text="{Binding IsBotPaused}" VerticalAlignment="Center" FontWeight="Bold" Width="40"/>
                 <Separator Width="1" Margin="15,2" Background="LightGray"/>
+                <Button Content="Pause" Command="{Binding PauseBotCommand}" Width="70" Margin="5,0" Background="#FFFFFFC0" FontWeight="Bold"
+                        ToolTip="Freeze the bot in place. Resume continues exactly where it was paused."/>
+                <Button Content="Resume" Command="{Binding ResumeBotCommand}" Width="70" Margin="5,0" Background="#FFD0FFD0" FontWeight="Bold"
+                        ToolTip="Resume the paused bot where it was paused."/>
                 <Button Content="STOP ALL BOTS" Command="{Binding StopBotCommand}" Width="120" Margin="5,0" Background="#FFFFD0D0" FontWeight="Bold"/>
             </WrapPanel>
         </Border>
@@ -49,6 +55,10 @@
                 <StackPanel>
                     <WrapPanel Orientation="Horizontal" Margin="5">
                         <Button Content="RUN BOT" Command="{Binding RunBotCommand}" Width="100" Margin="2" Background="#FFDEFFDE" FontWeight="Bold"/>
+                        <Button Content="Pause" Command="{Binding PauseBotCommand}" Width="70" Margin="2" Background="#FFFFFFC0" FontWeight="Bold"
+                                ToolTip="Freeze the bot in place. Resume continues where it was paused."/>
+                        <Button Content="Resume" Command="{Binding ResumeBotCommand}" Width="70" Margin="2" Background="#FFD0FFD0" FontWeight="Bold"
+                                ToolTip="Resume the paused bot where it was paused."/>
                         <Button Content="Path Editor" Command="{Binding OpenPathEditorCommand}" Width="100" Margin="10,2,2,2" Background="#FFF0F0FF"/>
                     </WrapPanel>
                     <TextBlock Text="Running the movement bot auto-starts the loot bot (hotkey End stops it)."
@@ -94,6 +104,12 @@
                     <Separator Width="1" Margin="5,2" Background="LightGray"/>
                     <Button Content="Start" Command="{Binding StartWorkflowCommand}"
                             Width="70" Margin="2" Background="#FFDEFFDE" FontWeight="Bold"/>
+                    <Button Content="Pause" Command="{Binding PauseWorkflowCommand}"
+                            Width="70" Margin="3,2" Background="#FFFFFFC0" FontWeight="Bold"
+                            ToolTip="Freeze the workflow in place. Resume continues with the same step and waypoint."/>
+                    <Button Content="Resume" Command="{Binding ResumeWorkflowCommand}"
+                            Width="70" Margin="3,2" Background="#FFD0FFD0" FontWeight="Bold"
+                            ToolTip="Resume the paused workflow where it was paused."/>
                     <Button Content="Stop" Command="{Binding StopWorkflowCommand}"
                             Width="70" Margin="3,2" Background="#FFFFD0D0" FontWeight="Bold"/>
                     <Separator Width="1" Margin="5,2" Background="LightGray"/>
