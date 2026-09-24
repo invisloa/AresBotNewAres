@@ -104,13 +104,19 @@ namespace DriverScanTester.Services
         // ─────────────────── Report-and-go-back ───────────────────
 
         /// <summary>
-        /// Initiates the report-and-go-back flow (teleport to town).
+        /// Initiates the report-and-go-back flow (teleport to town). A screenshot is
+        /// captured right after the town scroll is pressed (before the town loads).
         /// </summary>
         public void ReportAndGoBack()
         {
             _log("ReportAndGoBack: Teleporting to town. Pressing 6.");
             _stopMoving();
             GameInput.PressKey(GameInput.VK_6, GameInput.SCAN_6);
+
+            // Screenshot immediately after the scroll is triggered — before the town
+            // starts loading — so the image shows the state at the moment of teleport.
+            ScreenshotService.CaptureFullScreen(ScreenshotService.TownPortalsFolder, _log, "[ReportAndGoBack]");
+
             _repotStageStartTime = DateTime.Now;
             _isReportAndGoBackActive = true;
         }
@@ -159,6 +165,11 @@ namespace DriverScanTester.Services
                     _log("Repot Routine: Starting. Pressing 6 (Town Teleport).");
                     _stopMoving();
                     GameInput.PressKey(GameInput.VK_6, GameInput.SCAN_6);
+
+                    // Screenshot immediately after the scroll is triggered — before the
+                    // town starts loading — so the image shows the state at teleport time.
+                    ScreenshotService.CaptureFullScreen(ScreenshotService.TownPortalsFolder, _log, "[Repot Routine]");
+
                     _repotStageStartTime = DateTime.Now;
                     _repotStage = 1;
                 }

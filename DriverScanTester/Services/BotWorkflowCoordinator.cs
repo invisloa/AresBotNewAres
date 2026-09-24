@@ -1852,7 +1852,8 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Teleports to the city with the profile's teleport key and waits for the game
-        /// UI to settle afterwards.
+        /// UI to settle afterwards. A screenshot is captured right after the teleport
+        /// scroll is triggered (before the town loads) into Screenshots/TownPortals.
         /// </summary>
         private async Task TeleportToCity(CancellationToken token)
         {
@@ -1870,6 +1871,10 @@ namespace DriverScanTester.Services
             keybd_event(vk, scan, 0, 0);
             await PausableDelayAsync(BotConstants.Delays.TeleportKeyDownMs, token);
             keybd_event(vk, scan, KEYEVENTF_KEYUP, 0);
+
+            // Screenshot immediately after the teleport scroll is triggered — before the
+            // town starts loading — so the image shows the state at the moment of teleport.
+            ScreenshotService.CaptureFullScreen(ScreenshotService.TownPortalsFolder, _log, "[Teleport]");
 
             bool arrived = false;
             for (int i = 0; i < BotConstants.Delays.TeleportWaitIterations; i++)

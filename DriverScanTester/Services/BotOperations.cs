@@ -63,7 +63,9 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Presses the profile's town-teleport key (default '6').
+        /// Presses the profile's town-teleport key (default '6') and saves a screenshot
+        /// to Screenshots/TownPortals right after the scroll is triggered (before the
+        /// town loads).
         /// </summary>
         public static async Task<bool> TeleportToCity(OperationContext ctx, CancellationToken token)
         {
@@ -72,6 +74,12 @@ namespace DriverScanTester.Services
             GameInput.PressKey(
                 (byte)ctx.Profile.TeleportKey,
                 (byte)ctx.Profile.TeleportScanCode);
+
+            // Screenshot immediately after the teleport scroll is triggered — before the
+            // town starts loading — so the image shows the state at the moment of teleport.
+            ScreenshotService.CaptureFullScreen(
+                ScreenshotService.TownPortalsFolder, ctx.Log, "[Operation] TeleportToCity:");
+
             await Task.Delay(500, token);
             return true;
         }

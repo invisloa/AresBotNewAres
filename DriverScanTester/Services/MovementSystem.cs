@@ -2162,6 +2162,11 @@ namespace DriverScanTester.Services
                         _log($"[Unstuck] Reached {maxAttempts} stuck attempts in city — pressing 6 and waiting 10 minutes.");
                         StopMoving();
                         GameInput.PressKey(GameInput.VK_6, GameInput.SCAN_6);
+
+                        // Screenshot immediately after the scroll is triggered — before the
+                        // town starts loading — so the image shows the state at teleport time.
+                        ScreenshotService.CaptureFullScreen(ScreenshotService.TownPortalsFolder, _log, "[Unstuck]");
+
                         _inCityStuckCooldownUntil = DateTime.Now.AddMinutes(10);
                     }
                     else

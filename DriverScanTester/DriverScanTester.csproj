@@ -12,6 +12,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Folder Include="Screenshots\TownPortals\" />
     <Folder Include="Services\" />
   </ItemGroup>
 
