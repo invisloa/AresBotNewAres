@@ -19,9 +19,6 @@ namespace DriverScanTester.Services
 
         // --- Offsets from MovementSystem ---
         private const ulong PlayerPtrOffset = BotConstants.MemoryOffsets.PlayerPtr;
-        private const ulong MobSelectedPtrOffset2 = BotConstants.MemoryOffsets.MobSelectedPtr2;
-        private const ulong MobSelectedSubOffset2 = BotConstants.MemoryOffsets.MobSelectedSub2;
-        private const ulong MobSelectedOffset2 = BotConstants.MemoryOffsets.MobSelected2;
         private const ulong XOffset = BotConstants.MemoryOffsets.X;
         private const ulong YOffset = BotConstants.MemoryOffsets.Y;
         private const ulong HpOffset = BotConstants.MemoryOffsets.Hp;
@@ -472,9 +469,15 @@ namespace DriverScanTester.Services
             WriteShort(cameraBase + (ulong)BotConstants.MemoryOffsets.CameraVerticalLockOffset, value);
         }
 
-        public int GetAttackStatus()
+        public int GetSelectedTargetId()
         {
-            // Using "Target selected working target" as indicator for attack readiness
+            return ReadSelectedTargetId();
+        }
+
+        private int ReadSelectedTargetId()
+        {
+            // The current target ID is stored in the player structure. All target
+            // classification must use this same source.
             ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
             if (playerBase == 0) return 0;
 
@@ -483,29 +486,28 @@ namespace DriverScanTester.Services
 
         public bool IsMobSelected()
         {
-            ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
-            if (playerBase == 0) return false;
-            int targetId = ReadInt(playerBase + TargetSelectedOffset);
-            // targetId > MaxMobTargetId indicates a player character — skip it
-            // NOTE: targetId is -1 (0xFFFFFFFF) when NO mob is selected,
-            // so we must check targetId > 0, not targetId != 0.
+            return IsMobTargetId(ReadSelectedTargetId());
+        }
+
+        /// <summary>Classifies a raw target ID using the game's mob/player ID boundary.</summary>
+        public static bool IsMobTargetId(int targetId)
+        {
+            // -1 (0xFFFFFFFF) means no target; valid mob/NPC IDs are positive and below the boundary.
             return targetId > 0 && targetId < BotConstants.Combat.MaxMobTargetId;
         }
 
+        /// <summary>Returns true when a raw target ID belongs to a player character.</summary>
+        public static bool IsPlayerTargetId(int targetId)
+        {
+            return targetId > BotConstants.Combat.MaxMobTargetId;
+        }
+
         /// <summary>
-        /// Returns true only when a player character (not a mob/NPC) is confirmed as the current target.
-        /// Unlike <see cref="IsMobSelected()"/>, this does NOT return true when the pointer chain
-        /// fails or targetId is 0 — it specifically checks for targetId > <see cref="BotConstants.Combat.MaxMobTargetId"/>.
+        /// Returns true only when the current target ID in the player structure is a player character.
         /// </summary>
         public bool IsPlayerSelected()
         {
-            ulong ptr = ReadPointer(_moduleBase + MobSelectedPtrOffset2);
-            if (ptr == 0) return false;
-            ulong sub = ReadPointer(ptr + MobSelectedSubOffset2);
-            if (sub == 0) return false;
-            int targetId = ReadInt(sub + MobSelectedOffset2);
-            // Only return true when targetId is confirmed to be a player character (above threshold)
-            return targetId > BotConstants.Combat.MaxMobTargetId;
+            return IsPlayerTargetId(ReadSelectedTargetId());
         }
 
         /// <summary>

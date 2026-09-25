@@ -838,14 +838,14 @@ namespace DriverScanTester.Services
             }
 
             byte currentAction = _memoryService.GetCurrentAction();
-            int attackStatus = _memoryService.GetAttackStatus();
+            int targetId = _memoryService.GetSelectedTargetId();
             bool mobSelected = _memoryService.IsMobSelected();
 
             // Log position every 5 ticks (action bytes included — key for stuck diagnosis:
             // 25=idle, 27/3=running, 28=being hit, 39=attacking).
             if (_tickCount % 5 == 0)
             {
-                _log($"[Tick {_tickCount}] @ ({currX:F1},{currY:F1}) Act:{currentAction} Mob:{mobSelected} AtkSt:{attackStatus} Cam:{_memoryService.GetCameraAngle()}");
+                _log($"[Tick {_tickCount}] @ ({currX:F1},{currY:F1}) Act:{currentAction} Mob:{mobSelected} TargetId:{targetId} Cam:{_memoryService.GetCameraAngle()}");
             }
 
             BotMode currentMode = BotMode.OnlyMove;
@@ -939,7 +939,7 @@ namespace DriverScanTester.Services
 
                 if (canUseCombatRetargetSearch && _combatRetargetCameraStage != CombatRetargetCameraStage.None)
                 {
-                    if (attackStatus > 0)
+                    if (targetId > 0)
                     {
                         _log($"[CombatRetarget] Mob selected at camera {cameraDistanceToApply}. Resuming normal combat.");
                         ClearCombatRetargetSearch();

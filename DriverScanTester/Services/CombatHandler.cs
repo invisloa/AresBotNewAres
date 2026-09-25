@@ -142,7 +142,7 @@ namespace DriverScanTester.Services
             }
 
             int anim1 = memoryService.GetAnimation1();
-            int attackVal = memoryService.GetAttackStatus();
+            int targetId = memoryService.GetSelectedTargetId();
             byte currentAction = memoryService.GetCurrentAction();
 
             if (anim1 > KnightAttackedMin && anim1 < KnightAttackedMax)
@@ -150,13 +150,15 @@ namespace DriverScanTester.Services
                 _log($"[Combat] Player is being attacked (Anim: {anim1})");
             }
 
-            if (attackVal > 0)
+            if (targetId > 0)
             {
                 // ── Player character check: skip attacking other players ──
-                if (memoryService.IsPlayerSelected())
+                // Classify the exact target ID read above. Reading a second, separate
+                // pointer chain here could describe a different/stale target.
+                if (GameMemoryService.IsPlayerTargetId(targetId))
                 {
                     CapturePlayerScreenshot();
-                    _log("[Combat] Target is a player character — skipping attack. TAB.");
+                    _log($"[Combat] Target ID {targetId} is a player character — skipping attack. TAB.");
                     _wasAttacking = false;
                     _combatIdleStartTime = DateTime.MinValue;
                     return CombatAction.TabTarget;
@@ -213,7 +215,7 @@ namespace DriverScanTester.Services
 
                 // ── Attack-not-connecting detection: mana not consumed ──
                 // A real attack consumes mana (skill) with every swing. If the attack
-                // animation keeps playing (attackVal > 0) but mana does NOT drop for
+                // animation keeps playing (a target ID is present) but mana does NOT drop for
                 // COMBAT_MANA_STUCK_TIMEOUT_MS, the attack is not connecting — the mob
                 // looks attacked but its HP never drops (phantom/unreachable target).
                 // Position is deliberately NOT part of this check: the attack lunge

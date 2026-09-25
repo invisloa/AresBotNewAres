@@ -309,9 +309,6 @@ namespace DriverScanTester
         {
             // Player structure
             public const ulong PlayerPtr = 0x486BC8;
-            public const ulong MobSelectedPtr2 = 0x3F4D4C;
-            public const ulong MobSelectedSub2 = 0x9D;
-            public const ulong MobSelected2 = 0x60;
             public const ulong X = 0x144;
             public const ulong Y = 0xEE8;
             public const ulong Hp = 0x168;
