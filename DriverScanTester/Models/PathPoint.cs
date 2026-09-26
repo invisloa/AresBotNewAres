@@ -35,6 +35,14 @@ namespace DriverScanTester.Models
         private BotMode _mode = BotMode.OnlyMove;
         public BotMode Mode { get => _mode; set => SetField(ref _mode, value); }
 
+        private MovementSteeringMode? _steeringMode;
+        /// <summary>
+        /// Per-point approach steering override: KeyboardTurn = WAD keys (A/D turn while W drives),
+        /// DirectCamera = write the camera angle directly. Null = inherit the path runner default
+        /// (KeyboardTurn / WAD for normal routes). New points default to WAD in the editor.
+        /// </summary>
+        public MovementSteeringMode? SteeringMode { get => _steeringMode; set => SetField(ref _steeringMode, value); }
+
         private short _cameraDistanceLock = DefaultCameraDistanceLock;
         public short CameraDistanceLock { get => _cameraDistanceLock; set => SetField(ref _cameraDistanceLock, value); }
 
@@ -96,7 +104,8 @@ namespace DriverScanTester.Models
             string stuckRecoveryPath = "",
             short stuckRecoveryMobCameraDistance = DefaultCameraDistanceLock,
             string onArrivalOperation = "",
-            bool isOperationStep = false)
+            bool isOperationStep = false,
+            MovementSteeringMode? steeringMode = null)
         {
             _x = x;
             _y = y;
@@ -111,6 +120,7 @@ namespace DriverScanTester.Models
             _stuckRecoveryMobCameraDistance = stuckRecoveryMobCameraDistance;
             _onArrivalOperation = onArrivalOperation;
             _isOperationStep = isOperationStep;
+            _steeringMode = steeringMode;
         }
     }
 }

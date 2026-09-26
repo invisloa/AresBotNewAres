@@ -83,6 +83,28 @@ namespace DriverScanTester.Tests
             Assert.Equal(PathPoint.DefaultCameraDistanceLock, point.StuckRecoveryMobCameraDistance);
             Assert.Equal("", point.OnArrivalOperation);
             Assert.False(point.IsOperationStep);
+            Assert.Null(point.SteeringMode);
+        }
+
+        [Fact]
+        public void ExplicitPerPointSteeringModeSurvivesJsonRoundTrip()
+        {
+            var segment = new PathSegment
+            {
+                Name = "steering",
+                Points = new List<PathPoint>
+                {
+                    new PathPoint(1, 2, steeringMode: MovementSteeringMode.DirectCamera),
+                    new PathPoint(3, 4, steeringMode: MovementSteeringMode.KeyboardTurn)
+                }
+            };
+
+            string json = JsonSerializer.Serialize(segment);
+            var loaded = JsonSerializer.Deserialize<PathSegment>(json);
+
+            Assert.NotNull(loaded);
+            Assert.Equal(MovementSteeringMode.DirectCamera, loaded!.Points[0].SteeringMode);
+            Assert.Equal(MovementSteeringMode.KeyboardTurn, loaded.Points[1].SteeringMode);
         }
 
         [Fact]
@@ -226,6 +248,15 @@ namespace DriverScanTester.Tests
 
             Assert.Contains(lines, line => line.Contains("[ReverseDiagonal] Started."));
             Assert.DoesNotContain(lines, line => line.Contains("configured=Default"));
+
+            // Normal movement defaults to keyboard steering, but default unstuck still
+            // invokes the direct-camera recovery primitive (not an A/D key-down).
+            var steeringModeField = typeof(MovementSystem).GetField(
+                "_steeringMode", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(steeringModeField);
+            Assert.Equal(MovementSteeringMode.KeyboardTurn, steeringModeField!.GetValue(movement));
+            Assert.Contains(lines, line => line.Contains("[Camera] Apply") && line.Contains("(no W)"));
+            Assert.DoesNotContain(lines, line => line.Contains("[Steering]") && line.Contains(" down."));
         }
 
         [Fact]

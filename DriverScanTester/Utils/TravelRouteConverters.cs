@@ -2,6 +2,7 @@ using System;
 using System.Globalization;
 using System.Windows.Data;
 using DriverScanTester.Models;
+using DriverScanTester.Services;
 
 namespace DriverScanTester.Utils
 {
@@ -25,6 +26,21 @@ namespace DriverScanTester.Utils
         public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
             => value is TravelRouteCompletionMode mode
                 ? (mode == TravelRouteCompletionMode.ExpectedMapReached ? "Destination map loaded" : "Last waypoint reached")
+                : "";
+
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+            => System.Windows.Data.Binding.DoNothing;
+    }
+
+    /// <summary>
+    /// Converts a MovementSteeringMode (nullable) into its friendly display text:
+    /// KeyboardTurn = WAD keys, DirectCamera = camera angle written directly.
+    /// </summary>
+    public sealed class SteeringModeTextConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+            => value is MovementSteeringMode mode
+                ? (mode == MovementSteeringMode.DirectCamera ? "Camera angle" : "WAD (W + A/D)")
                 : "";
 
         public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)

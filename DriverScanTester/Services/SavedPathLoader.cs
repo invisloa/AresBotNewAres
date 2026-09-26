@@ -66,7 +66,8 @@ namespace DriverScanTester.Services
                         pt.StuckRecoveryPath,
                         pt.StuckRecoveryMobCameraDistance,
                         pt.OnArrivalOperation ?? "",
-                        pt.IsOperationStep));
+                        pt.IsOperationStep,
+                        pt.SteeringMode));
                 }
 
                 _log($"[SavedPathLoader] Loaded '{segmentFileName}': {waypoints.Count} points.");

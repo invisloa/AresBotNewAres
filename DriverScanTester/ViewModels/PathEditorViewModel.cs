@@ -62,6 +62,17 @@ namespace DriverScanTester.ViewModels
             set => SetProperty(ref _segmentBotMode, value);
         }
 
+        private MovementSteeringMode _segmentSteeringMode = MovementSteeringMode.KeyboardTurn;
+        /// <summary>
+        /// Steering default applied to newly added/captured points. WAD (KeyboardTurn) by
+        /// default; each point in the grid can be overridden individually.
+        /// </summary>
+        public MovementSteeringMode SegmentSteeringMode
+        {
+            get => _segmentSteeringMode;
+            set => SetProperty(ref _segmentSteeringMode, value);
+        }
+
         private string _segmentCameraDistanceLockText = PathPoint.DefaultCameraDistanceLock.ToString();
         public string SegmentCameraDistanceLockText
         {
@@ -225,8 +236,8 @@ namespace DriverScanTester.ViewModels
         {
             short cameraDistanceLock = GetSegmentCameraDistanceLock();
             short attackDisengageDistance = GetSegmentAttackDisengageDistance();
-            Points.Add(new PathPoint(0, 0, SegmentPrecision, SegmentBotMode, cameraDistanceLock, attackDisengageDistance, SegmentZoneRestriction));
-            StatusText = $"Added new point (0,0) with cam lock {cameraDistanceLock} and attack disengage {attackDisengageDistance}.";
+            Points.Add(new PathPoint(0, 0, SegmentPrecision, SegmentBotMode, cameraDistanceLock, attackDisengageDistance, SegmentZoneRestriction, steeringMode: SegmentSteeringMode));
+            StatusText = $"Added new point (0,0) with cam lock {cameraDistanceLock}, attack disengage {attackDisengageDistance} and {DescribeSteering(SegmentSteeringMode)} steering.";
         }
 
         private void AddMethodStep()
@@ -238,7 +249,8 @@ namespace DriverScanTester.ViewModels
                 SegmentBotMode,
                 GetSegmentCameraDistanceLock(),
                 GetSegmentAttackDisengageDistance(),
-                SegmentZoneRestriction)
+                SegmentZoneRestriction,
+                steeringMode: SegmentSteeringMode)
             {
                 IsOperationStep = true
             };
@@ -317,8 +329,8 @@ namespace DriverScanTester.ViewModels
                 float y = (float)BitConverter.ToInt16(yBuf, 0);
                 short cameraDistanceLock = GetSegmentCameraDistanceLock();
                 short attackDisengageDistance = GetSegmentAttackDisengageDistance();
-                Points.Add(new PathPoint(x, y, SegmentPrecision, SegmentBotMode, cameraDistanceLock, attackDisengageDistance, SegmentZoneRestriction));
-                StatusText = $"Captured ({x}, {y}) with {SegmentPrecision} precision, {SegmentBotMode}, cam lock {cameraDistanceLock}, attack disengage {attackDisengageDistance}.";
+                Points.Add(new PathPoint(x, y, SegmentPrecision, SegmentBotMode, cameraDistanceLock, attackDisengageDistance, SegmentZoneRestriction, steeringMode: SegmentSteeringMode));
+                StatusText = $"Captured ({x}, {y}) with {SegmentPrecision} precision, {SegmentBotMode}, {DescribeSteering(SegmentSteeringMode)} steering, cam lock {cameraDistanceLock}, attack disengage {attackDisengageDistance}.";
             }
             else
             {
@@ -416,6 +428,16 @@ namespace DriverScanTester.ViewModels
                 if (loaded != null)
                 {
                     var loadedPoints = loaded.Points ?? new List<PathPoint>();
+
+                    // Legacy path files have no per-point steering field. Normalize them to
+                    // WAD (KeyboardTurn) so the editor shows the effective mode of a normal
+                    // route; explicit values from newer files are preserved.
+                    foreach (var p in loadedPoints)
+                    {
+                        if (p.SteeringMode == null)
+                            p.SteeringMode = MovementSteeringMode.KeyboardTurn;
+                    }
+
                     Points = new ObservableCollection<PathPoint>(loadedPoints);
                     SegmentName = loaded.Name;
                     SegmentPrecision = loaded.Precision;
@@ -426,6 +448,7 @@ namespace DriverScanTester.ViewModels
                     {
                         SegmentCameraDistanceLockText = loadedPoints[0].CameraDistanceLock.ToString();
                         SegmentAttackDisengageDistanceText = loadedPoints[0].AttackDisengageDistance.ToString();
+                        SegmentSteeringMode = loadedPoints[0].SteeringMode ?? MovementSteeringMode.KeyboardTurn;
                     }
                     else
                     {
@@ -456,7 +479,8 @@ namespace DriverScanTester.ViewModels
                 p.StuckRecoveryPath,
                 p.StuckRecoveryMobCameraDistance,
                 p.OnArrivalOperation ?? "",
-                p.IsOperationStep)).ToList();
+                p.IsOperationStep,
+                p.SteeringMode)).ToList();
             OnRunPath?.Invoke(list, LoopRoute);
             StatusText = "Running current editor path...";
         }
@@ -481,6 +505,9 @@ namespace DriverScanTester.ViewModels
                 StatusText = "Library Error: " + ex.Message;
             }
         }
+
+        private static string DescribeSteering(MovementSteeringMode? mode) =>
+            mode == MovementSteeringMode.DirectCamera ? "camera-angle" : "WAD";
 
         private short GetSegmentCameraDistanceLock()
         {

@@ -19,6 +19,9 @@ namespace DriverScanTester.Services
 
     /// <summary>
     /// Runs a MovementSystem on a given set of waypoints.
+    /// The configured steering mode is the default for waypoints without their own
+    /// per-point override (KeyboardTurn/WAD by default); a waypoint's
+    /// <see cref="Waypoint.SteeringMode"/> wins when set.
     /// Abstracts away the MovementSystem lifecycle so both the old MainViewModel
     /// and the new BotWorkflowCoordinator can use it.
     /// </summary>
@@ -27,6 +30,7 @@ namespace DriverScanTester.Services
         private readonly GameMemoryService _memoryService;
         private readonly Action<string> _log;
         private readonly bool _enableWaypointSpecialRecoveries;
+        private readonly MovementSteeringMode _steeringMode;
         private MovementSystem? _movementSystem;
 
         /// <summary>
@@ -43,11 +47,13 @@ namespace DriverScanTester.Services
         public PathRunnerService(
             GameMemoryService memoryService,
             Action<string> log,
-            bool enableWaypointSpecialRecoveries = true)
+            bool enableWaypointSpecialRecoveries = true,
+            MovementSteeringMode steeringMode = MovementSteeringMode.KeyboardTurn)
         {
             _memoryService = memoryService;
             _log = log;
             _enableWaypointSpecialRecoveries = enableWaypointSpecialRecoveries;
+            _steeringMode = steeringMode;
         }
 
         /// <summary>
@@ -83,7 +89,8 @@ namespace DriverScanTester.Services
                 customPath: waypoints,
                 initialMode: initialMode,
                 loopPath: loop,
-                enableWaypointSpecialRecoveries: _enableWaypointSpecialRecoveries)
+                enableWaypointSpecialRecoveries: _enableWaypointSpecialRecoveries,
+                steeringMode: _steeringMode)
             {
                 InternalRepotEnabled = false, // External coordinator handles repot
                 WaypointRecoveryExecutor = WaypointRecoveryExecutor

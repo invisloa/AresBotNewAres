@@ -33,7 +33,8 @@ namespace DriverScanTester.Services
             _auxiliaryPathRunner = new PathRunnerService(
                 memoryService,
                 log,
-                enableWaypointSpecialRecoveries: false);
+                enableWaypointSpecialRecoveries: false,
+                steeringMode: MovementSteeringMode.DirectCamera);
 
             var context = new OperationContext(
                 memoryService,

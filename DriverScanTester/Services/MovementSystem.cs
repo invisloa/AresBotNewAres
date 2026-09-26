@@ -18,6 +18,12 @@ namespace DriverScanTester.Services
         High = 20
     }
 
+    public enum MovementSteeringMode
+    {
+        KeyboardTurn,
+        DirectCamera
+    }
+
     public enum BotMode
     {
         OnlyMove,
@@ -56,6 +62,13 @@ namespace DriverScanTester.Services
         public short CameraDistanceLock { get; set; }
         public short AttackDisengageDistance { get; set; }
         public ZoneRestriction ZoneRestriction { get; set; }
+        /// <summary>
+        /// Per-waypoint approach steering override: KeyboardTurn = WAD keys (A/D turn while
+        /// W drives), DirectCamera = write the camera angle directly. Null = use the
+        /// MovementSystem's configured default mode (KeyboardTurn / WAD for normal routes,
+        /// DirectCamera for auxiliary recovery routes).
+        /// </summary>
+        public MovementSteeringMode? SteeringMode { get; set; }
         public WaypointStuckRecoveryType StuckRecoveryType { get; set; }
         public string StuckRecoveryOperation { get; set; }
         public string StuckRecoveryPath { get; set; }
@@ -87,7 +100,8 @@ namespace DriverScanTester.Services
             string stuckRecoveryPath = "",
             short stuckRecoveryMobCameraDistance = DefaultCameraDistanceLock,
             string onArrivalOperation = "",
-            bool isOperationStep = false)
+            bool isOperationStep = false,
+            MovementSteeringMode? steeringMode = null)
         {
             X = x;
             Y = y;
@@ -102,6 +116,7 @@ namespace DriverScanTester.Services
             StuckRecoveryMobCameraDistance = stuckRecoveryMobCameraDistance;
             OnArrivalOperation = onArrivalOperation;
             IsOperationStep = isOperationStep;
+            SteeringMode = steeringMode;
         }
     }
 
@@ -112,6 +127,7 @@ namespace DriverScanTester.Services
         private readonly CombatHandler _combatHandler;
         private readonly RepotHelper _repotHelper;
         private readonly bool _enableWaypointSpecialRecoveries;
+        private readonly MovementSteeringMode _steeringMode;
 
         public WaypointRecoveryExecutor? WaypointRecoveryExecutor { get; set; }
 
@@ -198,6 +214,7 @@ namespace DriverScanTester.Services
         private float _finalStandbyX;
         private float _finalStandbyY;
         private BotMode _finalStandbyMode = BotMode.OnlyMove;
+        private MovementSteeringMode? _finalStandbySteeringMode;
         private short _finalStandbyAtkDis = 0;
 
         // Initial route resync (first tick — find nearest segment)
@@ -287,6 +304,16 @@ namespace DriverScanTester.Services
         // Bearing state
         private const float UnsetBearing = BotConstants.Movement.UnsetBearing;
         private float _lastSetBearingDeg = UnsetBearing;
+        private float? _keyboardFrozenBearingDeg;
+
+        private enum TurnKeyState
+        {
+            None,
+            LeftA,
+            RightD
+        }
+
+        private TurnKeyState _heldTurnKey = TurnKeyState.None;
         private bool _hasLastGameAngle = false;
         private float _lastSetGameAngle = 0f;
 
@@ -451,13 +478,15 @@ namespace DriverScanTester.Services
             BotMode initialMode = BotMode.OnlyMove,
             bool loopPath = false,
             bool enableWaypointSpecialRecoveries = true,
-            WaypointRecoveryExecutor? waypointRecoveryExecutor = null)
+            WaypointRecoveryExecutor? waypointRecoveryExecutor = null,
+            MovementSteeringMode steeringMode = MovementSteeringMode.KeyboardTurn)
         {
             _memoryService = memoryService;
             _log = log;
             _combatHandler = new CombatHandler(log);
             _repotHelper = new RepotHelper(memoryService, log, StopMoving, () => _goalReached = true);
             _enableWaypointSpecialRecoveries = enableWaypointSpecialRecoveries;
+            _steeringMode = steeringMode;
             WaypointRecoveryExecutor = waypointRecoveryExecutor;
             Waypoint2 = (targetX, targetY);
             GlobalPrecision = precision;
@@ -471,8 +500,11 @@ namespace DriverScanTester.Services
 
             _isInitialized = true;
             _log($"MovementSystem: Initialized with GameMemoryService, Default Precision: {GlobalPrecision}, Loop: {LoopPath}");
+            _log($"[Steering] DefaultMode={_steeringMode} (per-waypoint overrides allowed) tolerance={BotConstants.Movement.KeyboardTurnToleranceDegrees:F1}°.");
             _log($"[LocalMap] Initial map ID = {initialMapId}.");
-            _log($"[BearingCalib] Using pure float math: Math.Atan2(target-current) → radians written to camera (32-bit float).");
+            _log(_steeringMode == MovementSteeringMode.DirectCamera
+                ? "[BearingCalib] Using pure float math: Math.Atan2(target-current) → radians written directly to camera (32-bit float). Legacy direct steering active."
+                : "[BearingCalib] Using calibrated bearing math; actual camera yaw feeds held A/D keyboard steering.");
 
             if (customPath != null)
             {
@@ -488,7 +520,8 @@ namespace DriverScanTester.Services
                 foreach (var p in _initialPath)
                 {
                     string methodTag = p.IsOperationStep ? $" METHOD:{p.OnArrivalOperation} (no position check)" : "";
-                    _log($"[Path] #{index}: ({p.X:F1}, {p.Y:F1}) Precision:{p.Precision} Mode:{p.Mode} CamLock:{p.CameraDistanceLock} AtkDis:{p.AttackDisengageDistance}{methodTag}");
+                    string steeringTag = p.SteeringMode?.ToString() ?? "Default";
+                    _log($"[Path] #{index}: ({p.X:F1}, {p.Y:F1}) Precision:{p.Precision} Mode:{p.Mode} CamLock:{p.CameraDistanceLock} AtkDis:{p.AttackDisengageDistance} Steer:{steeringTag}{methodTag}");
                     index++;
                 }
 
@@ -870,7 +903,7 @@ namespace DriverScanTester.Services
                 if (distFromFinal > _finalStandbyAtkDis + 2f)
                 {
                     _log($"[Standby] Outside AtkDis ({distFromFinal:F1} > {_finalStandbyAtkDis}) — returning to final waypoint.");
-                    MoveTowards(currX, currY, _finalStandbyX, _finalStandbyY);
+                    MoveTowards(currX, currY, _finalStandbyX, _finalStandbyY, ResolveSteeringMode(_finalStandbySteeringMode, _steeringMode));
                     return;
                 }
 
@@ -1380,7 +1413,7 @@ namespace DriverScanTester.Services
                 {
                     string ghostFlag = IsGhostWaypoint(target) ? " [GHOST]" : "";
                     float brgToWp = GeometryUtils.GetBearingToTargetDeg(currX, currY, target.X, target.Y);
-                    _log($"[Route] T:{_tickCount} WP{ghostFlag}({target.X:F1},{target.Y:F1}) d:{distNow:F2} th:{thresholdNow:F2} Brg:{brgToWp:F1}deg Act:{currentAction} Mob:{mobSelected} M:{target.Mode} P:{target.Precision} Cam:{_memoryService.GetCameraAngle()}");
+                    _log($"[Route] T:{_tickCount} WP{ghostFlag}({target.X:F1},{target.Y:F1}) d:{distNow:F2} th:{thresholdNow:F2} Brg:{brgToWp:F1}deg Act:{currentAction} Mob:{mobSelected} M:{target.Mode} P:{target.Precision} Steer:{ResolveSteeringMode(target.SteeringMode, _steeringMode)} Cam:{_memoryService.GetCameraAngle()}");
                 }
 
                 // Track healthy movement bearing for escape direction
@@ -1391,7 +1424,7 @@ namespace DriverScanTester.Services
                     _lastHealthyMoveTime = DateTime.Now;
                 }
 
-                MoveTowards(currX, currY, target.X, target.Y);
+                MoveTowards(currX, currY, target.X, target.Y, ResolveSteeringMode(target.SteeringMode, _steeringMode));
             }
             else
             {
@@ -1544,6 +1577,7 @@ namespace DriverScanTester.Services
                     _finalStandbyY = target.Y;
                     _finalStandbyMode = target.Mode;
                     _finalStandbyAtkDis = target.AttackDisengageDistance;
+                    _finalStandbySteeringMode = target.SteeringMode;
                     _finalStandbyActive = true;
 
                     HandleEmptyWaypointQueueAfterAdvance();
@@ -1727,19 +1761,43 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Applies a desired bearing: converts bearing to game camera angle (radians),
-        /// sets the camera directly (subject to filtering), and holds W for forward movement.
+        /// Per-waypoint steering resolution: an explicit waypoint mode wins, otherwise the
+        /// MovementSystem/path-runner configured default is used.
         /// </summary>
-        private void ApplySteeringBearing(float bearingDeg)
+        internal static MovementSteeringMode ResolveSteeringMode(
+            MovementSteeringMode? waypointMode,
+            MovementSteeringMode defaultMode)
+            => waypointMode ?? defaultMode;
+
+        /// <summary>
+        /// Applies a desired bearing using the supplied steering mode.
+        /// </summary>
+        private void ApplySteeringBearing(float bearingDeg, MovementSteeringMode steeringMode)
         {
+            if (steeringMode == MovementSteeringMode.DirectCamera)
+            {
+                ApplyDirectSteeringBearing(bearingDeg);
+                return;
+            }
+
+            ApplyKeyboardSteeringBearing(bearingDeg);
+        }
+
+        /// <summary>
+        /// Legacy direct-camera steering. Its filtering and write state intentionally
+        /// remain separate from the feedback-controlled keyboard steering state.
+        /// </summary>
+        private void ApplyDirectSteeringBearing(float bearingDeg)
+        {
+            ReleaseTurnKey("direct camera steering");
+
             float cameraRadians = GeometryUtils.ConvertBearingToRadians(bearingDeg);
             _lastSetBearingDeg = bearingDeg;
             _lastSetGameAngle = cameraRadians;
 
             // Capture whether this is a fresh segment BEFORE mutating _hasLastGameAngle.
-            // ResetBearingState() sets _hasLastGameAngle=false; the very next call to
-            // ApplySteeringBearing should bypass the camera filter so the new heading
-            // is applied immediately.
+            // ResetBearingState() sets _hasLastGameAngle=false; the very next direct
+            // steering call bypasses the camera filter so the new heading is applied immediately.
             bool isFreshSegment = !_hasLastGameAngle;
             _hasLastGameAngle = true;
 
@@ -1757,12 +1815,158 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// Feedback-controls A/D from the actual horizontal camera angle while keeping W held.
+        /// Heading errors above <see cref="BotConstants.Movement.KeyboardTurnCameraSnapThresholdDegrees"/>
+        /// bypass the A/D feedback loop and snap the camera directly instead, so the character
+        /// does not walk a wide arc away from the waypoint while a very large turn completes.
+        /// W stays held in both paths.
+        /// </summary>
+        private void ApplyKeyboardSteeringBearing(float bearingDeg)
+        {
+            float desiredBearingDeg = GeometryUtils.NormalizeBearingDeg(bearingDeg);
+
+            // Keep the complete W + turn-key ownership transition atomic with StopMoving.
+            lock (_inputLock)
+            {
+                StartMoving();
+
+                float currentRadians = _memoryService.GetCameraAngle();
+                float currentBearingDeg = GeometryUtils.ConvertRadiansToBearingDeg(currentRadians);
+                TurnKeyState desiredTurnKey = GetDesiredTurnKey(
+                    currentBearingDeg,
+                    desiredBearingDeg,
+                    out float signedError);
+
+                // Very large corrections are not steered with A/D — snap the camera instead.
+                // ApplyDirectSteeringBearing releases any held A/D through ReleaseTurnKey,
+                // writes the new heading immediately (the camera filter lets a difference
+                // this large through) and keeps W held.
+                if (ShouldSnapCameraForLargeTurn(signedError))
+                {
+                    _log($"[Steering] Large turn {signedError:+0.0;-0.0;0.0}° (> {BotConstants.Movement.KeyboardTurnCameraSnapThresholdDegrees:F0}°) — direct camera snap. current={currentBearingDeg:F1}° target={desiredBearingDeg:F1}°");
+                    ApplyDirectSteeringBearing(desiredBearingDeg);
+                    return;
+                }
+
+                string details = $"current={currentBearingDeg:F1}° target={desiredBearingDeg:F1}° error={signedError:+0.0;-0.0;0.0}°";
+
+                if (desiredTurnKey == TurnKeyState.None)
+                    SetTurnKey(TurnKeyState.None, $"target reached. {details}");
+                else
+                    SetTurnKey(desiredTurnKey, details);
+            }
+        }
+
+        /// <summary>
+        /// Pure keyboard steering decision: positive shortest error means D, negative means A;
+        /// error within the inclusive tolerance means no turn key.
+        /// </summary>
+        private static TurnKeyState GetDesiredTurnKey(
+            float currentBearingDeg,
+            float desiredBearingDeg,
+            out float signedError)
+        {
+            float normalizedTarget = GeometryUtils.NormalizeBearingDeg(desiredBearingDeg);
+            signedError = GeometryUtils.GetShortestBearingDiffDeg(currentBearingDeg, normalizedTarget);
+
+            if (Math.Abs(signedError) <= BotConstants.Movement.KeyboardTurnToleranceDegrees)
+                return TurnKeyState.None;
+
+            return GetTurnKeyForSignedError(signedError);
+        }
+
+        /// <summary>
+        /// Central signed-error mapping: increasing bearings use D and decreasing bearings use A.
+        /// Callers that control physical steering must apply the tolerance before this mapping.
+        /// </summary>
+        private static TurnKeyState GetTurnKeyForSignedError(float signedError)
+        {
+            return signedError > 0f ? TurnKeyState.RightD : TurnKeyState.LeftA;
+        }
+
+        /// <summary>
+        /// True when the heading error is so large that steering with W+A/D would make the
+        /// character walk a wide arc; such turns snap the camera directly instead.
+        /// Strictly greater than the threshold: an error exactly at the threshold still
+        /// uses the smooth A/D curve.
+        /// </summary>
+        private static bool ShouldSnapCameraForLargeTurn(float signedError)
+            => Math.Abs(signedError) > BotConstants.Movement.KeyboardTurnCameraSnapThresholdDegrees;
+
+        /// <summary>
+        /// Pure ownership transition. Returned values are the key to release first and
+        /// the key to press second; equal requests produce no key events.
+        /// </summary>
+        private static (TurnKeyState Release, TurnKeyState Press) GetTurnKeyTransition(
+            TurnKeyState current,
+            TurnKeyState desired)
+        {
+            if (current == desired)
+                return (TurnKeyState.None, TurnKeyState.None);
+
+            return (current, desired);
+        }
+
+        private bool SetTurnKey(TurnKeyState desired, string transitionDetails)
+        {
+            lock (_inputLock)
+            {
+                TurnKeyState previous = _heldTurnKey;
+                (TurnKeyState release, TurnKeyState press) = GetTurnKeyTransition(previous, desired);
+                if (release == TurnKeyState.None && press == TurnKeyState.None)
+                    return false;
+
+                if (release != TurnKeyState.None)
+                    SendTurnKey(release, keyUp: true);
+                if (press != TurnKeyState.None)
+                    SendTurnKey(press, keyUp: false);
+
+                _heldTurnKey = desired;
+
+                if (desired == TurnKeyState.None)
+                    _log($"[Steering] {GetTurnKeyName(previous)} up — {transitionDetails}");
+                else if (previous != TurnKeyState.None)
+                    _log($"[Steering] {GetTurnKeyName(previous)} -> {GetTurnKeyName(desired)}. {transitionDetails}");
+                else
+                    _log($"[Steering] {GetTurnKeyName(desired)} down. {transitionDetails}");
+
+                return true;
+            }
+        }
+
+        private static string GetTurnKeyName(TurnKeyState key) => key switch
+        {
+            TurnKeyState.LeftA => "A",
+            TurnKeyState.RightD => "D",
+            _ => "None"
+        };
+
+        private static void SendTurnKey(TurnKeyState key, bool keyUp)
+        {
+            byte vk = key == TurnKeyState.LeftA ? GameInput.VK_A : GameInput.VK_D;
+            byte scan = key == TurnKeyState.LeftA ? GameInput.SCAN_A : GameInput.SCAN_D;
+            uint flags = keyUp ? (uint)GameInput.KEYEVENTF_KEYUP : 0u;
+            GameInput.keybd_event(vk, scan, flags, 0);
+        }
+
+        private void ReleaseTurnKey(string reason)
+        {
+            lock (_inputLock)
+            {
+                SetTurnKey(TurnKeyState.None, reason);
+                _keyboardFrozenBearingDeg = null;
+            }
+        }
+
+        /// <summary>
         /// Applies a desired bearing: converts bearing to game camera angle (radians),
         /// sets the camera directly (subject to filtering) — WITHOUT pressing W.
         /// Used by ReverseDiagonalRecovery which controls W itself.
         /// </summary>
         private void ApplyCameraBearing(float bearingDeg)
         {
+            ReleaseTurnKey("direct camera recovery");
+
             float cameraRadians = GeometryUtils.ConvertBearingToRadians(bearingDeg);
             _lastSetBearingDeg = bearingDeg;
             _lastSetGameAngle = cameraRadians;
@@ -1872,19 +2076,45 @@ namespace DriverScanTester.Services
             return diff;
         }
 
-        private void MoveTowards(float currX, float currY, float targetX, float targetY)
+        private void MoveTowards(float currX, float currY, float targetX, float targetY, MovementSteeringMode steeringMode)
         {
             float targetBearingDeg = GeometryUtils.GetBearingToTargetDeg(currX, currY, targetX, targetY);
 
-            // ── Heading freeze near waypoint ──
-            // When close to the current waypoint, the bearing-to-target oscillates
-            // wildly due to position jitter.  Freeze the last stable camera angle
-            // and just keep moving forward until the waypoint is reached.
+            if (steeringMode == MovementSteeringMode.KeyboardTurn)
+            {
+                float dist = GeometryUtils.Distance(currX, currY, targetX, targetY);
+                // Keep the existing freeze distance calculation; freeze the desired
+                // waypoint bearing instead of the last directly-written camera angle.
+                float reachBase = GeometryUtils.GetWaypointReachThreshold(MovementPrecision.Medium);
+                float freezeThreshold = Math.Max(reachBase * 2.0f, HeadingFreezeDistanceBase);
+
+                if (dist <= freezeThreshold)
+                {
+                    if (!_keyboardFrozenBearingDeg.HasValue)
+                    {
+                        _keyboardFrozenBearingDeg = targetBearingDeg;
+                        _log($"[Steering] Near-waypoint heading frozen at {_keyboardFrozenBearingDeg.Value:F1}°");
+                    }
+
+                    targetBearingDeg = _keyboardFrozenBearingDeg.Value;
+                }
+                else
+                {
+                    _keyboardFrozenBearingDeg = null;
+                }
+
+                // Continue feedback steering against the frozen target so an unfinished
+                // turn is never left held indefinitely when entering the freeze region.
+                ApplySteeringBearing(targetBearingDeg, steeringMode);
+                return;
+            }
+
+            // Preserve the legacy direct-camera near-waypoint behavior: once a camera
+            // heading exists, keep W held and stop changing that heading inside the
+            // original freeze distance.
             if (_hasLastGameAngle)
             {
                 float dist = GeometryUtils.Distance(currX, currY, targetX, targetY);
-                // Use the same default threshold calculation as GetEffectiveWaypointReachThreshold
-                // but with a minimum floor so very-precise waypoints don't break freeze.
                 float reachBase = GeometryUtils.GetWaypointReachThreshold(MovementPrecision.Medium);
                 float freezeThreshold = Math.Max(reachBase * 2.0f, HeadingFreezeDistanceBase);
 
@@ -1895,7 +2125,7 @@ namespace DriverScanTester.Services
                 }
             }
 
-            ApplySteeringBearing(targetBearingDeg);
+            ApplySteeringBearing(targetBearingDeg, steeringMode);
         }
 
         // ========================================================================
@@ -1908,6 +2138,7 @@ namespace DriverScanTester.Services
             _hasLastGameAngle = false;
             _lastSetGameAngle = 0f;
             _hasCameraHysteresisCandidate = false;
+            _keyboardFrozenBearingDeg = null;
         }
 
         private void ResetActionStuckTracking()
@@ -2389,19 +2620,42 @@ namespace DriverScanTester.Services
             {
                 // Log only on a real transition — repeated StopMoving calls (multiple
                 // callers per tick) used to flood the log with identical W-up lines.
-                if (_isMovingForward)
+                bool wasMovingForward = _isMovingForward;
+                if (wasMovingForward)
                 {
                     _isMovingForward = false;
                     _stopMoveCount++;
-                    _log($"[Input] W up (StopMoving) — call #{_stopMoveCount}. Tick:{_tickCount}");
                 }
 
-                GameInput.keybd_event(GameInput.VK_W, GameInput.SCAN_W, (uint)GameInput.KEYEVENTF_KEYUP, 0);
-            }
+                // Physical cleanup is unconditional and logical turn ownership is reset
+                // even if one of the native KEYUP calls fails.
+                try
+                {
+                    GameInput.keybd_event(GameInput.VK_W, GameInput.SCAN_W, (uint)GameInput.KEYEVENTF_KEYUP, 0);
+                }
+                finally
+                {
+                    try
+                    {
+                        GameInput.keybd_event(GameInput.VK_A, GameInput.SCAN_A, (uint)GameInput.KEYEVENTF_KEYUP, 0);
+                    }
+                    finally
+                    {
+                        try
+                        {
+                            GameInput.keybd_event(GameInput.VK_D, GameInput.SCAN_D, (uint)GameInput.KEYEVENTF_KEYUP, 0);
+                        }
+                        finally
+                        {
+                            _heldTurnKey = TurnKeyState.None;
+                            _keyboardFrozenBearingDeg = null;
+                        }
+                    }
+                }
 
-            // Defensive cleanup: release A/D in case they were pressed by a previous version
-            GameInput.keybd_event(GameInput.VK_A, GameInput.SCAN_A, (uint)GameInput.KEYEVENTF_KEYUP, 0);
-            GameInput.keybd_event(GameInput.VK_D, GameInput.SCAN_D, (uint)GameInput.KEYEVENTF_KEYUP, 0);
+                if (wasMovingForward)
+                    _log($"[Input] W up (StopMoving) — call #{_stopMoveCount}. Tick:{_tickCount}");
+            }
         }
 
         // ── Skill 3 management ──

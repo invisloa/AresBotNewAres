@@ -28,7 +28,6 @@ namespace DriverScanTester.Services
 
         private Bitmap _bitmap;
         private Graphics _graphics;
-        private bool _wasSodDetected = false;
 
         // ── Scan-phase spacebar spam ──
         // A background task spams spacebar while the pixel scan is running,
@@ -42,7 +41,8 @@ namespace DriverScanTester.Services
         //   AreaLoot    → press spacebar x3, snapshot inventory, check after 100ms
         //   AreaLootWait→ compare inventory snapshot; if changed → keep spacebar-looting;
         //                  if no change after several tries → switch to Scan
-        //   Scan        → pixel-scan for SOD/SOP white pixels and collect them
+        //   Scan        → pixel-scan: label white blobs, filter ring/name/line shapes,
+        //                  probe only loot-like blobs (small compact sparkles)
         //   ScanComplete→ a full scan pass found no items; hold briefly so the movement
         //                  system can walk away, then restart the cycle from Idle
         private enum LootMachineState { Idle, PostMobTab, AreaLoot, AreaLootWait, Scan, ScanComplete }
@@ -157,9 +157,6 @@ namespace DriverScanTester.Services
         private int _referenceClientOriginY;
         private int _coordOffsetX;
         private int _coordOffsetY;
-
-        /// <summary>Maximum white pixels before aborting scan — dialogs/UI have tons of white.</summary>
-        private const int MAX_WHITE_PIXELS = 200;
 
         /// <summary>Startup time — skip scans for the first 5s so loot doesn't run before movement.</summary>
         private readonly DateTime _createdAt = DateTime.UtcNow;
@@ -747,6 +744,19 @@ namespace DriverScanTester.Services
 
         private bool ScanRegion(int[] xRange, int[] yRange, string regionName)
         {
+            // ── Loot diagnostics ──
+            // Clone the exact frame that is scanned and save it (annotated) to
+            // LootSSFolder once the region pass finishes, so loot detection problems
+            // can be diagnosed from what the bot actually saw. The clone MUST be taken
+            // right after CaptureScreen(): _bitmap is reused by every capture
+            // (including the post-collection refresh) and would otherwise be gone.
+            Bitmap? diagnosticFrame = null;
+            var diagnosticWhiteHits = new List<Point>();
+            Rectangle diagnosticScanRegion = Rectangle.Empty;
+            Rectangle diagnosticExcludeZone = Rectangle.Empty;
+            int diagnosticWhiteCount = 0;
+            string diagnosticOutcome = "scan-error";
+
             try
             {
                 CaptureScreen();
@@ -754,6 +764,7 @@ namespace DriverScanTester.Services
                 // If bitmap capture failed (window not found, etc.), abort scan.
                 if (_bitmap == null || _clientWidth <= 0 || _clientHeight <= 0)
                 {
+                    diagnosticOutcome = "capture-failed";
                     return false;
                 }
 
@@ -776,11 +787,16 @@ namespace DriverScanTester.Services
                 if (xStart >= xEnd || yStart >= yEnd)
                 {
                     _log($"[Loot] {regionName}: clamped range is empty (out of client area).");
+                    diagnosticOutcome = "empty-range";
                     return false;
                 }
 
-                _wasSodDetected = false;
-                int whiteCount = 0;
+                // Snapshot the frame under analysis (see diagnostics comment above).
+                diagnosticFrame = ScreenshotService.CloneLootScanFrame(_bitmap);
+                diagnosticScanRegion = new Rectangle(xStart, yStart, xEnd - xStart, yEnd - yStart);
+                diagnosticExcludeZone = new Rectangle(
+                    exclXMin, exclYMin, exclXMax - exclXMin + 1, exclYMax - exclYMin + 1);
+
                 int scanPixels = (xEnd - xStart) * (yEnd - yStart);
 
                 // Check once before starting the scan — if we're in city, abort
@@ -792,51 +808,323 @@ namespace DriverScanTester.Services
                 if (ShouldAbortLoot())
                 {
                     _log($"[Loot] {regionName}: city/combat detected before scan — aborting.");
+                    diagnosticOutcome = "city-abort";
                     return false;
                 }
 
+                // ── Phase A: collect every pure-white pixel in the region — no input.
+                //    The old scan probed each white pixel immediately, so mob names,
+                //    target rings and sprite highlights produced hundreds of useless
+                //    mouse probes and even aborted whole region passes. Now the whites
+                //    are gathered first and only filtered survivors are probed. ──
+                var whitePoints = new List<Point>();
                 for (int x = xStart; x < xEnd; x++)
                 {
                     for (int y = yStart; y < yEnd; y++)
                     {
+                        if (x >= exclXMin && x <= exclXMax && y >= exclYMin && y <= exclYMax)
+                            continue; // character exclude zone
+
                         Color pixelColor = _bitmap.GetPixel(x, y);
+                        if (pixelColor.R == 255 && pixelColor.G == 255 && pixelColor.B == 255)
+                            whitePoints.Add(new Point(x, y));
+                    }
+                }
+                diagnosticWhiteCount = whitePoints.Count;
 
-                        bool inExcludeZone = (x >= exclXMin && x <= exclXMax && y >= exclYMin && y <= exclYMax);
-                        bool isWhite = (pixelColor.R == 255 && pixelColor.G == 255 && pixelColor.B == 255);
+                // ── Phase B: label 8-connected components and keep only loot-shaped
+                //    blobs. Target rings (long thin arcs), mob-name text (glyph rows),
+                //    weapon lines and oversized sprite highlights are dropped instead
+                //    of being probed; a dialog is one huge blob and is dropped too. ──
+                List<WhiteComponent> components = LabelWhiteComponents(whitePoints);
+                var candidates = new List<WhiteComponent>();
+                int filteredComponents = 0;
+                foreach (WhiteComponent component in components)
+                {
+                    if (IsLootCandidate(component))
+                        candidates.Add(component);
+                    else
+                        filteredComponents++;
+                }
 
-                        if (!inExcludeZone && isWhite)
+                // Mob names are glyph rows — drop them so a name can never eat the
+                // probe budget before the loot below/next to it is reached.
+                HashSet<WhiteComponent> textGlyphs = FindTextGlyphs(candidates);
+                if (textGlyphs.Count > 0)
+                    candidates.RemoveAll(textGlyphs.Contains);
+
+                // Probe left → right, like the old column-major pixel scan.
+                candidates.Sort((a, b) => a.XMin != b.XMin ? a.XMin.CompareTo(b.XMin) : a.YMin.CompareTo(b.YMin));
+
+                // ── Phase C: probe only the surviving candidate blobs. The hover check
+                //    is unchanged: small blobs get every pixel, larger ones a handful of
+                //    sampled points. Tiny blobs keep the old ±1 diagonal search. ──
+                int probesUsed = 0;
+                foreach (WhiteComponent component in candidates)
+                {
+                    if (ShouldAbortLoot())
+                    {
+                        diagnosticOutcome = "city-abort";
+                        return false;
+                    }
+
+                    bool addDiagonals = component.Area <= TinyProbeWithDiagonalsArea;
+                    foreach (Point probe in SelectProbePoints(component))
+                    {
+                        if (TryCollectAt(probe.X, probe.Y)) { diagnosticOutcome = "collected"; return true; }
+                        probesUsed++;
+
+                        if (addDiagonals)
                         {
-                            whiteCount++;
-                            if (whiteCount > MAX_WHITE_PIXELS)
-                            {
-                                // Exceeded threshold — this is likely a dialog/UI window,
-                                // not the game world. Abort the entire scan pass.
-                                _log($"[Loot] {regionName}: aborted — >{MAX_WHITE_PIXELS} white pixels (likely dialog/UI).");
-                                return false;
-                            }
+                            if (TryCollectAt(probe.X + 1, probe.Y + 1)) { diagnosticOutcome = "collected"; return true; }
+                            if (TryCollectAt(probe.X - 1, probe.Y - 1)) { diagnosticOutcome = "collected"; return true; }
+                            if (TryCollectAt(probe.X + 1, probe.Y - 1)) { diagnosticOutcome = "collected"; return true; }
+                            if (TryCollectAt(probe.X - 1, probe.Y + 1)) { diagnosticOutcome = "collected"; return true; }
+                            probesUsed += 4;
+                        }
 
-                            if (TryCollectAt(x, y)) return true;
-                            if (TryCollectAt(x + 1, y + 1)) return true;
-                            if (TryCollectAt(x - 1, y - 1)) return true;
-                            if (TryCollectAt(x + 1, y - 1)) return true;
-                            if (TryCollectAt(x - 1, y + 1)) return true;
+                        diagnosticWhiteHits.Add(probe);
 
-                            if (_wasSodDetected)
-                            {
-                                var (foundSx, foundSy) = BitmapLocalToScreen(x, y);
-                                _log($"[Loot] {regionName}: item hit at bitmap ({x},{y}) → screen ({foundSx},{foundSy}), {whiteCount} white px so far{KillElapsed()}.");
-                                return true;
-                            }
+                        if (probesUsed >= MaxLootProbesPerRegion)
+                        {
+                            _log($"[Loot] {regionName}: probe budget ({MaxLootProbesPerRegion}) exhausted — " +
+                                 $"{diagnosticWhiteHits.Count} probed px of {whitePoints.Count} white px in {components.Count} components; " +
+                                 $"aborting region (likely UI/effect clutter).");
+                            diagnosticOutcome = "too-many-white";
+                            return false;
                         }
                     }
                 }
-                _log($"[Loot] {regionName}: scanned {scanPixels} pixels, {whiteCount} white candidates, no item collected.");
+
+                if (whitePoints.Count > 0)
+                {
+                    _log($"[Loot] {regionName}: scanned {scanPixels} px, {whitePoints.Count} white px in {components.Count} components — " +
+                         $"{filteredComponents} filtered (ring/line/highlight), {textGlyphs.Count} text glyphs skipped, " +
+                         $"{candidates.Count} loot candidates probed ({probesUsed} probes), no item collected{KillElapsed()}.");
+                }
+                else
+                {
+                    _log($"[Loot] {regionName}: scanned {scanPixels} px, no white pixels.");
+                }
+                diagnosticOutcome = "no-item";
             }
             catch (Exception ex)
             {
                 _log($"PixelScan error: {ex.Message}");
             }
+            finally
+            {
+                // Save whatever frame was captured (if any) with the scan overlay,
+                // regardless of how the region pass ended.
+                ScreenshotService.SaveLootScanFrame(
+                    diagnosticFrame,
+                    regionName,
+                    diagnosticOutcome,
+                    _log,
+                    diagnosticWhiteCount,
+                    diagnosticScanRegion,
+                    diagnosticExcludeZone,
+                    diagnosticWhiteHits);
+            }
             return false;
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  WHITE-PIXEL SHAPE FILTER (loot candidate detection)
+        //  Mob names, target rings, weapon lines and sprite highlights are
+        //  white too (see LootSSFolder diagnostics). They are removed by
+        //  connected-component shape so only small compact blobs — the actual
+        //  loot sparkles — are probed with the IsLootMouseOver() check.
+        // ════════════════════════════════════════════════════════════════
+
+        /// <summary>Largest area (px) a white blob may have to be a loot candidate.</summary>
+        private const int MaxLootCandidateArea = 60;
+
+        /// <summary>Largest width/height (px) a white blob may have to be a loot candidate.</summary>
+        private const int MaxLootCandidateDimension = 24;
+
+        /// <summary>Blobs at most this thick but at least <see cref="ThinLineMinLength"/> long are weapon/UI lines, not loot.</summary>
+        private const int ThinLineMaxThickness = 2;
+        private const int ThinLineMinLength = 12;
+
+        /// <summary>Components at least this wide AND tall are ring arcs / name bands, never loot.</summary>
+        private const int WideBandMinWidth = 18;
+        private const int WideBandMinHeight = 12;
+
+        /// <summary>Components up to this area are probed at every pixel.</summary>
+        private const int DenseProbeMaxArea = 12;
+
+        /// <summary>Tiny blobs (1–4 px) additionally get the old ±1 diagonal hover search around each pixel.</summary>
+        private const int TinyProbeWithDiagonalsArea = 4;
+
+        /// <summary>Max probe points sampled from a non-dense component.</summary>
+        private const int MaxSampleProbePoints = 8;
+
+        /// <summary>Hard cap on mouseover probes per region pass — replaces the old raw-white-count abort.</summary>
+        private const int MaxLootProbesPerRegion = 400;
+
+        /// <summary>Text-cluster detection: a horizontal run of at least this many glyph-like blobs is a mob name.</summary>
+        private const int TextClusterMinGlyphs = 5;
+        private const int TextClusterMaxGlyphArea = 40;
+        private const int TextClusterMaxGlyphWidth = 14;
+        private const int TextClusterMaxGlyphHeight = 16;
+        private const int TextClusterMaxGapPx = 4;
+        private const int TextClusterMaxBaselineDriftPx = 5;
+
+        /// <summary>A connected group of pure-white pixels found during a region scan.</summary>
+        private sealed class WhiteComponent
+        {
+            public readonly List<Point> Points = new List<Point>();
+            public int XMin = int.MaxValue, YMin = int.MaxValue;
+            public int XMax = int.MinValue, YMax = int.MinValue;
+
+            public int Area => Points.Count;
+            public int Width => XMax - XMin + 1;
+            public int Height => YMax - YMin + 1;
+
+            public void Add(int x, int y)
+            {
+                Points.Add(new Point(x, y));
+                if (x < XMin) XMin = x;
+                if (x > XMax) XMax = x;
+                if (y < YMin) YMin = y;
+                if (y > YMax) YMax = y;
+            }
+        }
+
+        /// <summary>Groups white pixels into 8-connected components.</summary>
+        private static List<WhiteComponent> LabelWhiteComponents(List<Point> whitePoints)
+        {
+            var present = new HashSet<(int X, int Y)>(whitePoints.Count);
+            foreach (Point p in whitePoints)
+                present.Add((p.X, p.Y));
+
+            var visited = new HashSet<(int X, int Y)>(whitePoints.Count);
+            var components = new List<WhiteComponent>();
+
+            foreach (Point start in whitePoints)
+            {
+                var startKey = (start.X, start.Y);
+                if (!visited.Add(startKey))
+                    continue;
+
+                var component = new WhiteComponent();
+                var queue = new Queue<(int X, int Y)>();
+                queue.Enqueue(startKey);
+
+                while (queue.Count > 0)
+                {
+                    var (x, y) = queue.Dequeue();
+                    component.Add(x, y);
+
+                    for (int dy = -1; dy <= 1; dy++)
+                    {
+                        for (int dx = -1; dx <= 1; dx++)
+                        {
+                            if (dx == 0 && dy == 0)
+                                continue;
+
+                            var neighbor = (x + dx, y + dy);
+                            if (present.Contains(neighbor) && visited.Add(neighbor))
+                                queue.Enqueue(neighbor);
+                        }
+                    }
+                }
+
+                components.Add(component);
+            }
+
+            return components;
+        }
+
+        /// <summary>
+        /// True when a white component looks like a loot drop (small compact blob).
+        /// Large blobs (ring arcs, name bands, dialogs), thin long lines (weapon glow,
+        /// UI separators) and wide low-fill bands are rejected.
+        /// </summary>
+        private static bool IsLootCandidate(WhiteComponent component)
+        {
+            if (component.Area > MaxLootCandidateArea)
+                return false;
+            if (component.Width > MaxLootCandidateDimension || component.Height > MaxLootCandidateDimension)
+                return false;
+            if (Math.Min(component.Width, component.Height) <= ThinLineMaxThickness &&
+                Math.Max(component.Width, component.Height) >= ThinLineMinLength)
+                return false;
+            if (component.Width >= WideBandMinWidth && component.Height >= WideBandMinHeight)
+                return false;
+            return true;
+        }
+
+        /// <summary>
+        /// Finds glyph-like components arranged in horizontal runs (mob-name text) and
+        /// returns them so they are excluded from probing. Loot sparkles are few and
+        /// never arranged in long tight rows, so they survive this filter.
+        /// </summary>
+        private static HashSet<WhiteComponent> FindTextGlyphs(List<WhiteComponent> candidates)
+        {
+            var glyphs = new List<WhiteComponent>();
+            foreach (WhiteComponent c in candidates)
+            {
+                if (c.Area <= TextClusterMaxGlyphArea &&
+                    c.Width <= TextClusterMaxGlyphWidth &&
+                    c.Height <= TextClusterMaxGlyphHeight)
+                    glyphs.Add(c);
+            }
+            glyphs.Sort((a, b) => a.XMin != b.XMin ? a.XMin.CompareTo(b.XMin) : a.YMin.CompareTo(b.YMin));
+
+            var textGlyphs = new HashSet<WhiteComponent>();
+            var run = new List<WhiteComponent>();
+
+            void FlushRun()
+            {
+                if (run.Count >= TextClusterMinGlyphs)
+                {
+                    foreach (WhiteComponent glyph in run)
+                        textGlyphs.Add(glyph);
+                }
+                run.Clear();
+            }
+
+            foreach (WhiteComponent glyph in glyphs)
+            {
+                if (run.Count > 0)
+                {
+                    WhiteComponent prev = run[run.Count - 1];
+                    int gap = glyph.XMin - prev.XMax - 1;
+                    double prevCenterY = (prev.YMin + prev.YMax) / 2.0;
+                    double centerY = (glyph.YMin + glyph.YMax) / 2.0;
+
+                    if (gap > TextClusterMaxGapPx || Math.Abs(centerY - prevCenterY) > TextClusterMaxBaselineDriftPx)
+                        FlushRun();
+                }
+                run.Add(glyph);
+            }
+            FlushRun();
+
+            return textGlyphs;
+        }
+
+        /// <summary>
+        /// Probe points for a candidate component: every pixel for dense (small)
+        /// components, or evenly sampled points for larger ones. Pixels are ordered
+        /// like the old column-major scan (x, then y).
+        /// </summary>
+        private static List<Point> SelectProbePoints(WhiteComponent component)
+        {
+            var ordered = new List<Point>(component.Points);
+            ordered.Sort((a, b) => a.X != b.X ? a.X.CompareTo(b.X) : a.Y.CompareTo(b.Y));
+
+            if (component.Area <= DenseProbeMaxArea || ordered.Count <= MaxSampleProbePoints)
+                return ordered;
+
+            var probes = new List<Point>(MaxSampleProbePoints);
+            for (int i = 0; i < MaxSampleProbePoints; i++)
+            {
+                int index = (int)Math.Round(i * (ordered.Count - 1) / (double)(MaxSampleProbePoints - 1));
+                probes.Add(ordered[index]);
+            }
+            return probes;
         }
 
         private void CaptureScreen()
@@ -874,7 +1162,6 @@ namespace DriverScanTester.Services
             // Mobs/NPCs produce a different cl value and are NOT collected.
             if (_memoryService.IsLootMouseOver())
             {
-                _wasSodDetected = true;
                 CollectionClick();
                 return true;
             }
@@ -977,6 +1264,12 @@ namespace DriverScanTester.Services
             // screen content has changed).
             CaptureScreen();
             _log("[Loot] Fresh screen capture forced after click.");
+
+            // Loot diagnostics: also save the post-collection frame so the state the
+            // character ended up in (item gone / still on the ground / walked away)
+            // can be compared with the annotated frame from the scan that clicked it.
+            ScreenshotService.SaveLootScanFrame(
+                ScreenshotService.CloneLootScanFrame(_bitmap), "AfterClick", "post-click", _log);
             }
             finally
             {

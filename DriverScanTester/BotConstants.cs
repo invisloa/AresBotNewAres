@@ -200,6 +200,17 @@ namespace DriverScanTester
             /// <summary>Sentinel value meaning "no bearing set".</summary>
             public const float UnsetBearing = -999f;
 
+            /// <summary>Angular tolerance at which held keyboard steering releases A/D.</summary>
+            public const float KeyboardTurnToleranceDegrees = 10.0f;
+
+            /// <summary>
+            /// Heading error above which KeyboardTurn steering stops using W+A/D and snaps
+            /// the camera directly to the desired bearing instead. Large turns walked through
+            /// with A/D make the character run a wide arc away from the waypoint, so they are
+            /// applied as an immediate camera write (W stays held in both paths).
+            /// </summary>
+            public const float KeyboardTurnCameraSnapThresholdDegrees = 100.0f;
+
             /// <summary>Grace period in seconds after pressing W during which stuck detection is ignored.</summary>
             public const double StuckGraceAfterStartSeconds = 1.25;
 
