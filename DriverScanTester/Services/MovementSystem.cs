@@ -235,6 +235,18 @@ namespace DriverScanTester.Services
         /// <summary>Safety deadline for the current loot wait session.</summary>
         private DateTime _lootWaitDeadline = DateTime.MinValue;
 
+        // ── Post-kill SOD/SOP pink-scan hold (MoveAndAttack) ──
+        // After each kill in MoveAndAttack mode the loot system runs one pink big-region
+        // scan for SOD/SOP drops. Combat is suspended until that whole scan cycle
+        // finishes (requested → repeating passes → no pink left), so the drop check is
+        // never skipped by TAB selecting the next mob or by walking away.
+        /// <summary>True while the pink-scan hold is active (prevents log spam).</summary>
+        private bool _pinkScanHoldActive = false;
+        /// <summary>When the current pink-scan hold started (UtcNow) — safety timeout.</summary>
+        private DateTime _pinkScanHoldSince = DateTime.MinValue;
+        /// <summary>True once the current pink-scan hold was force-released by the safety timeout.</summary>
+        private bool _pinkScanHoldTimedOut = false;
+
         /// <summary>
         /// Optional reference to the running LootSystem (set by the host — workflow
         /// coordinator or MainViewModel). Used to hold movement until a full loot scan
@@ -699,6 +711,9 @@ namespace DriverScanTester.Services
                 _lootPriorityHoldActive = false;
                 _lootPriorityHoldSince = DateTime.MinValue;
                 _lootPriorityHoldTimedOut = false;
+                _pinkScanHoldActive = false;
+                _pinkScanHoldSince = DateTime.MinValue;
+                _pinkScanHoldTimedOut = false;
                 if (LootSystemRef != null && (LootSystemRef.IsCollecting || LootSystemRef.IsLootingActive))
                 {
                     if (_tickCount % _stateLogInterval == 0)
@@ -733,6 +748,49 @@ namespace DriverScanTester.Services
             // loot-priority post-kill hold below and resetting it every tick caused the
             // "waiting for the loot scan" line to spam once per tick. It is cleared in
             // the else branch when the loot phase actually ends.
+
+            // ── Post-kill SOD/SOP pink-scan hold (MoveAndAttack) ──
+            // After each kill in MoveAndAttack mode the loot system runs one pink
+            // big-region scan for SOD/SOP drops and repeats it until no pink pixels are
+            // left. While that request/scan is pending, combat (TAB/attack) and waypoint
+            // movement are suspended so the drop check always finishes — the loot system
+            // keeps scanning even if TAB already selected the next mob.
+            if (LootSystemRef != null && LootSystemRef.IsPinkScanPendingOrActive)
+            {
+                if (_pinkScanHoldSince == DateTime.MinValue)
+                    _pinkScanHoldSince = DateTime.UtcNow;
+
+                bool pinkHoldTimedOut =
+                    (DateTime.UtcNow - _pinkScanHoldSince).TotalMilliseconds >=
+                    BotConstants.Delays.MaxLootWaitMs;
+
+                if (!pinkHoldTimedOut)
+                {
+                    if (!_pinkScanHoldActive)
+                    {
+                        _pinkScanHoldActive = true;
+                        _combatHandler.ResetState();
+                        _log($"[Tick {_tickCount}] SOD/SOP pink scan — pausing combat/movement until the pink loot check finishes.");
+                    }
+                    ReleaseSkillThree();
+                    StopMoving();
+                    ClearCombatRetargetSearch();
+                    await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                    return;
+                }
+
+                if (!_pinkScanHoldTimedOut)
+                {
+                    _pinkScanHoldTimedOut = true;
+                    _log($"[Tick {_tickCount}] SOD/SOP pink-scan hold timed out after {BotConstants.Delays.MaxLootWaitMs}ms — resuming combat (scan continues in background).");
+                }
+            }
+            else
+            {
+                _pinkScanHoldSince = DateTime.MinValue;
+                _pinkScanHoldTimedOut = false;
+                _pinkScanHoldActive = false;
+            }
 
             // ── Loot-priority post-kill hold ──
             // In loot priority mode, after a mob dies (mob selected → no target) the loot
@@ -955,13 +1013,15 @@ namespace DriverScanTester.Services
                     cameraDistanceToApply = GetCombatRetargetCameraDistance();
                 }
 
-                // While the loot system is mid-cycle (MoveAndAttackAndLoot), do NOT
-                // override the camera — the pixel scan needs its zoomed view
-                // (LootScanDistance) to detect ground items. Without this the movement
-                // reverts the camera every tick and the live scan misses everything that
-                // the "Test Loot" scan (which runs without movement) detects. The
-                // movement restores its own camera distance once the loot cycle finishes.
-                bool lootScanning = currentMode == BotMode.MoveAndAttackAndLoot &&
+                // While the loot system is mid-cycle (MoveAndAttackAndLoot, or the
+                // MoveAndAttack SOD/SOP pink scan), do NOT override the camera — the
+                // pixel scan needs its zoomed view (LootScanDistance) to detect ground
+                // items. Without this the movement reverts the camera every tick and the
+                // live scan misses everything that the "Test Loot" scan (which runs
+                // without movement) detects. The movement restores its own camera
+                // distance once the loot cycle finishes.
+                bool lootScanning = (currentMode == BotMode.MoveAndAttackAndLoot ||
+                                     currentMode == BotMode.MoveAndAttack) &&
                                     LootSystemRef != null &&
                                     LootSystemRef.IsLootCycleActive;
                 if (!lootScanning)
@@ -1063,6 +1123,14 @@ namespace DriverScanTester.Services
 
             switch (combatAction)
             {
+                case CombatAction.TabAfterKill:
+                    // A fight just ended (mob died / went idle). In MoveAndAttack SOD/SOP
+                    // mode request the post-kill pink big-region scan BEFORE TAB selects
+                    // the next target; the pink-scan hold above then suspends combat
+                    // until the SOD/SOP drop check finishes.
+                    LootSystemRef?.RequestPinkScan();
+                    goto case CombatAction.TabTarget;
+
                 case CombatAction.TabTarget:
                     if ((currentMode == BotMode.MoveAndAttack || currentMode == BotMode.MoveAndAttackAndLoot) &&
                         _isSkillThreeHeld &&
@@ -1128,14 +1196,15 @@ namespace DriverScanTester.Services
             ReleaseSkillThree();
 
             // ── Post-combat loot wait ──
-            // In MoveAndAttackAndLoot mode the bot must NOT walk away while the loot
-            // system (running in a parallel task) is still collecting. Wait until a full
-            // scan pass completes with no confirmed items (LootSystem.IsLootCycleActive
-            // becomes false) or until a safety timeout. The wait only arms right after
-            // combat — during normal walking the loot cycle runs without blocking.
+            // In MoveAndAttackAndLoot mode (and the MoveAndAttack SOD/SOP pink scan)
+            // the bot must NOT walk away while the loot system (running in a parallel
+            // task) is still collecting. Wait until a full scan pass completes with no
+            // confirmed items (LootSystem.IsLootCycleActive becomes false) or until a
+            // safety timeout. The wait only arms right after combat — during normal
+            // walking the loot cycle runs without blocking.
             // Skipped entirely while the unstuck routine is active — the recovery runs
             // uninterrupted in the movement section below.
-            if (currentMode == BotMode.MoveAndAttackAndLoot && !_isUnstuckRoutineActive)
+            if ((currentMode == BotMode.MoveAndAttackAndLoot || currentMode == BotMode.MoveAndAttack) && !_isUnstuckRoutineActive)
             {
                 bool isCombatStillActive = combatAction == CombatAction.Attack ||
                                            combatAction == CombatAction.CombatWait ||

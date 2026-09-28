@@ -17,6 +17,13 @@ namespace DriverScanTester.Services
         None,
         /// <summary>Press TAB to cycle target (non-attacking move mode).</summary>
         TabTarget,
+        /// <summary>
+        /// A fight just ended — the previously selected mob died (or went stuck/idle for
+        /// the idle timeout) and TAB should cycle to the next target. Distinct from
+        /// <see cref="TabTarget"/> so MoveAndAttack SOD/SOP mode can run its post-kill
+        /// pink scan before selecting the next target.
+        /// </summary>
+        TabAfterKill,
         /// <summary>Press 3 to use attack skill (and stop moving).</summary>
         Attack,
         /// <summary>Waiting during combat (attack cooldown) — skip movement entirely.</summary>
@@ -202,7 +209,7 @@ namespace DriverScanTester.Services
                             _log($"[Combat] Action stuck for {idleMs:F0}ms. Mob dead or stuck. TAB.");
                             _wasAttacking = false;
                             _combatIdleStartTime = DateTime.MinValue;
-                            return CombatAction.TabTarget;
+                            return CombatAction.TabAfterKill;
                         }
 
                         // Still waiting for idle timeout
@@ -281,6 +288,12 @@ namespace DriverScanTester.Services
             else
             {
                 // ── Not attacking — cycle target periodically ──
+                // If a target was being attacked and vanished since the previous
+                // evaluation, this TAB follows a kill: report TabAfterKill so
+                // MoveAndAttack SOD/SOP mode can run its post-kill pink scan. The
+                // first TAB after the loss carries the flag; later cycles are plain
+                // TabTarget.
+                bool killedSinceLastEvaluation = _wasAttacking;
                 _wasAttacking = false;
                 _combatIdleStartTime = DateTime.MinValue;
 
@@ -300,7 +313,7 @@ namespace DriverScanTester.Services
                 {
                     _log("[Key] TAB (target cycle — move mode)");
                     _lastMoveModeTabTime = DateTime.Now;
-                    return CombatAction.TabTarget;
+                    return killedSinceLastEvaluation ? CombatAction.TabAfterKill : CombatAction.TabTarget;
                 }
             }
 

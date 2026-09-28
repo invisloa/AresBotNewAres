@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
@@ -43,9 +43,12 @@ namespace DriverScanTester.Services
         //                  if no change after several tries → switch to Scan
         //   Scan        → pixel-scan: label white blobs, filter ring/name/line shapes,
         //                  probe only loot-like blobs (small compact sparkles)
+        //   PinkScan   → SOD/SOP-only mode (MoveAndAttack waypoints): after each kill,
+        //                  scan ONLY the big region for PINK pixels, collect every
+        //                  SOD/SOP found, and repeat until a pass finds none left.
         //   ScanComplete→ a full scan pass found no items; hold briefly so the movement
         //                  system can walk away, then restart the cycle from Idle
-        private enum LootMachineState { Idle, PostMobTab, AreaLoot, AreaLootWait, Scan, ScanComplete }
+        private enum LootMachineState { Idle, PostMobTab, AreaLoot, AreaLootWait, Scan, PinkScan, ScanComplete }
         private LootMachineState _lootState = LootMachineState.Idle;
         private DateTime _nextActionTime = DateTime.MinValue;
         private int _inventoryChecksumBefore;
@@ -57,6 +60,13 @@ namespace DriverScanTester.Services
 
         /// <summary>Last time an item was actually collected (spacebar pickup or pixel-scan click).</summary>
         private DateTime _lastItemCollectedAt = DateTime.MinValue;
+
+        // ── SOD/SOP pink-scan request (MoveAndAttack post-kill) ──
+        // The movement system requests the pink scan the moment CombatHandler reports a
+        // finished fight (TabAfterKill), so the scan is not missed when TAB re-selects a
+        // mob before the loot task's own selected→not-selected transition is observed.
+        private volatile bool _pinkScanRequested;
+        private DateTime _pinkScanRequestedAt = DateTime.MinValue;
 
         /// <summary>
         /// Time since the last item was collected. Used by the movement system to extend
@@ -78,7 +88,8 @@ namespace DriverScanTester.Services
             _lootState == LootMachineState.PostMobTab ||
             _lootState == LootMachineState.AreaLoot ||
             _lootState == LootMachineState.AreaLootWait ||
-            _lootState == LootMachineState.Scan;
+            _lootState == LootMachineState.Scan ||
+            _lootState == LootMachineState.PinkScan;
 
         /// <summary>Game window handle — stored during ResolveClientOrigin().</summary>
         private nint _hwnd;
@@ -96,6 +107,43 @@ namespace DriverScanTester.Services
         public bool LootPriorityMode { get; set; } = false;
 
         /// <summary>
+        /// SOD/SOP-only loot mode, used for MoveAndAttack waypoints: after each mob kill
+        /// the loot machine runs ONE big-region pixel scan that looks ONLY for PINK
+        /// (SOD/SOP) blobs — no small-region pass, no white normal-loot scanning and no
+        /// spacebar area-loot cycle. Every pink drop found is collected and the scan is
+        /// repeated until a full pass finds no pink pixels left. While no kill is being
+        /// processed the loot machine stays idle (it never starts the usual loot cycle).
+        /// Set per-tick by the host from the current waypoint mode; while false the
+        /// normal MoveAndAttackAndLoot behaviour is unchanged.
+        /// </summary>
+        public bool PinkLootOnlyMode { get; set; } = false;
+
+        /// <summary>
+        /// Requests an immediate post-kill SOD/SOP pink scan. Called by the movement
+        /// system the moment a fight ends (CombatHandler.TabAfterKill), so the scan is
+        /// not missed if TAB re-selects a mob before the loot task observes the
+        /// selected→not-selected transition. No-op unless <see cref="PinkLootOnlyMode"/>
+        /// is enabled. The request is consumed by <see cref="Update"/>.
+        /// </summary>
+        public void RequestPinkScan()
+        {
+            if (!PinkLootOnlyMode)
+                return;
+
+            _pinkScanRequestedAt = DateTime.UtcNow;
+            _pinkScanRequested = true;
+            _log("[Loot] SOD/SOP pink scan requested (post-kill).");
+        }
+
+        /// <summary>
+        /// True while a post-kill SOD/SOP pink scan is requested or running. The
+        /// movement system holds combat/movement while this is true, so the drop check
+        /// always finishes before the bot walks away or starts the next fight.
+        /// </summary>
+        public bool IsPinkScanPendingOrActive =>
+            _pinkScanRequested || _lootState == LootMachineState.PinkScan;
+
+        /// <summary>
         /// True while the loot machine is in its post-kill looting phase (loot priority
         /// mode only): set the moment a mob dies (mob selected → no target) and cleared
         /// when a full scan pass finds no more items (everything looted) or the loot is
@@ -109,7 +157,8 @@ namespace DriverScanTester.Services
         /// True while the loot machine is in the pixel-scan state (Scan): it is actively
         /// looking for, clicking and walking to ground items.
         /// </summary>
-        public bool IsScanActive => _lootState == LootMachineState.Scan;
+        public bool IsScanActive => _lootState == LootMachineState.Scan ||
+                                    _lootState == LootMachineState.PinkScan;
 
         /// <summary>
         /// True while the loot system is actually collecting a found item (mouseover
@@ -461,15 +510,42 @@ namespace DriverScanTester.Services
             // ── Track mob selection to detect mob death ──
             bool isMobSelected = _memoryService.IsMobSelected();
 
+            // ── Post-kill SOD/SOP pink-scan request (MoveAndAttack) ──
+            // The movement system requests this the moment a fight ends. Consume the
+            // flag on every tick (even when it is dropped) so a stale request can never
+            // hold the movement system forever.
+            bool pinkScanRequested = _pinkScanRequested;
+            if (pinkScanRequested)
+            {
+                _pinkScanRequested = false;
+                bool fresh = (DateTime.UtcNow - _pinkScanRequestedAt).TotalMilliseconds <=
+                             BotConstants.Loot.PinkScanRequestTtlMs;
+                if (!PinkLootOnlyMode)
+                {
+                    pinkScanRequested = false;
+                }
+                else if (!fresh)
+                {
+                    _log("[Loot] Stale pink-scan request dropped (expired before it could start).");
+                    pinkScanRequested = false;
+                }
+            }
+
             // Mob just died (was selected → no longer selected) → normally TAB first to
             // check if there are more mobs to kill before starting loot. In loot-priority
             // mode the TAB check is skipped — looting comes first: wait ~200ms so the
             // drops appear, then loot everything before the next target is even selected.
+            // In SOD/SOP pink-only mode the request above (or this transition) starts a
+            // pink big-region scan instead of the normal loot cycle.
             if (_wasMobSelectedPrev && !isMobSelected)
             {
                 _wasMobSelectedPrev = false;
                 _lastKillAt = DateTime.UtcNow;
-                if (LootPriorityMode)
+                if (PinkLootOnlyMode)
+                {
+                    pinkScanRequested = true;
+                }
+                else if (LootPriorityMode)
                 {
                     _log($"[Loot] Mob killed (loot priority) — waiting {BotConstants.Delays.LootPostKillDelayMs}ms for drops, then looting everything.");
                     IsLootingActive = true;
@@ -486,29 +562,46 @@ namespace DriverScanTester.Services
                 }
             }
 
+            // ── Start the post-kill SOD/SOP pink scan ──
+            // The scan is NOT cancelled by a re-selected target (the check belongs to
+            // the mob that just died), so the state machine below keeps running even
+            // while a mob is selected — the movement system holds combat during the scan.
+            if (pinkScanRequested)
+            {
+                _log($"[Loot] Mob killed — SOD/SOP pink scan starting (big region only, pink pixels only; waiting {BotConstants.Delays.LootPostKillDelayMs}ms for drops).");
+                IsLootingActive = true;
+                _lootState = LootMachineState.PinkScan;
+                _nextActionTime = DateTime.UtcNow.AddMilliseconds(BotConstants.Delays.LootPostKillDelayMs);
+                _consecutiveEmptySpacePresses = 0;
+            }
+
             // ── A selected mob pauses loot ──
             // While a mob is targeted (combat in progress) the loot machine does NOT
             // scan — it just waits for the fight to end. Looting while fighting looks
             // unnatural. Loot resumes when the mob dies (death detection above) or the
-            // target is lost.
+            // target is lost. Exception: a requested/active SOD/SOP pink scan is never
+            // cancelled — it belongs to the mob that just died and must finish.
             if (isMobSelected)
             {
                 // Remember the selection for mob-death detection.
                 _wasMobSelectedPrev = true;
 
-                if (_lootState != LootMachineState.Idle)
+                if (_lootState != LootMachineState.PinkScan)
                 {
-                    StopScanSpacebarSpam();
-                    _lootState = LootMachineState.Idle;
-                    _consecutiveEmptySpacePresses = 0;
+                    if (_lootState != LootMachineState.Idle)
+                    {
+                        StopScanSpacebarSpam();
+                        _lootState = LootMachineState.Idle;
+                        _consecutiveEmptySpacePresses = 0;
+                    }
+
+                    // A mob selected mid-loot interrupts the loot phase — combat takes
+                    // over and the next kill re-arms the phase.
+                    IsLootingActive = false;
+
+                    await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                    return;
                 }
-
-                // A mob selected mid-loot interrupts the loot phase — combat takes
-                // over and the next kill re-arms the phase.
-                IsLootingActive = false;
-
-                await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
-                return;
             }
 
             // ── Loot state machine ──
@@ -519,11 +612,19 @@ namespace DriverScanTester.Services
             //   (items collected) → AreaLoot again (keep spacebar-looting)
             //   (no items after N tries) → Scan (with 200ms delay)
             // Scan → pixel-scan for items (meanwhile spam spacebar), collect them → back to AreaLoot
+            // PinkScan → SOD/SOP-only mode: big region, pink pixels, repeat until none left
             // ===================================================================
 
             switch (_lootState)
             {
                 case LootMachineState.Idle:
+                    if (PinkLootOnlyMode)
+                    {
+                        // SOD/SOP-only mode scans solely after a kill. While walking
+                        // there is nothing to do — no area-loot, no white-pixel scan.
+                        break;
+                    }
+
                     // Start the loot cycle.
                     _lootState = LootMachineState.AreaLoot;
                     _nextActionTime = DateTime.UtcNow;
@@ -657,6 +758,39 @@ namespace DriverScanTester.Services
                     }
                     break;
 
+                case LootMachineState.PinkScan:
+                    // ── SOD/SOP-only post-kill scan (MoveAndAttack waypoints) ──
+                    // ONE region (big), PINK pixels only. Pink drops found are
+                    // collected and the pass repeats until a full pass finds none left.
+                    // No small-region pass, no white-blob scan, no spacebar area-loot.
+                    _memoryService.SetCameraDistance(BotConstants.Camera.LootScanDistance);
+
+                    if (DateTime.UtcNow < _nextActionTime)
+                    {
+                        break; // post-kill delay — let the drops appear first
+                    }
+
+                    if (PinkPixelScan())
+                    {
+                        // Pink SOD/SOP was found and collected — rescan next tick
+                        // to drain any remaining pink drops.
+                        _lastItemCollectedAt = DateTime.UtcNow;
+                        _nextActionTime = DateTime.UtcNow.AddMilliseconds(50);
+                    }
+                    else
+                    {
+                        // Full pink pass finished with no item collected — the pink
+                        // pixels are gone (or none were lootable). Done for this kill.
+                        _log($"[Loot] Pink scan complete — no SOD/SOP left to loot{KillElapsed()}.");
+                        IsLootingActive = false;
+                        _lastKillAt = DateTime.MinValue;
+                        _lootState = LootMachineState.ScanComplete;
+                        _scanCompleteUntil = DateTime.UtcNow.AddMilliseconds(
+                            BotConstants.Delays.LootScanCompleteHoldMs);
+                        _consecutiveEmptySpacePresses = 0;
+                    }
+                    break;
+
                 case LootMachineState.ScanComplete:
                     // Full scan found nothing. Hold (no spacebar spam / no captures) until
                     // the hold expires, then restart the cycle from Idle.
@@ -742,8 +876,38 @@ namespace DriverScanTester.Services
             return false;
         }
 
-        private bool ScanRegion(int[] xRange, int[] yRange, string regionName)
+        /// <summary>
+        /// SOD/SOP-only pixel scan (MoveAndAttack post-kill): a single pass over the
+        /// BIG region looking only for pink pixels. There is no small-region pass and
+        /// no white normal-loot detection — the caller repeats this until it returns
+        /// false (no pink pixel was collectable), so every SOD/SOP drop in view gets
+        /// picked up before the bot moves on.
+        /// </summary>
+        private bool PinkPixelScan()
         {
+            _memoryService.SetCameraDistance(BotConstants.Camera.LootScanDistance);
+            return ScanRegion(bigX, bigY, "BigScan-Pink", pinkOnly: true);
+        }
+
+        /// <summary>
+        /// EXACT match for the SOD/SOP ground-drop color: the client mod
+        /// (tools/scroll_pink_square.py) paints the square with a solid opaque
+        /// DeepPink texture — PINK = BGRA(147, 20, 255, 255) → RGB(255, 20, 147).
+        /// No range/tolerance is applied on purpose: only this exact color is a
+        /// SOD/SOP drop, so white sparkles, terrain and effects never match.
+        /// Constants: <c>BotConstants.Loot.PinkPixelR/G/B</c>.
+        /// </summary>
+        internal static bool IsSodSopPinkPixel(Color pixelColor)
+        {
+            return pixelColor.R == BotConstants.Loot.PinkPixelR &&
+                   pixelColor.G == BotConstants.Loot.PinkPixelG &&
+                   pixelColor.B == BotConstants.Loot.PinkPixelB;
+        }
+
+        private bool ScanRegion(int[] xRange, int[] yRange, string regionName, bool pinkOnly = false)
+        {
+            string pixelNoun = pinkOnly ? "pink" : "white";
+
             // ── Loot diagnostics ──
             // Clone the exact frame that is scanned and save it (annotated) to
             // LootSSFolder once the region pass finishes, so loot detection problems
@@ -812,12 +976,13 @@ namespace DriverScanTester.Services
                     return false;
                 }
 
-                // ── Phase A: collect every pure-white pixel in the region — no input.
-                //    The old scan probed each white pixel immediately, so mob names,
-                //    target rings and sprite highlights produced hundreds of useless
-                //    mouse probes and even aborted whole region passes. Now the whites
-                //    are gathered first and only filtered survivors are probed. ──
-                var whitePoints = new List<Point>();
+                // ── Phase A: collect every target pixel in the region — no input.
+                //    Normal loot = pure-white pixels; SOD/SOP pink mode = saturated
+                //    pink pixels. The old scan probed each pixel immediately, so mob
+                //    names, target rings and sprite highlights produced hundreds of
+                //    useless mouse probes and even aborted whole region passes. Now the
+                //    candidates are gathered first and only filtered survivors are probed. ──
+                var targetPoints = new List<Point>();
                 for (int x = xStart; x < xEnd; x++)
                 {
                     for (int y = yStart; y < yEnd; y++)
@@ -826,30 +991,51 @@ namespace DriverScanTester.Services
                             continue; // character exclude zone
 
                         Color pixelColor = _bitmap.GetPixel(x, y);
-                        if (pixelColor.R == 255 && pixelColor.G == 255 && pixelColor.B == 255)
-                            whitePoints.Add(new Point(x, y));
+                        bool isTarget = pinkOnly
+                            ? IsSodSopPinkPixel(pixelColor)
+                            : (pixelColor.R == 255 && pixelColor.G == 255 && pixelColor.B == 255);
+                        if (isTarget)
+                            targetPoints.Add(new Point(x, y));
                     }
                 }
-                diagnosticWhiteCount = whitePoints.Count;
+                diagnosticWhiteCount = targetPoints.Count;
 
                 // ── Phase B: label 8-connected components and keep only loot-shaped
                 //    blobs. Target rings (long thin arcs), mob-name text (glyph rows),
                 //    weapon lines and oversized sprite highlights are dropped instead
                 //    of being probed; a dialog is one huge blob and is dropped too. ──
-                List<WhiteComponent> components = LabelWhiteComponents(whitePoints);
+                List<WhiteComponent> components = LabelWhiteComponents(targetPoints);
                 var candidates = new List<WhiteComponent>();
                 int filteredComponents = 0;
+                int tinyPinkComponents = 0;
                 foreach (WhiteComponent component in components)
                 {
-                    if (IsLootCandidate(component))
+                    bool isCandidate = pinkOnly
+                        ? IsPinkLootCandidate(component)
+                        : IsLootCandidate(component);
+                    if (isCandidate)
+                    {
                         candidates.Add(component);
+                    }
                     else
+                    {
                         filteredComponents++;
+                        if (pinkOnly &&
+                            (component.Width < BotConstants.Loot.PinkMinCandidateWidth ||
+                             component.Height < BotConstants.Loot.PinkMinCandidateHeight))
+                        {
+                            tinyPinkComponents++;
+                        }
+                    }
                 }
 
                 // Mob names are glyph rows — drop them so a name can never eat the
-                // probe budget before the loot below/next to it is reached.
-                HashSet<WhiteComponent> textGlyphs = FindTextGlyphs(candidates);
+                // probe budget before the loot below/next to it is reached. In pink
+                // SOD/SOP mode the pink name/glow itself is the target, so no text
+                // filtering is applied there.
+                HashSet<WhiteComponent> textGlyphs = pinkOnly
+                    ? new HashSet<WhiteComponent>()
+                    : FindTextGlyphs(candidates);
                 if (textGlyphs.Count > 0)
                     candidates.RemoveAll(textGlyphs.Contains);
 
@@ -860,6 +1046,7 @@ namespace DriverScanTester.Services
                 //    is unchanged: small blobs get every pixel, larger ones a handful of
                 //    sampled points. Tiny blobs keep the old ±1 diagonal search. ──
                 int probesUsed = 0;
+                int probeBudget = pinkOnly ? MaxPinkProbesPerRegion : MaxLootProbesPerRegion;
                 foreach (WhiteComponent component in candidates)
                 {
                     if (ShouldAbortLoot())
@@ -885,10 +1072,10 @@ namespace DriverScanTester.Services
 
                         diagnosticWhiteHits.Add(probe);
 
-                        if (probesUsed >= MaxLootProbesPerRegion)
+                        if (probesUsed >= probeBudget)
                         {
-                            _log($"[Loot] {regionName}: probe budget ({MaxLootProbesPerRegion}) exhausted — " +
-                                 $"{diagnosticWhiteHits.Count} probed px of {whitePoints.Count} white px in {components.Count} components; " +
+                            _log($"[Loot] {regionName}: probe budget ({probeBudget}) exhausted — " +
+                                 $"{diagnosticWhiteHits.Count} probed px of {targetPoints.Count} {pixelNoun} px in {components.Count} components; " +
                                  $"aborting region (likely UI/effect clutter).");
                             diagnosticOutcome = "too-many-white";
                             return false;
@@ -896,15 +1083,18 @@ namespace DriverScanTester.Services
                     }
                 }
 
-                if (whitePoints.Count > 0)
+                if (targetPoints.Count > 0)
                 {
-                    _log($"[Loot] {regionName}: scanned {scanPixels} px, {whitePoints.Count} white px in {components.Count} components — " +
-                         $"{filteredComponents} filtered (ring/line/highlight), {textGlyphs.Count} text glyphs skipped, " +
+                    string tinyPinkNote = pinkOnly
+                        ? $", {tinyPinkComponents} below {BotConstants.Loot.PinkMinCandidateWidth}x{BotConstants.Loot.PinkMinCandidateHeight} px skipped"
+                        : "";
+                    _log($"[Loot] {regionName}: scanned {scanPixels} px, {targetPoints.Count} {pixelNoun} px in {components.Count} components — " +
+                         $"{filteredComponents} filtered (shape/size){tinyPinkNote}, {textGlyphs.Count} text glyphs skipped, " +
                          $"{candidates.Count} loot candidates probed ({probesUsed} probes), no item collected{KillElapsed()}.");
                 }
                 else
                 {
-                    _log($"[Loot] {regionName}: scanned {scanPixels} px, no white pixels.");
+                    _log($"[Loot] {regionName}: scanned {scanPixels} px, no {pixelNoun} pixels.");
                 }
                 diagnosticOutcome = "no-item";
             }
@@ -924,7 +1114,8 @@ namespace DriverScanTester.Services
                     diagnosticWhiteCount,
                     diagnosticScanRegion,
                     diagnosticExcludeZone,
-                    diagnosticWhiteHits);
+                    diagnosticWhiteHits,
+                    pixelNoun);
             }
             return false;
         }
@@ -963,6 +1154,11 @@ namespace DriverScanTester.Services
         /// <summary>Hard cap on mouseover probes per region pass — replaces the old raw-white-count abort.</summary>
         private const int MaxLootProbesPerRegion = 400;
 
+        /// <summary>Probe budget for the SOD/SOP pink scan: pink-colored terrain/AoE
+        /// noise produces more candidate blobs than the white shape filter, so the
+        /// pink pass gets a bigger (still bounded) budget.</summary>
+        private const int MaxPinkProbesPerRegion = 800;
+
         /// <summary>Text-cluster detection: a horizontal run of at least this many glyph-like blobs is a mob name.</summary>
         private const int TextClusterMinGlyphs = 5;
         private const int TextClusterMaxGlyphArea = 40;
@@ -972,7 +1168,7 @@ namespace DriverScanTester.Services
         private const int TextClusterMaxBaselineDriftPx = 5;
 
         /// <summary>A connected group of pure-white pixels found during a region scan.</summary>
-        private sealed class WhiteComponent
+        internal sealed class WhiteComponent
         {
             public readonly List<Point> Points = new List<Point>();
             public int XMin = int.MaxValue, YMin = int.MaxValue;
@@ -1054,6 +1250,23 @@ namespace DriverScanTester.Services
             if (component.Width >= WideBandMinWidth && component.Height >= WideBandMinHeight)
                 return false;
             return true;
+        }
+
+        /// <summary>
+        /// True when a pink component could be a SOD/SOP ground drop. The pixel test
+        /// is an EXACT DeepPink match, so any connected component is made of the
+        /// painted loot square only — terrain, AoE and white sparkles cannot form
+        /// one. There is therefore NO upper size limit: the 0.6x0.6 world square can
+        /// render far larger than a few pixels depending on camera distance, and an
+        /// area/dimension cap would filter the real drop out. Only the minimum
+        /// loot-square size is enforced (<c>BotConstants.Loot.PinkMinCandidate*</c>,
+        /// 10x10 px) — smaller specks are skipped (treated as not-loot) so the probe
+        /// budget is not burned on noise.
+        /// </summary>
+        internal static bool IsPinkLootCandidate(WhiteComponent component)
+        {
+            return component.Width >= BotConstants.Loot.PinkMinCandidateWidth &&
+                   component.Height >= BotConstants.Loot.PinkMinCandidateHeight;
         }
 
         /// <summary>

@@ -290,7 +290,9 @@ namespace DriverScanTester.Services
             LogFlowPlan();
 
             // ── Auto potion drinking ──
-            var healSystem = new HealManaSystem(_memoryService, _log);
+            // The workflow uses the profile's explicit thresholds, so the player-based
+            // auto detection (60% max HP / 20% max mana) is disabled for this instance.
+            var healSystem = new HealManaSystem(_memoryService, _log, usePlayerBasedThresholds: false);
             HealManaSystem.Threshold1 = (short)Math.Clamp(_profile.MinHp, 0, short.MaxValue);
             HealManaSystem.Threshold2 = (short)Math.Clamp(_profile.MinMana, 0, short.MaxValue);
             _log($"[HealMana] Auto-drink enabled: HP < {HealManaSystem.Threshold1} → key 1, Mana < {HealManaSystem.Threshold2} → key 2.");
@@ -778,15 +780,20 @@ namespace DriverScanTester.Services
 
             var pathTask = _pathRunner.RunPathAsync(waypoints, loop: true, expToken);
 
-            // The EXP route is a hunting route (MoveAndAttackAndLoot): run the loot
-            // system in parallel so drops are collected while walking and after kills.
+            // The EXP route is a hunting route: run the loot system in parallel so drops
+            // are collected while walking and after kills. MoveAndAttackAndLoot routes use
+            // the normal white-pixel loot cycle; MoveAndAttack routes use the SOD/SOP
+            // pink-only post-kill scan (single big region, repeated until no pink left).
             LootSystem? lootSystem = null;
             Task? lootTask = null;
-            if (waypoints.Any(w => w.Mode == BotMode.MoveAndAttackAndLoot))
+            bool hasAttackLootRoute = waypoints.Any(w => w.Mode == BotMode.MoveAndAttackAndLoot);
+            bool hasAttackOnlyRoute = waypoints.Any(w => w.Mode == BotMode.MoveAndAttack);
+            if (hasAttackLootRoute || hasAttackOnlyRoute)
             {
                 lootSystem = new LootSystem(_memoryService, _log)
                 {
-                    LootPriorityMode = _profile.LootPriority
+                    LootPriorityMode = _profile.LootPriority,
+                    PinkLootOnlyMode = !hasAttackLootRoute && hasAttackOnlyRoute
                 };
 
                 // Give the movement system a reference to the loot system so it can hold
@@ -816,6 +823,13 @@ namespace DriverScanTester.Services
                                 await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
                                 continue;
                             }
+
+                            // Track the current waypoint mode: MoveAndAttack waypoints use
+                            // the SOD/SOP pink-only scan; MoveAndAttackAndLoot keeps the
+                            // normal white-pixel loot cycle.
+                            lootSystem.PinkLootOnlyMode =
+                                _pathRunner.CurrentMovement?.CurrentMode == BotMode.MoveAndAttack;
+
                             await lootSystem.Update(expToken);
                             await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
                         }
@@ -826,7 +840,9 @@ namespace DriverScanTester.Services
                         _log($"[ExpLoop] Loot system error: {ex.Message}");
                     }
                 }, expToken);
-                _log("[ExpLoop] Loot system started (MoveAndAttackAndLoot route).");
+                _log(hasAttackLootRoute
+                    ? "[ExpLoop] Loot system started (MoveAndAttackAndLoot route — normal white-pixel loot)."
+                    : "[ExpLoop] Loot system started (MoveAndAttack route — SOD/SOP pink-pixel scan only, big region, after each kill).");
                 if (_profile.LootPriority)
                     _log("[ExpLoop] LOOT PRIORITY MODE ON — looting outranks combat; attack and waypoint movement are suspended while loot is being scanned/collected.");
             }

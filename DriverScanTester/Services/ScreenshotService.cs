@@ -63,6 +63,7 @@ namespace DriverScanTester.Services
         /// </summary>
         /// <param name="label">Scan label, e.g. "SmallScan", "BigScan", "AfterClick".</param>
         /// <param name="outcome">Scan result, e.g. "collected", "no-item".</param>
+        /// <param name="pixelLabel">Name of the detected pixel class in the caption ("white" / "pink").</param>
         public static void SaveLootScanFrame(
             Bitmap? frame,
             string label,
@@ -71,7 +72,8 @@ namespace DriverScanTester.Services
             int whiteCount = 0,
             Rectangle scanRegion = default,
             Rectangle excludeZone = default,
-            IReadOnlyList<Point>? whiteHits = null)
+            IReadOnlyList<Point>? whiteHits = null,
+            string pixelLabel = "white")
         {
             if (frame == null)
                 return;
@@ -101,7 +103,7 @@ namespace DriverScanTester.Services
                             graphics.FillRectangle(hitBrush, hit.X - 1, hit.Y - 1, 3, 3);
                     }
 
-                    string caption = $"{label} | {outcome} | white px: {whiteCount}";
+                    string caption = $"{label} | {outcome} | {pixelLabel} px: {whiteCount}";
                     using var font = new Font(FontFamily.GenericSansSerif, 16f, FontStyle.Bold);
                     SizeF captionSize = graphics.MeasureString(caption, font);
                     using var captionBg = new SolidBrush(Color.FromArgb(190, 0, 0, 0));

@@ -402,6 +402,15 @@ namespace DriverScanTester.ViewModels
         {
             // A previous run may have been stopped while paused — always start unpaused.
             PauseController.Resume();
+
+            // This entry point is invoked from the Path Editor window ("Run This Path"),
+            // so the EDITOR — not the game — is the foreground window right now. All
+            // movement/potion keys are sent with keybd_event, which delivers input to the
+            // foreground window only: without this call W/A/D/1/2/3 land in the editor and
+            // the character "ghost-walks" (camera turns via memory writes, position never
+            // changes, potions are never consumed).
+            FocusGameWindow();
+
             // 1. Stop existing
             if (_isMovementBotRunning || _isHealManaBotRunning || _isLootBotRunning)
             {
@@ -462,11 +471,15 @@ namespace DriverScanTester.ViewModels
             _isHealManaBotRunning = true;
             var hmToken = _healManaBotCts.Token;
             Task.Run(() => HealManaBotLoop(hmToken), hmToken);
+            AppendBotLog("Heal/Mana Bot started.");
 
             // 5. Start Loot — skipped entirely for OnlyMove-only paths (mandatory move: no loot/attack).
             // Heal stays always on (step 4, separate task). Mixed paths still start loot,
             // but LootBotLoop + MovementSystem suspend it while an OnlyMove waypoint is active.
-            bool needsLoot = path.Exists(p => p.Mode == Services.BotMode.MoveAndAttackAndLoot);
+            // MoveAndAttack paths start it too: it runs the SOD/SOP pink-only scan
+            // (big region, pink pixels, after each kill) instead of the normal loot cycle.
+            bool needsLoot = path.Exists(p => p.Mode == Services.BotMode.MoveAndAttackAndLoot ||
+                                              p.Mode == Services.BotMode.MoveAndAttack);
             if (!needsLoot)
             {
                 AppendBotLog("Loot Bot not started (OnlyMove-only path — mandatory move, no loot/attack).");
@@ -2672,6 +2685,12 @@ namespace DriverScanTester.ViewModels
         [DllImport("user32.dll")]
         private static extern bool ShowWindow(nint hWnd, int nCmdShow);
 
+        [DllImport("user32.dll")]
+        private static extern nint GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(nint hWnd, out uint lpdwProcessId);
+
 
         private const int VK_PRIOR = 0x21; // Page Up
         private const int VK_HOME = 0x24;  // Home
@@ -2684,6 +2703,8 @@ namespace DriverScanTester.ViewModels
         public bool IsHealManaBotRunningInternal => _isHealManaBotRunning;
         private bool _isLootBotRunning;
         public bool IsLootBotRunningInternal => _isLootBotRunning;
+        // One-shot flag so the UIPI/elevation warning is logged only once per session.
+        private bool _elevationWarningLogged;
         private CancellationTokenSource? _movementBotCts;
         private CancellationTokenSource? _healManaBotCts;
         private CancellationTokenSource? _lootBotCts;
@@ -3179,6 +3200,40 @@ namespace DriverScanTester.ViewModels
                             {
                                 ShowWindow(hwnd, SW_RESTORE);
                                 SetForegroundWindow(hwnd);
+
+                                // Diagnostic: keybd_event input (W/A/D, potion keys, TAB,
+                                // skills) only reaches the FOREGROUND window. Memory-based
+                                // camera writes work regardless — so a game that did not
+                                // actually come to the front turns its camera but never
+                                // walks ("ghost-walk", position stays constant).
+                                nint foreground = GetForegroundWindow();
+                                _ = GetWindowThreadProcessId(foreground, out uint foregroundPid);
+                                if (foreground != hwnd && foregroundPid != _attachedPid)
+                                {
+                                    AppendLog(
+                                        $"[Focus] Warning: game window is not in the foreground " +
+                                        $"(foreground=0x{foreground:X} pid={foregroundPid}, game=0x{hwnd:X} pid={_attachedPid}). " +
+                                        $"Keyboard input will NOT reach the game.");
+                                }
+
+                                // Elevation mismatch: when the game runs elevated (admin) and
+                                // the bot does not, Windows UIPI silently blocks every
+                                // keybd_event (W/A/D/1/2/3). Focus is correct and the camera
+                                // still moves via memory writes, but the character never
+                                // walks and potions are never drunk. This is the #1 cause of
+                                // "ghost-walk" reports — log it loudly and exactly once.
+                                if (!_elevationWarningLogged &&
+                                    !ElevationCheck.IsCurrentProcessElevated() &&
+                                    ElevationCheck.IsProcessElevated((int)_attachedPid))
+                                {
+                                    _elevationWarningLogged = true;
+                                    AppendLog(
+                                        "[Elevation] WARNING: the game runs as administrator but DriverScanTester does NOT. " +
+                                        "Windows UIPI will silently block keybd_event (W/A/D/1/2/3) sent to the game — " +
+                                        "the camera (memory writes via the driver) still works, so the character turns but never moves. " +
+                                        "Fix: close DriverScanTester and run it as administrator (right-click -> Run as administrator), " +
+                                        "or launch it from an elevated Visual Studio.");
+                                }
                             }
                         }
 
@@ -3449,7 +3504,11 @@ namespace DriverScanTester.ViewModels
 
                         // Auto-start loot bot when movement starts — except for OnlyMove
                         // (mandatory move: no loot/attack). Heal is independent and unaffected.
-                        if (!_isLootBotRunning && SelectedBotMode == Services.BotMode.MoveAndAttackAndLoot)
+                        // MoveAndAttack also starts it: the loot system then runs the
+                        // SOD/SOP pink-only post-kill scan (no normal white loot).
+                        if (!_isLootBotRunning &&
+                            (SelectedBotMode == Services.BotMode.MoveAndAttackAndLoot ||
+                             SelectedBotMode == Services.BotMode.MoveAndAttack))
                         {
                             ToggleLootBot(true);
                         }
@@ -3531,6 +3590,11 @@ namespace DriverScanTester.ViewModels
                         // Initial 5-second delay before bot starts moving
                         AppendBotLog("Movement will start in 5 seconds...");
                         await PauseController.PausableDelayAsync(5000, token);
+
+                        // Re-assert focus right before the first W press: during the countdown
+                        // the user may still be clicking around in the bot UI, and keybd_event
+                        // only reaches the foreground window.
+                        FocusGameWindow();
 
                         while (!token.IsCancellationRequested && _isAttached && _movementSystem != null)
                         {
@@ -3646,6 +3710,13 @@ namespace DriverScanTester.ViewModels
                                 await PauseController.PausableDelayAsync(10, token);
                                 continue;
                             }
+
+                            // Track the current waypoint mode: MoveAndAttack waypoints use
+                            // the SOD/SOP pink-only scan; MoveAndAttackAndLoot keeps the
+                            // normal white-pixel loot cycle.
+                            _lootSystem.PinkLootOnlyMode =
+                                _movementSystem?.CurrentMode == Services.BotMode.MoveAndAttack;
+
                             await _lootSystem.Update(token);
                             await PauseController.PausableDelayAsync(10, token); // Update rate for loot
                         }

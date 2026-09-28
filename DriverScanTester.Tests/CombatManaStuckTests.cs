@@ -163,5 +163,49 @@ namespace DriverScanTester.Tests
 
             Assert.Equal(CombatAction.Unstuck, Evaluate(handler, memory));
         }
+
+        /// <summary>
+        /// A mob that stays selected but goes action-idle past the idle timeout is dead:
+        /// the TAB that follows must be reported as <see cref="CombatAction.TabAfterKill"/>
+        /// so MoveAndAttack SOD/SOP mode runs its post-kill pink scan.
+        /// </summary>
+        [Fact]
+        public void IdleTimeout_WhileMobSelected_ReturnsTabAfterKill()
+        {
+            var stub = new MemoryStub { Mana = 1400, Action = 39 };
+            var handler = new CombatHandler(NoLog);
+            GameMemoryService memory = stub.Create(NoLog);
+
+            Assert.Equal(CombatAction.Attack, Evaluate(handler, memory));
+
+            // Mob still selected, but the action is idle for longer than the timeout.
+            stub.Action = 0;
+            Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory));
+            Backdate(handler, "_combatIdleStartTime", 2.0);
+
+            Assert.Equal(CombatAction.TabAfterKill, Evaluate(handler, memory));
+        }
+
+        /// <summary>
+        /// When the target vanishes right after being attacked (mob died, target cleared)
+        /// the first TAB cycle must carry the kill signal; later cycles are plain TABs.
+        /// </summary>
+        [Fact]
+        public void TargetVanishedAfterAttack_FirstTabIsTabAfterKill_ThenPlainTab()
+        {
+            var stub = new MemoryStub { Mana = 1400, Action = 39 };
+            var handler = new CombatHandler(NoLog);
+            GameMemoryService memory = stub.Create(NoLog);
+
+            Assert.Equal(CombatAction.Attack, Evaluate(handler, memory));
+
+            // Target vanished (mob died) — the first TAB reports the kill.
+            stub.TargetId = 0;
+            Assert.Equal(CombatAction.TabAfterKill, Evaluate(handler, memory));
+
+            // The next TAB cycle is a plain target cycle — no new kill to report.
+            Backdate(handler, "_lastMoveModeTabTime", 5.0);
+            Assert.Equal(CombatAction.TabTarget, Evaluate(handler, memory));
+        }
     }
 }

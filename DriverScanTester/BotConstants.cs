@@ -549,11 +549,21 @@ namespace DriverScanTester
             /// <summary>Scan code for key '2'.</summary>
             public const byte ScanCode2 = 0x03;
 
-            /// <summary>HP threshold below which key '1' is pressed.</summary>
+            /// <summary>Fallback HP threshold below which key '1' is pressed. Only used
+            /// when the player's max HP cannot be read — the live threshold is derived
+            /// from 60% of the player's max HP when the heal bot attaches/starts.</summary>
             public const short HpThreshold = 666;
 
-            /// <summary>MP threshold below which key '2' is pressed.</summary>
-            public const short MpThreshold = 150    ;
+            /// <summary>Fallback MP threshold below which key '2' is pressed. Only used
+            /// when the player's max mana cannot be read — the live threshold is derived
+            /// from 20% of the player's max mana when the heal bot attaches/starts.</summary>
+            public const short MpThreshold = 150;
+
+            /// <summary>Fraction of the player's max HP used as the live HP-drink threshold.</summary>
+            public const double HpThresholdFraction = 0.6;
+
+            /// <summary>Fraction of the player's max mana used as the live mana-drink threshold.</summary>
+            public const double MpThresholdFraction = 0.2;
 
             /// <summary>Delay in ms between key down and key up events.</summary>
             public const int KeyPressDelayMs = 50;
@@ -1001,6 +1011,33 @@ namespace DriverScanTester
         // ════════════════════════════════════════════════════════════════
         public static class Loot
         {
+            /// <summary>SOD/SOP ground-drop pink detection: EXACT red channel of the solid
+            /// texture painted by the client mod (tools/scroll_pink_square.py:
+            /// PINK = BGRA(147, 20, 255, 255) → RGB(255, 20, 147) DeepPink). Only this
+            /// exact color is treated as a SOD/SOP drop — no ranges, so white sparkles,
+            /// terrain and effects can never match.</summary>
+            public const int PinkPixelR = 255;
+
+            /// <summary>SOD/SOP ground-drop pink detection: EXACT green channel (20).</summary>
+            public const int PinkPixelG = 20;
+
+            /// <summary>SOD/SOP ground-drop pink detection: EXACT blue channel (147).</summary>
+            public const int PinkPixelB = 147;
+
+            /// <summary>Minimum width (px) a connected pink blob must have to be probed as a
+            /// SOD/SOP drop. The painted loot square is at least 10x10 px; smaller pink
+            /// specks (effects, noise, stray name-label pixels) are skipped and treated
+            /// as not-loot without wasting a mouseover probe.</summary>
+            public const int PinkMinCandidateWidth = 10;
+
+            /// <summary>Minimum height (px) a connected pink blob must have to be probed as a
+            /// SOD/SOP drop. See <see cref="PinkMinCandidateWidth"/>.</summary>
+            public const int PinkMinCandidateHeight = 10;
+
+            /// <summary>How long a post-kill pink-scan request stays valid (ms). Requests older
+            /// than this are dropped instead of starting a stale scan after a pause.</summary>
+            public const int PinkScanRequestTtlMs = 5000;
+
             /// <summary>Small scan region X range. Centered on the character
             /// (was previously shifted +50 to the right).</summary>
             public static readonly int[] SmallScanX = { 800, 1120 };
