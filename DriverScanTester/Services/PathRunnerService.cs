@@ -93,7 +93,8 @@ namespace DriverScanTester.Services
                 steeringMode: _steeringMode)
             {
                 InternalRepotEnabled = false, // External coordinator handles repot
-                WaypointRecoveryExecutor = WaypointRecoveryExecutor
+                WaypointRecoveryExecutor = WaypointRecoveryExecutor,
+                MobGroupingPausePredicate = () => PauseController?.IsPaused == true
             };
 
             _log($"[PathRunner] Started path with {waypoints.Count} points, loop={loop}.");
@@ -113,6 +114,7 @@ namespace DriverScanTester.Services
                             _log("[PathRunner] Paused — holding route position.");
                             pauseLogged = true;
                         }
+                        _movementSystem?.CancelMobGrouping("bot paused");
                         _movementSystem?.StopMoving();
                         _movementSystem?.ReleaseCombatKeys();
                         await PauseController.WaitIfPausedAsync(token);
@@ -204,6 +206,7 @@ namespace DriverScanTester.Services
             {
                 // Persist any pending stuck-cell data before stopping
                 _movementSystem?.SaveLocalMap();
+                _movementSystem?.CancelMobGrouping("path runner stopped");
                 _movementSystem?.CancelWaypointSpecialRecovery();
                 // Centralized input cleanup for every termination path (normal
                 // completion, cancellation, exception, phase change): StopMoving
@@ -214,6 +217,7 @@ namespace DriverScanTester.Services
                 // release log therefore always precedes "[PathRunner] Path stopped."
                 _movementSystem?.ReleaseCombatKeys();
                 _movementSystem?.StopMoving();
+                _movementSystem?.DisposeMobGroupingDetector();
                 _log("[PathRunner] Path stopped.");
             }
 
@@ -229,6 +233,7 @@ namespace DriverScanTester.Services
         public void Stop()
         {
             _movementSystem?.SaveLocalMap();
+            _movementSystem?.CancelMobGrouping("path runner stop requested");
             _movementSystem?.CancelWaypointSpecialRecovery();
             _movementSystem?.ReleaseCombatKeys();
             _movementSystem?.StopMoving();

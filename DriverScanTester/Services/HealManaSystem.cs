@@ -82,10 +82,12 @@ namespace DriverScanTester.Services
         /// </summary>
         private bool TryLoadPlayerThresholds()
         {
-            var (maxHp, maxMana, success) = _memoryService.GetMaxHpMana();
-            if (!success || maxHp <= 0)
+            var read = _memoryService.GetMaxHpMana();
+            if (!read.Success || read.MaxHp <= 0 || read.MaxMana <= 0)
                 return false;
 
+            int maxHp = read.MaxHp;
+            int maxMana = read.MaxMana;
             Threshold1 = (short)Math.Clamp((int)Math.Round(maxHp * BotConstants.HealMana.HpThresholdFraction), 0, short.MaxValue);
             Threshold2 = (short)Math.Clamp((int)Math.Round(maxMana * BotConstants.HealMana.MpThresholdFraction), 0, short.MaxValue);
             _playerThresholdsLoaded = true;

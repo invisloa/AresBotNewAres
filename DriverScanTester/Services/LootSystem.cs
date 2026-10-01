@@ -1063,11 +1063,22 @@ namespace DriverScanTester.Services
                 var candidates = new List<WhiteComponent>();
                 int filteredComponents = 0;
                 int tinyPinkComponents = 0;
+                int mobMarkerComponents = 0;
                 foreach (WhiteComponent component in components)
                 {
                     bool isCandidate = pinkOnly
                         ? IsPinkLootCandidate(component)
                         : IsLootCandidate(component);
+                    if (isCandidate && pinkOnly && IsMobMarkerRingComponent(component, _bitmap))
+                    {
+                        // The artificial Hyena markers deliberately use saturated magenta and
+                        // overlap the legacy SOD/SOP color family. Exclude sparse marker-ring
+                        // geometry before setting _pinkCandidatesRemain/probing; exact loot
+                        // mouseover remains authoritative for all actual SOD/SOP components.
+                        mobMarkerComponents++;
+                        isCandidate = false;
+                    }
+
                     if (isCandidate)
                     {
                         candidates.Add(component);
@@ -1157,7 +1168,7 @@ namespace DriverScanTester.Services
                         ? $", {tinyPinkComponents} below {BotConstants.Loot.PinkMinCandidateWidth}x{BotConstants.Loot.PinkMinCandidateHeight} px skipped"
                         : "";
                     _log($"[Loot] {regionName}: scanned {scanPixels} px, {targetPoints.Count} {pixelNoun} px in {components.Count} components — " +
-                         $"{filteredComponents} filtered (shape/size){tinyPinkNote}, {textGlyphs.Count} text glyphs skipped, " +
+                         $"{filteredComponents} filtered (shape/size; mob-marker rings={mobMarkerComponents}){tinyPinkNote}, {textGlyphs.Count} text glyphs skipped, " +
                          $"{candidates.Count} loot candidates probed ({probesUsed} probes), no item collected{KillElapsed()}.");
                 }
                 else
@@ -1336,6 +1347,31 @@ namespace DriverScanTester.Services
         {
             return component.Width >= BotConstants.Loot.PinkMinCandidateWidth &&
                    component.Height >= BotConstants.Loot.PinkMinCandidateHeight;
+        }
+
+        /// <summary>
+        /// Identifies only sparse, approximately circular magenta ring components with the
+        /// configured artificial mob-marker scale. Solid SOD/SOP squares keep their existing
+        /// candidate behavior. This guards the pink scan's retry state from remaining armed on
+        /// living mobs whose magenta marker can never pass the exact item mouseover check.
+        /// </summary>
+        internal static bool IsMobMarkerRingComponent(WhiteComponent component, Bitmap bitmap)
+        {
+            float expectedRadius = Math.Max(6f,
+                BotConstants.MobGrouping.ExpectedMarkerRadiusPx * bitmap.Height /
+                BotConstants.MobGrouping.ReferenceClientHeightPx);
+            int minDimension = Math.Min(component.Width, component.Height);
+            int maxDimension = Math.Max(component.Width, component.Height);
+            if (minDimension < BotConstants.Loot.PinkMinCandidateWidth ||
+                maxDimension > expectedRadius * 8f)
+                return false;
+
+            float aspectRatio = maxDimension / (float)Math.Max(minDimension, 1);
+            if (aspectRatio > 3.5f)
+                return false;
+
+            float fillRatio = component.Area / (float)Math.Max(component.Width * component.Height, 1);
+            return fillRatio <= 0.38f;
         }
 
         /// <summary>

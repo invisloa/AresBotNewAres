@@ -187,6 +187,64 @@ namespace DriverScanTester
         }
 
         // ════════════════════════════════════════════════════════════════
+        //  MOB GROUPING — global runtime-only AOE assistance
+        // ════════════════════════════════════════════════════════════════
+        public static class MobGrouping
+        {
+            /// <summary>Global runtime toggle default. Never serialized with profiles or paths.</summary>
+            public const bool EnabledDefault = false;
+            public const int MinimumMobs = 3;
+            public const int DetectionIntervalMs = 225;
+            public const int BadFormationPersistenceMs = 750;
+            /// <summary>One missed/weak frame can bridge this short interval without resetting a candidate.</summary>
+            public const int BadFormationGraceMs = 450;
+            public const int MinimumCombatTimeMs = 1200;
+            public const int GroupingMoveDurationMs = 700;
+            public const int SettleDelayMs = 350;
+            public const int MaxMovesPerGrouping = 2;
+            public const int CooldownMs = 5000;
+            public const int MaxGroupingsPerEncounter = 2;
+            public const int EncounterQuietResetMs = 2500;
+
+            /// <summary>
+            /// Initial conservative spread thresholds at the reference marker size (pixels).
+            /// Trigger is deliberately wider than success; tune using real Hyena screenshots.
+            /// Analyzer scales them with detected marker radius when client resolution changes.
+            /// </summary>
+            public const float TriggerAverageSpreadPx = 40f;
+            public const float TriggerMaximumSpreadPx = 68f;
+            public const float SuccessAverageSpreadPx = 24f;
+            public const float SuccessMaximumSpreadPx = 44f;
+
+            /// <summary>Approximate outer ring radius at a reference 840px-high client.</summary>
+            public const float ExpectedMarkerRadiusPx = 18f;
+            public const float ReferenceClientHeightPx = 840f;
+            public const float InnerRingRadiusRatio = 0.62f;
+            public const int MarkerRadiusTolerancePx = 3;
+            public const int RingValidationTolerancePx = 1;
+            public const int MarkerColorTolerance = 32;
+            public const int MinimumRingHoughVotes = 10;
+            public const float MinimumRingCoverage = 0.40f;
+            /// <summary>Reject filled magenta loot squares: a real marker has an open center.</summary>
+            public const float RingCenterClearRadiusRatio = 0.40f;
+            public const float MaximumCenterMagentaCoverage = 0.10f;
+            public const int RingAngularSamples = 32;
+            public const int CyanMinimumComponentPixels = 1;
+            public const int CyanMaximumComponentPixels = 80;
+            public const float CandidateDeduplicationRadiusFactor = 0.35f;
+
+            /// <summary>Stable anchor inferred from the existing centered loot-exclusion zone.</summary>
+            public const float PlayerAnchorRatioX = 0.372f;
+            public const float PlayerAnchorRatioY = 0.476f;
+            /// <summary>ROI half-sizes, as client ratios around the player anchor; right-side UI is mostly excluded.</summary>
+            public const float RoiHalfWidthRatio = 0.40f;
+            public const float RoiHalfHeightRatio = 0.39f;
+
+            /// <summary>Abort a grouping move if it makes less than this much world-coordinate progress.</summary>
+            public const float MinimumMoveProgress = 0.75f;
+        }
+
+        // ════════════════════════════════════════════════════════════════
         //  MOVEMENT — ghost waypoints, stuck, thresholds, camera filters
         // ════════════════════════════════════════════════════════════════
         public static class Movement

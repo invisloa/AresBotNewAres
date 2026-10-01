@@ -281,6 +281,18 @@
                             </Grid>
                         </GroupBox>
 
+                        <GroupBox Header="Combat Assistance" Margin="0,0,0,10" Padding="7">
+                            <DockPanel LastChildFill="False">
+                                <CheckBox Content="Enable Mob Grouping"
+                                          IsChecked="{Binding MobGroupingEnabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                          VerticalAlignment="Center" Margin="4,2"
+                                          ToolTip="Global runtime option. Runs only on MoveAndAttack waypoints and cancels for recovery, loot holds, pause, or Repot."/>
+                                <Border DockPanel.Dock="Right" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="6,0,2,0">
+                                    <TextBlock Text="{Binding MobGroupingStatus}" FontWeight="SemiBold"/>
+                                </Border>
+                            </DockPanel>
+                        </GroupBox>
+
                         <GroupBox Header="Manual Controls" Margin="0,0,0,10" Padding="7">
                             <Grid>
                                 <Grid.ColumnDefinitions>

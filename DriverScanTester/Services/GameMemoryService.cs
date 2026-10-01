@@ -5,6 +5,22 @@ using DriverScanTester.Models;
 
 namespace DriverScanTester.Services
 {
+    public readonly record struct MaxHpManaReadResult(
+        ulong ModuleBase,
+        ulong PlayerPointerAddress,
+        bool PlayerPointerReadSucceeded,
+        ulong PlayerBase,
+        ulong MaxHpAddress,
+        bool MaxHpReadSucceeded,
+        int MaxHp,
+        ulong MaxManaAddress,
+        bool MaxManaReadSucceeded,
+        int MaxMana)
+    {
+        public bool PlayerBaseResolved => PlayerPointerReadSucceeded && PlayerBase != 0;
+        public bool Success => PlayerBaseResolved && MaxHpReadSucceeded && MaxManaReadSucceeded;
+    }
+
     public class GameMemoryService
     {
         public delegate bool ReadMemoryDelegate(uint pid, ulong address, byte[] buffer, out uint bytesRead);
@@ -132,6 +148,33 @@ namespace DriverScanTester.Services
         }
 
         #region Memory Helpers
+
+        private bool TryReadPointer(ulong address, out ulong value)
+        {
+            value = 0;
+            if (_pointerSize != 4 && _pointerSize != 8)
+                return false;
+
+            byte[] buf = new byte[_pointerSize];
+            if (!_read(_pid, address, buf, out uint bytesRead) || bytesRead != _pointerSize)
+                return false;
+
+            value = _pointerSize == 8 ? BitConverter.ToUInt64(buf, 0) : BitConverter.ToUInt32(buf, 0);
+            return true;
+        }
+
+        private bool TryReadShort(ulong address, out short value)
+        {
+            value = 0;
+            byte[] buf = new byte[sizeof(short)];
+            if (!_read(_pid, address, buf, out uint bytesRead) || bytesRead != sizeof(short))
+                return false;
+
+            // A_MaxHP and A_MaxMP are configured as LockValueType.Short in the
+            // existing address files; LockAddressEntryViewModel decodes Short as Int16.
+            value = BitConverter.ToInt16(buf, 0);
+            return true;
+        }
 
         private ulong ReadPointer(ulong address)
         {
@@ -648,14 +691,30 @@ namespace DriverScanTester.Services
             return (hp, mana, true);
         }
 
-        public (int maxHp, int maxMp, bool success) GetMaxHpMana()
+        public MaxHpManaReadResult GetMaxHpMana()
         {
-            ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
-            if (playerBase == 0) return (0, 0, false);
+            ulong playerPointerAddress = _moduleBase + PlayerPtrOffset;
+            bool playerPointerReadSucceeded = TryReadPointer(playerPointerAddress, out ulong playerBase);
+            bool playerBaseResolved = playerPointerReadSucceeded && playerBase != 0;
 
-            int maxHp = ReadShort(playerBase + MaxHpOffset);
-            int maxMp = ReadShort(playerBase + MaxMpOffset);
-            return (maxHp, maxMp, true);
+            ulong maxHpAddress = playerBaseResolved ? playerBase + MaxHpOffset : 0;
+            ulong maxManaAddress = playerBaseResolved ? playerBase + MaxMpOffset : 0;
+            short maxHpValue = 0;
+            short maxManaValue = 0;
+            bool maxHpReadSucceeded = playerBaseResolved && TryReadShort(maxHpAddress, out maxHpValue);
+            bool maxManaReadSucceeded = playerBaseResolved && TryReadShort(maxManaAddress, out maxManaValue);
+
+            return new MaxHpManaReadResult(
+                _moduleBase,
+                playerPointerAddress,
+                playerPointerReadSucceeded,
+                playerBase,
+                maxHpAddress,
+                maxHpReadSucceeded,
+                maxHpReadSucceeded ? maxHpValue : 0,
+                maxManaAddress,
+                maxManaReadSucceeded,
+                maxManaReadSucceeded ? maxManaValue : 0);
         }
 
         public int GetMapNumber()

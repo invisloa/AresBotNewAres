@@ -155,6 +155,8 @@ namespace DriverScanTester.Services
         /// <summary>Whether the coordinator is running.</summary>
         public bool IsRunning => _isRunning;
 
+        public string MobGroupingStatus => _pathRunner.CurrentMovement?.MobGroupingStatus ?? "Idle";
+
         /// <summary>The active profile.</summary>
         public BotProfile ActiveProfile => _profile;
 
@@ -173,6 +175,7 @@ namespace DriverScanTester.Services
         /// </summary>
         public void RequestPauseInputRelease()
         {
+            try { _pathRunner.CurrentMovement?.CancelMobGrouping("workflow paused"); } catch { }
             try { _pathRunner.CurrentMovement?.StopMoving(); } catch { }
             try { _pathRunner.CurrentMovement?.ReleaseCombatKeys(); } catch { }
         }

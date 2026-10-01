@@ -326,66 +326,150 @@ namespace DriverScanTester.ViewModels
 
         public void OpenPathEditorInternal() => OpenPathEditor();
 
-        /// <summary>
-        /// Initializes the manual Bot Window thresholds from the attached player's max
-        /// HP and mana. If memory cannot be read, existing/default thresholds are retained.
-        /// </summary>
-        public void InitializeManualHealManaThresholdsFromPlayer()
+        private sealed class ManualHealManaThresholdInitializationResult
         {
-            try
-            {
-                if (!_isAttached)
-                {
-                    AppendBotLog("[HealMana] Cannot initialize Bot Window thresholds: game is not attached. Keeping existing thresholds.");
-                    return;
-                }
-
-                ulong baseAddr = FindModuleInScanner("Ares.exe", false);
-                if (baseAddr == 0 && _pointerScanner != null)
-                {
-                    _pointerScanner.RefreshModules();
-                    baseAddr = FindModuleInScanner("Ares.exe", true);
-                }
-                if (baseAddr == 0)
-                {
-                    AppendBotLog("[HealMana] Cannot initialize Bot Window thresholds: Ares.exe module base could not be resolved. Keeping existing thresholds.");
-                    return;
-                }
-
-                var memoryService = new GameMemoryService(
-                    _attachedPid,
-                    DriverRead,
-                    DriverWrite,
-                    baseAddr,
-                    GetPointerSize(),
-                    AppendBotLog);
-                var (maxHp, maxMana, success) = memoryService.GetMaxHpMana();
-                if (!success || maxHp <= 0 || maxMana <= 0)
-                {
-                    AppendBotLog($"[HealMana] Could not read valid player max HP/mana (success={success}, max HP={maxHp}, max mana={maxMana}). Keeping existing thresholds.");
-                    return;
-                }
-
-                short hpThreshold = (short)Math.Clamp(
-                    (int)Math.Round(maxHp * BotConstants.HealMana.HpThresholdFraction),
-                    0,
-                    short.MaxValue);
-                short manaThreshold = (short)Math.Clamp(
-                    (int)Math.Round(maxMana * BotConstants.HealMana.MpThresholdFraction),
-                    0,
-                    short.MaxValue);
-
-                HealManaThreshold1 = hpThreshold;
-                HealManaThreshold2 = manaThreshold;
-                AppendBotLog($"[HealMana] Bot Window thresholds initialized from player max HP {maxHp} / max mana {maxMana}: HP {hpThreshold}, mana {manaThreshold}.");
-            }
-            catch (Exception ex)
-            {
-                AppendBotLog($"[HealMana] Failed to initialize Bot Window thresholds from player max HP/mana: {ex.Message}. Keeping existing thresholds.");
-            }
+            public List<string> LogLines { get; } = new();
         }
 
-        private void OpenBotWindow()
+        /// <summary>
+        /// Reads the player's maximum stats during Bot Window initialization. Retries
+        /// briefly for login/map transitions, then independently initializes each value
+        /// that was successfully read while retaining the other current threshold.
+        /// </summary>
+        private async Task<ManualHealManaThresholdInitializationResult> InitializeManualHealManaThresholdsFromPlayer()
+        {
+            const int maxAttempts = 4;
+            const int retryDelayMs = 300;
+            var result = new ManualHealManaThresholdInitializationResult();
+            int? maxHp = null;
+            int? maxMana = null;
+
+            if (!_isAttached)
+            {
+                result.LogLines.Add("[HealMana] Automatic max-stat initialization unavailable: game is not attached; no memory reads attempted.");
+            }
+            else
+            {
+                for (int attempt = 1; attempt <= maxAttempts; attempt++)
+                {
+                    ulong moduleBase = 0;
+                    try
+                    {
+                        moduleBase = FindModuleInScanner("Ares.exe", false);
+                        if (moduleBase == 0 && _pointerScanner != null)
+                        {
+                            _pointerScanner.RefreshModules();
+                            moduleBase = FindModuleInScanner("Ares.exe", true);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        result.LogLines.Add($"[HealMana] Max-stat attempt {attempt}/{maxAttempts}: Ares.exe module lookup failed: {ex.Message}.");
+                    }
+
+                    if (moduleBase == 0)
+                    {
+                        ulong unresolvedPlayerPtrAddress = BotConstants.MemoryOffsets.PlayerPtr;
+                        result.LogLines.Add(
+                            $"[HealMana] Max-stat attempt {attempt}/{maxAttempts}: Ares.exe module base=0x0 (unresolved); " +
+                            $"PlayerPtr address=0x{unresolvedPlayerPtrAddress:X} (not read); playerBase=unresolved; " +
+                            $"MaxHp final address=unresolved (playerBase + 0x{BotConstants.MemoryOffsets.MaxHp:X}, not read); " +
+                            $"MaxMana final address=unresolved (playerBase + 0x{BotConstants.MemoryOffsets.MaxMp:X}, not read).");
+                    }
+                    else
+                    {
+                        try
+                        {
+                            var memoryService = new GameMemoryService(
+                                _attachedPid,
+                                DriverRead,
+                                DriverWrite,
+                                moduleBase,
+                                GetPointerSize(),
+                                AppendBotLog);
+                            MaxHpManaReadResult read = await Task.Run(memoryService.GetMaxHpMana);
+                            result.LogLines.Add(FormatMaxHpManaReadDiagnostic(attempt, maxAttempts, read));
+
+                            // Keep the first valid value for each stat while retrying only
+                            // to fill a missing value. No UI exists yet, so edits cannot be lost.
+                            if (maxHp == null && read.MaxHpReadSucceeded && read.MaxHp > 0)
+                                maxHp = read.MaxHp;
+                            if (maxMana == null && read.MaxManaReadSucceeded && read.MaxMana > 0)
+                                maxMana = read.MaxMana;
+                        }
+                        catch (Exception ex)
+                        {
+                            ulong playerPtrAddress = moduleBase + BotConstants.MemoryOffsets.PlayerPtr;
+                            result.LogLines.Add(
+                                $"[HealMana] Max-stat attempt {attempt}/{maxAttempts}: Ares.exe module base=0x{moduleBase:X}; " +
+                                $"PlayerPtr address=0x{playerPtrAddress:X}; playerBase unresolved; " +
+                                $"MaxHp final address unresolved (playerBase + 0x{BotConstants.MemoryOffsets.MaxHp:X}); " +
+                                $"MaxMana final address unresolved (playerBase + 0x{BotConstants.MemoryOffsets.MaxMp:X}); read threw: {ex.Message}.");
+                        }
+                    }
+
+                    if (maxHp.HasValue && maxMana.HasValue)
+                        break;
+                    if (attempt < maxAttempts)
+                        await Task.Delay(retryDelayMs);
+                }
+            }
+
+            if (maxHp.HasValue)
+            {
+                short hpThreshold = (short)Math.Clamp(
+                    (int)Math.Round(maxHp.Value * BotConstants.HealMana.HpThresholdFraction),
+                    0,
+                    short.MaxValue);
+                HealManaThreshold1 = hpThreshold;
+                result.LogLines.Add($"[HealMana] Max HP read: {maxHp.Value} -> threshold {hpThreshold}.");
+            }
+            else
+            {
+                result.LogLines.Add($"[HealMana] HP automatic initialization FAILED — retaining fallback/current value {HealManaThreshold1}.");
+            }
+
+            if (maxMana.HasValue)
+            {
+                short manaThreshold = (short)Math.Clamp(
+                    (int)Math.Round(maxMana.Value * BotConstants.HealMana.MpThresholdFraction),
+                    0,
+                    short.MaxValue);
+                HealManaThreshold2 = manaThreshold;
+                result.LogLines.Add($"[HealMana] Max Mana read: {maxMana.Value} -> threshold {manaThreshold}.");
+            }
+            else
+            {
+                result.LogLines.Add($"[HealMana] Mana automatic initialization FAILED — retaining fallback/current value {HealManaThreshold2}.");
+            }
+
+            return result;
+        }
+
+        private static string FormatMaxHpManaReadDiagnostic(int attempt, int maxAttempts, MaxHpManaReadResult read)
+        {
+            string pointerStatus = read.PlayerPointerReadSucceeded ? "read succeeded" : "read FAILED";
+            string playerBase = read.PlayerPointerReadSucceeded ? $"0x{read.PlayerBase:X}" : "unresolved";
+            string maxHpAddress = read.PlayerBaseResolved
+                ? $"0x{read.MaxHpAddress:X}"
+                : $"unresolved (playerBase + 0x{BotConstants.MemoryOffsets.MaxHp:X})";
+            string maxManaAddress = read.PlayerBaseResolved
+                ? $"0x{read.MaxManaAddress:X}"
+                : $"unresolved (playerBase + 0x{BotConstants.MemoryOffsets.MaxMp:X})";
+            string maxHpStatus = read.MaxHpReadSucceeded
+                ? $"read succeeded, Int16={read.MaxHp}, raw=0x{unchecked((ushort)read.MaxHp):X4}"
+                : "read FAILED";
+            string maxManaStatus = read.MaxManaReadSucceeded
+                ? $"read succeeded, Int16={read.MaxMana}, raw=0x{unchecked((ushort)read.MaxMana):X4}"
+                : "read FAILED";
+
+            return $"[HealMana] Max-stat attempt {attempt}/{maxAttempts}: Ares.exe module base=0x{read.ModuleBase:X}; " +
+                   $"PlayerPtr address=0x{read.PlayerPointerAddress:X} ({pointerStatus}); resolved playerBase={playerBase}; " +
+                   $"MaxHp final address={maxHpAddress}, {maxHpStatus}; " +
+                   $"MaxMana final address={maxManaAddress}, {maxManaStatus}.";
+        }
+
+        private async void OpenBotWindow()
         {
             if (_botWindow != null)
             {
@@ -397,12 +481,16 @@ namespace DriverScanTester.ViewModels
                 _botWindow.Focus();
                 return;
             }
+            if (_isBotWindowOpening)
+                return;
 
+            _isBotWindowOpening = true;
             BotViewModel? botVm = null;
             Views.BotWindow? win = null;
             try
             {
-                InitializeManualHealManaThresholdsFromPlayer();
+                ManualHealManaThresholdInitializationResult initialization =
+                    await InitializeManualHealManaThresholdsFromPlayer();
                 botVm = new BotViewModel(this);
                 win = new Views.BotWindow
                 {
@@ -422,6 +510,8 @@ namespace DriverScanTester.ViewModels
                     botVm.Dispose();
                 };
                 win.Show();
+                foreach (string line in initialization.LogLines)
+                    botVm.AppendBotLog(line);
             }
             catch (Exception ex)
             {
@@ -432,6 +522,10 @@ namespace DriverScanTester.ViewModels
                 }
                 botVm?.Dispose();
                 AppendLog("OpenBotWindow error: " + ex.Message);
+            }
+            finally
+            {
+                _isBotWindowOpening = false;
             }
         }
 
@@ -545,13 +639,17 @@ namespace DriverScanTester.ViewModels
                 path,
                 initialMode,
                 loop,
-                waypointRecoveryExecutor: waypointRecoveryExecutor);
+                waypointRecoveryExecutor: waypointRecoveryExecutor)
+            {
+                MobGroupingPausePredicate = () => PauseController.IsPaused
+            };
             
             _movementBotCts = new CancellationTokenSource();
             _isMovementBotRunning = true;
             var token = _movementBotCts.Token;
+            MovementSystem movementForTask = _movementSystem!;
 
-            Task.Run(() => MovementBotLoop(token), token);
+            Task.Run(() => MovementBotLoop(token, movementForTask), token);
             AppendBotLog($"Bot started with Custom Route ({path.Count} points). Loop: {loop}");
 
             // 4. Start Heal/Mana using the values initialized for the Bot Window.
@@ -1836,6 +1934,7 @@ namespace DriverScanTester.ViewModels
         /// <summary>Optional sink for bot log lines (the Bot window's log). Null when the Bot window is not open.</summary>
         private Action<string>? _botLogSink;
         private Views.BotWindow? _botWindow;
+        private bool _isBotWindowOpening;
 
         /// <summary>
         /// Routes a bot log line to the bot log (Bot window) when it is open; falls back
@@ -2842,6 +2941,7 @@ namespace DriverScanTester.ViewModels
             PauseController.Pause();
             // Release held inputs immediately so the character halts instead of
             // running / attacking while the loops suspend at their next checkpoint.
+            try { _movementSystem?.CancelMobGrouping("bot paused"); } catch { }
             try { _movementSystem?.StopMoving(); } catch { }
             try { _movementSystem?.ReleaseCombatKeys(); } catch { }
             try { _workflowCoordinator?.RequestPauseInputRelease(); } catch { }
@@ -2870,12 +2970,19 @@ namespace DriverScanTester.ViewModels
         /// <summary>Releases held movement/combat inputs (pause path + stop path).</summary>
         private void ReleaseAllBotInputs()
         {
+            try { _movementSystem?.CancelMobGrouping("bot stop/input cleanup"); } catch { }
             try { _movementSystem?.StopMoving(); } catch { }
             try { _movementSystem?.ReleaseCombatKeys(); } catch { }
             try { _workflowCoordinator?.RequestPauseInputRelease(); } catch { }
         }
 
         public bool IsWorkflowRunning => _workflowCoordinator?.IsRunning ?? false;
+
+        public string MobGroupingStatus => _isMovementBotRunning && _movementSystem != null
+            ? _movementSystem.MobGroupingStatus
+            : _workflowCoordinator?.IsRunning == true
+                ? _workflowCoordinator.MobGroupingStatus
+                : "Waiting for MoveAndAttack";
 
         /// <summary>
         /// User-friendly text for the current workflow stage (no raw phase enum names).
@@ -3584,12 +3691,16 @@ namespace DriverScanTester.ViewModels
                             baseAddr = FindModuleInScanner("Ares.exe", true);
                         }
                         var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
-                        _movementSystem = new MovementSystem(memoryService, AppendBotLog, tx, ty, SelectedPrecision, null, SelectedBotMode);
+                        _movementSystem = new MovementSystem(memoryService, AppendBotLog, tx, ty, SelectedPrecision, null, SelectedBotMode)
+                        {
+                            MobGroupingPausePredicate = () => PauseController.IsPaused
+                        };
         
                         _movementBotCts = new CancellationTokenSource();
                         _isMovementBotRunning = true;
                         var movementToken = _movementBotCts.Token;
-                        Task.Run(() => MovementBotLoop(movementToken), movementToken);
+                        MovementSystem movementForTask = _movementSystem!;
+                        Task.Run(() => MovementBotLoop(movementToken, movementForTask), movementToken);
                         AppendBotLog("Movement Bot started.");
 
                         // Auto-start loot bot when movement starts — except for OnlyMove
@@ -3673,7 +3784,7 @@ namespace DriverScanTester.ViewModels
                     }
                 }
         
-                private async Task MovementBotLoop(CancellationToken token)
+                private async Task MovementBotLoop(CancellationToken token, MovementSystem movementForTask)
                 {
                     try
                     {
@@ -3692,6 +3803,7 @@ namespace DriverScanTester.ViewModels
                             // by PauseAllBots); resume continues with the same waypoint state.
                             if (PauseController.IsPaused)
                             {
+                                movementForTask.CancelMobGrouping("manual movement paused");
                                 _movementSystem.StopMoving();
                                 _movementSystem.ReleaseCombatKeys();
                                 await PauseController.WaitIfPausedAsync(token);
@@ -3738,9 +3850,11 @@ namespace DriverScanTester.ViewModels
                         _movementSystem?.SaveLocalMap();
 
                         // Ensure movement stops even on cancellation
-                        _movementSystem?.CancelWaypointSpecialRecovery();
-                        _movementSystem?.ReleaseCombatKeys();
-                        _movementSystem?.StopMoving();
+                        movementForTask.CancelMobGrouping("manual movement loop stopped");
+                        movementForTask.CancelWaypointSpecialRecovery();
+                        movementForTask.ReleaseCombatKeys();
+                        movementForTask.StopMoving();
+                        movementForTask.DisposeMobGroupingDetector();
                     }
                 }
         

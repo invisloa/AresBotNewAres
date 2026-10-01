@@ -136,6 +136,25 @@ namespace DriverScanTester.ViewModels
             set => SetProperty(ref _botLogText, value);
         }
 
+        /// <summary>Global runtime-only option; profiles and paths never own this value.</summary>
+        public bool MobGroupingEnabled
+        {
+            get => MobGroupingRuntimeSettings.Enabled;
+            set
+            {
+                if (MobGroupingRuntimeSettings.Enabled == value)
+                    return;
+                MobGroupingRuntimeSettings.Enabled = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(MobGroupingStatus));
+                AppendBotLog($"[MobGrouping] global runtime setting {(value ? "enabled" : "disabled")}.");
+            }
+        }
+
+        public string MobGroupingStatus => MobGroupingRuntimeSettings.Enabled
+            ? $"Mob Grouping: {_main.MobGroupingStatus}"
+            : "Mob Grouping: Off";
+
         public bool IsMovementBotRunning
         {
             get => _isMovementBotRunning;
@@ -542,6 +561,7 @@ namespace DriverScanTester.ViewModels
                     CurrentMana = "--";
                     HpPotCount = "--";
                     ManaPotCount = "--";
+                    OnPropertyChanged(nameof(MobGroupingStatus));
                 });
                 return;
             }
@@ -566,6 +586,8 @@ namespace DriverScanTester.ViewModels
                 IsHealManaBotRunning = _main.IsHealManaBotRunningInternal;
                 IsLootBotRunning = _main.IsLootBotRunningInternal;
                 IsBotPaused = _main.IsBotPaused;
+
+                OnPropertyChanged(nameof(MobGroupingStatus));
 
                 // Sync workflow state from MainViewModel
                 IsWorkflowRunning = _main.IsWorkflowRunning;

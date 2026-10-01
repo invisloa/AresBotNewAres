@@ -128,8 +128,35 @@ namespace DriverScanTester.Services
         private readonly RepotHelper _repotHelper;
         private readonly bool _enableWaypointSpecialRecoveries;
         private readonly MovementSteeringMode _steeringMode;
+        private readonly MobMarkerDetector _mobMarkerDetector;
+        private readonly MobGroupingController _mobGroupingController;
+        private readonly object _mobGroupingLock = new();
+        private DateTime _nextMobGroupingDetectionAt = DateTime.MinValue;
+        private MobGroupAnalysis? _lastMobGroupingAnalysis;
+        private bool _lastMobGroupingCaptureSucceeded;
+        private bool _mobGroupingOwnsMovement;
+        private bool _resumeCombatSkillAfterGrouping;
+        private bool _mobGroupingDisposed;
 
         public WaypointRecoveryExecutor? WaypointRecoveryExecutor { get; set; }
+        /// <summary>Set by the host so grouping cannot start while its shared pause switch is active.</summary>
+        public Func<bool>? MobGroupingPausePredicate { get; set; }
+
+        public MobGroupingState CurrentMobGroupingState => _mobGroupingController.State;
+
+        public string MobGroupingStatus => !MobGroupingRuntimeSettings.Enabled
+            ? "Off"
+            : CurrentMobGroupingState switch
+            {
+                MobGroupingState.Idle => "Waiting for MoveAndAttack",
+                MobGroupingState.Observing => "Observing",
+                MobGroupingState.GroupingMove => "Moving",
+                MobGroupingState.Settling => "Settling",
+                MobGroupingState.Verify => "Verifying",
+                MobGroupingState.ResumeCombat => "Resuming combat",
+                MobGroupingState.Cooldown => "Cooldown",
+                _ => "Idle"
+            };
 
         public MovementPrecision GlobalPrecision { get; set; } = MovementPrecision.Medium;
         public bool LoopPath { get; set; } = false;
@@ -296,6 +323,268 @@ namespace DriverScanTester.Services
         /// runs in its own HealManaSystem task).
         /// </summary>
         public bool IsMoveOnlyActive => CurrentMode == BotMode.OnlyMove;
+
+        /// <summary>
+        /// Cancels only the grouping-owned sequence and releases inputs through the existing
+        /// MovementSystem ownership helpers. Hosts call this at pause/stop/phase boundaries.
+        /// </summary>
+        public void CancelMobGrouping(string reason)
+        {
+            lock (_mobGroupingLock)
+            {
+                MobGroupingDecision decision = _mobGroupingController.Cancel(DateTime.UtcNow, reason);
+                if (decision.Directive != MobGroupingDirective.Cancelled)
+                    return;
+                FinishMobGroupingOwnership(resumeCombat: true, DateTime.UtcNow);
+            }
+        }
+
+        /// <summary>Disposes the reusable client ROI bitmap after the movement loop has ended.</summary>
+        public void DisposeMobGroupingDetector()
+        {
+            CancelMobGrouping("movement system stopped");
+            lock (_mobGroupingLock)
+            {
+                if (_mobGroupingDisposed)
+                    return;
+                _mobGroupingDisposed = true;
+                _mobMarkerDetector.Dispose();
+            }
+        }
+
+        /// <summary>Manually captures and saves one annotated combat-ROI diagnostic image.</summary>
+        public bool CaptureMobGroupingDebugSnapshot()
+        {
+            lock (_mobGroupingLock)
+            {
+                if (_mobGroupingDisposed)
+                    return false;
+
+                using Bitmap? frame = _mobMarkerDetector.CaptureDebugFrame(out MobMarkerDetectionResult? result);
+                if (frame == null || result == null)
+                    return false;
+
+                _lastMobGroupingAnalysis = MobGroupAnalyzer.Analyze(result.Markers, result.PlayerAnchor);
+                return MobGroupingDebugRenderer.Save(
+                    frame, result, _lastMobGroupingAnalysis, CurrentMobGroupingState.ToString(), _log);
+            }
+        }
+
+        private void StartMobGroupingMove(MobGroupingDecision decision)
+        {
+            ReleaseSkillThree();
+            StopMoving();
+            _combatHandler.SuspendForExternalMovement();
+            _resumeCombatSkillAfterGrouping = true;
+            _mobGroupingOwnsMovement = true;
+
+            float cameraBearing = GeometryUtils.ConvertRadiansToBearingDeg(_memoryService.GetCameraAngle());
+            float bearing = GeometryUtils.NormalizeBearingDeg(
+                cameraBearing + MobGroupingDirectionMath.ToBearingOffset(decision.Direction ?? MobGroupingDirection.North));
+            MovementSteeringMode? waypointSteering = _finalStandbyActive
+                ? _finalStandbySteeringMode
+                : _waypoints.Count > 0 ? _waypoints.Peek().SteeringMode : null;
+            ApplySteeringBearing(bearing, ResolveSteeringMode(waypointSteering, _steeringMode));
+        }
+
+        private void FinishMobGroupingOwnership(bool resumeCombat, DateTime nowUtc)
+        {
+            if (_mobGroupingOwnsMovement)
+            {
+                StopMoving();
+                _mobGroupingOwnsMovement = false;
+            }
+            ReleaseSkillThree();
+            _combatHandler.ResumeAfterExternalMovement();
+            _resumeCombatSkillAfterGrouping = resumeCombat && CurrentMode == BotMode.MoveAndAttack;
+            if (resumeCombat)
+                _mobGroupingController.CompleteResume(nowUtc);
+        }
+
+        /// <summary>True while grouping has temporarily taken control away from route/combat.</summary>
+        private bool IsMobGroupingSequenceActive => _mobGroupingController.IsSequenceActive;
+
+        private bool TryObserveOrStartMobGrouping(
+            BotMode currentMode,
+            bool hasCombatContext,
+            float currX,
+            float currY,
+            bool positionValid,
+            CancellationToken token)
+        {
+            if (_mobGroupingDisposed)
+                return false;
+
+            bool enabled = MobGroupingRuntimeSettings.Enabled;
+            if (!enabled || CurrentMode != BotMode.MoveAndAttack || currentMode != BotMode.MoveAndAttack)
+            {
+                if (_mobGroupingController.State == MobGroupingState.Observing)
+                {
+                    lock (_mobGroupingLock)
+                        _mobGroupingController.Cancel(DateTime.UtcNow,
+                            !enabled ? "feature disabled" : "mode is not MoveAndAttack");
+                }
+                return false;
+            }
+
+            DateTime now = DateTime.UtcNow;
+            bool detectionCaptured = false;
+            if (now >= _nextMobGroupingDetectionAt)
+            {
+                CaptureMobGroupingSample();
+                detectionCaptured = true;
+            }
+
+            bool windowValid = _mobMarkerDetector.IsGameWindowValid();
+            MobGroupingDecision decision;
+            lock (_mobGroupingLock)
+            {
+                var input = CreateMobGroupingInput(
+                    now, MobGroupingRuntimeSettings.Enabled, hasCombatContext, windowValid, detectionCaptured,
+                    detectionCaptured ? _lastMobGroupingAnalysis : null,
+                    positionValid, currX, currY, token);
+                decision = _mobGroupingController.Tick(input);
+                ApplyMobGroupingDecision(decision, now);
+            }
+
+            return decision.Directive != MobGroupingDirective.None;
+        }
+
+        /// <summary>
+        /// Ticks an already-active operation before the normal combat pipeline. Returning false
+        /// means grouping still owns this movement tick; true means it was cancelled and normal
+        /// higher-priority processing may continue immediately.
+        /// </summary>
+        private bool TickActiveMobGrouping(
+            BotMode currentMode,
+            bool hasCombatContext,
+            float currX,
+            float currY,
+            bool positionValid,
+            CancellationToken token)
+        {
+            DateTime now = DateTime.UtcNow;
+            bool windowValid = _mobMarkerDetector.IsGameWindowValid();
+            bool detectionCaptured = false;
+
+            if (_mobGroupingController.State == MobGroupingState.Verify &&
+                _mobGroupingController.NeedsVerificationCapture(now))
+            {
+                CaptureMobGroupingSample();
+                detectionCaptured = true;
+            }
+
+            MobGroupingDecision decision;
+            lock (_mobGroupingLock)
+            {
+                var input = CreateMobGroupingInput(
+                    now, MobGroupingRuntimeSettings.Enabled, hasCombatContext, windowValid, detectionCaptured,
+                    detectionCaptured ? _lastMobGroupingAnalysis : null,
+                    positionValid, currX, currY, token);
+                decision = _mobGroupingController.Tick(input);
+
+                if (decision.Directive == MobGroupingDirective.VerifyFormation)
+                {
+                    CaptureMobGroupingSample();
+                    detectionCaptured = true;
+                    input = CreateMobGroupingInput(
+                        now, MobGroupingRuntimeSettings.Enabled, hasCombatContext,
+                        windowValid, detectionCaptured,
+                        _lastMobGroupingAnalysis, positionValid, currX, currY, token);
+                    decision = _mobGroupingController.Tick(input);
+                }
+
+                ApplyMobGroupingDecision(decision, now);
+            }
+
+            if (decision.Directive == MobGroupingDirective.Cancelled)
+            {
+                bool paused;
+                try { paused = MobGroupingPausePredicate?.Invoke() == true; }
+                catch { paused = true; }
+                if (paused || token.IsCancellationRequested || !windowValid)
+                    return false;
+                return true;
+            }
+
+            return false;
+        }
+
+        private void CaptureMobGroupingSample()
+        {
+            MobMarkerDetectionResult result = _mobMarkerDetector.CaptureAndDetect();
+            MobGroupAnalysis? analysis = result.Success
+                ? MobGroupAnalyzer.Analyze(result.Markers, result.PlayerAnchor)
+                : null;
+            lock (_mobGroupingLock)
+            {
+                _nextMobGroupingDetectionAt = DateTime.UtcNow.AddMilliseconds(BotConstants.MobGrouping.DetectionIntervalMs);
+                _lastMobGroupingCaptureSucceeded = result.Success;
+                _lastMobGroupingAnalysis = analysis;
+            }
+        }
+
+        private MobGroupingTickInput CreateMobGroupingInput(
+            DateTime nowUtc,
+            bool enabled,
+            bool hasCombatContext,
+            bool windowValid,
+            bool detectionCaptured,
+            MobGroupAnalysis? analysis,
+            bool positionValid,
+            float currX,
+            float currY,
+            CancellationToken token)
+        {
+            bool paused;
+            try { paused = MobGroupingPausePredicate?.Invoke() == true; }
+            catch { paused = true; }
+
+            bool lootHold = LootSystemRef != null &&
+                (LootSystemRef.IsCollecting || LootSystemRef.IsPinkScanPendingOrActive ||
+                 (LootPriorityMode && LootSystemRef.IsLootingActive));
+            bool transition = _repotHelper.IsReportAndGoBackActive || _waypointRepotRequested ||
+                DateTime.Now < _inCityStuckCooldownUntil;
+            bool recovery = _isUnstuckRoutineActive || _reverseDiagonalRecovery.IsActive ||
+                IsWaypointSpecialRecoveryActive;
+
+            return new MobGroupingTickInput(
+                nowUtc,
+                enabled,
+                CurrentMode,
+                hasCombatContext,
+                paused,
+                token.IsCancellationRequested,
+                transition,
+                recovery,
+                lootHold,
+                windowValid,
+                detectionCaptured,
+                analysis,
+                positionValid,
+                currX,
+                currY);
+        }
+
+        private void ApplyMobGroupingDecision(MobGroupingDecision decision, DateTime nowUtc)
+        {
+            switch (decision.Directive)
+            {
+                case MobGroupingDirective.StartMove:
+                    StartMobGroupingMove(decision);
+                    break;
+                case MobGroupingDirective.StopMovement:
+                    StopMoving();
+                    _mobGroupingOwnsMovement = false;
+                    break;
+                case MobGroupingDirective.ResumeCombat:
+                    FinishMobGroupingOwnership(resumeCombat: true, nowUtc);
+                    break;
+                case MobGroupingDirective.Cancelled:
+                    FinishMobGroupingOwnership(resumeCombat: true, nowUtc);
+                    break;
+            }
+        }
 
         /// <summary>True while the loot-priority hold is active (prevents log spam).</summary>
         private bool _lootPriorityHoldActive = false;
@@ -496,6 +785,8 @@ namespace DriverScanTester.Services
             _memoryService = memoryService;
             _log = log;
             _combatHandler = new CombatHandler(log);
+            _mobMarkerDetector = new MobMarkerDetector(log);
+            _mobGroupingController = new MobGroupingController(log);
             _repotHelper = new RepotHelper(memoryService, log, StopMoving, () => _goalReached = true);
             _enableWaypointSpecialRecoveries = enableWaypointSpecialRecoveries;
             _steeringMode = steeringMode;
@@ -579,6 +870,9 @@ namespace DriverScanTester.Services
 
             token.ThrowIfCancellationRequested();
 
+            if (_isWaypointSpecialRecoveryActive || _waypointMobRecovery?.IsActive == true)
+                CancelMobGrouping("waypoint special recovery owns control");
+
             // AttackMob is the only special recovery that remains tick-driven. External
             // operation/recovery-path actions await inside the confirmed-stuck dispatcher,
             // so this guard also prevents normal route/combat logic from competing with one.
@@ -605,6 +899,7 @@ namespace DriverScanTester.Services
             // still handled by EvaluateRepotTick below (15s wait + goal reached).
             if (!InternalRepotEnabled && _repotHelper.IsReportAndGoBackActive)
             {
+                CancelMobGrouping("ReportAndGoBack/teleport transition");
                 if (_isMovingForward || _isSkillThreeHeld || _isUnstuckRoutineActive ||
                     _reverseDiagonalRecovery.IsActive || _consecutiveStuckAttempts != 0)
                 {
@@ -623,6 +918,7 @@ namespace DriverScanTester.Services
             // After 3 stuck attempts in city, bot presses 6 and waits 10 minutes.
             if (DateTime.Now < _inCityStuckCooldownUntil)
             {
+                CancelMobGrouping("in-city teleport cooldown");
                 if (_isMovingForward || _isSkillThreeHeld)
                 {
                     StopMoving();
@@ -650,6 +946,7 @@ namespace DriverScanTester.Services
 
                 if (zoneBlocked)
                 {
+                    CancelMobGrouping("zone restriction hold");
                     // Log only on the transition into the blocked state, not every tick.
                     if (_zoneBlockedSince == DateTime.MinValue)
                     {
@@ -687,6 +984,7 @@ namespace DriverScanTester.Services
             var repotAction = _repotHelper.EvaluateRepotTick(InternalRepotEnabled);
             if (repotAction != RepotAction.None)
             {
+                CancelMobGrouping("Repot transition");
                 _log($"[Repot] {repotAction}");
             }
             if (repotAction == RepotAction.ReportAndGoBackActive)
@@ -731,6 +1029,7 @@ namespace DriverScanTester.Services
             // resume as soon as the collection finishes.
             if (LootSystemRef != null && LootSystemRef.IsCollecting)
             {
+                CancelMobGrouping("loot collection hold");
                 if (!_lootPriorityHoldActive)
                 {
                     _lootPriorityHoldActive = true;
@@ -763,6 +1062,7 @@ namespace DriverScanTester.Services
                 // Never resume combat on a timer while pink loot is still pending.
                 if (LootSystemRef.IsPinkScanPendingOrActive)
                 {
+                    CancelMobGrouping("SOD/SOP pink-scan hold");
                     if (!_pinkScanHoldActive)
                     {
                         _pinkScanHoldActive = true;
@@ -793,6 +1093,7 @@ namespace DriverScanTester.Services
             // is found.
             if (LootPriorityMode && LootSystemRef != null && LootSystemRef.IsLootingActive)
             {
+                CancelMobGrouping("loot-priority hold");
                 if (_lootPriorityHoldSince == DateTime.MinValue)
                 {
                     _lootPriorityHoldSince = DateTime.UtcNow;
@@ -849,6 +1150,7 @@ namespace DriverScanTester.Services
             int currentMapId = _memoryService.GetMapNumber();
             if (currentMapId != _currentMapId)
             {
+                CancelMobGrouping("map/teleport transition");
                 int oldMapId = _currentMapId;
                 _log($"[Tick {_tickCount}] Map: {oldMapId} → {currentMapId}");
                 _localNavigationMap.ChangeMap(currentMapId);
@@ -950,7 +1252,7 @@ namespace DriverScanTester.Services
 
                 // Attack mode: check AtkDis boundary. If outside → move back.
                 float distFromFinal = GeometryUtils.Distance(currX, currY, _finalStandbyX, _finalStandbyY);
-                if (distFromFinal > _finalStandbyAtkDis + 2f)
+                if (distFromFinal > _finalStandbyAtkDis + 2f && !IsMobGroupingSequenceActive)
                 {
                     _log($"[Standby] Outside AtkDis ({distFromFinal:F1} > {_finalStandbyAtkDis}) — returning to final waypoint.");
                     MoveTowards(currX, currY, _finalStandbyX, _finalStandbyY, ResolveSteeringMode(_finalStandbySteeringMode, _steeringMode));
@@ -965,6 +1267,8 @@ namespace DriverScanTester.Services
                 currentMode = _finalStandbyMode == BotMode.MoveAndAttackAndLoot
                     ? BotMode.MoveAndAttack
                     : _finalStandbyMode;
+                if (IsMobGroupingSequenceActive && CurrentMode != BotMode.MoveAndAttack)
+                    CancelMobGrouping($"effective mode changed to {CurrentMode}");
                 goto RUN_COMBAT_ONLY;
             }
 
@@ -975,7 +1279,8 @@ namespace DriverScanTester.Services
                 manhattanDistanceToTarget = GeometryUtils.ManhattanDistance(currX, currY, currentWaypoint.X, currentWaypoint.Y);
 
                 bool isAttackMode = currentWaypoint.Mode == BotMode.MoveAndAttack || currentWaypoint.Mode == BotMode.MoveAndAttackAndLoot;
-                if (isAttackMode && manhattanDistanceToTarget > currentWaypoint.AttackDisengageDistance)
+                if (isAttackMode && manhattanDistanceToTarget > currentWaypoint.AttackDisengageDistance &&
+                    !IsMobGroupingSequenceActive)
                 {
                     if (!_attackSuppressedForCurrentWaypoint)
                     {
@@ -988,10 +1293,15 @@ namespace DriverScanTester.Services
 
                     currentMode = BotMode.OnlyMove;
                 }
-                else if (_attackSuppressedForCurrentWaypoint && isAttackMode)
+                else if (_attackSuppressedForCurrentWaypoint && isAttackMode &&
+                         !IsMobGroupingSequenceActive)
                 {
                     currentMode = BotMode.OnlyMove;
                 }
+
+                if (IsMobGroupingSequenceActive &&
+                    (CurrentMode != BotMode.MoveAndAttack || currentMode != BotMode.MoveAndAttack))
+                    CancelMobGrouping($"effective combat mode changed to {CurrentMode}");
 
                 bool canUseCombatRetargetSearch = currentMode == BotMode.MoveAndAttack || currentMode == BotMode.MoveAndAttackAndLoot;
                 if (!canUseCombatRetargetSearch)
@@ -1100,7 +1410,13 @@ namespace DriverScanTester.Services
 
             // ── Combat mode handling ──
         RUN_COMBAT_ONLY:
+            if (IsMobGroupingSequenceActive &&
+                !TickActiveMobGrouping(currentMode, mobSelected, currX, currY, success, token))
+                return;
+
             var combatAction = _combatHandler.EvaluateCombatAction(_memoryService, currentMode, _isUnstuckRoutineActive, currX, currY);
+            if (combatAction == CombatAction.Unstuck || combatAction == CombatAction.RepositionAndRetry)
+                CancelMobGrouping($"{combatAction} has priority");
             if (combatAction != CombatAction.None && combatAction != CombatAction.CombatWait)
             {
                 _log($"[Tick {_tickCount}] Combat: {combatAction}");
@@ -1113,9 +1429,23 @@ namespace DriverScanTester.Services
                 _log($"[RouteResync] pending set: reason={combatAction}");
             }
 
+            if (combatAction != CombatAction.Unstuck && combatAction != CombatAction.RepositionAndRetry &&
+                TryObserveOrStartMobGrouping(
+                    currentMode,
+                    hasCombatContext: CurrentMode == BotMode.MoveAndAttack &&
+                        currentMode == BotMode.MoveAndAttack && mobSelected && targetId > 0 &&
+                        GameMemoryService.IsMobTargetId(targetId) &&
+                        _combatRetargetCameraStage == CombatRetargetCameraStage.None,
+                    currX,
+                    currY,
+                    success,
+                    token))
+                return;
+
             switch (combatAction)
             {
                 case CombatAction.TabAfterKill:
+                    _resumeCombatSkillAfterGrouping = false;
                     // A fight just ended (mob died / went idle). In MoveAndAttack SOD/SOP
                     // mode request the post-kill pink big-region scan BEFORE TAB selects
                     // the next target; the pink-scan hold above then suspends combat
@@ -1124,6 +1454,7 @@ namespace DriverScanTester.Services
                     goto case CombatAction.TabTarget;
 
                 case CombatAction.TabTarget:
+                    _resumeCombatSkillAfterGrouping = false;
                     if ((currentMode == BotMode.MoveAndAttack || currentMode == BotMode.MoveAndAttackAndLoot) &&
                         _isSkillThreeHeld &&
                         _combatRetargetCameraStage == CombatRetargetCameraStage.None)
@@ -1148,6 +1479,7 @@ namespace DriverScanTester.Services
                     return;
 
                 case CombatAction.Attack:
+                    _resumeCombatSkillAfterGrouping = false;
                     HoldSkillThree();
                     if (_isMovingForward)
                     {
@@ -1157,6 +1489,13 @@ namespace DriverScanTester.Services
                     return;
 
                 case CombatAction.CombatWait:
+                    // A grouping walk released the existing combat-owned hold. Reacquire it
+                    // here through MovementSystem once ordinary combat evaluation resumes.
+                    if (_resumeCombatSkillAfterGrouping && currentMode == BotMode.MoveAndAttack)
+                    {
+                        HoldSkillThree();
+                        _resumeCombatSkillAfterGrouping = false;
+                    }
                     // Skill 3 is held, W is released — keep waiting in combat
                     await Task.Delay(BotConstants.Delays.CombatAttackWaitMs, token);
                     return;
@@ -2216,6 +2555,7 @@ namespace DriverScanTester.Services
         /// </summary>
         private void ResetStuckAndUnstuckState(string reason)
         {
+            CancelMobGrouping($"unstuck state reset: {reason}");
             _reverseDiagonalRecovery.Stop();
             _isUnstuckRoutineActive = false;
             _consecutiveStuckAttempts = 0;
@@ -2228,6 +2568,7 @@ namespace DriverScanTester.Services
             _routeResyncPendingAfterCombat = false;
             _attackSuppressedForCurrentWaypoint = false;
             _combatHandler.ResetState();
+            _resumeCombatSkillAfterGrouping = false;
             ClearCombatRetargetSearch();
             ReleaseSkillThree();
             StopMoving();
@@ -2238,6 +2579,7 @@ namespace DriverScanTester.Services
         {
             _attackSuppressedForCurrentWaypoint = false;
             _combatHandler.ResetState();
+            _resumeCombatSkillAfterGrouping = false;
             ClearCombatRetargetSearch();
             ReleaseSkillThree();
         }
@@ -2252,6 +2594,8 @@ namespace DriverScanTester.Services
 
         private void PrepareSpecialRecovery(Waypoint target)
         {
+            CancelMobGrouping("waypoint special recovery started");
+            _resumeCombatSkillAfterGrouping = false;
             _activeSpecialRecoveryTarget = target;
             _isWaypointSpecialRecoveryActive = true;
             _isUnstuckRoutineActive = true;
@@ -2431,6 +2775,7 @@ namespace DriverScanTester.Services
         /// </summary>
         private void StartReverseDiagonalRecovery(float currX, float currY, Waypoint target)
         {
+            CancelMobGrouping("ReverseDiagonalRecovery started");
             _consecutiveStuckAttempts++;
             _lastStuckAttemptPos = (currX, currY);
             bool inCity = _memoryService.GetIsInCity();
@@ -2501,6 +2846,7 @@ namespace DriverScanTester.Services
         /// </summary>
         private void StartCombatUnstuck(float currX, float currY)
         {
+            CancelMobGrouping("combat unstuck started");
             ReleaseSkillThree();
             Waypoint target = _waypoints.Count > 0
                 ? _waypoints.Peek()
@@ -2519,6 +2865,7 @@ namespace DriverScanTester.Services
         /// </summary>
         private async Task RepositionAndRetryAttack(float currX, float currY, CancellationToken token)
         {
+            CancelMobGrouping("RepositionAndRetry has priority");
             ReleaseSkillThree();
             ClearCombatRetargetSearch();
 

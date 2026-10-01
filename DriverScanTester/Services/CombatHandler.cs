@@ -86,6 +86,8 @@ namespace DriverScanTester.Services
         private DateTime _lastCombatPosChangeAt = DateTime.MinValue;
         /// <summary>Previous position sample (for change detection).</summary>
         private (float X, float Y)? _lastCombatPos = null;
+        private bool _externallySuspended;
+        private DateTime _externalSuspensionStartedAt = DateTime.MinValue;
 
         /// <summary>
         /// Minimum ms of continuous idle action (0/25/1) while a target is still selected
@@ -111,6 +113,9 @@ namespace DriverScanTester.Services
         /// </summary>
         public bool CheckAttackSpeed(GameMemoryService memoryService)
         {
+            if (_externallySuspended)
+                return false;
+
             if ((DateTime.Now - _lastAttackSpeedCheck).TotalSeconds >= BotConstants.SpeedPotion.CheckIntervalSeconds)
             {
                 short attackSpeed = memoryService.GetAttackSpeed();
@@ -138,6 +143,9 @@ namespace DriverScanTester.Services
             float currX,
             float currY)
         {
+            if (_externallySuspended)
+                return CombatAction.None;
+
             if (currentMode != BotMode.MoveAndAttack && currentMode != BotMode.MoveAndAttackAndLoot)
             {
                 return CombatAction.None;
@@ -385,6 +393,41 @@ namespace DriverScanTester.Services
             {
                 _log($"[Combat] Failed to save player screenshot: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Pauses watchdog/targeting evaluation while MovementSystem owns a temporary grouping
+        /// walk. Internal combat state is preserved; elapsed suspension time is removed from its
+        /// timers on resume so the deliberate no-attack interval cannot fabricate a mana-stuck.
+        /// </summary>
+        public void SuspendForExternalMovement()
+        {
+            if (_externallySuspended)
+                return;
+            _externallySuspended = true;
+            _externalSuspensionStartedAt = DateTime.Now;
+        }
+
+        public void ResumeAfterExternalMovement()
+        {
+            if (!_externallySuspended)
+                return;
+
+            TimeSpan suspension = DateTime.Now - _externalSuspensionStartedAt;
+            ShiftTimestamp(ref _lastNonIdleActionTime, suspension);
+            ShiftTimestamp(ref _lastMoveModeTabTime, suspension);
+            ShiftTimestamp(ref _lastAttackSpeedCheck, suspension);
+            ShiftTimestamp(ref _combatIdleStartTime, suspension);
+            ShiftTimestamp(ref _lastManaChangeAt, suspension);
+            ShiftTimestamp(ref _lastCombatPosChangeAt, suspension);
+            _externalSuspensionStartedAt = DateTime.MinValue;
+            _externallySuspended = false;
+        }
+
+        private static void ShiftTimestamp(ref DateTime timestamp, TimeSpan shift)
+        {
+            if (timestamp != DateTime.MinValue)
+                timestamp = timestamp.Add(shift);
         }
 
         /// <summary>
