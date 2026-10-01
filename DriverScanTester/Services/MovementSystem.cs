@@ -509,8 +509,10 @@ namespace DriverScanTester.Services
             bool windowValid = _mobMarkerDetector.IsGameWindowValid();
             bool detectionCaptured = false;
 
-            if (_mobGroupingController.State == MobGroupingState.Verify &&
-                _mobGroupingController.NeedsVerificationCapture(now))
+            // The gather walk samples the mob layout every GatherRescanIntervalMs (500 ms).
+            // NeedsGatherRescan is false at/after the gather deadline, so a rescan can never
+            // delay the deadline-driven stop and no scan is started past the deadline.
+            if (_mobGroupingController.NeedsGatherRescan(now))
             {
                 CaptureMobGroupingSample();
                 detectionCaptured = true;
@@ -525,17 +527,6 @@ namespace DriverScanTester.Services
                     detectionCaptured ? _lastMobGroupingAnalysis : null,
                     positionValid, currX, currY, token);
                 decision = _mobGroupingController.Tick(input);
-
-                if (decision.Directive == MobGroupingDirective.VerifyFormation)
-                {
-                    CaptureMobGroupingSample();
-                    detectionCaptured = true;
-                    input = CreateMobGroupingInput(
-                        now, MobGroupingRuntimeSettings.Enabled, hasCombatContext,
-                        windowValid, detectionCaptured,
-                        _lastMobGroupingAnalysis, positionValid, currX, currY, token);
-                    decision = _mobGroupingController.Tick(input);
-                }
 
                 ApplyMobGroupingDecision(decision, now);
 

@@ -199,9 +199,23 @@ namespace DriverScanTester
             /// <summary>One missed/weak frame can bridge this short interval without resetting a candidate.</summary>
             public const int BadFormationGraceMs = 450;
             public const int MinimumCombatTimeMs = 1200;
-            public const int GroupingMoveDurationMs = 700;
-            public const int SettleDelayMs = 350;
-            public const int MaxMovesPerGrouping = 2;
+            /// <summary>
+            /// Nominal gather movement duration. Each gather attempt selects ONE random deadline of
+            /// this duration +/- <see cref="GatherMoveDurationVariationMs"/> and keeps it for the
+            /// entire attempt (it is never re-rolled by the periodic rescans).
+            /// </summary>
+            public const int GatherMoveNominalDurationMs = 2000;
+            /// <summary>
+            /// Symmetric random variation applied once per gather attempt.
+            /// Nominal 2000 ms +/- 1000 ms gives a per-attempt deadline in 1000..3000 ms.
+            /// </summary>
+            public const int GatherMoveDurationVariationMs = 1000;
+            /// <summary>
+            /// Interval between in-move grouping-quality rescans while the gather walk is active.
+            /// The gather deadline always wins over this cadence: no rescan is started at or
+            /// after the deadline.
+            /// </summary>
+            public const int GatherRescanIntervalMs = 500;
             public const int CooldownMs = 5000;
             public const int MaxGroupingsPerEncounter = 2;
             public const int EncounterQuietResetMs = 2500;

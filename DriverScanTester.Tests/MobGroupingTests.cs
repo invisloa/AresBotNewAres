@@ -58,20 +58,35 @@ namespace DriverScanTester.Tests
             return decision;
         }
 
-        private static MobGroupingDecision FinishOneMove(
-            MobGroupingController controller,
-            DateTime moveStarted,
-            float startX,
-            MobGroupAnalysis verification)
-        {
-            DateTime movementEnded = moveStarted.AddMilliseconds(BotConstants.MobGrouping.GroupingMoveDurationMs);
-            MobGroupingDecision stopped = controller.Tick(Input(movementEnded, playerX: startX + 1f));
-            Assert.Equal(MobGroupingDirective.StopMovement, stopped.Directive);
+        private static MobGroupingController MakeController(int gatherDurationMs)
+            => new(null, new FixedDurationRandom(gatherDurationMs));
 
-            DateTime settled = movementEnded.AddMilliseconds(BotConstants.MobGrouping.SettleDelayMs);
-            MobGroupingDecision verify = controller.Tick(Input(settled));
-            Assert.Equal(MobGroupingDirective.VerifyFormation, verify.Directive);
-            return controller.Tick(Input(settled, verification, sample: true, playerX: startX + 1f));
+        /// <summary>Deterministic gather-duration source for the timing tests.</summary>
+        private sealed class FixedDurationRandom : Random
+        {
+            private readonly int _durationMs;
+
+            public FixedDurationRandom(int durationMs) => _durationMs = durationMs;
+
+            public override int Next(int minValue, int maxValue)
+                => Math.Clamp(_durationMs, minValue, Math.Max(minValue, maxValue - 1));
+        }
+
+        /// <summary>Sequence random source that also counts how many deadlines were requested.</summary>
+        private sealed class SequenceRandom : Random
+        {
+            private readonly Queue<int> _values;
+
+            public int CallCount { get; private set; }
+
+            public SequenceRandom(params int[] values) => _values = new Queue<int>(values);
+
+            public override int Next(int minValue, int maxValue)
+            {
+                CallCount++;
+                int value = _values.Count > 0 ? _values.Dequeue() : minValue;
+                return Math.Clamp(value, minValue, Math.Max(minValue, maxValue - 1));
+            }
         }
 
         [Fact]
@@ -167,72 +182,115 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void GroupingMoveSettleAndClusteredVerification_ResumesCombatAndStartsCooldown()
+        public void GatherStopsEarlyWhenMobsBecomeClustered()
         {
-            var controller = new MobGroupingController();
+            // Deadline is 3000 ms, but a 1000 ms rescan already reports a compact
+            // formation, so the walk must stop immediately and resume combat.
+            var controller = MakeController(3000);
             MobGroupingDecision started = Trigger(controller, Utc());
-            DateTime moveStart = Utc(1200);
+            Assert.Equal(MobGroupingDirective.StartMove, started.Directive);
 
-            MobGroupingDecision resumed = FinishOneMove(controller, moveStart, 0, Analyze(ClusteredPoints));
+            DateTime earlyStop = Utc(1200 + 1000);
+            MobGroupingDecision resumed = controller.Tick(Input(
+                earlyStop, Analyze(ClusteredPoints), sample: true, playerX: 10f));
+
             Assert.Equal(MobGroupingDirective.ResumeCombat, resumed.Directive);
+            Assert.Equal(1, resumed.MoveNumber);
+            Assert.Equal(1, started.MoveNumber);
 
-            DateTime resumedAt = moveStart.AddMilliseconds(1050);
-            controller.CompleteResume(resumedAt);
+            controller.CompleteResume(earlyStop);
             Assert.Equal(MobGroupingState.Cooldown, controller.State);
             Assert.Equal(MobGroupingDirective.None, controller.Tick(Input(
-                resumedAt.AddMilliseconds(BotConstants.MobGrouping.CooldownMs - 1),
+                earlyStop.AddMilliseconds(BotConstants.MobGrouping.CooldownMs - 1),
                 Analyze(ScatteredPoints), sample: true)).Directive);
-            Assert.Equal(1, started.MoveNumber);
         }
 
         [Fact]
-        public void FailedFirstVerification_AllowsExactlyOneAdditionalMove()
+        public void GatherDeadlineStopsMovementAndResumesCombat()
         {
-            var controller = new MobGroupingController();
+            var controller = MakeController(2200);
             Trigger(controller, Utc());
-            DateTime firstMoveStart = Utc(1200);
-            MobGroupingDecision secondMove = FinishOneMove(
-                controller, firstMoveStart, 0, Analyze(ScatteredPoints));
+            DateTime moveStart = Utc(1200);
+            DateTime deadline = moveStart.AddMilliseconds(2200);
 
-            Assert.Equal(MobGroupingDirective.StartMove, secondMove.Directive);
-            Assert.Equal(2, secondMove.MoveNumber);
-            Assert.Equal(2, controller.MovesStarted);
-        }
+            // The rescans never satisfy the grouping condition; the walk still ends at
+            // the selected deadline without waiting for another scan cadence.
+            foreach (int offset in new[] { 500, 1000, 1500, 2000 })
+            {
+                MobGroupingDecision scan = controller.Tick(Input(
+                    moveStart.AddMilliseconds(offset), Analyze(ScatteredPoints), sample: true,
+                    playerX: offset / 100f));
+                Assert.Equal(MobGroupingDirective.None, scan.Directive);
+                Assert.Equal(MobGroupingState.GroupingMove, controller.State);
+            }
 
-        [Fact]
-        public void FailedSecondVerification_ResumesRegardlessAndStartsCooldown()
-        {
-            var controller = new MobGroupingController();
-            Trigger(controller, Utc());
-            DateTime firstMoveStart = Utc(1200);
-            MobGroupingDecision secondMove = FinishOneMove(
-                controller, firstMoveStart, 0, Analyze(ScatteredPoints));
-            Assert.Equal(MobGroupingDirective.StartMove, secondMove.Directive);
-
-            DateTime secondMoveStart = firstMoveStart.AddMilliseconds(
-                BotConstants.MobGrouping.GroupingMoveDurationMs + BotConstants.MobGrouping.SettleDelayMs);
-            MobGroupingDecision resumed = FinishOneMove(
-                controller, secondMoveStart, 1f, Analyze(ScatteredPoints));
-
+            MobGroupingDecision resumed = controller.Tick(Input(deadline, playerX: 25f));
             Assert.Equal(MobGroupingDirective.ResumeCombat, resumed.Directive);
-            Assert.Equal(2, resumed.MoveNumber);
-            controller.CompleteResume(secondMoveStart.AddMilliseconds(1050));
+            Assert.Equal(1, resumed.MoveNumber);
+            Assert.Equal(1, controller.MovesStarted);
+
+            controller.CompleteResume(deadline);
             Assert.Equal(MobGroupingState.Cooldown, controller.State);
+        }
+
+        [Fact]
+        public void GatherUsesOneDeadlineAndNeverStartsASecondMove()
+        {
+            // The sequence random would report a much shorter duration if the controller
+            // re-rolled on a rescan, and CallCount proves the deadline was chosen once.
+            var random = new SequenceRandom(3000, 1000, 1000, 1000);
+            var controller = new MobGroupingController(null, random);
+            Trigger(controller, Utc());
+            DateTime moveStart = Utc(1200);
+
+            // Several rescans pass without grouping; the deadline must stay 3000 ms and
+            // must NOT be re-randomized or extended by the rescan loop.
+            foreach (int offset in new[] { 500, 1000, 1500, 2000, 2500 })
+            {
+                controller.Tick(Input(moveStart.AddMilliseconds(offset),
+                    Analyze(ScatteredPoints), sample: true, playerX: offset / 100f));
+            }
+
+            MobGroupingDecision beforeDeadline = controller.Tick(Input(
+                moveStart.AddMilliseconds(2999), playerX: 30f));
+            Assert.Equal(MobGroupingDirective.None, beforeDeadline.Directive);
+            Assert.Equal(MobGroupingState.GroupingMove, controller.State);
+            Assert.Equal(1, random.CallCount);
+
+            MobGroupingDecision atDeadline = controller.Tick(Input(
+                moveStart.AddMilliseconds(3000), playerX: 30f));
+            Assert.Equal(MobGroupingDirective.ResumeCombat, atDeadline.Directive);
+            Assert.Equal(1, atDeadline.MoveNumber);
+            Assert.Equal(1, controller.MovesStarted);
+            Assert.Equal(1, random.CallCount);
+        }
+
+        [Fact]
+        public void GatherSuccessPredicateRequiresMinimumMobsAndClustering()
+        {
+            // Single source of truth: enough mobs AND the existing clustering condition.
+            Assert.True(MobGroupingController.IsGatheringComplete(Analyze(ClusteredPoints)));
+            Assert.False(MobGroupingController.IsGatheringComplete(Analyze(ScatteredPoints)));
+            Assert.False(MobGroupingController.IsGatheringComplete(Analyze()));
+            Assert.False(MobGroupingController.IsGatheringComplete(
+                Analyze(ScatteredPoints.Take(BotConstants.MobGrouping.MinimumMobs - 1).ToArray())));
         }
 
         [Fact]
         public void CooldownBlocksRetrigger()
         {
-            var controller = new MobGroupingController();
+            var controller = MakeController(2000);
             Trigger(controller, Utc());
             DateTime moveStart = Utc(1200);
-            FinishOneMove(controller, moveStart, 0, Analyze(ClusteredPoints));
-            DateTime resumedAt = moveStart.AddMilliseconds(1050);
-            controller.CompleteResume(resumedAt);
+            DateTime deadline = moveStart.AddMilliseconds(2000);
+
+            MobGroupingDecision resumed = controller.Tick(Input(deadline, playerX: 30f));
+            Assert.Equal(MobGroupingDirective.ResumeCombat, resumed.Directive);
+            controller.CompleteResume(deadline);
 
             MobGroupingDecision decision = controller.Tick(Input(
-                resumedAt.AddMilliseconds(BotConstants.MobGrouping.CooldownMs - 1),
-                Analyze(ScatteredPoints), sample: true));
+                deadline.AddMilliseconds(BotConstants.MobGrouping.CooldownMs - 1),
+                Analyze(ScatteredPoints), sample: true, playerX: 30f));
 
             Assert.Equal(MobGroupingDirective.None, decision.Directive);
             Assert.Equal(MobGroupingState.Cooldown, controller.State);
@@ -241,7 +299,7 @@ namespace DriverScanTester.Tests
         [Fact]
         public void EncounterLimitBlocksThirdGroupingUntilStableQuietReset()
         {
-            var controller = new MobGroupingController();
+            var controller = MakeController(2000);
             DateTime time = Utc();
 
             for (int grouping = 0; grouping < BotConstants.MobGrouping.MaxGroupingsPerEncounter; grouping++)
@@ -258,15 +316,110 @@ namespace DriverScanTester.Tests
                     (start, moveStart) = TriggerAfterCooldown(controller, time);
                 }
                 Assert.Equal(MobGroupingDirective.StartMove, start.Directive);
-                FinishOneMove(controller, moveStart, grouping, Analyze(ClusteredPoints));
-                DateTime resumed = moveStart.AddMilliseconds(1050);
-                controller.CompleteResume(resumed);
-                time = resumed.AddMilliseconds(BotConstants.MobGrouping.CooldownMs);
+
+                DateTime deadline = moveStart.AddMilliseconds(2000);
+                MobGroupingDecision resumed = controller.Tick(Input(deadline, playerX: grouping + 1f));
+                Assert.Equal(MobGroupingDirective.ResumeCombat, resumed.Directive);
+                controller.CompleteResume(deadline);
+                time = deadline.AddMilliseconds(BotConstants.MobGrouping.CooldownMs);
             }
 
             (MobGroupingDecision blocked, _) = TriggerAfterCooldown(controller, time);
             Assert.Equal(MobGroupingDirective.None, blocked.Directive);
             Assert.Equal(BotConstants.MobGrouping.MaxGroupingsPerEncounter, controller.GroupingsThisEncounter);
+        }
+
+        [Fact]
+        public void GatherDurationStaysWithinNominalPlusMinusVariation()
+        {
+            var controller = new MobGroupingController(null, new Random(20260101));
+            int min = BotConstants.MobGrouping.GatherMoveNominalDurationMs -
+                      BotConstants.MobGrouping.GatherMoveDurationVariationMs;
+            int max = BotConstants.MobGrouping.GatherMoveNominalDurationMs +
+                      BotConstants.MobGrouping.GatherMoveDurationVariationMs;
+
+            for (int i = 0; i < 500; i++)
+                Assert.InRange(controller.ChooseGatherDurationMs(), min, max);
+        }
+
+        [Fact]
+        public void GatherRescanIsDueEveryConfiguredIntervalAndNeverPastTheDeadline()
+        {
+            var controller = MakeController(3000);
+            Trigger(controller, Utc());
+            DateTime moveStart = Utc(1200);
+
+            Assert.False(controller.NeedsGatherRescan(moveStart.AddMilliseconds(499)));
+            Assert.True(controller.NeedsGatherRescan(moveStart.AddMilliseconds(500)));
+
+            controller.Tick(Input(moveStart.AddMilliseconds(500), Analyze(ScatteredPoints),
+                sample: true, playerX: 5f));
+            Assert.False(controller.NeedsGatherRescan(moveStart.AddMilliseconds(999)));
+            Assert.True(controller.NeedsGatherRescan(moveStart.AddMilliseconds(1000)));
+
+            // The deadline always wins over the rescan cadence: no rescan is due at or
+            // past it, so the deadline stop can never be delayed by a pending scan.
+            Assert.False(controller.NeedsGatherRescan(moveStart.AddMilliseconds(3000)));
+            Assert.False(controller.NeedsGatherRescan(moveStart.AddMilliseconds(4200)));
+        }
+
+        [Fact]
+        public void NoStaleRescanOrGatherWorkAfterTheGatherCompletes()
+        {
+            var controller = MakeController(3000);
+            Trigger(controller, Utc());
+            DateTime moveStart = Utc(1200);
+            DateTime earlyStop = moveStart.AddMilliseconds(1000);
+
+            MobGroupingDecision resumed = controller.Tick(Input(
+                earlyStop, Analyze(ClusteredPoints), sample: true, playerX: 10f));
+            Assert.Equal(MobGroupingDirective.ResumeCombat, resumed.Directive);
+            controller.CompleteResume(earlyStop);
+            Assert.Equal(MobGroupingState.Cooldown, controller.State);
+            Assert.False(controller.NeedsGatherRescan(earlyStop));
+            Assert.False(controller.NeedsGatherRescan(earlyStop.AddMilliseconds(500)));
+
+            MobGroupingDecision late = controller.Tick(Input(
+                earlyStop.AddMilliseconds(600), Analyze(ScatteredPoints), sample: true, playerX: 10f));
+            Assert.Equal(MobGroupingDirective.None, late.Directive);
+            Assert.Equal(MobGroupingState.Cooldown, controller.State);
+        }
+
+        [Fact]
+        public void EmptyDetectionDoesNotEndGatherEarly()
+        {
+            // A rescan that finds no markers (occlusion/out of view) must not be mistaken
+            // for "mobs are grouped"; only the bounded deadline ends this attempt.
+            var controller = MakeController(2000);
+            Trigger(controller, Utc());
+            DateTime moveStart = Utc(1200);
+
+            foreach (int offset in new[] { 500, 1000, 1500 })
+            {
+                MobGroupingDecision scan = controller.Tick(Input(
+                    moveStart.AddMilliseconds(offset), Analyze(), sample: true, playerX: offset / 100f));
+                Assert.Equal(MobGroupingDirective.None, scan.Directive);
+                Assert.Equal(MobGroupingState.GroupingMove, controller.State);
+            }
+
+            MobGroupingDecision resumed = controller.Tick(Input(
+                moveStart.AddMilliseconds(2000), playerX: 20f));
+            Assert.Equal(MobGroupingDirective.ResumeCombat, resumed.Directive);
+        }
+
+        [Fact]
+        public void CancellingGatherStopsTheRescanLoopWithoutResumingThroughGather()
+        {
+            var controller = MakeController(3000);
+            Trigger(controller, Utc());
+            DateTime cancelAt = Utc(1700);
+
+            MobGroupingDecision cancelled = controller.Cancel(cancelAt, "test cancel");
+
+            Assert.Equal(MobGroupingDirective.Cancelled, cancelled.Directive);
+            Assert.Equal(MobGroupingState.Cooldown, controller.State);
+            Assert.False(controller.NeedsGatherRescan(cancelAt));
+            Assert.False(controller.NeedsGatherRescan(cancelAt.AddMilliseconds(500)));
         }
 
         private static (MobGroupingDecision Decision, DateTime StartedAt) TriggerAfterCooldown(
@@ -614,6 +767,51 @@ namespace DriverScanTester.Tests
             Assert.Null(modeField.GetValue(movement));
             Assert.False((bool)ownsField.GetValue(movement)!);
             Assert.False((bool)movingField.GetValue(movement)!);
+            movement.DisposeMobGroupingDetector();
+        }
+
+        [Fact]
+        public void GroupingResumeCombatReleasesMovementBeforeCombatResumes()
+        {
+            MovementSystem movement = CreateMovementSystem();
+            FieldInfo bearingField = typeof(MovementSystem).GetField("_mobGroupingTargetBearingDeg",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            FieldInfo modeField = typeof(MovementSystem).GetField("_mobGroupingSteeringMode",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            FieldInfo ownsField = typeof(MovementSystem).GetField("_mobGroupingOwnsMovement",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            FieldInfo movingField = typeof(MovementSystem).GetField("_isMovingForward",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            FieldInfo skillField = typeof(MovementSystem).GetField("_isSkillThreeHeld",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            object combatHandler = typeof(MovementSystem)
+                .GetField("_combatHandler", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(movement)!;
+            MethodInfo apply = typeof(MovementSystem).GetMethod("ApplyMobGroupingDecision",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+            bearingField.SetValue(movement, 90f);
+            modeField.SetValue(movement, MovementSteeringMode.KeyboardTurn);
+            ownsField.SetValue(movement, true);
+            movingField.SetValue(movement, true);
+            skillField.SetValue(movement, true);
+            typeof(CombatHandler).GetMethod("SuspendForExternalMovement")!.Invoke(combatHandler, null);
+
+            apply.Invoke(movement, new object[]
+            {
+                new MobGroupingDecision(MobGroupingDirective.ResumeCombat, MoveNumber: 1),
+                Utc()
+            });
+
+            // Every gather-owned input must be released before attack control resumes.
+            Assert.False(movement.IsAttackKeyHeld);
+            Assert.False((bool)movingField.GetValue(movement)!);
+            Assert.False((bool)ownsField.GetValue(movement)!);
+            Assert.Equal(BotConstants.Movement.UnsetBearing, (float)bearingField.GetValue(movement)!);
+            Assert.Null(modeField.GetValue(movement));
+            Assert.False((bool)typeof(CombatHandler)
+                .GetField("_externallySuspended", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(combatHandler)!);
             movement.DisposeMobGroupingDetector();
         }
 
