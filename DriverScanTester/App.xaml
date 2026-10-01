@@ -4,6 +4,66 @@
              xmlns:local="clr-namespace:DriverScanTester"
              StartupUri="MainWindow.xaml">
     <Application.Resources>
-         
+        <Style x:Key="ActionButtonBaseStyle" TargetType="{x:Type Button}">
+            <Setter Property="Padding" Value="10,5"/>
+            <Setter Property="MinHeight" Value="30"/>
+            <Setter Property="Margin" Value="4"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+
+        <Style x:Key="PrimaryActionButtonStyle" TargetType="{x:Type Button}" BasedOn="{StaticResource ActionButtonBaseStyle}">
+            <Setter Property="Background" Value="#FF245B91"/>
+            <Setter Property="BorderBrush" Value="#FF1A4773"/>
+            <Setter Property="Foreground" Value="White"/>
+        </Style>
+
+        <Style x:Key="StartActionButtonStyle" TargetType="{x:Type Button}" BasedOn="{StaticResource ActionButtonBaseStyle}">
+            <Setter Property="Background" Value="#FFE5F2E7"/>
+            <Setter Property="BorderBrush" Value="#FF9BC5A2"/>
+            <Setter Property="Foreground" Value="#FF285D31"/>
+        </Style>
+
+        <Style x:Key="DangerActionButtonStyle" TargetType="{x:Type Button}" BasedOn="{StaticResource ActionButtonBaseStyle}">
+            <Setter Property="Background" Value="#FFF9E5E5"/>
+            <Setter Property="BorderBrush" Value="#FFE0A1A1"/>
+            <Setter Property="Foreground" Value="#FF812626"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+        </Style>
+
+        <Style x:Key="ScopedDangerActionButtonStyle" TargetType="{x:Type Button}" BasedOn="{StaticResource DangerActionButtonStyle}">
+            <Setter Property="Padding" Value="7,3"/>
+            <Setter Property="MinHeight" Value="28"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+            <Setter Property="Background" Value="#FFFFF1F1"/>
+            <Setter Property="BorderBrush" Value="#FFE7C2C2"/>
+        </Style>
+
+        <Style x:Key="WarningActionButtonStyle" TargetType="{x:Type Button}" BasedOn="{StaticResource ActionButtonBaseStyle}">
+            <Setter Property="Background" Value="#FFFFF2CC"/>
+            <Setter Property="BorderBrush" Value="#FFE5CF82"/>
+            <Setter Property="Foreground" Value="#FF6C5416"/>
+        </Style>
+
+        <Style x:Key="SecondaryActionButtonStyle" TargetType="{x:Type Button}" BasedOn="{StaticResource ActionButtonBaseStyle}">
+            <Setter Property="Background" Value="#FFF1F3F5"/>
+            <Setter Property="BorderBrush" Value="#FFCDD3D9"/>
+            <Setter Property="Foreground" Value="#FF303840"/>
+        </Style>
+
+        <Style x:Key="RuntimeBadgeBorderStyle" TargetType="{x:Type Border}">
+            <Setter Property="Background" Value="#FFF1F3F5"/>
+            <Setter Property="BorderBrush" Value="#FFD3D9DF"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="4"/>
+            <Setter Property="Padding" Value="7,4"/>
+            <Setter Property="Margin" Value="3,2"/>
+        </Style>
+
+        <Style x:Key="RuntimeBadgeTextStyle" TargetType="{x:Type TextBlock}">
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
     </Application.Resources>
 </Application>

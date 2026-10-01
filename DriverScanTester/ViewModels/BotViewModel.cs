@@ -7,7 +7,7 @@ using static DriverScanTester.BotConstants;
 
 namespace DriverScanTester.ViewModels
 {
-    public sealed class BotViewModel : BaseViewModel
+    public sealed class BotViewModel : BaseViewModel, IDisposable
     {
         private readonly MainViewModel _main;
 
@@ -27,7 +27,8 @@ namespace DriverScanTester.ViewModels
         private bool _isWorkflowRunning;
         private bool _isBotPaused;
         private string _workflowPhaseText = "Idle";
-        private System.Threading.Timer _statsTimer;
+        private System.Threading.Timer? _statsTimer;
+        private int _isDisposed;
 
         // Test Method control
         private System.Collections.ObjectModel.ObservableCollection<string> _availableOperationNames = new();
@@ -47,10 +48,12 @@ namespace DriverScanTester.ViewModels
         public BotViewModel(MainViewModel main)
         {
             _main = main;
+            _hpThresholdText = _main.HealManaThreshold1.ToString();
+            _manaThresholdText = _main.HealManaThreshold2.ToString();
 
             RunBotCommand = new RelayCommand(_ => RunBot(), _ => _main.IsAttached);
-            StopBotCommand = new RelayCommand(_ => StopAllBots(), _ => _main.IsAttached && (IsMovementBotRunning || IsHealManaBotRunning || IsLootBotRunning));
-            PauseBotCommand = new RelayCommand(_ => PauseBots(), _ => _main.IsAttached && !IsBotPaused && (IsMovementBotRunning || IsHealManaBotRunning || IsLootBotRunning || IsWorkflowRunning));
+            StopBotCommand = new RelayCommand(_ => StopAllBots(), _ => _main.IsAttached && IsAnyRuntimeActive);
+            PauseBotCommand = new RelayCommand(_ => PauseBots(), _ => _main.IsAttached && !IsBotPaused && IsAnyRuntimeActive);
             ResumeBotCommand = new RelayCommand(_ => ResumeBots(), _ => _main.IsAttached && IsBotPaused);
             ToggleHealManaBotCommand = new RelayCommand(_ => ToggleHealManaBot(), _ => _main.IsAttached);
             OpenPathEditorCommand = new RelayCommand(_ => _main.OpenPathEditorInternal(), _ => _main.IsAttached);
@@ -61,7 +64,7 @@ namespace DriverScanTester.ViewModels
 
             // Route Workflow commands
             StartWorkflowCommand = new RelayCommand(_ => StartWorkflowWithProfile(), _ => _main.IsAttached && CanStartWorkflow && !IsBotPaused);
-            StopWorkflowCommand = new RelayCommand(_ => _main.StopWorkflow(), _ => _main.IsAttached);
+            StopWorkflowCommand = new RelayCommand(_ => _main.StopWorkflow(), _ => _main.IsAttached && IsWorkflowRunning);
             PauseWorkflowCommand = new RelayCommand(_ => PauseBots(), _ => _main.IsAttached && !IsBotPaused && IsWorkflowRunning);
             ResumeWorkflowCommand = new RelayCommand(_ => ResumeBots(), _ => _main.IsAttached && IsBotPaused && IsWorkflowRunning);
             RefreshProfilesCommand = new RelayCommand(_ => RefreshProfiles(), _ => _main.IsAttached);
@@ -139,7 +142,10 @@ namespace DriverScanTester.ViewModels
             set
             {
                 if (SetProperty(ref _isMovementBotRunning, value))
+                {
                     OnPropertyChanged(nameof(IsAnyBotRunning));
+                    NotifyRuntimeActivityChanged();
+                }
             }
         }
 
@@ -149,7 +155,10 @@ namespace DriverScanTester.ViewModels
             set
             {
                 if (SetProperty(ref _isHealManaBotRunning, value))
+                {
                     OnPropertyChanged(nameof(IsAnyBotRunning));
+                    NotifyRuntimeActivityChanged();
+                }
             }
         }
 
@@ -159,11 +168,22 @@ namespace DriverScanTester.ViewModels
             set
             {
                 if (SetProperty(ref _isLootBotRunning, value))
+                {
                     OnPropertyChanged(nameof(IsAnyBotRunning));
+                    NotifyRuntimeActivityChanged();
+                }
             }
         }
 
         public bool IsAnyBotRunning => IsMovementBotRunning || IsHealManaBotRunning || IsLootBotRunning;
+
+        public bool IsAnyRuntimeActive => IsAnyBotRunning || IsWorkflowRunning;
+
+        private void NotifyRuntimeActivityChanged()
+        {
+            OnPropertyChanged(nameof(IsAnyRuntimeActive));
+            System.Windows.Input.CommandManager.InvalidateRequerySuggested();
+        }
 
         /// <summary>True while every bot loop is suspended in place (Pause pressed).</summary>
         public bool IsBotPaused
@@ -180,7 +200,11 @@ namespace DriverScanTester.ViewModels
         public bool IsWorkflowRunning
         {
             get => _isWorkflowRunning;
-            set => SetProperty(ref _isWorkflowRunning, value);
+            set
+            {
+                if (SetProperty(ref _isWorkflowRunning, value))
+                    NotifyRuntimeActivityChanged();
+            }
         }
 
         public string WorkflowPhaseText
@@ -500,17 +524,20 @@ namespace DriverScanTester.ViewModels
             IsHealManaBotRunning = _main.IsHealManaBotRunningInternal;
             IsLootBotRunning = _main.IsLootBotRunningInternal;
             IsBotPaused = _main.IsBotPaused;
-
-            HpThresholdText = _main.HealManaThreshold1.ToString();
-            ManaThresholdText = _main.HealManaThreshold2.ToString();
         }
 
         private void RefreshStats()
         {
+            if (System.Threading.Volatile.Read(ref _isDisposed) != 0)
+                return;
+
             if (!_main.IsAttached)
             {
                 System.Windows.Application.Current?.Dispatcher?.Invoke(() =>
                 {
+                    if (System.Threading.Volatile.Read(ref _isDisposed) != 0)
+                        return;
+
                     CurrentHp = "--";
                     CurrentMana = "--";
                     HpPotCount = "--";
@@ -521,6 +548,11 @@ namespace DriverScanTester.ViewModels
 
             System.Windows.Application.Current?.Dispatcher?.Invoke(() =>
             {
+                if (System.Threading.Volatile.Read(ref _isDisposed) != 0)
+                    return;
+
+                // Thresholds are user-owned configuration and are intentionally not
+                // synchronized by this periodic runtime-stats refresh.
                 var (hp, mana, success) = _main.GetHpMana();
                 if (success)
                 {
@@ -562,6 +594,14 @@ namespace DriverScanTester.ViewModels
             }
             // Unlimited file log (UI keeps only the last 500 lines).
             BotFileLogger.AppendLine(stamped);
+        }
+
+        public void Dispose()
+        {
+            if (System.Threading.Interlocked.Exchange(ref _isDisposed, 1) != 0)
+                return;
+
+            System.Threading.Interlocked.Exchange(ref _statsTimer, null)?.Dispose();
         }
 
         private void ClearBotLog()

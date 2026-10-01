@@ -549,20 +549,18 @@ namespace DriverScanTester
             /// <summary>Scan code for key '2'.</summary>
             public const byte ScanCode2 = 0x03;
 
-            /// <summary>Fallback HP threshold below which key '1' is pressed. Only used
-            /// when the player's max HP cannot be read — the live threshold is derived
-            /// from 60% of the player's max HP when the heal bot attaches/starts.</summary>
+            /// <summary>Fallback HP threshold below which key '1' is pressed. Retained
+            /// when player max HP cannot be read while opening the manual Bot Window.</summary>
             public const short HpThreshold = 666;
 
-            /// <summary>Fallback MP threshold below which key '2' is pressed. Only used
-            /// when the player's max mana cannot be read — the live threshold is derived
-            /// from 20% of the player's max mana when the heal bot attaches/starts.</summary>
+            /// <summary>Fallback MP threshold below which key '2' is pressed. Retained
+            /// when player max mana cannot be read while opening the manual Bot Window.</summary>
             public const short MpThreshold = 150;
 
-            /// <summary>Fraction of the player's max HP used as the live HP-drink threshold.</summary>
+            /// <summary>Fraction of the player's max HP used to initialize the manual Bot Window HP threshold.</summary>
             public const double HpThresholdFraction = 0.6;
 
-            /// <summary>Fraction of the player's max mana used as the live mana-drink threshold.</summary>
+            /// <summary>Fraction of the player's max mana used to initialize the manual Bot Window mana threshold.</summary>
             public const double MpThresholdFraction = 0.2;
 
             /// <summary>Delay in ms between key down and key up events.</summary>

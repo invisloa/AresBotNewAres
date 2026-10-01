@@ -326,22 +326,111 @@ namespace DriverScanTester.ViewModels
 
         public void OpenPathEditorInternal() => OpenPathEditor();
 
-        private void OpenBotWindow()
+        /// <summary>
+        /// Initializes the manual Bot Window thresholds from the attached player's max
+        /// HP and mana. If memory cannot be read, existing/default thresholds are retained.
+        /// </summary>
+        public void InitializeManualHealManaThresholdsFromPlayer()
         {
             try
             {
-                var botVm = new BotViewModel(this);
-                // Route all bot service logs to the Bot window's log from now on.
-                _botLogSink = botVm.AppendBotLog;
-                var win = new Views.BotWindow
+                if (!_isAttached)
+                {
+                    AppendBotLog("[HealMana] Cannot initialize Bot Window thresholds: game is not attached. Keeping existing thresholds.");
+                    return;
+                }
+
+                ulong baseAddr = FindModuleInScanner("Ares.exe", false);
+                if (baseAddr == 0 && _pointerScanner != null)
+                {
+                    _pointerScanner.RefreshModules();
+                    baseAddr = FindModuleInScanner("Ares.exe", true);
+                }
+                if (baseAddr == 0)
+                {
+                    AppendBotLog("[HealMana] Cannot initialize Bot Window thresholds: Ares.exe module base could not be resolved. Keeping existing thresholds.");
+                    return;
+                }
+
+                var memoryService = new GameMemoryService(
+                    _attachedPid,
+                    DriverRead,
+                    DriverWrite,
+                    baseAddr,
+                    GetPointerSize(),
+                    AppendBotLog);
+                var (maxHp, maxMana, success) = memoryService.GetMaxHpMana();
+                if (!success || maxHp <= 0 || maxMana <= 0)
+                {
+                    AppendBotLog($"[HealMana] Could not read valid player max HP/mana (success={success}, max HP={maxHp}, max mana={maxMana}). Keeping existing thresholds.");
+                    return;
+                }
+
+                short hpThreshold = (short)Math.Clamp(
+                    (int)Math.Round(maxHp * BotConstants.HealMana.HpThresholdFraction),
+                    0,
+                    short.MaxValue);
+                short manaThreshold = (short)Math.Clamp(
+                    (int)Math.Round(maxMana * BotConstants.HealMana.MpThresholdFraction),
+                    0,
+                    short.MaxValue);
+
+                HealManaThreshold1 = hpThreshold;
+                HealManaThreshold2 = manaThreshold;
+                AppendBotLog($"[HealMana] Bot Window thresholds initialized from player max HP {maxHp} / max mana {maxMana}: HP {hpThreshold}, mana {manaThreshold}.");
+            }
+            catch (Exception ex)
+            {
+                AppendBotLog($"[HealMana] Failed to initialize Bot Window thresholds from player max HP/mana: {ex.Message}. Keeping existing thresholds.");
+            }
+        }
+
+        private void OpenBotWindow()
+        {
+            if (_botWindow != null)
+            {
+                if (_botWindow.WindowState == WindowState.Minimized)
+                    _botWindow.WindowState = WindowState.Normal;
+                if (!_botWindow.IsVisible)
+                    _botWindow.Show();
+                _botWindow.Activate();
+                _botWindow.Focus();
+                return;
+            }
+
+            BotViewModel? botVm = null;
+            Views.BotWindow? win = null;
+            try
+            {
+                InitializeManualHealManaThresholdsFromPlayer();
+                botVm = new BotViewModel(this);
+                win = new Views.BotWindow
                 {
                     DataContext = botVm,
                     Owner = Application.Current?.MainWindow
+                };
+
+                _botWindow = win;
+                _botLogSink = botVm.AppendBotLog;
+                win.Closed += (_, _) =>
+                {
+                    if (ReferenceEquals(_botWindow, win))
+                    {
+                        _botWindow = null;
+                        _botLogSink = null;
+                    }
+                    botVm.Dispose();
                 };
                 win.Show();
             }
             catch (Exception ex)
             {
+                if (win != null && ReferenceEquals(_botWindow, win))
+                {
+                    _botWindow = null;
+                    _botLogSink = null;
+                }
+                botVm?.Dispose();
                 AppendLog("OpenBotWindow error: " + ex.Message);
             }
         }
@@ -465,8 +554,8 @@ namespace DriverScanTester.ViewModels
             Task.Run(() => MovementBotLoop(token), token);
             AppendBotLog($"Bot started with Custom Route ({path.Count} points). Loop: {loop}");
 
-            // 4. Start Heal/Mana
-            _healManaSystem = new HealManaSystem(memoryService, AppendBotLog);
+            // 4. Start Heal/Mana using the values initialized for the Bot Window.
+            _healManaSystem = new HealManaSystem(memoryService, AppendBotLog, usePlayerBasedThresholds: false);
             _healManaBotCts = new CancellationTokenSource();
             _isHealManaBotRunning = true;
             var hmToken = _healManaBotCts.Token;
@@ -1746,6 +1835,7 @@ namespace DriverScanTester.ViewModels
 
         /// <summary>Optional sink for bot log lines (the Bot window's log). Null when the Bot window is not open.</summary>
         private Action<string>? _botLogSink;
+        private Views.BotWindow? _botWindow;
 
         /// <summary>
         /// Routes a bot log line to the bot log (Bot window) when it is open; falls back
@@ -3540,7 +3630,7 @@ namespace DriverScanTester.ViewModels
                         }
 
                         var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
-                        _healManaSystem = new HealManaSystem(memoryService, AppendBotLog);
+                        _healManaSystem = new HealManaSystem(memoryService, AppendBotLog, usePlayerBasedThresholds: false);
                         _healManaBotCts = new CancellationTokenSource();
                         _isHealManaBotRunning = true;
                         var healManaToken = _healManaBotCts.Token;

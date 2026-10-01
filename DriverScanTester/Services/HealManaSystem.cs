@@ -29,17 +29,17 @@ namespace DriverScanTester.Services
         private const byte SCAN_CODE_2 = BotConstants.HealMana.ScanCode2; // Scan code for '2'
         private const int KEYEVENTF_KEYUP = BotConstants.Keyboard.KeyEventKeyUp;
 
-        // Thresholds (fallback defaults; reloaded once from the player's max HP/mana
-        // when the heal bot attaches/starts — see TryLoadPlayerThresholds).
+        // Shared fallback/manual thresholds. The Bot Window initializes its manual
+        // values from player max HP/mana when it opens; workflow instances set profile values.
         public static short Threshold2 = BotConstants.HealMana.MpThreshold;        // Threshold for key '2' (MP?)
         public static short Threshold1 = BotConstants.HealMana.HpThreshold;       // Threshold for key '1' (HP?)
 
-        /// <summary>True when the thresholds should be derived from the player's max
-        /// HP/mana instead of the caller-supplied values (workflow profiles pass false).</summary>
+        /// <summary>True when this instance should derive thresholds from player max
+        /// HP/mana. Manual Bot Window and workflow instances disable this behavior.</summary>
         private readonly bool _usePlayerBasedThresholds;
 
-        /// <summary>Set once the player's max HP/mana have been read successfully — the
-        /// data is loaded only once per heal bot run, never repeatedly.</summary>
+        /// <summary>Set once player max HP/mana have been read successfully for an
+        /// instance with player-based threshold initialization enabled.</summary>
         private bool _playerThresholdsLoaded;
 
         [DllImport("user32.dll")]
@@ -66,10 +66,9 @@ namespace DriverScanTester.Services
             _log = log;
             _usePlayerBasedThresholds = usePlayerBasedThresholds;
 
-            // Load the player's max HP/mana once on attach and derive the drink
-            // thresholds (60% max HP / 20% max mana). If the character is not in
-            // the game yet, Update() retries until the first successful read and
-            // then never reads the max values again.
+            // Player-based initialization remains available to callers that opt in.
+            // The manual Bot Window initializes its thresholds when opened and creates
+            // this system with player-based initialization disabled.
             if (_usePlayerBasedThresholds && !TryLoadPlayerThresholds())
             {
                 _log("[HealMana] Player max HP/mana not readable yet — will retry while the bot runs.");
@@ -79,7 +78,7 @@ namespace DriverScanTester.Services
         /// <summary>
         /// Reads the player's max HP/mana once and derives the drink thresholds:
         /// 60% of max HP for key '1' and 20% of max mana for key '2'.
-        /// Returns false while the player object is not readable (e.g. not in game).
+        /// Returns false while the player object or max HP is not readable (e.g. not in game).
         /// </summary>
         private bool TryLoadPlayerThresholds()
         {
@@ -101,8 +100,8 @@ namespace DriverScanTester.Services
         {
             try
             {
-                // Retry the one-time max HP/mana load until it succeeds (e.g. the
-                // character was still logging in when the bot started).
+                // For callers that opted into player-based initialization, retry the
+                // one-time max HP/mana load until it succeeds.
                 if (_usePlayerBasedThresholds && !_playerThresholdsLoaded)
                 {
                     TryLoadPlayerThresholds();

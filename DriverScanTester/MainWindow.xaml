@@ -87,33 +87,31 @@
             </WrapPanel>
         </GroupBox>
 
-        <!-- Row 3: Tools & Bot -->
+        <!-- Row 3: Developer tools and bot navigation -->
         <Grid Grid.Row="3" Margin="0,0,0,10">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="2*"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-            
+
             <GroupBox Header="Tools" Grid.Column="0" Margin="0,0,5,0">
                 <WrapPanel Orientation="Horizontal">
-                    <Button Content="Search Address" Command="{Binding ShowSearchAddressCommand}" Width="100" Margin="5,2" Background="#FFF0F0FF"/>
-                    <Button Content="Lock Window" Command="{Binding ShowLockWindowCommand}" Width="100" Margin="5,2"/>
-                    <Button Content="Hex Window" Command="{Binding ShowHexWindowCommand}" Width="100" Margin="5,2"/>
-                    <Button Content="Path Editor" Command="{Binding OpenPathEditorCommand}" Width="100" Margin="5,2" Background="#FFF0F0FF"/>
-                    <Button Content="Bot Window" Command="{Binding OpenBotWindowCommand}" Width="100" Margin="5,2" Background="#FFFFF0D0" FontWeight="Bold"/>
-                    
-                    <Separator Width="1" Margin="15,2" Background="LightGray"/>
-                    
+                    <Button Content="Search Address" Command="{Binding ShowSearchAddressCommand}" Width="110" Style="{StaticResource SecondaryActionButtonStyle}"/>
+                    <Button Content="Lock Window" Command="{Binding ShowLockWindowCommand}" Width="105" Style="{StaticResource SecondaryActionButtonStyle}"/>
+                    <Button Content="Hex Window" Command="{Binding ShowHexWindowCommand}" Width="100" Style="{StaticResource SecondaryActionButtonStyle}"/>
+                    <Separator Width="1" Margin="10,2" Background="LightGray"/>
                     <Label Content="Pointer Target:" VerticalAlignment="Center"/>
                     <TextBox Width="120" Text="{Binding PointerTargetText, UpdateSourceTrigger=PropertyChanged}" VerticalAlignment="Center"/>
-                    <Button Content="Pointer Scan…" Command="{Binding PointerScanCommand}" Width="110" Margin="5,2"/>
+                    <Button Content="Pointer Scan…" Command="{Binding PointerScanCommand}" Width="115" Style="{StaticResource SecondaryActionButtonStyle}"/>
                 </WrapPanel>
             </GroupBox>
 
-            <GroupBox Header="Bot Actions" Grid.Column="1" Margin="5,0,0,0">
-                <StackPanel Orientation="Horizontal">
-                    <Button Content="Open Bot Window" Command="{Binding OpenBotWindowCommand}" Width="150" Margin="5,2" Background="#FFFFF0D0" FontWeight="Bold"/>
-                    <Label Content="(all bot controls)" VerticalAlignment="Center" FontStyle="Italic" Foreground="Gray"/>
+            <GroupBox Header="Bot" Grid.Column="1" Margin="5,0,0,0" MinWidth="265">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="Bot Control Panel" Command="{Binding OpenBotWindowCommand}"
+                            Style="{StaticResource PrimaryActionButtonStyle}"/>
+                    <Button Content="Path / Profile Editor" Command="{Binding OpenPathEditorCommand}"
+                            Style="{StaticResource SecondaryActionButtonStyle}"/>
                 </StackPanel>
             </GroupBox>
         </Grid>

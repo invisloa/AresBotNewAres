@@ -3,254 +3,468 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        xmlns:vm="clr-namespace:DriverScanTester.ViewModels"
         mc:Ignorable="d"
-        Title="Bot Control Panel" Height="680" Width="920"
+        Title="Bot Control Panel" Height="720" Width="980"
+        MinWidth="820" MinHeight="570"
         WindowStartupLocation="CenterOwner">
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
-        <!-- Row 0: Status Bar -->
-        <Border Grid.Row="0" BorderBrush="#FF007ACC" BorderThickness="2" CornerRadius="4" Padding="8" Margin="0,0,0,10" Background="#FFF0F8FF">
-            <WrapPanel Orientation="Horizontal">
-                <TextBlock Text="Status:" FontWeight="Bold" VerticalAlignment="Center"/>
-                <TextBlock Text="Move:" FontWeight="Bold" VerticalAlignment="Center" Margin="12,0,0,0"/>
-                <TextBlock Text="{Binding IsMovementBotRunning}" VerticalAlignment="Center" Width="40"/>
-                <TextBlock Text="Heal:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
-                <TextBlock Text="{Binding IsHealManaBotRunning}" VerticalAlignment="Center" Width="40"/>
-                <TextBlock Text="Loot:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
-                <TextBlock Text="{Binding IsLootBotRunning}" VerticalAlignment="Center" Width="40"/>
-                <TextBlock Text="Workflow:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
-                <TextBlock Text="{Binding IsWorkflowRunning}" VerticalAlignment="Center" Width="40"/>
-                <Separator Width="1" Margin="15,2" Background="LightGray"/>
-                <TextBlock Text="Any bot running:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
-                <TextBlock Text="{Binding IsAnyBotRunning}" VerticalAlignment="Center" FontWeight="Bold" Width="40"/>
-                <TextBlock Text="Paused:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
-                <TextBlock Text="{Binding IsBotPaused}" VerticalAlignment="Center" FontWeight="Bold" Width="40"/>
-                <Separator Width="1" Margin="15,2" Background="LightGray"/>
-                <Button Content="Pause" Command="{Binding PauseBotCommand}" Width="70" Margin="5,0" Background="#FFFFFFC0" FontWeight="Bold"
-                        ToolTip="Freeze the bot in place. Resume continues exactly where it was paused."/>
-                <Button Content="Resume" Command="{Binding ResumeBotCommand}" Width="70" Margin="5,0" Background="#FFD0FFD0" FontWeight="Bold"
-                        ToolTip="Resume the paused bot where it was paused."/>
-                <Button Content="STOP ALL BOTS" Command="{Binding StopBotCommand}" Width="120" Margin="5,0" Background="#FFFFD0D0" FontWeight="Bold"/>
-            </WrapPanel>
+        <!-- Persistent global runtime actions, independent of the selected tab. -->
+        <Border Grid.Row="0" BorderBrush="#FFD3D9DF" BorderThickness="1" CornerRadius="5"
+                Background="#FFF7F8FA" Padding="6" Margin="0,0,0,8">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <WrapPanel Grid.Column="0" VerticalAlignment="Center">
+                    <Border Padding="7,4" Margin="3,2" CornerRadius="4">
+                        <Border.Style>
+                            <Style TargetType="Border" BasedOn="{StaticResource RuntimeBadgeBorderStyle}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsAnyRuntimeActive}" Value="True">
+                                        <Setter Property="Background" Value="#FFE8F3EA"/>
+                                        <Setter Property="BorderBrush" Value="#FF9BC5A2"/>
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding IsBotPaused}" Value="True">
+                                        <Setter Property="Background" Value="#FFFFF3D6"/>
+                                        <Setter Property="BorderBrush" Value="#FFE5CF82"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Border.Style>
+                        <TextBlock>
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource RuntimeBadgeTextStyle}">
+                                    <Setter Property="Text" Value="Overall: Idle"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsAnyRuntimeActive}" Value="True">
+                                            <Setter Property="Text" Value="Overall: Running"/>
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsBotPaused}" Value="True">
+                                            <Setter Property="Text" Value="Overall: Paused"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </Border>
+                    <Border Padding="7,4" Margin="3,2" CornerRadius="4">
+                        <Border.Style>
+                            <Style TargetType="Border" BasedOn="{StaticResource RuntimeBadgeBorderStyle}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsMovementBotRunning}" Value="True">
+                                        <Setter Property="Background" Value="#FFE8F3EA"/>
+                                        <Setter Property="BorderBrush" Value="#FF9BC5A2"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Border.Style>
+                        <TextBlock>
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource RuntimeBadgeTextStyle}">
+                                    <Setter Property="Text" Value="Movement: Off"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsMovementBotRunning}" Value="True">
+                                            <Setter Property="Text" Value="Movement: Running"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </Border>
+                    <Border Padding="7,4" Margin="3,2" CornerRadius="4">
+                        <Border.Style>
+                            <Style TargetType="Border" BasedOn="{StaticResource RuntimeBadgeBorderStyle}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsHealManaBotRunning}" Value="True">
+                                        <Setter Property="Background" Value="#FFE8F3EA"/>
+                                        <Setter Property="BorderBrush" Value="#FF9BC5A2"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Border.Style>
+                        <TextBlock>
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource RuntimeBadgeTextStyle}">
+                                    <Setter Property="Text" Value="Heal/Mana: Off"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsHealManaBotRunning}" Value="True">
+                                            <Setter Property="Text" Value="Heal/Mana: Running"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </Border>
+                    <Border Padding="7,4" Margin="3,2" CornerRadius="4">
+                        <Border.Style>
+                            <Style TargetType="Border" BasedOn="{StaticResource RuntimeBadgeBorderStyle}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsLootBotRunning}" Value="True">
+                                        <Setter Property="Background" Value="#FFE8F3EA"/>
+                                        <Setter Property="BorderBrush" Value="#FF9BC5A2"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Border.Style>
+                        <TextBlock>
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource RuntimeBadgeTextStyle}">
+                                    <Setter Property="Text" Value="Loot: Off"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsLootBotRunning}" Value="True">
+                                            <Setter Property="Text" Value="Loot: Running"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </Border>
+                    <Border Padding="7,4" Margin="3,2" CornerRadius="4">
+                        <Border.Style>
+                            <Style TargetType="Border" BasedOn="{StaticResource RuntimeBadgeBorderStyle}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsWorkflowRunning}" Value="True">
+                                        <Setter Property="Background" Value="#FFE8F3EA"/>
+                                        <Setter Property="BorderBrush" Value="#FF9BC5A2"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Border.Style>
+                        <TextBlock>
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource RuntimeBadgeTextStyle}">
+                                    <Setter Property="Text" Value="Workflow: Off"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsWorkflowRunning}" Value="True">
+                                            <Setter Property="Text" Value="Workflow: Running"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </Border>
+                </WrapPanel>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="Pause" Command="{Binding PauseBotCommand}"
+                            ToolTip="Freeze the bot in place. Resume continues where it was paused.">
+                        <Button.Style>
+                            <Style TargetType="Button" BasedOn="{StaticResource WarningActionButtonStyle}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsBotPaused}" Value="True">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                    </Button>
+                    <Button Content="Resume" Command="{Binding ResumeBotCommand}"
+                            ToolTip="Resume the paused bot where it was paused.">
+                        <Button.Style>
+                            <Style TargetType="Button" BasedOn="{StaticResource StartActionButtonStyle}">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsBotPaused}" Value="True">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                    </Button>
+                    <Button Content="Stop All" Command="{Binding StopBotCommand}"
+                            Style="{StaticResource DangerActionButtonStyle}" MinWidth="100"/>
+                </StackPanel>
+            </Grid>
         </Border>
 
-        <!-- Row 1: Movement Bot + Heal/Mana Bot -->
-        <Grid Grid.Row="1" Margin="0,0,0,10">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
+        <TabControl Grid.Row="1">
+            <TabItem Header="Run">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="8">
+                        <GroupBox Header="Route Workflow" Margin="0,0,0,10" Padding="7">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <Grid Grid.Row="0" Margin="0,0,0,7">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="Profile:" FontWeight="Bold" VerticalAlignment="Center" Margin="2,0,6,0"/>
+                                    <ComboBox Grid.Column="1" ItemsSource="{Binding ProfileNames}"
+                                              SelectedItem="{Binding SelectedProfileName}"
+                                              IsEditable="True" IsTextSearchEnabled="True" VerticalAlignment="Center"
+                                              Margin="3,0"/>
+                                    <Button Grid.Column="2" Content="Refresh" Command="{Binding RefreshProfilesCommand}"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"/>
+                                    <Button Grid.Column="3" Content="Validate" Command="{Binding ValidateProfileCommand}"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"/>
+                                    <Button Grid.Column="4" Content="Start Workflow" Command="{Binding StartWorkflowCommand}"
+                                            Style="{StaticResource StartActionButtonStyle}"/>
+                                    <Button Grid.Column="5" Content="Stop Workflow" Command="{Binding StopWorkflowCommand}"
+                                            Style="{StaticResource ScopedDangerActionButtonStyle}"/>
+                                </Grid>
 
-            <!-- Movement Bot -->
-            <GroupBox Header="Movement Bot (HotKey: Home)" Grid.Column="0" Margin="0,0,5,0">
-                <StackPanel>
-                    <WrapPanel Orientation="Horizontal" Margin="5">
-                        <Button Content="RUN BOT" Command="{Binding RunBotCommand}" Width="100" Margin="2" Background="#FFDEFFDE" FontWeight="Bold"/>
-                        <Button Content="Pause" Command="{Binding PauseBotCommand}" Width="70" Margin="2" Background="#FFFFFFC0" FontWeight="Bold"
-                                ToolTip="Freeze the bot in place. Resume continues where it was paused."/>
-                        <Button Content="Resume" Command="{Binding ResumeBotCommand}" Width="70" Margin="2" Background="#FFD0FFD0" FontWeight="Bold"
-                                ToolTip="Resume the paused bot where it was paused."/>
-                        <Button Content="Path Editor" Command="{Binding OpenPathEditorCommand}" Width="100" Margin="10,2,2,2" Background="#FFF0F0FF"/>
-                    </WrapPanel>
-                    <TextBlock Text="Running the movement bot auto-starts the loot bot (hotkey End stops it)."
-                               FontSize="9" Foreground="Gray" Margin="5,0,0,5" TextWrapping="Wrap" FontStyle="Italic"/>
-                </StackPanel>
-            </GroupBox>
+                                <Grid Grid.Row="1" Margin="0,0,0,7">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="1.05*"/>
+                                        <ColumnDefinition Width="1.8*"/>
+                                        <ColumnDefinition Width="0.75*"/>
+                                        <ColumnDefinition Width="1.1*"/>
+                                        <ColumnDefinition Width="1.2*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Border Grid.Column="0" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="2">
+                                        <StackPanel>
+                                            <TextBlock Text="Workflow status" FontSize="10" Foreground="Gray"/>
+                                            <TextBlock FontWeight="SemiBold">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Text" Value="Off"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsWorkflowRunning}" Value="True">
+                                                                <Setter Property="Text" Value="Running"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Grid.Column="1" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="2">
+                                        <StackPanel>
+                                            <TextBlock Text="Current stage" FontSize="10" Foreground="Gray"/>
+                                            <TextBlock Text="{Binding WorkflowPhaseText}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Grid.Column="2" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="2">
+                                        <StackPanel>
+                                            <TextBlock Text="Cycles" FontSize="10" Foreground="Gray"/>
+                                            <TextBlock Text="{Binding WorkflowCycleCount}" FontWeight="SemiBold"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Grid.Column="3" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="2">
+                                        <StackPanel>
+                                            <TextBlock Text="Run duration (min)" FontSize="10" Foreground="Gray"
+                                                       ToolTip="Optional limit. Empty or 0 runs indefinitely."/>
+                                            <TextBox Text="{Binding RunDurationMinutesText, UpdateSourceTrigger=PropertyChanged}"
+                                                     MinWidth="70" ToolTip="Applies to Start Workflow and Start Manual Bot."/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Grid.Column="4" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="2">
+                                        <StackPanel>
+                                            <TextBlock Text="Auto-stop remaining" FontSize="10" Foreground="Gray"/>
+                                            <TextBlock Text="{Binding RunTimeRemainingText}" FontWeight="SemiBold" Foreground="#FF245B91"/>
+                                        </StackPanel>
+                                    </Border>
+                                </Grid>
 
-            <!-- Heal/Mana Bot -->
-            <GroupBox Header="Heal / Mana Bot (HotKey: Page Up)" Grid.Column="1" Margin="5,0,0,0">
-                <StackPanel>
-                    <WrapPanel Orientation="Horizontal" Margin="5">
-                        <Label Content="HP Threshold:" VerticalAlignment="Center" FontWeight="Bold"/>
-                        <TextBox Width="60" Text="{Binding HpThresholdText, UpdateSourceTrigger=PropertyChanged}" VerticalAlignment="Center" Margin="2,0"/>
-                        <Label Content="(uses key '1')" VerticalAlignment="Center" Margin="5,0,0,0" FontStyle="Italic"/>
-                    </WrapPanel>
-                    <WrapPanel Orientation="Horizontal" Margin="5">
-                        <Label Content="Mana Threshold:" VerticalAlignment="Center" FontWeight="Bold"/>
-                        <TextBox Width="60" Text="{Binding ManaThresholdText, UpdateSourceTrigger=PropertyChanged}" VerticalAlignment="Center" Margin="2,0"/>
-                        <Label Content="(uses key '2')" VerticalAlignment="Center" Margin="5,0,0,0" FontStyle="Italic"/>
-                    </WrapPanel>
-                    <WrapPanel Orientation="Horizontal" Margin="5">
-                        <Button Content="Toggle Heal/Mana Bot" Command="{Binding ToggleHealManaBotCommand}" Width="160" Margin="2" Background="#FFFFF0D0"/>
-                        <TextBlock Text="Status:" VerticalAlignment="Center" Margin="10,0,5,0"/>
-                        <TextBlock Text="{Binding IsHealManaBotRunning}" VerticalAlignment="Center" FontWeight="Bold"/>
-                    </WrapPanel>
-                </StackPanel>
-            </GroupBox>
-        </Grid>
+                                <Border Grid.Row="2" Background="#FFF7F8FA" BorderBrush="#FFE0E4E8"
+                                        BorderThickness="1" CornerRadius="3" Padding="5" Margin="2,0">
+                                    <ScrollViewer MaxHeight="54" VerticalScrollBarVisibility="Auto"
+                                                  HorizontalScrollBarVisibility="Disabled">
+                                        <TextBlock Text="{Binding ValidationText}" TextWrapping="Wrap" Foreground="#FF555D65" FontSize="11"/>
+                                    </ScrollViewer>
+                                </Border>
+                            </Grid>
+                        </GroupBox>
 
-        <!-- Row 2: Route Workflow -->
-        <GroupBox Grid.Row="2" Header="Route Workflow" Margin="0,0,0,10" BorderBrush="#FF3399FF" BorderThickness="1">
-            <StackPanel>
-                <WrapPanel Orientation="Horizontal" Margin="5,3">
-                    <TextBlock Text="Profile:" FontWeight="Bold" VerticalAlignment="Center"/>
-                    <ComboBox ItemsSource="{Binding ProfileNames}"
-                              SelectedItem="{Binding SelectedProfileName}"
-                              Width="140" VerticalAlignment="Center" Margin="5,0"
-                              IsEditable="True" IsTextSearchEnabled="True"/>
-                    <Button Content="Refresh" Command="{Binding RefreshProfilesCommand}"
-                            Width="60" Margin="3,0" FontSize="10"/>
-                    <Button Content="Validate" Command="{Binding ValidateProfileCommand}"
-                            Width="60" Margin="3,0" FontSize="10"/>
-                    <Separator Width="1" Margin="5,2" Background="LightGray"/>
-                    <Button Content="Start" Command="{Binding StartWorkflowCommand}"
-                            Width="70" Margin="2" Background="#FFDEFFDE" FontWeight="Bold"/>
-                    <Button Content="Pause" Command="{Binding PauseWorkflowCommand}"
-                            Width="70" Margin="3,2" Background="#FFFFFFC0" FontWeight="Bold"
-                            ToolTip="Freeze the workflow in place. Resume continues with the same step and waypoint."/>
-                    <Button Content="Resume" Command="{Binding ResumeWorkflowCommand}"
-                            Width="70" Margin="3,2" Background="#FFD0FFD0" FontWeight="Bold"
-                            ToolTip="Resume the paused workflow where it was paused."/>
-                    <Button Content="Stop" Command="{Binding StopWorkflowCommand}"
-                            Width="70" Margin="3,2" Background="#FFFFD0D0" FontWeight="Bold"/>
-                    <Separator Width="1" Margin="5,2" Background="LightGray"/>
-                    <TextBlock Text="Run for (min):" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,3,0"
-                               ToolTip="Optional run-duration limit. Empty or 0 = run indefinitely. When the time expires every bot action is stopped automatically."/>
-                    <TextBox Width="60" VerticalAlignment="Center" Margin="0,0"
-                             Text="{Binding RunDurationMinutesText, UpdateSourceTrigger=PropertyChanged}"
-                             ToolTip="Type minutes (e.g. 90). Empty or 0 = run indefinitely. Applies to Start below and to RUN BOT."/>
-                </WrapPanel>
-                <WrapPanel Orientation="Horizontal" Margin="5,0,5,3">
-                    <TextBlock Text="Running:" FontWeight="Bold" VerticalAlignment="Center"/>
-                    <TextBlock Text="{Binding IsWorkflowRunning}" VerticalAlignment="Center" Width="30" Margin="3,0"/>
-                    <Separator Width="1" Margin="10,2" Background="LightGray"/>
-                    <TextBlock Text="Auto-stop in:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,3,0"/>
-                    <TextBlock Text="{Binding RunTimeRemainingText}" VerticalAlignment="Center" FontWeight="Bold"
-                               Foreground="#FF007ACC" MinWidth="90"/>
-                    <Separator Width="1" Margin="10,2" Background="LightGray"/>
-                    <TextBlock Text="Current stage:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,3,0"/>
-                    <TextBlock Text="{Binding WorkflowPhaseText}" VerticalAlignment="Center" FontWeight="Bold"
-                               Foreground="#FF007ACC" MinWidth="140"/>
-                    <Separator Width="1" Margin="10,2" Background="LightGray"/>
-                    <TextBlock Text="Cycles (repot&#8594;exp):" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,3,0"
-                               ToolTip="How many full repot→exp cycles the bot has completed in this run. Resets on every Start."/>
-                    <TextBlock Text="{Binding WorkflowCycleCount}" VerticalAlignment="Center" FontWeight="Bold"
-                               Foreground="#FF007ACC" MinWidth="30"/>
-                    <Separator Width="1" Margin="10,2" Background="LightGray"/>
-                    <TextBlock Text="Validation:" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,3,0"/>
-                    <TextBlock Text="{Binding ValidationText}" VerticalAlignment="Center" Foreground="Gray" FontSize="10"/>
-                </WrapPanel>
-            </StackPanel>
-        </GroupBox>
+                        <GroupBox Header="Manual Controls" Margin="0,0,0,10" Padding="7">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <GroupBox Grid.Column="0" Header="Movement" Margin="0,0,5,0" Padding="6">
+                                    <StackPanel>
+                                        <WrapPanel>
+                                            <Button Content="Start Manual Bot" Command="{Binding RunBotCommand}"
+                                                    Style="{StaticResource StartActionButtonStyle}"/>
+                                            <Button Content="Path / Profile Editor" Command="{Binding OpenPathEditorCommand}"
+                                                    Style="{StaticResource SecondaryActionButtonStyle}"/>
+                                        </WrapPanel>
+                                        <TextBlock Text="Starting manual movement also starts loot automatically."
+                                                   FontSize="10" Foreground="Gray" FontStyle="Italic"
+                                                   TextWrapping="Wrap" Margin="5,2,5,0"/>
+                                    </StackPanel>
+                                </GroupBox>
 
-        <!-- Row 3: Test Method + Calibration -->
-        <Grid Grid.Row="3" Margin="0,0,0,10">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
+                                <GroupBox Grid.Column="1" Header="Heal / Mana" Margin="5,0,0,0" Padding="6">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="75"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+                                        <TextBlock Grid.Row="0" Grid.Column="0" Text="HP threshold" VerticalAlignment="Center" Margin="3"/>
+                                        <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding HpThresholdText, UpdateSourceTrigger=PropertyChanged}"
+                                                 Width="68" VerticalAlignment="Center" Margin="3"/>
+                                        <TextBlock Grid.Row="0" Grid.Column="2" Text="key 1" VerticalAlignment="Center" Foreground="Gray" Margin="5,3"/>
+                                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Mana threshold" VerticalAlignment="Center" Margin="3"/>
+                                        <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding ManaThresholdText, UpdateSourceTrigger=PropertyChanged}"
+                                                 Width="68" VerticalAlignment="Center" Margin="3"/>
+                                        <TextBlock Grid.Row="1" Grid.Column="2" Text="key 2" VerticalAlignment="Center" Foreground="Gray" Margin="5,3"/>
+                                        <WrapPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="3" VerticalAlignment="Center" Margin="0,5,0,0">
+                                            <Button Content="Start/Stop Heal-Mana" Command="{Binding ToggleHealManaBotCommand}"
+                                                    Style="{StaticResource SecondaryActionButtonStyle}"/>
+                                            <Border Padding="7,4" Margin="4" CornerRadius="4">
+                                                <Border.Style>
+                                                    <Style TargetType="Border" BasedOn="{StaticResource RuntimeBadgeBorderStyle}">
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsHealManaBotRunning}" Value="True">
+                                                                <Setter Property="Background" Value="#FFE8F3EA"/>
+                                                                <Setter Property="BorderBrush" Value="#FF9BC5A2"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Border.Style>
+                                                <TextBlock>
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock" BasedOn="{StaticResource RuntimeBadgeTextStyle}">
+                                                            <Setter Property="Text" Value="Off"/>
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsHealManaBotRunning}" Value="True">
+                                                                    <Setter Property="Text" Value="Running"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
+                                            </Border>
+                                        </WrapPanel>
+                                    </Grid>
+                                </GroupBox>
+                            </Grid>
+                        </GroupBox>
 
-            <!-- Test Method -->
-            <GroupBox Header="Test Method" Grid.Column="0" Margin="0,0,5,0" BorderBrush="#FFFF8800" BorderThickness="1">
-                <StackPanel>
-                    <WrapPanel Orientation="Horizontal" Margin="5">
-                        <TextBlock Text="Operation:" FontWeight="Bold" VerticalAlignment="Center"/>
-                        <ComboBox ItemsSource="{Binding AvailableOperationNames}"
-                                  SelectedItem="{Binding SelectedOperationName}"
-                                  Width="170" VerticalAlignment="Center" Margin="5,0"
-                                  IsTextSearchEnabled="True"/>
-                        <Button Content="TEST" Command="{Binding TestOperationCommand}" Width="80"
-                                Margin="5,0" Background="#FFFFD080" FontWeight="Bold"/>
-                    </WrapPanel>
-                    <WrapPanel Orientation="Horizontal" Margin="5,0,5,5">
-                        <TextBlock Text="Result:" FontWeight="Bold" VerticalAlignment="Center"/>
-                        <TextBlock Text="{Binding OperationTestStatus}" VerticalAlignment="Center" Margin="5,0"
-                                   FontWeight="Bold" Foreground="#FF007ACC" MinWidth="80"/>
-                    </WrapPanel>
-                    <TextBlock Text="Runs the selected bot operation once (e.g. Enter_COT) with the same services as the workflow."
-                               FontSize="9" Foreground="Gray" Margin="5,0,0,5" TextWrapping="Wrap" FontStyle="Italic"/>
-                </StackPanel>
-            </GroupBox>
-
-            <!-- Calibration -->
-            <GroupBox Header="Calibration" Grid.Column="1" Margin="5,0,0,0" BorderBrush="#FFE0E0E0" BorderThickness="1">
-                <StackPanel>
-                    <WrapPanel Orientation="Horizontal" Margin="5">
-                        <Button Content="Mouseover NPC" Command="{Binding CaptureNpcMouseOverCommand}" Width="130" Margin="0,0,5,0" Background="#FFE0E0FF" ToolTip="Najedz kursorem na NPC (sprzedawce, u ktorego bot ma sprzedawac) i kliknij. Zapisze pelny dump wartosci do MouseOverValues_Log.txt i ustawi SellerPointedValue."/>
-                        <Button Content="Mouseover Item" Command="{Binding CaptureItemMouseOverCommand}" Width="130" Margin="0" Background="#FFE0E0FF" ToolTip="Najedz kursorem na item (loot) i kliknij. Zapisze pelny dump wartosci do MouseOverValues_Log.txt i ustawi LootMouseOverValue."/>
-                    </WrapPanel>
-                    <TextBlock Text="Hover the target NPC / item in the game, then click to capture the mouseover value. Saved to MouseCalibration.json and restored on restart."
-                               FontSize="9" Foreground="Gray" Margin="5,0,0,5" TextWrapping="Wrap" FontStyle="Italic"/>
-                </StackPanel>
-            </GroupBox>
-        </Grid>
-
-        <!-- Row 4: Live Player Stats + Hotkeys -->
-        <Grid Grid.Row="4" Margin="0,0,0,10">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-
-            <!-- Live Player Stats -->
-            <GroupBox Header="Live Player Stats" Grid.Column="0" Margin="0,0,5,0">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-                    <StackPanel Grid.Column="0" Margin="5">
-                        <TextBlock FontWeight="Bold" Text="HP" Margin="0,0,0,2"/>
-                        <TextBlock Text="{Binding CurrentHp}" FontSize="18" Foreground="#FFCC0000"/>
-                        <TextBlock FontWeight="Bold" Text="Mana" Margin="0,8,0,2"/>
-                        <TextBlock Text="{Binding CurrentMana}" FontSize="18" Foreground="#FF0000CC"/>
+                        <GroupBox Header="Live Player Stats" Padding="7">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Border Grid.Column="0" Style="{StaticResource RuntimeBadgeBorderStyle}">
+                                    <StackPanel><TextBlock Text="HP" FontSize="10" Foreground="Gray"/><TextBlock Text="{Binding CurrentHp}" FontSize="16" FontWeight="SemiBold"/></StackPanel>
+                                </Border>
+                                <Border Grid.Column="1" Style="{StaticResource RuntimeBadgeBorderStyle}">
+                                    <StackPanel><TextBlock Text="Mana" FontSize="10" Foreground="Gray"/><TextBlock Text="{Binding CurrentMana}" FontSize="16" FontWeight="SemiBold"/></StackPanel>
+                                </Border>
+                                <Border Grid.Column="2" Style="{StaticResource RuntimeBadgeBorderStyle}">
+                                    <StackPanel><TextBlock Text="HP Potions" FontSize="10" Foreground="Gray"/><TextBlock Text="{Binding HpPotCount}" FontSize="16" FontWeight="SemiBold"/></StackPanel>
+                                </Border>
+                                <Border Grid.Column="3" Style="{StaticResource RuntimeBadgeBorderStyle}">
+                                    <StackPanel><TextBlock Text="Mana Potions" FontSize="10" Foreground="Gray"/><TextBlock Text="{Binding ManaPotCount}" FontSize="16" FontWeight="SemiBold"/></StackPanel>
+                                </Border>
+                            </Grid>
+                        </GroupBox>
                     </StackPanel>
-                    <StackPanel Grid.Column="1" Margin="5">
-                        <TextBlock FontWeight="Bold" Text="HP Potions" Margin="0,0,0,2"/>
-                        <TextBlock Text="{Binding HpPotCount}" FontSize="18"/>
-                        <TextBlock FontWeight="Bold" Text="Mana Potions" Margin="0,8,0,2"/>
-                        <TextBlock Text="{Binding ManaPotCount}" FontSize="18"/>
+                </ScrollViewer>
+            </TabItem>
+
+            <TabItem Header="Tools">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="8">
+                        <GroupBox Header="Test Operation — diagnostic tool" Margin="0,0,0,10" Padding="7">
+                            <StackPanel>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Operation:" FontWeight="SemiBold" VerticalAlignment="Center" Margin="3"/>
+                                <ComboBox Grid.Column="1" ItemsSource="{Binding AvailableOperationNames}"
+                                          SelectedItem="{Binding SelectedOperationName}"
+                                          IsTextSearchEnabled="True" VerticalAlignment="Center" Margin="3"/>
+                                <Button Grid.Column="2" Content="Test Operation" Command="{Binding TestOperationCommand}"
+                                        Style="{StaticResource SecondaryActionButtonStyle}"/>
+                                <Border Grid.Column="3" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="4">
+                                    <TextBlock Text="{Binding OperationTestStatus}" FontWeight="SemiBold"/>
+                                </Border>
+                            </Grid>
+                            <TextBlock Text="Runs the selected bot operation once (for example Enter_COT) with the same services as the workflow."
+                                       FontSize="10" Foreground="Gray" TextWrapping="Wrap" Margin="4,7,4,0"/>
+                            </StackPanel>
+                        </GroupBox>
+
+                        <GroupBox Header="Calibration" Margin="0,0,0,10" Padding="7">
+                            <StackPanel>
+                                <WrapPanel>
+                                    <Button Content="Capture NPC Mouseover" Command="{Binding CaptureNpcMouseOverCommand}"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"
+                                            ToolTip="Najedz kursorem na NPC (sprzedawce, u ktorego bot ma sprzedawac) i kliknij. Zapisze pelny dump wartosci do MouseOverValues_Log.txt i ustawi SellerPointedValue."/>
+                                    <Button Content="Capture Item Mouseover" Command="{Binding CaptureItemMouseOverCommand}"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"
+                                            ToolTip="Najedz kursorem na item (loot) i kliknij. Zapisze pelny dump wartosci do MouseOverValues_Log.txt i ustawi LootMouseOverValue."/>
+                                </WrapPanel>
+                                <TextBlock Text="Hover the target NPC or item in the game, then capture its mouseover value. Calibration is saved to MouseCalibration.json and restored on restart."
+                                           FontSize="10" Foreground="Gray" Margin="5,2,5,0" TextWrapping="Wrap" FontStyle="Italic"/>
+                            </StackPanel>
+                        </GroupBox>
+
+                        <GroupBox Header="Hotkeys / Shortcuts" Padding="7">
+                            <Grid Margin="3">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="90"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Grid.Column="0" Text="Home" FontWeight="Bold" Margin="4"/>
+                                <TextBlock Grid.Row="0" Grid.Column="1" Text="Toggle Movement Bot" Margin="4"/>
+                                <TextBlock Grid.Row="1" Grid.Column="0" Text="Page Up" FontWeight="Bold" Margin="4"/>
+                                <TextBlock Grid.Row="1" Grid.Column="1" Text="Toggle Heal/Mana Bot" Margin="4"/>
+                                <TextBlock Grid.Row="2" Grid.Column="0" Text="End" FontWeight="Bold" Margin="4"/>
+                                <TextBlock Grid.Row="2" Grid.Column="1" Text="Toggle Loot Bot" Margin="4"/>
+                            </Grid>
+                        </GroupBox>
                     </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <TabItem Header="Log">
+                <Grid Margin="8">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <Button Grid.Row="0" Content="Clear Log" Command="{Binding ClearBotLogCommand}"
+                            Style="{StaticResource SecondaryActionButtonStyle}"
+                            HorizontalAlignment="Right" Margin="2,0,2,6"/>
+                    <TextBox Grid.Row="1" x:Name="BotLogBox" Text="{Binding BotLogText, Mode=OneWay}"
+                             IsReadOnly="True"
+                             VerticalScrollBarVisibility="Auto"
+                             HorizontalScrollBarVisibility="Auto"
+                             TextWrapping="NoWrap"
+                             FontFamily="Consolas"
+                             FontSize="10"
+                             Background="#FFF9F9F9"
+                             TextChanged="BotLogBox_TextChanged"/>
                 </Grid>
-            </GroupBox>
-
-            <!-- Hotkeys -->
-            <GroupBox Header="Hotkeys" Grid.Column="1" Margin="5,0,0,0">
-                <StackPanel>
-                    <WrapPanel Orientation="Horizontal" Margin="8,4">
-                        <TextBlock FontWeight="Bold" Width="70">Home</TextBlock>
-                        <TextBlock>- Toggle Movement Bot</TextBlock>
-                    </WrapPanel>
-                    <WrapPanel Orientation="Horizontal" Margin="8,4">
-                        <TextBlock FontWeight="Bold" Width="70">Page Up</TextBlock>
-                        <TextBlock>- Toggle Heal/Mana Bot</TextBlock>
-                    </WrapPanel>
-                    <WrapPanel Orientation="Horizontal" Margin="8,4">
-                        <TextBlock FontWeight="Bold" Width="70">End</TextBlock>
-                        <TextBlock>- Toggle Loot Bot</TextBlock>
-                    </WrapPanel>
-                </StackPanel>
-            </GroupBox>
-        </Grid>
-
-        <!-- Row 5: Bot-Specific Log -->
-        <GroupBox Grid.Row="5" Header="Bot Log" Margin="0,0,0,5">
-            <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                </Grid.RowDefinitions>
-                <Button Grid.Row="0" Content="Clear Log" Command="{Binding ClearBotLogCommand}"
-                        HorizontalAlignment="Right" Padding="6,1" FontSize="10" Margin="0,0,0,2" Cursor="Hand"/>
-                <TextBox Grid.Row="1" x:Name="BotLogBox" Text="{Binding BotLogText, Mode=OneWay}"
-                         IsReadOnly="True"
-                         VerticalScrollBarVisibility="Auto"
-                         HorizontalScrollBarVisibility="Auto"
-                         TextWrapping="NoWrap"
-                         FontFamily="Consolas"
-                         FontSize="10"
-                         Background="#FFF9F9F9"
-                         TextChanged="BotLogBox_TextChanged"/>
-            </Grid>
-        </GroupBox>
+            </TabItem>
+        </TabControl>
     </Grid>
 </Window>
