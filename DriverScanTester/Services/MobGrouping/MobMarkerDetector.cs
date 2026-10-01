@@ -371,8 +371,27 @@ namespace DriverScanTester.Services
                     count > BotConstants.MobGrouping.CyanMaximumComponentPixels)
                     continue;
 
+                float centerX = sumX / (float)count;
+                float centerY = sumY / (float)count;
+
+                // Cyan supplies the exact center, but arbitrary cyan pixels/effects must not
+                // become phantom mobs. Confirm that artificial magenta ring evidence exists
+                // around the expected ring radius before emitting the candidate. The center
+                // is already known, so this confirmation threshold is intentionally lower
+                // than the ring-only fallback (partial/occluded rings still pass).
+                float magentaRingSupport = ScoreCircularRing(
+                    (int)Math.Round(centerX),
+                    (int)Math.Round(centerY),
+                    width,
+                    height,
+                    expectedRadius,
+                    expectedRadius * BotConstants.MobGrouping.InnerRingRadiusRatio,
+                    BotConstants.MobGrouping.RingValidationTolerancePx);
+                if (magentaRingSupport < BotConstants.MobGrouping.CyanCenterMinimumMagentaRingSupport)
+                    continue;
+
                 candidates.Add(new MobMarker(
-                    new MobPoint(clientOffsetX + sumX / (float)count, clientOffsetY + sumY / (float)count),
+                    new MobPoint(clientOffsetX + centerX, clientOffsetY + centerY),
                     expectedRadius,
                     1f,
                     MobMarkerSource.CyanCenter));

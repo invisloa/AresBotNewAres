@@ -225,6 +225,16 @@ namespace DriverScanTester
             public const int MarkerColorTolerance = 32;
             public const int MinimumRingHoughVotes = 10;
             public const float MinimumRingCoverage = 0.40f;
+            /// <summary>
+            /// Minimum artificial-magenta ring support required to confirm a cyan-center
+            /// hypothesis as a real mob marker. A cyan blob alone gives the exact center but
+            /// can also come from arbitrary effects, so magenta evidence near the expected
+            /// ring radius must corroborate it. The threshold is deliberately below the
+            /// ring-only <see cref="MinimumRingCoverage"/> (0.40): the cyan center is already
+            /// known, so a partial/occluded ring is enough. 0.20 tolerates a fully occluded
+            /// quadrant plus scattered gaps while still rejecting cyan-only artifacts.
+            /// </summary>
+            public const float CyanCenterMinimumMagentaRingSupport = 0.20f;
             /// <summary>Reject filled magenta loot squares: a real marker has an open center.</summary>
             public const float RingCenterClearRadiusRatio = 0.40f;
             public const float MaximumCenterMagentaCoverage = 0.10f;

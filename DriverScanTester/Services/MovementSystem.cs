@@ -137,6 +137,12 @@ namespace DriverScanTester.Services
         private bool _mobGroupingOwnsMovement;
         private bool _resumeCombatSkillAfterGrouping;
         private bool _mobGroupingDisposed;
+        // Absolute grouping target captured at movement start and the steering mode
+        // resolved for this movement. KeyboardTurn must re-evaluate A/D from the live
+        // camera every tick against this fixed bearing; it must never be recomputed
+        // relative to the changing camera during the walk.
+        private float _mobGroupingTargetBearingDeg = UnsetBearing;
+        private MovementSteeringMode? _mobGroupingSteeringMode;
 
         public WaypointRecoveryExecutor? WaypointRecoveryExecutor { get; set; }
         /// <summary>Set by the host so grouping cannot start while its shared pause switch is active.</summary>
@@ -378,13 +384,53 @@ namespace DriverScanTester.Services
             _resumeCombatSkillAfterGrouping = true;
             _mobGroupingOwnsMovement = true;
 
+            // The controller's direction is relative to the camera orientation at the
+            // moment this movement starts. Resolve it ONCE into an absolute bearing and
+            // store it; every later tick re-runs the existing steering engine against
+            // this same bearing so KeyboardTurn feedback is not recomputed relative to
+            // the changing camera.
             float cameraBearing = GeometryUtils.ConvertRadiansToBearingDeg(_memoryService.GetCameraAngle());
-            float bearing = GeometryUtils.NormalizeBearingDeg(
-                cameraBearing + MobGroupingDirectionMath.ToBearingOffset(decision.Direction ?? MobGroupingDirection.North));
+            float bearing = ComputeMobGroupingTargetBearingDeg(
+                cameraBearing, decision.Direction ?? MobGroupingDirection.North);
             MovementSteeringMode? waypointSteering = _finalStandbyActive
                 ? _finalStandbySteeringMode
                 : _waypoints.Count > 0 ? _waypoints.Peek().SteeringMode : null;
-            ApplySteeringBearing(bearing, ResolveSteeringMode(waypointSteering, _steeringMode));
+            _mobGroupingSteeringMode = ResolveSteeringMode(waypointSteering, _steeringMode);
+            _mobGroupingTargetBearingDeg = bearing;
+            ApplySteeringBearing(bearing, _mobGroupingSteeringMode.Value);
+        }
+
+        /// <summary>
+        /// Pure conversion of the grouping direction (relative to the camera at movement
+        /// start) into the absolute bearing stored for the whole movement. Kept separate
+        /// so the no-drift behavior is unit-testable without native key events.
+        /// </summary>
+        internal static float ComputeMobGroupingTargetBearingDeg(
+            float cameraBearingDeg,
+            MobGroupingDirection direction)
+            => GeometryUtils.NormalizeBearingDeg(
+                cameraBearingDeg + MobGroupingDirectionMath.ToBearingOffset(direction));
+
+        /// <summary>
+        /// Re-runs the EXISTING steering engine for an in-progress grouping walk using
+        /// the absolute bearing captured at movement start. This is what keeps KeyboardTurn
+        /// feedback-controlled: W stays held and A/D are recalculated from the live camera
+        /// against the fixed grouping bearing every regular update tick. DirectCamera is
+        /// routed through the same method on purpose — its existing camera filter already
+        /// suppresses unnecessary writes, so no second direct-camera algorithm exists.
+        /// </summary>
+        private void ApplyMobGroupingSteeringTick()
+        {
+            if (_mobGroupingTargetBearingDeg == UnsetBearing || !_mobGroupingSteeringMode.HasValue)
+                return;
+            ApplySteeringBearing(_mobGroupingTargetBearingDeg, _mobGroupingSteeringMode.Value);
+        }
+
+        /// <summary>Clears the stored per-movement grouping bearing and steering mode.</summary>
+        private void ClearMobGroupingSteeringState()
+        {
+            _mobGroupingTargetBearingDeg = UnsetBearing;
+            _mobGroupingSteeringMode = null;
         }
 
         private void FinishMobGroupingOwnership(bool resumeCombat, DateTime nowUtc)
@@ -394,6 +440,7 @@ namespace DriverScanTester.Services
                 StopMoving();
                 _mobGroupingOwnsMovement = false;
             }
+            ClearMobGroupingSteeringState();
             ReleaseSkillThree();
             _combatHandler.ResumeAfterExternalMovement();
             _resumeCombatSkillAfterGrouping = resumeCombat && CurrentMode == BotMode.MoveAndAttack;
@@ -416,20 +463,15 @@ namespace DriverScanTester.Services
                 return false;
 
             bool enabled = MobGroupingRuntimeSettings.Enabled;
-            if (!enabled || CurrentMode != BotMode.MoveAndAttack || currentMode != BotMode.MoveAndAttack)
-            {
-                if (_mobGroupingController.State == MobGroupingState.Observing)
-                {
-                    lock (_mobGroupingLock)
-                        _mobGroupingController.Cancel(DateTime.UtcNow,
-                            !enabled ? "feature disabled" : "mode is not MoveAndAttack");
-                }
-                return false;
-            }
+            bool eligible = enabled && CurrentMode == BotMode.MoveAndAttack && currentMode == BotMode.MoveAndAttack;
 
+            // The controller is always ticked (even when disabled or outside MoveAndAttack)
+            // so its time-based combat-absence lifecycle can reset the encounter grouping
+            // count without depending on detection running. Detection stays gated: screen
+            // capture only happens while grouping may actually act.
             DateTime now = DateTime.UtcNow;
             bool detectionCaptured = false;
-            if (now >= _nextMobGroupingDetectionAt)
+            if (eligible && now >= _nextMobGroupingDetectionAt)
             {
                 CaptureMobGroupingSample();
                 detectionCaptured = true;
@@ -440,7 +482,7 @@ namespace DriverScanTester.Services
             lock (_mobGroupingLock)
             {
                 var input = CreateMobGroupingInput(
-                    now, MobGroupingRuntimeSettings.Enabled, hasCombatContext, windowValid, detectionCaptured,
+                    now, enabled, hasCombatContext, windowValid, detectionCaptured,
                     detectionCaptured ? _lastMobGroupingAnalysis : null,
                     positionValid, currX, currY, token);
                 decision = _mobGroupingController.Tick(input);
@@ -475,9 +517,10 @@ namespace DriverScanTester.Services
             }
 
             MobGroupingDecision decision;
+            MobGroupingTickInput input = default;
             lock (_mobGroupingLock)
             {
-                var input = CreateMobGroupingInput(
+                input = CreateMobGroupingInput(
                     now, MobGroupingRuntimeSettings.Enabled, hasCombatContext, windowValid, detectionCaptured,
                     detectionCaptured ? _lastMobGroupingAnalysis : null,
                     positionValid, currX, currY, token);
@@ -495,6 +538,19 @@ namespace DriverScanTester.Services
                 }
 
                 ApplyMobGroupingDecision(decision, now);
+
+                // Continue the feedback-controlled steering for the WHOLE grouping walk.
+                // StartMove already applied its first steering call on this tick; every
+                // later tick uses the same stored absolute bearing so KeyboardTurn
+                // recalculates A/D from the live camera and releases the turn key inside
+                // the configured tolerance.
+                if (decision.Directive != MobGroupingDirective.StartMove &&
+                    decision.Directive != MobGroupingDirective.Cancelled &&
+                    _mobGroupingOwnsMovement &&
+                    _mobGroupingController.State == MobGroupingState.GroupingMove)
+                {
+                    ApplyMobGroupingSteeringTick();
+                }
             }
 
             if (decision.Directive == MobGroupingDirective.Cancelled)
@@ -502,13 +558,34 @@ namespace DriverScanTester.Services
                 bool paused;
                 try { paused = MobGroupingPausePredicate?.Invoke() == true; }
                 catch { paused = true; }
-                if (paused || token.IsCancellationRequested || !windowValid)
-                    return false;
-                return true;
+                return CanContinueAfterGroupingCancellation(
+                    paused || input.IsPaused,
+                    input.IsStopping || token.IsCancellationRequested,
+                    input.IsTransitioning,
+                    input.IsRecoveryActive,
+                    input.IsLootHoldActive,
+                    windowValid);
             }
 
             return false;
         }
+
+        /// <summary>
+        /// Pure same-tick handoff decision after a grouping cancellation: when no other
+        /// higher-priority owner (pause, stop/cancellation, transition, recovery, loot hold
+        /// or an invalid/unfocused window) holds the update, the ordinary combat pipeline
+        /// must run on the SAME tick so a lost target can produce TabAfterKill and
+        /// <c>RequestPinkScan</c> immediately.
+        /// </summary>
+        internal static bool CanContinueAfterGroupingCancellation(
+            bool paused,
+            bool cancellationRequested,
+            bool transitioning,
+            bool recoveryActive,
+            bool lootHoldActive,
+            bool windowValid)
+            => !paused && !cancellationRequested && !transitioning &&
+               !recoveryActive && !lootHoldActive && windowValid;
 
         private void CaptureMobGroupingSample()
         {
@@ -576,6 +653,7 @@ namespace DriverScanTester.Services
                 case MobGroupingDirective.StopMovement:
                     StopMoving();
                     _mobGroupingOwnsMovement = false;
+                    ClearMobGroupingSteeringState();
                     break;
                 case MobGroupingDirective.ResumeCombat:
                     FinishMobGroupingOwnership(resumeCombat: true, nowUtc);
@@ -1410,8 +1488,16 @@ namespace DriverScanTester.Services
 
             // ── Combat mode handling ──
         RUN_COMBAT_ONLY:
+            // Single authoritative combat-context read for both the active-grouping
+            // cancellation and the observation gate below. It is the same expression
+            // grouping has always used to decide whether a real combat encounter exists.
+            bool hasCombatContext = CurrentMode == BotMode.MoveAndAttack &&
+                currentMode == BotMode.MoveAndAttack && mobSelected && targetId > 0 &&
+                GameMemoryService.IsMobTargetId(targetId) &&
+                _combatRetargetCameraStage == CombatRetargetCameraStage.None;
+
             if (IsMobGroupingSequenceActive &&
-                !TickActiveMobGrouping(currentMode, mobSelected, currX, currY, success, token))
+                !TickActiveMobGrouping(currentMode, hasCombatContext, currX, currY, success, token))
                 return;
 
             var combatAction = _combatHandler.EvaluateCombatAction(_memoryService, currentMode, _isUnstuckRoutineActive, currX, currY);
@@ -1432,10 +1518,7 @@ namespace DriverScanTester.Services
             if (combatAction != CombatAction.Unstuck && combatAction != CombatAction.RepositionAndRetry &&
                 TryObserveOrStartMobGrouping(
                     currentMode,
-                    hasCombatContext: CurrentMode == BotMode.MoveAndAttack &&
-                        currentMode == BotMode.MoveAndAttack && mobSelected && targetId > 0 &&
-                        GameMemoryService.IsMobTargetId(targetId) &&
-                        _combatRetargetCameraStage == CombatRetargetCameraStage.None,
+                    hasCombatContext,
                     currX,
                     currY,
                     success,

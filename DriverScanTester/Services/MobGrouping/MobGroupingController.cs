@@ -36,7 +36,8 @@ namespace DriverScanTester.Services
         private DateTime _settleUntil = DateTime.MinValue;
         private DateTime _moveUntil = DateTime.MinValue;
         private DateTime _nextVerificationCaptureAt = DateTime.MinValue;
-        private DateTime _quietSince = DateTime.MinValue;
+        /// <summary>When the current continuous combat-context absence started (MinValue = combat present).</summary>
+        private DateTime _combatAbsentSince = DateTime.MinValue;
         private bool _quietResetLogged;
         private bool _encounterLimitLogged;
         private int _movesStarted;
@@ -66,8 +67,14 @@ namespace DriverScanTester.Services
             if (active && blockReason != null)
                 return CancelSequence(input.NowUtc, blockReason);
 
-            if (input.DetectionCaptured && input.Analysis is { IsValid: true })
-                UpdateEncounter(input.Analysis, input.NowUtc);
+            // Losing the combat target during an active sequence must end grouping
+            // immediately: the post-kill SOD/SOP flow (CombatHandler -> TabAfterKill ->
+            // LootSystem.RequestPinkScan) must never be delayed by a temporary grouping
+            // walk. This is a normal termination, not a failure.
+            if (active && !input.HasCombatContext)
+                return CancelSequence(input.NowUtc, "combat context ended");
+
+            UpdateEncounterLifecycle(input.NowUtc, input.HasCombatContext);
 
             if (State == MobGroupingState.ResumeCombat)
                 return new MobGroupingDecision(MobGroupingDirective.ResumeCombat, Reason: "complete");
@@ -316,27 +323,36 @@ namespace DriverScanTester.Services
             return new MobGroupingDecision(MobGroupingDirective.ResumeCombat, MoveNumber: _movesStarted, Reason: "complete");
         }
 
-        private void UpdateEncounter(MobGroupAnalysis analysis, DateTime nowUtc)
+        /// <summary>
+        /// Time-based combat-absence lifecycle for the encounter grouping count. It runs
+        /// on every controller tick, before the enabled/mode gates, so the reset works
+        /// even when detection is not running (feature disabled, mode not MoveAndAttack,
+        /// still in MoveAndAttack but no target). A single missed frame only starts the
+        /// absence window; the count resets only after EncounterQuietResetMs of
+        /// CONTINUOUS combat-context absence. No mob identity tracking is involved.
+        /// The bad-detection grace (BadFormationGraceMs) remains independent.
+        /// </summary>
+        private void UpdateEncounterLifecycle(DateTime nowUtc, bool hasCombatContext)
         {
-            if (analysis.DetectedMobCount > 0)
+            if (hasCombatContext)
             {
-                _quietSince = DateTime.MinValue;
+                _combatAbsentSince = DateTime.MinValue;
                 _quietResetLogged = false;
                 return;
             }
 
-            if (_quietSince == DateTime.MinValue)
-                _quietSince = nowUtc;
+            if (_combatAbsentSince == DateTime.MinValue)
+                _combatAbsentSince = nowUtc;
 
-            if (!IsSequenceActive && !_quietResetLogged &&
-                nowUtc - _quietSince >= TimeSpan.FromMilliseconds(BotConstants.MobGrouping.EncounterQuietResetMs))
+            if (!_quietResetLogged &&
+                nowUtc - _combatAbsentSince >= TimeSpan.FromMilliseconds(BotConstants.MobGrouping.EncounterQuietResetMs))
             {
                 _groupingsThisEncounter = 0;
                 _encounterLimitLogged = false;
                 _combatSince = DateTime.MinValue;
                 ClearCandidate("encounter quiet reset");
                 _quietResetLogged = true;
-                _log("[MobGrouping] no mob markers for the quiet reset period; encounter grouping count reset.");
+                _log("[MobGrouping] combat context absent for the quiet reset period; encounter grouping count reset.");
             }
         }
 

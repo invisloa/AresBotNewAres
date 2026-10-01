@@ -153,5 +153,136 @@ namespace DriverScanTester.Tests
             Type? nested = typeof(LootSystem).GetNestedType("WhiteComponent", BindingFlags.NonPublic);
             Assert.NotNull(nested);
         }
+
+        // ── Artificial mob-marker magenta exclusion (pink-loot mask) ──
+
+        /// <summary>
+        /// The production connected-component labeler, fed through the pink-loot mask.
+        /// Mirrors exactly what ScanRegion does in Phase A for pinkOnly=true.
+        /// </summary>
+        private static List<LootSystem.WhiteComponent> LabelPinkLootComponents(
+            IEnumerable<(Point Point, Color Color)> pixels)
+        {
+            List<Point> maskPoints = pixels
+                .Where(pixel => LootSystem.IsPinkLootMaskPixel(pixel.Color))
+                .Select(pixel => pixel.Point)
+                .ToList();
+            return LabelRawComponents(maskPoints);
+        }
+
+        private static List<LootSystem.WhiteComponent> LabelRawComponents(IEnumerable<Point> pixels)
+        {
+            MethodInfo method = typeof(LootSystem).GetMethod(
+                "LabelWhiteComponents", BindingFlags.NonPublic | BindingFlags.Static)
+                ?? throw new InvalidOperationException("LootSystem.LabelWhiteComponents was not found.");
+            return (List<LootSystem.WhiteComponent>)method.Invoke(
+                null, new object[] { pixels.ToList() })!;
+        }
+
+        private static IEnumerable<(Point Point, Color Color)> RingPixels(int centerX, int centerY)
+        {
+            float radius = BotConstants.MobGrouping.ExpectedMarkerRadiusPx;
+            var markerMagenta = Color.FromArgb(255, 0, 255);
+            for (int angle = 0; angle < 360; angle += 2)
+            {
+                double radians = angle * Math.PI / 180.0;
+                for (int thickness = -1; thickness <= 1; thickness++)
+                {
+                    int x = centerX + (int)Math.Round((radius + thickness) * Math.Cos(radians));
+                    int y = centerY + (int)Math.Round((radius + thickness) * Math.Sin(radians));
+                    yield return (new Point(x, y), markerMagenta);
+                }
+            }
+        }
+
+        [Fact]
+        public void PinkLootMaskExcludesArtificialMarkerMagentaButKeepsTheSodSopFamily()
+        {
+            // Pure magenta belongs to the broad SOD/SOP pixel family ...
+            Assert.True(IsPink(255, 0, 255));
+            // ... but the narrow artificial marker predicate removes it from the
+            // pink-loot connected-component mask before labeling.
+            Assert.False(LootSystem.IsPinkLootMaskPixel(Color.FromArgb(255, 0, 255)));
+            Assert.False(LootSystem.IsPinkLootMaskPixel(Color.FromArgb(230, 20, 232)));
+
+            // Ordinary SOD/SOP texture shades stay detectable.
+            Assert.True(LootSystem.IsPinkLootMaskPixel(Color.FromArgb(255, 34, 175)));
+            Assert.True(LootSystem.IsPinkLootMaskPixel(Color.FromArgb(239, 21, 148)));
+            Assert.True(LootSystem.IsPinkLootMaskPixel(Color.FromArgb(255, 109, 255)));
+            Assert.True(LootSystem.IsPinkLootMaskPixel(Color.FromArgb(255, 45, 192)));
+        }
+
+        [Fact]
+        public void SingleAndTouchingArtificialMarkerRingsProduceNoPinkLootComponent()
+        {
+            var ringLayouts = new[]
+            {
+                new[] { (X: 50, Y: 50) },
+                new[] { (X: 50, Y: 50), (X: 84, Y: 50) }
+            };
+
+            foreach (var layout in ringLayouts)
+            {
+                var pixels = layout
+                    .SelectMany(center => RingPixels(center.X, center.Y))
+                    .ToList();
+                Assert.NotEmpty(pixels);
+                Assert.Empty(LabelPinkLootComponents(pixels));
+            }
+        }
+
+        [Fact]
+        public void WideOverlappingArtificialMarkerRingStructureProducesNoPinkLootComponent()
+        {
+            var centers = new[]
+            {
+                (X: 50, Y: 50), (X: 76, Y: 50), (X: 63, Y: 73),
+                (X: 89, Y: 73), (X: 63, Y: 27), (X: 89, Y: 27)
+            };
+            var pixels = centers
+                .SelectMany(center => RingPixels(center.X, center.Y))
+                .ToList();
+
+            // The raw magenta structure merges into one wide connected component —
+            // the exact shape that previously could slip through IsMobMarkerRingComponent.
+            List<LootSystem.WhiteComponent> raw = LabelRawComponents(pixels.Select(pixel => pixel.Point));
+            Assert.Contains(raw, component => component.Width > 40);
+
+            // Filtering through the production pink-loot mask removes every marker pixel,
+            // so no component (wide or not) can ever become a pink-loot candidate.
+            Assert.Empty(LabelPinkLootComponents(pixels));
+        }
+
+        [Fact]
+        public void SodSopPinkSquareTouchingArtificialMarkerStillLeavesPinkCandidates()
+        {
+            var pixels = new List<(Point Point, Color Color)>();
+            for (int x = 40; x < 64; x++)
+            {
+                for (int y = 40; y < 64; y++)
+                    pixels.Add((new Point(x, y), Color.FromArgb(255, 34, 175)));
+            }
+
+            // A marker ring overlaps the pink square; only the ring pixels are removed.
+            pixels.AddRange(RingPixels(52, 52));
+
+            List<LootSystem.WhiteComponent> components = LabelPinkLootComponents(pixels);
+            Assert.Contains(components, LootSystem.IsPinkLootCandidate);
+        }
+
+        [Fact]
+        public void SodSopPinkSquareWithoutMarkerRemainsAFullPinkLootCandidate()
+        {
+            var pixels = new List<(Point Point, Color Color)>();
+            for (int x = 0; x < 12; x++)
+            {
+                for (int y = 0; y < 12; y++)
+                    pixels.Add((new Point(x, y), Color.FromArgb(255, 34, 175)));
+            }
+
+            List<LootSystem.WhiteComponent> components = LabelPinkLootComponents(pixels);
+            LootSystem.WhiteComponent component = Assert.Single(components);
+            Assert.True(LootSystem.IsPinkLootCandidate(component));
+        }
     }
 }

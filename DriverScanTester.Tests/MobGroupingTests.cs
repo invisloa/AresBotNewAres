@@ -293,9 +293,97 @@ namespace DriverScanTester.Tests
             controller.Cancel(Utc(1300), "test cleanup");
             Assert.Equal(1, controller.GroupingsThisEncounter);
 
+            // The encounter reset is driven by combat-context absence, regardless of
+            // whether marker detection is still running.
             for (int time = 1400; time <= 3900; time += 500)
-                controller.Tick(Input(Utc(time), Analyze(), sample: true));
+                controller.Tick(Input(Utc(time), Analyze(), sample: true, combat: false));
 
+            Assert.Equal(0, controller.GroupingsThisEncounter);
+        }
+
+        [Fact]
+        public void ActiveGroupingCancelsImmediatelyWhenCombatContextEnds()
+        {
+            var controller = new MobGroupingController();
+            Trigger(controller, Utc());
+
+            MobGroupingDecision cancelled = controller.Tick(Input(
+                Utc(1300), Analyze(ScatteredPoints), sample: true, combat: false));
+
+            Assert.Equal(MobGroupingDirective.Cancelled, cancelled.Directive);
+            Assert.Equal("combat context ended", cancelled.Reason);
+            Assert.Equal(MobGroupingState.Cooldown, controller.State);
+            // The sequence must not be active on the cancellation tick, so MovementSystem's
+            // same-tick handoff runs the ordinary combat pipeline immediately.
+            Assert.False(controller.IsSequenceActive);
+        }
+
+        [Fact]
+        public void GroupingCancellationAllowsSameTickCombatHandoffWhenNoHigherPriorityOwner()
+        {
+            Assert.True(MovementSystem.CanContinueAfterGroupingCancellation(
+                paused: false, cancellationRequested: false, transitioning: false,
+                recoveryActive: false, lootHoldActive: false, windowValid: true));
+            Assert.False(MovementSystem.CanContinueAfterGroupingCancellation(
+                paused: true, cancellationRequested: false, transitioning: false,
+                recoveryActive: false, lootHoldActive: false, windowValid: true));
+            Assert.False(MovementSystem.CanContinueAfterGroupingCancellation(
+                paused: false, cancellationRequested: true, transitioning: false,
+                recoveryActive: false, lootHoldActive: false, windowValid: true));
+            Assert.False(MovementSystem.CanContinueAfterGroupingCancellation(
+                paused: false, cancellationRequested: false, transitioning: true,
+                recoveryActive: false, lootHoldActive: false, windowValid: true));
+            Assert.False(MovementSystem.CanContinueAfterGroupingCancellation(
+                paused: false, cancellationRequested: false, transitioning: false,
+                recoveryActive: true, lootHoldActive: false, windowValid: true));
+            Assert.False(MovementSystem.CanContinueAfterGroupingCancellation(
+                paused: false, cancellationRequested: false, transitioning: false,
+                recoveryActive: false, lootHoldActive: true, windowValid: true));
+            Assert.False(MovementSystem.CanContinueAfterGroupingCancellation(
+                paused: false, cancellationRequested: false, transitioning: false,
+                recoveryActive: false, lootHoldActive: false, windowValid: false));
+        }
+
+        [Fact]
+        public void EncounterCountSurvivesShortCombatGapAndResetsOnlyAfterQuietDuration()
+        {
+            var controller = new MobGroupingController();
+            SetGroupingsThisEncounter(controller, BotConstants.MobGrouping.MaxGroupingsPerEncounter);
+
+            controller.Tick(Input(Utc(), combat: false));
+            controller.Tick(Input(Utc(BotConstants.MobGrouping.EncounterQuietResetMs - 1), combat: false));
+            Assert.Equal(BotConstants.MobGrouping.MaxGroupingsPerEncounter, controller.GroupingsThisEncounter);
+
+            // A brief combat-context comeback restarts the absence window.
+            controller.Tick(Input(Utc(BotConstants.MobGrouping.EncounterQuietResetMs), combat: true));
+            controller.Tick(Input(Utc(BotConstants.MobGrouping.EncounterQuietResetMs + 1000), combat: false));
+            controller.Tick(Input(Utc(BotConstants.MobGrouping.EncounterQuietResetMs + 3000), combat: false));
+            Assert.Equal(BotConstants.MobGrouping.MaxGroupingsPerEncounter, controller.GroupingsThisEncounter);
+
+            controller.Tick(Input(Utc(BotConstants.MobGrouping.EncounterQuietResetMs + 3600), combat: false));
+            Assert.Equal(0, controller.GroupingsThisEncounter);
+        }
+
+        [Fact]
+        public void EncounterCountResetsAcrossModeChangeAndWhileFeatureDisabled()
+        {
+            var controller = new MobGroupingController();
+            SetGroupingsThisEncounter(controller, 2);
+
+            DateTime modeStart = Utc();
+            controller.Tick(Input(modeStart, mode: BotMode.OnlyMove, combat: false));
+            controller.Tick(Input(modeStart.AddMilliseconds(
+                BotConstants.MobGrouping.EncounterQuietResetMs), mode: BotMode.OnlyMove, combat: false));
+            Assert.Equal(0, controller.GroupingsThisEncounter);
+
+            // Combat returns and re-arms the lifecycle before the disabled scenario.
+            controller.Tick(Input(modeStart.AddSeconds(5), combat: true));
+            SetGroupingsThisEncounter(controller, 2);
+
+            DateTime disabledStart = modeStart.AddSeconds(10);
+            controller.Tick(Input(disabledStart, enabled: false, combat: false));
+            controller.Tick(Input(disabledStart.AddMilliseconds(
+                BotConstants.MobGrouping.EncounterQuietResetMs), enabled: false, combat: false));
             Assert.Equal(0, controller.GroupingsThisEncounter);
         }
 
@@ -431,6 +519,136 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void DetectorRejectsCyanArtifactWithoutArtificialMagentaRing()
+        {
+            using var detector = new MobMarkerDetector();
+            using var frame = NewFrame(120, 100);
+            using (Graphics graphics = Graphics.FromImage(frame))
+            using (var centerBrush = new SolidBrush(Color.Cyan))
+                graphics.FillEllipse(centerBrush, 55, 45, 5, 5);
+
+            Assert.Empty(detector.DetectBitmapForTesting(frame));
+        }
+
+        [Fact]
+        public void DetectorAcceptsCyanCenterConfirmedByPartialMagentaRing()
+        {
+            using var detector = new MobMarkerDetector();
+            using var frame = NewFrame(180, 100);
+            float radius = BotConstants.MobGrouping.ExpectedMarkerRadiusPx;
+            using (Graphics graphics = Graphics.FromImage(frame))
+            {
+                using var ringPen = new Pen(Color.Magenta, 2f);
+                graphics.DrawArc(ringPen, 90 - radius, 50 - radius, radius * 2, radius * 2, 30, 100);
+                using var centerBrush = new SolidBrush(Color.Cyan);
+                graphics.FillEllipse(centerBrush, 90 - 2, 50 - 2, 5, 5);
+            }
+
+            MobMarker[] markers = detector.DetectBitmapForTesting(frame);
+            Assert.Contains(markers, marker => marker.Source == MobMarkerSource.CyanCenter &&
+                Math.Abs(marker.Center.X - 90) <= 2 && Math.Abs(marker.Center.Y - 50) <= 2);
+        }
+
+        [Fact]
+        public void GroupingTargetBearingIsAbsoluteFromTheCameraAtMoveStart()
+        {
+            Assert.Equal(90f, MovementSystem.ComputeMobGroupingTargetBearingDeg(
+                0f, MobGroupingDirection.East));
+            Assert.Equal(10f, MovementSystem.ComputeMobGroupingTargetBearingDeg(
+                10f, MobGroupingDirection.North));
+            Assert.Equal(325f, MovementSystem.ComputeMobGroupingTargetBearingDeg(
+                10f, MobGroupingDirection.NorthWest));
+            Assert.Equal(350f, MovementSystem.ComputeMobGroupingTargetBearingDeg(
+                35f, MobGroupingDirection.NorthWest));
+            Assert.Equal(0f, MovementSystem.ComputeMobGroupingTargetBearingDeg(
+                315f, MobGroupingDirection.NorthEast));
+
+            // A second move started after the camera changed resolves a NEW absolute
+            // bearing — the first move's target is not reused.
+            Assert.NotEqual(
+                MovementSystem.ComputeMobGroupingTargetBearingDeg(0f, MobGroupingDirection.East),
+                MovementSystem.ComputeMobGroupingTargetBearingDeg(45f, MobGroupingDirection.East));
+        }
+
+        [Fact]
+        public void GroupingKeyboardFeedbackReleasesTheTurnKeyWithinTheConfiguredTolerance()
+        {
+            // KeyboardTurn re-evaluates this pure decision against the live camera bearing
+            // every tick; the stored grouping bearing stays fixed while the camera turns.
+            const float storedBearing = 90f;
+            Assert.Equal("RightD", DecideTurnKey(0f, storedBearing));
+            Assert.Equal("RightD", DecideTurnKey(60f, storedBearing));
+            Assert.Equal("None", DecideTurnKey(80f, storedBearing));
+            Assert.Equal("None", DecideTurnKey(90f, storedBearing));
+            Assert.Equal("None", DecideTurnKey(100f, storedBearing));
+            Assert.Equal("LeftA", DecideTurnKey(120f, storedBearing));
+        }
+
+        [Fact]
+        public void GroupingStopMovementClearsStoredBearingAndSteeringOwnership()
+        {
+            MovementSystem movement = CreateMovementSystem();
+            FieldInfo bearingField = typeof(MovementSystem).GetField("_mobGroupingTargetBearingDeg",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            FieldInfo modeField = typeof(MovementSystem).GetField("_mobGroupingSteeringMode",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            FieldInfo ownsField = typeof(MovementSystem).GetField("_mobGroupingOwnsMovement",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            FieldInfo movingField = typeof(MovementSystem).GetField("_isMovingForward",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            MethodInfo apply = typeof(MovementSystem).GetMethod("ApplyMobGroupingDecision",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+            bearingField.SetValue(movement, 123f);
+            modeField.SetValue(movement, MovementSteeringMode.KeyboardTurn);
+            ownsField.SetValue(movement, true);
+            movingField.SetValue(movement, true);
+
+            apply.Invoke(movement, new object[]
+            {
+                new MobGroupingDecision(MobGroupingDirective.StopMovement, MoveNumber: 1),
+                Utc()
+            });
+
+            Assert.Equal(BotConstants.Movement.UnsetBearing, (float)bearingField.GetValue(movement)!);
+            Assert.Null(modeField.GetValue(movement));
+            Assert.False((bool)ownsField.GetValue(movement)!);
+            Assert.False((bool)movingField.GetValue(movement)!);
+            movement.DisposeMobGroupingDetector();
+        }
+
+        [Fact]
+        public void GroupingSteeringTickReusesTheStoredBearingWithoutDrift()
+        {
+            MovementSystem movement = CreateMovementSystem();
+            FieldInfo bearingField = typeof(MovementSystem).GetField("_mobGroupingTargetBearingDeg",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            FieldInfo modeField = typeof(MovementSystem).GetField("_mobGroupingSteeringMode",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            FieldInfo movingField = typeof(MovementSystem).GetField("_isMovingForward",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            MethodInfo steeringTick = typeof(MovementSystem).GetMethod("ApplyMobGroupingSteeringTick",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+            // The stub camera reads 0°, so a stored bearing of 0° keeps the turn key at
+            // None and no A/D key event is synthesized. W is already "held" so StartMoving
+            // is a no-op too — this exercises the real per-tick steering path safely.
+            bearingField.SetValue(movement, 0f);
+            modeField.SetValue(movement, MovementSteeringMode.KeyboardTurn);
+            movingField.SetValue(movement, true);
+
+            for (int tick = 0; tick < 5; tick++)
+                steeringTick.Invoke(movement, null);
+
+            Assert.Equal(0f, (float)bearingField.GetValue(movement)!);
+            Assert.Equal("None", typeof(MovementSystem)
+                .GetField("_heldTurnKey", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(movement)!.ToString());
+            movement.StopMoving();
+            movement.DisposeMobGroupingDetector();
+        }
+
+        [Fact]
         public void ArtificialMagentaPredicateIsNarrowAndRejectsPinkLootShades()
         {
             Assert.True(MobMarkerDetector.IsMagentaMarkerPixel(Color.FromArgb(255, 0, 255)));
@@ -534,14 +752,56 @@ namespace DriverScanTester.Tests
             typeof(MovementSystem).GetField("_isSkillThreeHeld", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .SetValue(movement, true);
 
+            typeof(MovementSystem).GetField("_mobGroupingTargetBearingDeg",
+                BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(movement, 120f);
+            typeof(MovementSystem).GetField("_mobGroupingSteeringMode",
+                BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(movement, MovementSteeringMode.KeyboardTurn);
+            object combatHandler = typeof(MovementSystem)
+                .GetField("_combatHandler", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(movement)!;
+            typeof(CombatHandler).GetMethod("SuspendForExternalMovement")!.Invoke(combatHandler, null);
+
             movement.CancelMobGrouping("pause test");
 
+            Assert.False((bool)typeof(CombatHandler)
+                .GetField("_externallySuspended", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(combatHandler)!);
             Assert.False(movement.IsAttackKeyHeld);
             Assert.False((bool)typeof(MovementSystem).GetField("_isMovingForward",
                 BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(movement)!);
             Assert.False((bool)typeof(MovementSystem).GetField("_mobGroupingOwnsMovement",
                 BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(movement)!);
+            Assert.Equal(BotConstants.Movement.UnsetBearing, (float)typeof(MovementSystem)
+                .GetField("_mobGroupingTargetBearingDeg", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(movement)!);
+            Assert.Null(typeof(MovementSystem)
+                .GetField("_mobGroupingSteeringMode", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(movement));
             movement.DisposeMobGroupingDetector();
+        }
+
+        private static void SetGroupingsThisEncounter(MobGroupingController controller, int value)
+        {
+            typeof(MobGroupingController)
+                .GetField("_groupingsThisEncounter", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .SetValue(controller, value);
+        }
+
+        private static string DecideTurnKey(float currentBearing, float storedBearing)
+        {
+            MethodInfo method = typeof(MovementSystem).GetMethod("GetDesiredTurnKey",
+                BindingFlags.Static | BindingFlags.NonPublic)!;
+            object?[] arguments = { currentBearing, storedBearing, 0f };
+            return method.Invoke(null, arguments)!.ToString()!;
+        }
+
+        private static MovementSystem CreateMovementSystem()
+        {
+            var path = new List<Waypoint>
+            {
+                new(5000, 5000, MovementPrecision.Medium, BotMode.MoveAndAttack)
+            };
+            return new MovementSystem(CreateStubMemory(), _ => { }, 5000, 5000, customPath: path);
         }
 
         private static Bitmap NewFrame(int width, int height)

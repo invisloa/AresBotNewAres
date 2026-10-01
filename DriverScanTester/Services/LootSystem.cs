@@ -938,6 +938,17 @@ namespace DriverScanTester.Services
                    r + b >= PinkMinRedPlusBlue;
         }
 
+        /// <summary>
+        /// True when a pixel participates in the pink-only loot connected-component mask.
+        /// The narrow artificial mob-marker magenta predicate is excluded FIRST, so a
+        /// single marker ring, several touching rings or a wide merged/overlapping ring
+        /// structure can never become a pink-loot component. Every other SOD/SOP
+        /// hot-pink shade keeps the existing classifier behavior — SOD/SOP detection is
+        /// not weakened globally.
+        /// </summary>
+        internal static bool IsPinkLootMaskPixel(Color pixelColor)
+            => IsSodSopPinkPixel(pixelColor) && !MobMarkerDetector.IsMagentaMarkerPixel(pixelColor);
+
         private bool ScanRegion(int[] xRange, int[] yRange, string regionName, bool pinkOnly = false)
         {
             string pixelNoun = pinkOnly ? "pink" : "white";
@@ -1032,10 +1043,12 @@ namespace DriverScanTester.Services
 
                 // ── Phase A: collect every target pixel in the region — no input.
                 //    Normal loot = pure-white pixels; SOD/SOP pink mode = saturated
-                //    pink pixels. The old scan probed each pixel immediately, so mob
-                //    names, target rings and sprite highlights produced hundreds of
-                //    useless mouse probes and even aborted whole region passes. Now the
-                //    candidates are gathered first and only filtered survivors are probed. ──
+                //    pink pixels, with the narrow artificial mob-marker magenta removed
+                //    BEFORE connected components are built (IsPinkLootMaskPixel). The old
+                //    scan probed each pixel immediately, so mob names, target rings and
+                //    sprite highlights produced hundreds of useless mouse probes and even
+                //    aborted whole region passes. Now the candidates are gathered first
+                //    and only filtered survivors are probed. ──
                 var targetPoints = new List<Point>();
                 for (int x = xStart; x < xEnd; x++)
                 {
@@ -1047,7 +1060,7 @@ namespace DriverScanTester.Services
 
                         Color pixelColor = _bitmap.GetPixel(x, y);
                         bool isTarget = pinkOnly
-                            ? IsSodSopPinkPixel(pixelColor)
+                            ? IsPinkLootMaskPixel(pixelColor)
                             : (pixelColor.R == 255 && pixelColor.G == 255 && pixelColor.B == 255);
                         if (isTarget)
                             targetPoints.Add(new Point(x, y));
