@@ -44,7 +44,7 @@ namespace DriverScanTester.Services
         //   Scan        → pixel-scan: label white blobs, filter ring/name/line shapes,
         //                  probe only loot-like blobs (small compact sparkles)
         //   PinkScan   → SOD/SOP-only mode (MoveAndAttack waypoints): after each kill,
-        //                  scan ONLY the big region for PINK pixels, collect every
+        //                  scan the WHOLE game window for PINK pixels, collect every
         //                  SOD/SOP found, and repeat until a pass finds none left.
         //   ScanComplete→ a full scan pass found no items; hold briefly so the movement
         //                  system can walk away, then restart the cycle from Idle
@@ -65,6 +65,9 @@ namespace DriverScanTester.Services
         // The movement system requests the pink scan the moment CombatHandler reports a
         // finished fight (TabAfterKill), so the scan is not missed when TAB re-selects a
         // mob before the loot task's own selected→not-selected transition is observed.
+        private bool _pinkCandidatesRemain;
+        private int _pinkProbeOffset;
+        private CancellationToken _scanToken;
         private volatile bool _pinkScanRequested;
         private DateTime _pinkScanRequestedAt = DateTime.MinValue;
 
@@ -108,7 +111,7 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// SOD/SOP-only loot mode, used for MoveAndAttack waypoints: after each mob kill
-        /// the loot machine runs ONE big-region pixel scan that looks ONLY for PINK
+        /// the loot machine runs ONE full-window pixel scan that looks ONLY for PINK
         /// (SOD/SOP) blobs — no small-region pass, no white normal-loot scanning and no
         /// spacebar area-loot cycle. Every pink drop found is collected and the scan is
         /// repeated until a full pass finds no pink pixels left. While no kill is being
@@ -468,6 +471,7 @@ namespace DriverScanTester.Services
 
         public async Task Update(CancellationToken token)
         {
+            _scanToken = token;
             // ── Focus guard: if the game window is NOT the foreground window,
             //    do NOT scan, click, or send any input.  Without this check the
             //    loot bot would capture/click whatever window is on top (desktop,
@@ -777,6 +781,11 @@ namespace DriverScanTester.Services
                         _lastItemCollectedAt = DateTime.UtcNow;
                         _nextActionTime = DateTime.UtcNow.AddMilliseconds(50);
                     }
+                    else if (_pinkCandidatesRemain)
+                    {
+                        _log("[Loot] Pink candidate still visible — retrying mouseover; combat/movement remain paused.");
+                        _nextActionTime = DateTime.UtcNow.AddMilliseconds(50);
+                    }
                     else
                     {
                         // Full pink pass finished with no item collected — the pink
@@ -878,10 +887,12 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// SOD/SOP-only pixel scan (MoveAndAttack post-kill): a single pass over the
-        /// BIG region looking only for pink pixels. There is no small-region pass and
-        /// no white normal-loot detection — the caller repeats this until it returns
-        /// false (no pink pixel was collectable), so every SOD/SOP drop in view gets
-        /// picked up before the bot moves on.
+        /// WHOLE captured game window looking only for pink pixels. It ignores the
+        /// BigScan rectangle and the character exclude zone, because a pink drop can
+        /// land anywhere on screen (including under the player after a kill). There
+        /// is no small-region pass and no white normal-loot detection — the caller
+        /// repeats this until it returns false (no pink pixel was collectable), so
+        /// every SOD/SOP drop in view gets picked up before the bot moves on.
         /// </summary>
         private bool PinkPixelScan()
         {
@@ -889,19 +900,42 @@ namespace DriverScanTester.Services
             return ScanRegion(bigX, bigY, "BigScan-Pink", pinkOnly: true);
         }
 
+        // ── SOD/SOP hot-pink pixel classifier thresholds ──
+        // The custom SOD/SOP scroll texture is shaded/anti-aliased, so on screen it
+        // shows MANY pink shades (observed roughly R 239..255, G 21..109, B 148..255;
+        // typical centre ≈ 255,34,175), not one literal RGB value. These thresholds
+        // isolate that hot-pink/magenta color family: strong red, significant blue,
+        // substantially weaker green and clear pink/magenta dominance. The absolute
+        // minima let the darker shaded parts of the texture through; the
+        // channel-difference minima reject pale whites/greys.
+        private const int PinkMinR = 200;
+        private const int PinkMinB = 120;
+        private const int PinkMaxG = 150;
+        private const int PinkMinRedOverGreen = 80;
+        private const int PinkMinBlueOverGreen = 40;
+        private const int PinkMinRedPlusBlue = 380;
+
         /// <summary>
-        /// EXACT match for the SOD/SOP ground-drop color: the client mod
-        /// (tools/scroll_pink_square.py) paints the square with a solid opaque
-        /// DeepPink texture — PINK = BGRA(147, 20, 255, 255) → RGB(255, 20, 147).
-        /// No range/tolerance is applied on purpose: only this exact color is a
-        /// SOD/SOP drop, so white sparkles, terrain and effects never match.
-        /// Constants: <c>BotConstants.Loot.PinkPixelR/G/B</c>.
+        /// True when a pixel belongs to the SOD/SOP hot-pink color family. The
+        /// custom scroll texture renders as a shaded gradient, so no exact RGB
+        /// match can work: a pixel qualifies when red is strong, blue is
+        /// significant, green is substantially weaker and the pixel has clear
+        /// magenta/pink dominance (channel-difference + channel-sum minima).
+        /// Plain integer arithmetic on the RGB channels — no exact equality, no
+        /// hue/HSL/HSV conversion and no allocation, because the scan loop
+        /// examines hundreds of thousands of pixels.
         /// </summary>
         internal static bool IsSodSopPinkPixel(Color pixelColor)
         {
-            return pixelColor.R == BotConstants.Loot.PinkPixelR &&
-                   pixelColor.G == BotConstants.Loot.PinkPixelG &&
-                   pixelColor.B == BotConstants.Loot.PinkPixelB;
+            int r = pixelColor.R;
+            int g = pixelColor.G;
+            int b = pixelColor.B;
+            return r >= PinkMinR &&
+                   b >= PinkMinB &&
+                   g <= PinkMaxG &&
+                   r - g >= PinkMinRedOverGreen &&
+                   b - g >= PinkMinBlueOverGreen &&
+                   r + b >= PinkMinRedPlusBlue;
         }
 
         private bool ScanRegion(int[] xRange, int[] yRange, string regionName, bool pinkOnly = false)
@@ -942,6 +976,25 @@ namespace DriverScanTester.Services
                 int yStart = Math.Clamp(yRange[0] - refY, 0, _bitmap.Height - 1);
                 int yEnd   = Math.Clamp(yRange[1] - refY, 0, _bitmap.Height);
 
+                // The SOD/SOP pink pass sweeps the WHOLE captured client area: a
+                // drop can land anywhere on screen (a corner outside BigScan, or
+                // under the character after a kill), so the BigScan rectangle does
+                // not bound this pass. Override the clamped range with the full
+                // bitmap; normal white-loot scans keep using their region.
+                if (pinkOnly)
+                {
+                    xStart = 0;
+                    xEnd = _bitmap.Width;
+                    yStart = 0;
+                    yEnd = _bitmap.Height;
+                }
+
+                // The character exclude zone is a white-loot optimisation only.
+                // The pink SOD/SOP scan must see the WHOLE scan region — a drop
+                // lying under the character after a kill would otherwise be
+                // invisible — so the zone is not applied in pink mode.
+                bool applyExcludeZone = !pinkOnly;
+
                 // Also adjust exclude zone to bitmap-local coords.
                 int exclXMin = ExcludeXMin - refX;
                 int exclXMax = ExcludeXMax - refX;
@@ -958,8 +1011,9 @@ namespace DriverScanTester.Services
                 // Snapshot the frame under analysis (see diagnostics comment above).
                 diagnosticFrame = ScreenshotService.CloneLootScanFrame(_bitmap);
                 diagnosticScanRegion = new Rectangle(xStart, yStart, xEnd - xStart, yEnd - yStart);
-                diagnosticExcludeZone = new Rectangle(
-                    exclXMin, exclYMin, exclXMax - exclXMin + 1, exclYMax - exclYMin + 1);
+                diagnosticExcludeZone = applyExcludeZone
+                    ? new Rectangle(exclXMin, exclYMin, exclXMax - exclXMin + 1, exclYMax - exclYMin + 1)
+                    : Rectangle.Empty;
 
                 int scanPixels = (xEnd - xStart) * (yEnd - yStart);
 
@@ -987,7 +1041,8 @@ namespace DriverScanTester.Services
                 {
                     for (int y = yStart; y < yEnd; y++)
                     {
-                        if (x >= exclXMin && x <= exclXMax && y >= exclYMin && y <= exclYMax)
+                        if (applyExcludeZone &&
+                            x >= exclXMin && x <= exclXMax && y >= exclYMin && y <= exclYMax)
                             continue; // character exclude zone
 
                         Color pixelColor = _bitmap.GetPixel(x, y);
@@ -1039,6 +1094,12 @@ namespace DriverScanTester.Services
                 if (textGlyphs.Count > 0)
                     candidates.RemoveAll(textGlyphs.Contains);
 
+                if (pinkOnly)
+                {
+                    _pinkCandidatesRemain = candidates.Count > 0;
+                    if (!_pinkCandidatesRemain) _pinkProbeOffset = 0;
+                }
+
                 // Probe left → right, like the old column-major pixel scan.
                 candidates.Sort((a, b) => a.XMin != b.XMin ? a.XMin.CompareTo(b.XMin) : a.YMin.CompareTo(b.YMin));
 
@@ -1056,17 +1117,24 @@ namespace DriverScanTester.Services
                     }
 
                     bool addDiagonals = component.Area <= TinyProbeWithDiagonalsArea;
-                    foreach (Point probe in SelectProbePoints(component))
+                    // Cover the pink square fully, rotating across bounded passes.
+                    List<Point> points = pinkOnly ? component.Points : SelectProbePoints(component);
+                    int start = pinkOnly ? _pinkProbeOffset % points.Count : 0;
+                    for (int probeIndex = 0; probeIndex < points.Count; probeIndex++)
                     {
-                        if (TryCollectAt(probe.X, probe.Y)) { diagnosticOutcome = "collected"; return true; }
+                        Point probe = points[(start + probeIndex) % points.Count];
+                        if (pinkOnly) _pinkProbeOffset++;
+                        if (_scanToken.IsCancellationRequested || ShouldAbortLoot())
+                            return false;
+                        if (TryCollectAt(probe.X, probe.Y, pinkOnly)) { diagnosticOutcome = "collected"; return true; }
                         probesUsed++;
 
                         if (addDiagonals)
                         {
-                            if (TryCollectAt(probe.X + 1, probe.Y + 1)) { diagnosticOutcome = "collected"; return true; }
-                            if (TryCollectAt(probe.X - 1, probe.Y - 1)) { diagnosticOutcome = "collected"; return true; }
-                            if (TryCollectAt(probe.X + 1, probe.Y - 1)) { diagnosticOutcome = "collected"; return true; }
-                            if (TryCollectAt(probe.X - 1, probe.Y + 1)) { diagnosticOutcome = "collected"; return true; }
+                            if (TryCollectAt(probe.X + 1, probe.Y + 1, pinkOnly)) { diagnosticOutcome = "collected"; return true; }
+                            if (TryCollectAt(probe.X - 1, probe.Y - 1, pinkOnly)) { diagnosticOutcome = "collected"; return true; }
+                            if (TryCollectAt(probe.X + 1, probe.Y - 1, pinkOnly)) { diagnosticOutcome = "collected"; return true; }
+                            if (TryCollectAt(probe.X - 1, probe.Y + 1, pinkOnly)) { diagnosticOutcome = "collected"; return true; }
                             probesUsed += 4;
                         }
 
@@ -1157,7 +1225,7 @@ namespace DriverScanTester.Services
         /// <summary>Probe budget for the SOD/SOP pink scan: pink-colored terrain/AoE
         /// noise produces more candidate blobs than the white shape filter, so the
         /// pink pass gets a bigger (still bounded) budget.</summary>
-        private const int MaxPinkProbesPerRegion = 800;
+        private const int MaxPinkProbesPerRegion = 16;
 
         /// <summary>Text-cluster detection: a horizontal run of at least this many glyph-like blobs is a mob name.</summary>
         private const int TextClusterMinGlyphs = 5;
@@ -1254,14 +1322,15 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// True when a pink component could be a SOD/SOP ground drop. The pixel test
-        /// is an EXACT DeepPink match, so any connected component is made of the
-        /// painted loot square only — terrain, AoE and white sparkles cannot form
-        /// one. There is therefore NO upper size limit: the 0.6x0.6 world square can
-        /// render far larger than a few pixels depending on camera distance, and an
-        /// area/dimension cap would filter the real drop out. Only the minimum
-        /// loot-square size is enforced (<c>BotConstants.Loot.PinkMinCandidate*</c>,
-        /// 10x10 px) — smaller specks are skipped (treated as not-loot) so the probe
-        /// budget is not burned on noise.
+        /// classifies the whole hot-pink color family, so unrelated pink-ish terrain
+        /// or effect pixels can also pass it; those still never get collected because
+        /// every probe is confirmed against the game memory in TryCollectAt. There is
+        /// NO upper size limit: the 0.6x0.6 world square can render far larger than a
+        /// few pixels depending on camera distance, and an area/dimension cap would
+        /// filter the real drop out. Only the minimum loot-square size is enforced
+        /// (<c>BotConstants.Loot.PinkMinCandidate*</c>, 10x10 px) — smaller specks
+        /// are skipped (treated as not-loot) so the probe budget is not burned on
+        /// noise.
         /// </summary>
         internal static bool IsPinkLootCandidate(WhiteComponent component)
         {
@@ -1358,23 +1427,24 @@ namespace DriverScanTester.Services
             _graphics.CopyFromScreen(_clientOriginX, _clientOriginY, 0, 0, _bitmap.Size);
         }
 
-        private bool TryCollectAt(int x, int y)
+        private bool TryCollectAt(int x, int y, bool pinkOnly = false)
         {
-            WaitMouseInPosition(x, y);
+            WaitMouseInPosition(x, y, pinkOnly);
 
             // If the player entered city, abort immediately. A mob being selected
             // only aborts outside loot-priority mode.
-            if (ShouldAbortLoot())
+            if (_scanToken.IsCancellationRequested || ShouldAbortLoot())
             {
                 return false;
             }
 
-            // If the mouseover value matches the calibrated item value
-            // (LootMouseOverValue, captured via the 'Mouseover Item' button),
-            // treat it as SOD/SOP and collect regardless of the specific item type.
-            // Mobs/NPCs produce a different cl value and are NOT collected.
+            // Pink candidates are identified by the scan. Confirm lootability
+            // with the calibrated mouseover, not the separate highlighted-type
+            // field, which need not describe the ground item under this cursor.
             if (_memoryService.IsLootMouseOver())
             {
+                if (pinkOnly)
+                    _log("[Loot] Pink candidate mouseover matches calibration — collecting.");
                 CollectionClick();
                 return true;
             }
@@ -1415,9 +1485,9 @@ namespace DriverScanTester.Services
                 // If the player entered city, abort immediately. A mob being selected
                 // only aborts the spacebar spam outside loot-priority mode — in
                 // priority mode the walk to the clicked loot item must finish.
-                if (ShouldAbortLoot())
+                if (_scanToken.IsCancellationRequested || ShouldAbortLoot())
                 {
-                    _log("[Loot] City/combat detected during collection — aborting spacebar spam.");
+                    _log("[Loot] Stop/city detected during collection — aborting spacebar spam.");
                     break;
                 }
 
@@ -1533,7 +1603,7 @@ namespace DriverScanTester.Services
         //     }
         // }
 
-        private void WaitMouseInPosition(int bitmapLocalX, int bitmapLocalY)
+        private void WaitMouseInPosition(int bitmapLocalX, int bitmapLocalY, bool pinkOnly = false)
         {
             // Clamp to actual client area as safety net.
             int clampedX = Math.Clamp(bitmapLocalX, 0, Math.Max(_clientWidth - 1, 0));
@@ -1541,7 +1611,11 @@ namespace DriverScanTester.Services
             var (screenX, screenY) = BitmapLocalToScreen(clampedX, clampedY);
             MouseOperations.SetCursorPositionAbsolute(screenX, screenY);
             // Give the game time to update the mouseover memory value before IsLootMouseOver checks it.
-            Thread.Sleep(1);
+            // Allow 5 ms for SOD/SOP mouseover updates; normal scans keep 1 ms.
+            if (pinkOnly)
+                _scanToken.WaitHandle.WaitOne(5);
+            else
+                Thread.Sleep(1);
         }
 
         private int GetPositionX()

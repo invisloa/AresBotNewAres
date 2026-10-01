@@ -760,11 +760,8 @@ namespace DriverScanTester.Services
                 if (_pinkScanHoldSince == DateTime.MinValue)
                     _pinkScanHoldSince = DateTime.UtcNow;
 
-                bool pinkHoldTimedOut =
-                    (DateTime.UtcNow - _pinkScanHoldSince).TotalMilliseconds >=
-                    BotConstants.Delays.MaxLootWaitMs;
-
-                if (!pinkHoldTimedOut)
+                // Never resume combat on a timer while pink loot is still pending.
+                if (LootSystemRef.IsPinkScanPendingOrActive)
                 {
                     if (!_pinkScanHoldActive)
                     {
@@ -779,11 +776,6 @@ namespace DriverScanTester.Services
                     return;
                 }
 
-                if (!_pinkScanHoldTimedOut)
-                {
-                    _pinkScanHoldTimedOut = true;
-                    _log($"[Tick {_tickCount}] SOD/SOP pink-scan hold timed out after {BotConstants.Delays.MaxLootWaitMs}ms — resuming combat (scan continues in background).");
-                }
             }
             else
             {
