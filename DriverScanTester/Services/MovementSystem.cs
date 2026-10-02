@@ -249,6 +249,8 @@ namespace DriverScanTester.Services
         private BotMode _finalStandbyMode = BotMode.OnlyMove;
         private MovementSteeringMode? _finalStandbySteeringMode;
         private short _finalStandbyAtkDis = 0;
+        /// <summary>Last route waypoint that entered standby; reused for gather reach-threshold semantics.</summary>
+        private Waypoint _finalStandbyWaypoint;
 
         // Initial route resync (first tick — find nearest segment)
         private bool _initialResyncDone = false;
@@ -384,20 +386,11 @@ namespace DriverScanTester.Services
             _resumeCombatSkillAfterGrouping = true;
             _mobGroupingOwnsMovement = true;
 
-            // The controller's direction is relative to the camera orientation at the
-            // moment this movement starts. Resolve it ONCE into an absolute bearing and
-            // store it; every later tick re-runs the existing steering engine against
-            // this same bearing so KeyboardTurn feedback is not recomputed relative to
-            // the changing camera.
-            float cameraBearing = GeometryUtils.ConvertRadiansToBearingDeg(_memoryService.GetCameraAngle());
-            float bearing = ComputeMobGroupingTargetBearingDeg(
-                cameraBearing, decision.Direction ?? MobGroupingDirection.North);
-            MovementSteeringMode? waypointSteering = _finalStandbyActive
-                ? _finalStandbySteeringMode
-                : _waypoints.Count > 0 ? _waypoints.Peek().SteeringMode : null;
-            _mobGroupingSteeringMode = ResolveSteeringMode(waypointSteering, _steeringMode);
-            _mobGroupingTargetBearingDeg = bearing;
-            ApplySteeringBearing(bearing, _mobGroupingSteeringMode.Value);
+            // No bearing is snapshotted here. ApplyGatherMovement resolves the live
+            // world-space route waypoint every tick and reuses MoveTowards so the desired
+            // heading follows the player naturally; RecommendedEscapeDirection no longer
+            // drives physical movement.
+            ClearMobGroupingSteeringState();
         }
 
         /// <summary>
@@ -412,12 +405,10 @@ namespace DriverScanTester.Services
                 cameraBearingDeg + MobGroupingDirectionMath.ToBearingOffset(direction));
 
         /// <summary>
-        /// Re-runs the EXISTING steering engine for an in-progress grouping walk using
-        /// the absolute bearing captured at movement start. This is what keeps KeyboardTurn
-        /// feedback-controlled: W stays held and A/D are recalculated from the live camera
-        /// against the fixed grouping bearing every regular update tick. DirectCamera is
-        /// routed through the same method on purpose — its existing camera filter already
-        /// suppresses unnecessary writes, so no second direct-camera algorithm exists.
+        /// Legacy test hook for the removed bearing-snapshot steering path. Production
+        /// gather movement now flows through <see cref="ApplyGatherMovement"/>, which
+        /// recomputes the waypoint bearing live. This method is kept only so the existing
+        /// ownership/steering state tests can exercise the stored fields directly.
         /// </summary>
         private void ApplyMobGroupingSteeringTick()
         {
@@ -426,11 +417,89 @@ namespace DriverScanTester.Services
             ApplySteeringBearing(_mobGroupingTargetBearingDeg, _mobGroupingSteeringMode.Value);
         }
 
-        /// <summary>Clears the stored per-movement grouping bearing and steering mode.</summary>
+        /// <summary>Clears the legacy stored per-movement grouping bearing and steering mode.</summary>
         private void ClearMobGroupingSteeringState()
         {
             _mobGroupingTargetBearingDeg = UnsetBearing;
             _mobGroupingSteeringMode = null;
+        }
+
+        /// <summary>
+        /// Resolves the temporary gather navigation target from the ordinary route: the
+        /// current positional waypoint, or the final-standby point while standby owns the
+        /// route. Operation-only steps and already-reached targets are NOT valid gather
+        /// destinations - the ordinary path pipeline must process those first. The
+        /// waypoint's own steering override is resolved with exactly the same fallback as
+        /// normal route movement; gather movement never forces a steering type.
+        /// </summary>
+        internal bool TryGetGatherNavigationTarget(
+            float playerX,
+            float playerY,
+            out float targetX,
+            out float targetY,
+            out MovementSteeringMode steeringMode)
+        {
+            targetX = 0f;
+            targetY = 0f;
+            steeringMode = _steeringMode;
+
+            if (_finalStandbyActive)
+            {
+                if (_finalStandbyMode != BotMode.MoveAndAttack &&
+                    _finalStandbyMode != BotMode.MoveAndAttackAndLoot)
+                    return false;
+
+                if (GeometryUtils.Distance(playerX, playerY, _finalStandbyX, _finalStandbyY) <=
+                    GetEffectiveWaypointReachThreshold(_finalStandbyWaypoint))
+                    return false;
+
+                targetX = _finalStandbyX;
+                targetY = _finalStandbyY;
+                steeringMode = ResolveSteeringMode(_finalStandbySteeringMode, _steeringMode);
+                return true;
+            }
+
+            if (_waypoints.Count == 0)
+                return false;
+
+            Waypoint waypoint = _waypoints.Peek();
+            if (waypoint.IsOperationStep)
+                return false;
+
+            if (GeometryUtils.Distance(playerX, playerY, waypoint.X, waypoint.Y) <=
+                GetEffectiveWaypointReachThreshold(waypoint))
+                return false;
+
+            targetX = waypoint.X;
+            targetY = waypoint.Y;
+            steeringMode = ResolveSteeringMode(waypoint.SteeringMode, _steeringMode);
+            return true;
+        }
+
+        /// <summary>
+        /// True when MovementSystem currently exposes a valid positional navigation target
+        /// for a gather walk. MobGroupingController receives this as a boolean and never
+        /// touches the route itself.
+        /// </summary>
+        internal bool CanGatherTowardCurrentNavigationTarget(float playerX, float playerY) =>
+            TryGetGatherNavigationTarget(playerX, playerY, out _, out _, out _);
+
+        /// <summary>
+        /// One tick of the temporary gather walk. The target is the live world-space route
+        /// waypoint, so the desired bearing is recomputed from the player's current position
+        /// through the ordinary MoveTowards implementation (including per-waypoint steering
+        /// and KeyboardTurn feedback). Returns false when no valid target remains; the
+        /// controller observes the same fact through HasGatherNavigationTarget and ends the
+        /// gather on this tick.
+        /// </summary>
+        private bool ApplyGatherMovement(float currX, float currY)
+        {
+            if (!TryGetGatherNavigationTarget(currX, currY,
+                    out float targetX, out float targetY, out MovementSteeringMode steeringMode))
+                return false;
+
+            MoveTowards(currX, currY, targetX, targetY, steeringMode);
+            return true;
         }
 
         private void FinishMobGroupingOwnership(bool resumeCombat, DateTime nowUtc)
@@ -487,6 +556,12 @@ namespace DriverScanTester.Services
                     positionValid, currX, currY, token);
                 decision = _mobGroupingController.Tick(input);
                 ApplyMobGroupingDecision(decision, now);
+
+                // StartMove only releases combat control here; the first waypoint-steered
+                // gather step runs immediately on this same tick through the ordinary
+                // MoveTowards path.
+                if (decision.Directive == MobGroupingDirective.StartMove && _mobGroupingOwnsMovement)
+                    ApplyGatherMovement(currX, currY);
             }
 
             return decision.Directive != MobGroupingDirective.None;
@@ -530,17 +605,17 @@ namespace DriverScanTester.Services
 
                 ApplyMobGroupingDecision(decision, now);
 
-                // Continue the feedback-controlled steering for the WHOLE grouping walk.
-                // StartMove already applied its first steering call on this tick; every
-                // later tick uses the same stored absolute bearing so KeyboardTurn
-                // recalculates A/D from the live camera and releases the turn key inside
-                // the configured tolerance.
+                // Continue the LIVE waypoint-steered gather walk for the whole movement.
+                // Every tick recomputes the desired bearing from the player's current
+                // position to the current route waypoint through MoveTowards, so
+                // KeyboardTurn / DirectCamera and the waypoint steering override behave
+                // exactly like ordinary route movement.
                 if (decision.Directive != MobGroupingDirective.StartMove &&
                     decision.Directive != MobGroupingDirective.Cancelled &&
                     _mobGroupingOwnsMovement &&
                     _mobGroupingController.State == MobGroupingState.GroupingMove)
                 {
-                    ApplyMobGroupingSteeringTick();
+                    ApplyGatherMovement(currX, currY);
                 }
             }
 
@@ -631,7 +706,8 @@ namespace DriverScanTester.Services
                 analysis,
                 positionValid,
                 currX,
-                currY);
+                currY,
+                CanGatherTowardCurrentNavigationTarget(currX, currY));
         }
 
         private void ApplyMobGroupingDecision(MobGroupingDecision decision, DateTime nowUtc)
@@ -2052,6 +2128,7 @@ namespace DriverScanTester.Services
                     _finalStandbyMode = target.Mode;
                     _finalStandbyAtkDis = target.AttackDisengageDistance;
                     _finalStandbySteeringMode = target.SteeringMode;
+                    _finalStandbyWaypoint = target;
                     _finalStandbyActive = true;
 
                     HandleEmptyWaypointQueueAfterAdvance();

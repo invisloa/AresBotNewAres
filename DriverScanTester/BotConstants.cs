@@ -193,7 +193,18 @@ namespace DriverScanTester
         {
             /// <summary>Global runtime toggle default. Never serialized with profiles or paths.</summary>
             public const bool EnabledDefault = false;
-            public const int MinimumMobs = 3;
+            /// <summary>
+            /// Minimum visible mobs for gathering to make sense. A single mob never needs a
+            /// gather walk, while two sufficiently scattered mobs can need one.
+            /// </summary>
+            public const int MinimumMobs = 2;
+            /// <summary>
+            /// When many mobs are visible this is how many properly clustered mobs are enough
+            /// to stop gathering and attack the local cluster instead of chasing every outlier.
+            /// Deliberately distinct from <see cref="MinimumMobs"/>: that one is the minimum
+            /// visible mob count, this one is the attack-ready subset size.
+            /// </summary>
+            public const int AttackReadyClusterMobCount = 4;
             public const int DetectionIntervalMs = 225;
             public const int BadFormationPersistenceMs = 750;
             /// <summary>One missed/weak frame can bridge this short interval without resetting a candidate.</summary>

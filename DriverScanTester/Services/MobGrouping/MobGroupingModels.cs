@@ -74,7 +74,21 @@ namespace DriverScanTester.Services
         public bool HasDominantMobDirection { get; init; }
         public MobGroupingDirection RecommendedEscapeDirection { get; init; }
         public bool IsScattered { get; init; }
+        /// <summary>
+        /// True when the WHOLE detected formation satisfies the success thresholds.
+        /// Distinct from <see cref="HasAttackReadyCluster"/>.
+        /// </summary>
         public bool IsSufficientlyClustered { get; init; }
+        /// <summary>
+        /// True when more than <see cref="BotConstants.MobGrouping.AttackReadyClusterMobCount"/>
+        /// mobs were detected and SOME subset of exactly that size already satisfies the same
+        /// success thresholds. This lets the bot attack a valid local cluster even while
+        /// outliers elsewhere in the formation would keep the whole-formation spread bad.
+        /// Distinct from <see cref="IsSufficientlyClustered"/>.
+        /// </summary>
+        public bool HasAttackReadyCluster { get; init; }
+        /// <summary>Size of the attack-ready subset, or 0 when <see cref="HasAttackReadyCluster"/> is false.</summary>
+        public int AttackReadyClusterMobCount { get; init; }
         public float Confidence { get; init; }
         public MobMarker? CentralMob { get; init; }
 

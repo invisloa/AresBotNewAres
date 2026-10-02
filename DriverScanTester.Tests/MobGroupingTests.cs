@@ -20,6 +20,17 @@ namespace DriverScanTester.Tests
         {
             new(95, 60), new(100, 65), new(105, 60)
         };
+        /// <summary>Four tightly grouped mobs plus two remote outliers.</summary>
+        private static readonly MobPoint[] AttackReadyClusterWithOutliers =
+        {
+            new(95, 60), new(100, 65), new(105, 60), new(100, 55),
+            new(20, 60), new(180, 60)
+        };
+        /// <summary>Five mobs spread far apart with no compact four-mob subset.</summary>
+        private static readonly MobPoint[] SpreadWithoutCluster =
+        {
+            new(20, 60), new(110, 20), new(180, 60), new(60, 110), new(150, 110)
+        };
 
         private static MobGroupAnalysis Analyze(params MobPoint[] points)
         {
@@ -43,9 +54,10 @@ namespace DriverScanTester.Tests
             bool window = true,
             bool positionValid = true,
             float playerX = 0,
-            float playerY = 0)
+            float playerY = 0,
+            bool gatherNav = true)
             => new(now, enabled, mode, combat, paused, stopping, transition, recovery,
-                lootHold, window, sample, analysis, positionValid, playerX, playerY);
+                lootHold, window, sample, analysis, positionValid, playerX, playerY, gatherNav);
 
         private static DateTime Utc(int milliseconds = 0) =>
             new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(milliseconds);
@@ -113,19 +125,101 @@ namespace DriverScanTester.Tests
             Assert.NotEqual(MobGroupingState.GroupingMove, controller.State);
         }
 
-        [Theory]
-        [InlineData(1)]
-        [InlineData(2)]
-        public void BelowMinimumMobCount_NeverGroups(int count)
+        [Fact]
+        public void BelowMinimumMobCount_NeverGroups()
         {
             var controller = new MobGroupingController();
-            MobPoint[] points = ScatteredPoints.Take(count).ToArray();
+            MobPoint[] points = ScatteredPoints.Take(BotConstants.MobGrouping.MinimumMobs - 1).ToArray();
             for (int i = 0; i < 8; i++)
             {
                 MobGroupingDecision decision = controller.Tick(Input(
                     Utc(i * 225), Analyze(points), sample: true));
                 Assert.NotEqual(MobGroupingDirective.StartMove, decision.Directive);
             }
+        }
+
+        [Fact]
+        public void TwoScatteredMobsAfterPersistenceAndCombatMinimum_TriggerGather()
+        {
+            // MinimumMobs is now 2: two sufficiently scattered mobs can need gathering.
+            var controller = MakeController(2000);
+            DateTime start = Utc();
+            MobGroupingDecision decision = default;
+            foreach (int offset in new[] { 0, 225, 450, 675, 900, 1200 })
+                decision = controller.Tick(Input(
+                    start.AddMilliseconds(offset), Analyze(ScatteredPoints.Take(2).ToArray()), sample: true));
+
+            Assert.Equal(MobGroupingDirective.StartMove, decision.Directive);
+            Assert.Equal(1, controller.GroupingsThisEncounter);
+        }
+
+        [Fact]
+        public void TwoClusteredMobs_NeverGroups()
+        {
+            var controller = new MobGroupingController();
+            for (int i = 0; i < 10; i++)
+            {
+                MobGroupingDecision decision = controller.Tick(Input(
+                    Utc(i * 225), Analyze(new MobPoint(95, 60), new MobPoint(105, 60)), sample: true));
+                Assert.NotEqual(MobGroupingDirective.StartMove, decision.Directive);
+            }
+        }
+
+        [Fact]
+        public void AttackReadyClusterWithOutliers_AttacksInsteadOfGathering()
+        {
+            // Four mobs already form a valid AOE cluster; the two outliers must not keep
+            // the gatherer chasing perfect clustering forever.
+            var controller = new MobGroupingController();
+            for (int i = 0; i < 10; i++)
+            {
+                MobGroupingDecision decision = controller.Tick(Input(
+                    Utc(i * 225), Analyze(AttackReadyClusterWithOutliers), sample: true));
+                Assert.NotEqual(MobGroupingDirective.StartMove, decision.Directive);
+            }
+            Assert.Equal(0, controller.GroupingsThisEncounter);
+        }
+
+        [Fact]
+        public void GatherStopsEarlyWhenAttackReadyClusterAppears()
+        {
+            // Deadline is 3000 ms, but a rescan already finds a compact four-mob subset
+            // while outliers remain, so the walk must stop and attack the local cluster.
+            var controller = MakeController(3000);
+            Assert.Equal(MobGroupingDirective.StartMove, Trigger(controller, Utc()).Directive);
+
+            DateTime earlyStop = Utc(1200 + 1000);
+            MobGroupingDecision resumed = controller.Tick(Input(
+                earlyStop, Analyze(AttackReadyClusterWithOutliers), sample: true, playerX: 10f));
+
+            Assert.Equal(MobGroupingDirective.ResumeCombat, resumed.Directive);
+        }
+
+        [Fact]
+        public void GatherDoesNotStartWithoutNavigationTarget()
+        {
+            var controller = new MobGroupingController();
+            for (int i = 0; i < 8; i++)
+            {
+                MobGroupingDecision decision = controller.Tick(Input(
+                    Utc(i * 225), Analyze(ScatteredPoints), sample: true, gatherNav: false));
+                Assert.NotEqual(MobGroupingDirective.StartMove, decision.Directive);
+            }
+        }
+
+        [Fact]
+        public void GatherEndsCleanlyWhenNavigationTargetIsReached()
+        {
+            var controller = MakeController(3000);
+            Assert.Equal(MobGroupingDirective.StartMove, Trigger(controller, Utc()).Directive);
+
+            MobGroupingDecision resumed = controller.Tick(Input(
+                Utc(1400), Analyze(ScatteredPoints), sample: true, playerX: 10f, gatherNav: false));
+
+            Assert.Equal(MobGroupingDirective.ResumeCombat, resumed.Directive);
+            Assert.Equal(1, resumed.MoveNumber);
+            controller.CompleteResume(Utc(1400));
+            Assert.Equal(MobGroupingState.Cooldown, controller.State);
         }
 
         [Fact]
@@ -596,6 +690,100 @@ namespace DriverScanTester.Tests
             Trigger(controller, Utc());
             Assert.Equal(MobGroupingDirective.Cancelled,
                 controller.Tick(Input(Utc(1300), window: false)).Directive);
+        }
+
+        [Fact]
+        public void AnalyzerFindsAttackReadyClusterAmongOutliers()
+        {
+            MobGroupAnalysis analysis = Analyze(AttackReadyClusterWithOutliers);
+
+            Assert.Equal(6, analysis.DetectedMobCount);
+            Assert.True(analysis.IsScattered);
+            Assert.False(analysis.IsSufficientlyClustered);
+            Assert.True(analysis.HasAttackReadyCluster);
+            Assert.Equal(BotConstants.MobGrouping.AttackReadyClusterMobCount, analysis.AttackReadyClusterMobCount);
+        }
+
+        [Fact]
+        public void AnalyzerFindsClusterEvenWhenItIsNotCenteredOnTheWholeFormation()
+        {
+            // Two separate tight clusters with the whole centroid between them. Picking the
+            // four nearest to the overall centroid would mix the clusters; the exact subset
+            // search must still find a valid local cluster.
+            MobPoint[] twoClusters =
+            {
+                new(55, 60), new(60, 55), new(65, 60), new(60, 65),
+                new(235, 60), new(240, 55), new(245, 60), new(240, 65)
+            };
+            MobGroupAnalysis analysis = Analyze(twoClusters);
+
+            Assert.Equal(8, analysis.DetectedMobCount);
+            Assert.True(analysis.IsScattered);
+            Assert.False(analysis.IsSufficientlyClustered);
+            Assert.True(analysis.HasAttackReadyCluster);
+        }
+
+        [Fact]
+        public void AnalyzerDoesNotReportAttackReadyClusterWithoutAnyCompactFourSubset()
+        {
+            MobGroupAnalysis analysis = Analyze(SpreadWithoutCluster);
+
+            Assert.True(analysis.IsScattered);
+            Assert.False(analysis.HasAttackReadyCluster);
+            Assert.Equal(0, analysis.AttackReadyClusterMobCount);
+        }
+
+        [Fact]
+        public void AnalyzerKeepsWholeFormationAndAttackReadyClusterConceptsSeparate()
+        {
+            // Exactly four clustered mobs: the whole formation is clustered, but the
+            // subset concept only applies when more than four mobs are visible.
+            MobGroupAnalysis analysis = Analyze(
+                new MobPoint(95, 60), new MobPoint(100, 65),
+                new MobPoint(105, 60), new MobPoint(100, 55));
+
+            Assert.True(analysis.IsSufficientlyClustered);
+            Assert.False(analysis.HasAttackReadyCluster);
+        }
+
+        [Fact]
+        public void GatherNavigationTargetUsesLiveWaypointAndWaypointSteering()
+        {
+            var path = new List<Waypoint>
+            {
+                new(5000, 5000, MovementPrecision.Medium, BotMode.MoveAndAttack,
+                    steeringMode: MovementSteeringMode.DirectCamera)
+            };
+            MovementSystem movement = new(CreateStubMemory(), _ => { }, 0, 0, customPath: path);
+
+            Assert.True(movement.CanGatherTowardCurrentNavigationTarget(0, 0));
+            Assert.True(movement.TryGetGatherNavigationTarget(0, 0,
+                out float targetX, out float targetY, out MovementSteeringMode steering));
+            Assert.Equal(5000f, targetX);
+            Assert.Equal(5000f, targetY);
+            Assert.Equal(MovementSteeringMode.DirectCamera, steering);
+            movement.DisposeMobGroupingDetector();
+        }
+
+        [Fact]
+        public void GatherNavigationTargetRejectsReachedWaypointsAndOperationSteps()
+        {
+            var reached = new List<Waypoint>
+            {
+                new(10, 10, MovementPrecision.Medium, BotMode.MoveAndAttack)
+            };
+            MovementSystem reachedMovement = new(CreateStubMemory(), _ => { }, 0, 0, customPath: reached);
+            Assert.False(reachedMovement.CanGatherTowardCurrentNavigationTarget(10, 10));
+            reachedMovement.DisposeMobGroupingDetector();
+
+            var operationHead = new List<Waypoint>
+            {
+                new(0, 0, MovementPrecision.Medium, BotMode.OnlyMove, isOperationStep: true),
+                new(50, 50, MovementPrecision.Medium, BotMode.MoveAndAttack)
+            };
+            MovementSystem operationMovement = new(CreateStubMemory(), _ => { }, 0, 0, customPath: operationHead);
+            Assert.False(operationMovement.CanGatherTowardCurrentNavigationTarget(0, 0));
+            operationMovement.DisposeMobGroupingDetector();
         }
 
         [Fact]

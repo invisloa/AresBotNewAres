@@ -18,7 +18,8 @@ namespace DriverScanTester.Services
         MobGroupAnalysis? Analysis,
         bool PlayerPositionValid,
         float PlayerX,
-        float PlayerY);
+        float PlayerY,
+        bool HasGatherNavigationTarget = true);
 
     /// <summary>
     /// Tick-driven, deterministic grouping state machine. It has no image, combat, keyboard,
@@ -125,10 +126,23 @@ namespace DriverScanTester.Services
 
             if (State == MobGroupingState.GroupingMove)
             {
+                // A valid positional route target is the only gather destination. When the
+                // current waypoint becomes reached (or the route has no usable positional
+                // target), hand control back to the ordinary path pipeline so it can run the
+                // waypoint's arrival semantics. The controller never dequeues or advances
+                // the path and never picks a replacement waypoint.
+                if (!input.HasGatherNavigationTarget)
+                {
+                    double reachedMs = (input.NowUtc - _gatherStartedAt).TotalMilliseconds;
+                    _log($"[MobGrouping] gather navigation target reached or unavailable at {reachedMs:F0}ms - releasing path control.");
+                    return Finish();
+                }
+
                 // Periodic rescan answer: finish as soon as the detected formation is
                 // already grouped enough for AOE. The success condition is the same
                 // single predicate the gather verify step always used, fed by the
-                // 500 ms rescans; the direction captured at movement start is untouched.
+                // 500 ms rescans. Waypoint navigation continues live every tick through
+                // the ordinary MovementSystem steering.
                 bool groupedEnough = input.DetectionCaptured &&
                     input.Analysis is { IsValid: true } gatherAnalysis &&
                     IsGatheringComplete(gatherAnalysis);
@@ -143,7 +157,7 @@ namespace DriverScanTester.Services
 
                 if (!groupedEnough && input.NowUtc < _moveUntil)
                 {
-                    // Movement continues in the same direction. Schedule the next rescan.
+                    // Movement continues toward the live route target. Schedule the next rescan.
                     if (input.DetectionCaptured)
                         _nextGatherRescanAt = input.NowUtc.AddMilliseconds(
                             BotConstants.MobGrouping.GatherRescanIntervalMs);
@@ -203,7 +217,14 @@ namespace DriverScanTester.Services
             {
                 if (input.Analysis is { IsValid: true } analysis)
                 {
-                    if (analysis.IsScattered)
+                    // Gathering is only required for a scattered formation that does NOT
+                    // already contain an attack-ready local cluster. With many visible mobs
+                    // an existing four-mob cluster is enough to attack even when outliers
+                    // would keep the whole formation scattered.
+                    bool gatheringNeeded = analysis.IsScattered &&
+                        !analysis.IsSufficientlyClustered &&
+                        !analysis.HasAttackReadyCluster;
+                    if (gatheringNeeded)
                     {
                         if (_badFormationSince == DateTime.MinValue)
                         {
@@ -212,6 +233,10 @@ namespace DriverScanTester.Services
                         }
                         _lastBadFormationAt = input.NowUtc;
                         _candidateAnalysis = analysis;
+                    }
+                    else if (analysis.HasAttackReadyCluster)
+                    {
+                        ClearCandidate("attack-ready cluster already exists");
                     }
                     else if (analysis.DetectedMobCount >= BotConstants.MobGrouping.MinimumMobs)
                     {
@@ -249,6 +274,12 @@ namespace DriverScanTester.Services
                 return default;
             }
 
+            // No positional route target to walk toward: never invent an escape direction.
+            // The candidate stays fresh so the gather can still start once the ordinary
+            // path pipeline advances past a reached waypoint and exposes a valid target.
+            if (!input.HasGatherNavigationTarget)
+                return default;
+
             MobGroupAnalysis triggerAnalysis = _candidateAnalysis;
             _groupingsThisEncounter++;
             _movesStarted = 1;
@@ -262,8 +293,8 @@ namespace DriverScanTester.Services
             _nextGatherRescanAt = input.NowUtc.AddMilliseconds(
                 BotConstants.MobGrouping.GatherRescanIntervalMs);
             SetState(MobGroupingState.GroupingMove);
-            _log($"[MobGrouping] grouping triggered: mobs={triggerAnalysis.DetectedMobCount}, avg={triggerAnalysis.AverageSpread:F1}px, max={triggerAnalysis.MaximumSpread:F1}px, direction={triggerAnalysis.RecommendedEscapeDirection}.");
-            _log($"[MobGrouping] gather movement started: direction={triggerAnalysis.RecommendedEscapeDirection}, duration={gatherDurationMs}ms, rescan={BotConstants.MobGrouping.GatherRescanIntervalMs}ms.");
+            _log($"[MobGrouping] grouping triggered: mobs={triggerAnalysis.DetectedMobCount}, avg={triggerAnalysis.AverageSpread:F1}px, max={triggerAnalysis.MaximumSpread:F1}px.");
+            _log($"[MobGrouping] gather movement started toward the current route waypoint: duration={gatherDurationMs}ms, rescan={BotConstants.MobGrouping.GatherRescanIntervalMs}ms.");
             return new MobGroupingDecision(
                 MobGroupingDirective.StartMove,
                 triggerAnalysis.RecommendedEscapeDirection,
@@ -286,15 +317,16 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Single source of truth for "the gather succeeded": at least the existing minimum
-        /// mob count is still detected AND the existing Mob Group Analyzer says the formation
-        /// is sufficiently clustered for AOE. A frame that detects fewer markers (including
-        /// none) never counts as success during the walk - the bounded gather deadline ends an
-        /// attempt that cannot confirm a group. The spread/cluster thresholds themselves are
-        /// unchanged.
+        /// mob count is still detected AND the analyzer says either the WHOLE formation is
+        /// clustered or (with many mobs) an attack-ready local cluster of
+        /// <see cref="BotConstants.MobGrouping.AttackReadyClusterMobCount"/> exists. A frame
+        /// that detects fewer markers (including none) never counts as success during the
+        /// walk - the bounded gather deadline ends an attempt that cannot confirm a group.
+        /// The spread/cluster thresholds themselves are unchanged.
         /// </summary>
         internal static bool IsGatheringComplete(MobGroupAnalysis analysis) =>
             analysis.DetectedMobCount >= BotConstants.MobGrouping.MinimumMobs &&
-            analysis.IsSufficientlyClustered;
+            (analysis.IsSufficientlyClustered || analysis.HasAttackReadyCluster);
 
         /// <summary>Completes post-group cleanup and begins the shared runtime cooldown.</summary>
         public void CompleteResume(DateTime nowUtc)

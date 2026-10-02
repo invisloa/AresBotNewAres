@@ -116,6 +116,19 @@ namespace DriverScanTester.Services
             bool clustered = valid.Length < BotConstants.MobGrouping.MinimumMobs ||
                 (averageSpread <= successAverage && maximumSpread <= successMaximum);
 
+            // When many mobs are visible, the whole-formation spread can stay bad because of
+            // outliers even though a local group is already a perfect AOE target. Only then
+            // run the exact combination-of-AttackReadyClusterMobCount subset search. The
+            // whole-formation IsSufficientlyClustered result keeps its original meaning.
+            bool hasAttackReadyCluster = false;
+            int attackReadyClusterMobCount = 0;
+            if (valid.Length > BotConstants.MobGrouping.AttackReadyClusterMobCount &&
+                TryFindAttackReadyCluster(valid))
+            {
+                hasAttackReadyCluster = true;
+                attackReadyClusterMobCount = BotConstants.MobGrouping.AttackReadyClusterMobCount;
+            }
+
             return new MobGroupAnalysis
             {
                 IsValid = true,
@@ -130,9 +143,89 @@ namespace DriverScanTester.Services
                 RecommendedEscapeDirection = escapeDirection,
                 IsScattered = scattered,
                 IsSufficientlyClustered = clustered,
+                HasAttackReadyCluster = hasAttackReadyCluster,
+                AttackReadyClusterMobCount = attackReadyClusterMobCount,
                 Confidence = confidenceSum / valid.Length,
                 CentralMob = centralMob
             };
+        }
+
+        /// <summary>
+        /// Exact check whether ANY combination of exactly
+        /// <see cref="BotConstants.MobGrouping.AttackReadyClusterMobCount"/> valid markers
+        /// forms a cluster that satisfies the same success thresholds used for the whole
+        /// formation, scaled by the subset's own marker radii. The search is deterministic
+        /// and stops at the first matching combination; no centroid/nearest-neighbour
+        /// heuristic is involved, because the real cluster need not be centred on the
+        /// complete formation.
+        /// </summary>
+        private static bool TryFindAttackReadyCluster(MobMarker[] markers)
+        {
+            int clusterSize = BotConstants.MobGrouping.AttackReadyClusterMobCount;
+            if (markers.Length < clusterSize)
+                return false;
+
+            // One reusable index buffer: no per-combination allocations.
+            int[] indices = new int[clusterSize];
+            for (int i = 0; i < clusterSize; i++)
+                indices[i] = i;
+
+            while (true)
+            {
+                if (IsSubsetAttackReady(markers, indices))
+                    return true;
+
+                int position = clusterSize - 1;
+                while (position >= 0 && indices[position] == markers.Length - clusterSize + position)
+                    position--;
+                if (position < 0)
+                    return false;
+
+                indices[position]++;
+                for (int i = position + 1; i < clusterSize; i++)
+                    indices[i] = indices[i - 1] + 1;
+            }
+        }
+
+        /// <summary>
+        /// Computes the subset centroid, average/maximum spread and resolution scale from the
+        /// subset's own marker radii, then applies the existing success thresholds.
+        /// </summary>
+        private static bool IsSubsetAttackReady(MobMarker[] markers, int[] indices)
+        {
+            float centroidX = 0;
+            float centroidY = 0;
+            float radiusSum = 0;
+            foreach (int index in indices)
+            {
+                MobMarker marker = markers[index];
+                centroidX += marker.Center.X;
+                centroidY += marker.Center.Y;
+                radiusSum += marker.Radius > 0
+                    ? marker.Radius
+                    : BotConstants.MobGrouping.ExpectedMarkerRadiusPx;
+            }
+
+            float count = indices.Length;
+            centroidX /= count;
+            centroidY /= count;
+
+            float spreadSum = 0;
+            float maximumSpread = 0;
+            foreach (int index in indices)
+            {
+                float dx = markers[index].Center.X - centroidX;
+                float dy = markers[index].Center.Y - centroidY;
+                float distance = MathF.Sqrt(dx * dx + dy * dy);
+                spreadSum += distance;
+                maximumSpread = Math.Max(maximumSpread, distance);
+            }
+
+            float averageSpread = spreadSum / count;
+            float averageRadius = radiusSum / count;
+            float resolutionScale = averageRadius / BotConstants.MobGrouping.ExpectedMarkerRadiusPx;
+            return averageSpread <= BotConstants.MobGrouping.SuccessAverageSpreadPx * resolutionScale &&
+                   maximumSpread <= BotConstants.MobGrouping.SuccessMaximumSpreadPx * resolutionScale;
         }
 
         private static bool IsFinite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);
