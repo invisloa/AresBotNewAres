@@ -181,12 +181,19 @@ namespace DriverScanTester.Services
         }
 
         internal static bool IsMagentaMarkerPixel(Color color)
+            => IsMagentaMarkerPixel(color.R, color.G, color.B);
+
+        /// <summary>
+        /// Raw-channel overload used by the bulk LockBits loot scan (no Color
+        /// construction per scanned pixel). Same predicate as the Color overload.
+        /// </summary>
+        internal static bool IsMagentaMarkerPixel(int r, int g, int b)
         {
             int tolerance = BotConstants.MobGrouping.MarkerColorTolerance;
-            return color.R >= 255 - tolerance &&
-                   color.G <= tolerance &&
-                   color.B >= 255 - tolerance &&
-                   Math.Abs(color.R - color.B) <= tolerance;
+            return r >= 255 - tolerance &&
+                   g <= tolerance &&
+                   b >= 255 - tolerance &&
+                   Math.Abs(r - b) <= tolerance;
         }
 
         internal static bool IsCyanCenterPixel(Color color)

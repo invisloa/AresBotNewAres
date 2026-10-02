@@ -44,8 +44,9 @@ namespace DriverScanTester.Services
         //   Scan        → pixel-scan: label white blobs, filter ring/name/line shapes,
         //                  probe only loot-like blobs (small compact sparkles)
         //   PinkScan   → SOD/SOP-only mode (MoveAndAttack waypoints): after each kill,
-        //                  scan the WHOLE game window for PINK pixels, collect every
-        //                  SOD/SOP found, and repeat until a pass finds none left.
+        //                  sweep the WHOLE game window for PINK pixels in ONE continuous
+        //                  mouse pass over every candidate pixel, collect each SOD/SOP
+        //                  found, and repeat a fresh sweep after each successful pickup.
         //   ScanComplete→ a full scan pass found no items; hold briefly so the movement
         //                  system can walk away, then restart the cycle from Idle
         private enum LootMachineState { Idle, PostMobTab, AreaLoot, AreaLootWait, Scan, PinkScan, ScanComplete }
@@ -65,9 +66,14 @@ namespace DriverScanTester.Services
         // The movement system requests the pink scan the moment CombatHandler reports a
         // finished fight (TabAfterKill), so the scan is not missed when TAB re-selects a
         // mob before the loot task's own selected→not-selected transition is observed.
-        private bool _pinkCandidatesRemain;
-        private int _pinkProbeOffset;
         private CancellationToken _scanToken;
+
+        /// <summary>
+        /// Reusable raw-pixel buffer for the bulk LockBits region scan (Phase A).
+        /// Kept between scans so the captured frame is read in one copy instead of a
+        /// <see cref="Bitmap.GetPixel"/> call per pixel.
+        /// </summary>
+        private byte[] _scanBuffer = Array.Empty<byte>();
         private volatile bool _pinkScanRequested;
         private DateTime _pinkScanRequestedAt = DateTime.MinValue;
 
@@ -113,11 +119,12 @@ namespace DriverScanTester.Services
         /// SOD/SOP-only loot mode, used for MoveAndAttack waypoints: after each mob kill
         /// the loot machine runs ONE full-window pixel scan that looks ONLY for PINK
         /// (SOD/SOP) blobs — no small-region pass, no white normal-loot scanning and no
-        /// spacebar area-loot cycle. Every pink drop found is collected and the scan is
-        /// repeated until a full pass finds no pink pixels left. While no kill is being
-        /// processed the loot machine stays idle (it never starts the usual loot cycle).
-        /// Set per-tick by the host from the current waypoint mode; while false the
-        /// normal MoveAndAttackAndLoot behaviour is unchanged.
+        /// spacebar area-loot cycle. Every candidate pixel is probed in one continuous
+        /// mouse sweep; a fresh sweep starts after each successful pickup, and a sweep
+        /// that collects nothing over its whole candidate set ends the post-kill check.
+        /// While no kill is being processed the loot machine stays idle (it never starts
+        /// the usual loot cycle). Set per-tick by the host from the current waypoint
+        /// mode; while false the normal MoveAndAttackAndLoot behaviour is unchanged.
         /// </summary>
         public bool PinkLootOnlyMode { get; set; } = false;
 
@@ -781,15 +788,11 @@ namespace DriverScanTester.Services
                         _lastItemCollectedAt = DateTime.UtcNow;
                         _nextActionTime = DateTime.UtcNow.AddMilliseconds(50);
                     }
-                    else if (_pinkCandidatesRemain)
-                    {
-                        _log("[Loot] Pink candidate still visible — retrying mouseover; combat/movement remain paused.");
-                        _nextActionTime = DateTime.UtcNow.AddMilliseconds(50);
-                    }
                     else
                     {
-                        // Full pink pass finished with no item collected — the pink
-                        // pixels are gone (or none were lootable). Done for this kill.
+                        // The full sweep probed EVERY pink candidate pixel in one
+                        // continuous pass and collected nothing — the remaining pink
+                        // pixels are false positives (AoE/terrain), not loot. Done.
                         _log($"[Loot] Pink scan complete — no SOD/SOP left to loot{KillElapsed()}.");
                         IsLootingActive = false;
                         _lastKillAt = DateTime.MinValue;
@@ -890,9 +893,10 @@ namespace DriverScanTester.Services
         /// WHOLE captured game window looking only for pink pixels. It ignores the
         /// BigScan rectangle and the character exclude zone, because a pink drop can
         /// land anywhere on screen (including under the player after a kill). There
-        /// is no small-region pass and no white normal-loot detection — the caller
-        /// repeats this until it returns false (no pink pixel was collectable), so
-        /// every SOD/SOP drop in view gets picked up before the bot moves on.
+        /// is no small-region pass and no white normal-loot detection. Every candidate
+        /// pixel is probed in one continuous mouse sweep; the caller repeats a fresh
+        /// sweep after each successful pickup so remaining drops are still collected,
+        /// and a sweep that collects nothing ends the post-kill check.
         /// </summary>
         private bool PinkPixelScan()
         {
@@ -926,10 +930,14 @@ namespace DriverScanTester.Services
         /// examines hundreds of thousands of pixels.
         /// </summary>
         internal static bool IsSodSopPinkPixel(Color pixelColor)
+            => IsSodSopPinkPixel(pixelColor.R, pixelColor.G, pixelColor.B);
+
+        /// <summary>
+        /// Raw-channel overload of <see cref="IsSodSopPinkPixel(Color)"/> used by the
+        /// bulk LockBits scan loop (no <see cref="Color"/> construction per pixel).
+        /// </summary>
+        internal static bool IsSodSopPinkPixel(int r, int g, int b)
         {
-            int r = pixelColor.R;
-            int g = pixelColor.G;
-            int b = pixelColor.B;
             return r >= PinkMinR &&
                    b >= PinkMinB &&
                    g <= PinkMaxG &&
@@ -947,7 +955,14 @@ namespace DriverScanTester.Services
         /// not weakened globally.
         /// </summary>
         internal static bool IsPinkLootMaskPixel(Color pixelColor)
-            => IsSodSopPinkPixel(pixelColor) && !MobMarkerDetector.IsMagentaMarkerPixel(pixelColor);
+            => IsPinkLootMaskPixel(pixelColor.R, pixelColor.G, pixelColor.B);
+
+        /// <summary>
+        /// Raw-channel overload of <see cref="IsPinkLootMaskPixel(Color)"/> used by the
+        /// bulk pixel scan.
+        /// </summary>
+        internal static bool IsPinkLootMaskPixel(int r, int g, int b)
+            => IsSodSopPinkPixel(r, g, b) && !MobMarkerDetector.IsMagentaMarkerPixel(r, g, b);
 
         private bool ScanRegion(int[] xRange, int[] yRange, string regionName, bool pinkOnly = false)
         {
@@ -1048,24 +1063,13 @@ namespace DriverScanTester.Services
                 //    scan probed each pixel immediately, so mob names, target rings and
                 //    sprite highlights produced hundreds of useless mouse probes and even
                 //    aborted whole region passes. Now the candidates are gathered first
-                //    and only filtered survivors are probed. ──
+                //    and only filtered survivors are probed. The frame is read in one
+                //    bulk LockBits copy (CollectScanTargetPoints), not GetPixel per px. ──
                 var targetPoints = new List<Point>();
-                for (int x = xStart; x < xEnd; x++)
-                {
-                    for (int y = yStart; y < yEnd; y++)
-                    {
-                        if (applyExcludeZone &&
-                            x >= exclXMin && x <= exclXMax && y >= exclYMin && y <= exclYMax)
-                            continue; // character exclude zone
-
-                        Color pixelColor = _bitmap.GetPixel(x, y);
-                        bool isTarget = pinkOnly
-                            ? IsPinkLootMaskPixel(pixelColor)
-                            : (pixelColor.R == 255 && pixelColor.G == 255 && pixelColor.B == 255);
-                        if (isTarget)
-                            targetPoints.Add(new Point(x, y));
-                    }
-                }
+                CollectScanTargetPoints(
+                    xStart, xEnd, yStart, yEnd,
+                    applyExcludeZone, exclXMin, exclXMax, exclYMin, exclYMax,
+                    pinkOnly, targetPoints);
                 diagnosticWhiteCount = targetPoints.Count;
 
                 // ── Phase B: label 8-connected components and keep only loot-shaped
@@ -1086,7 +1090,7 @@ namespace DriverScanTester.Services
                     {
                         // The artificial Hyena markers deliberately use saturated magenta and
                         // overlap the legacy SOD/SOP color family. Exclude sparse marker-ring
-                        // geometry before setting _pinkCandidatesRemain/probing; exact loot
+                        // geometry before probing; exact loot
                         // mouseover remains authoritative for all actual SOD/SOP components.
                         mobMarkerComponents++;
                         isCandidate = false;
@@ -1118,20 +1122,22 @@ namespace DriverScanTester.Services
                 if (textGlyphs.Count > 0)
                     candidates.RemoveAll(textGlyphs.Contains);
 
-                if (pinkOnly)
-                {
-                    _pinkCandidatesRemain = candidates.Count > 0;
-                    if (!_pinkCandidatesRemain) _pinkProbeOffset = 0;
-                }
-
                 // Probe left → right, like the old column-major pixel scan.
                 candidates.Sort((a, b) => a.XMin != b.XMin ? a.XMin.CompareTo(b.XMin) : a.YMin.CompareTo(b.YMin));
 
                 // ── Phase C: probe only the surviving candidate blobs. The hover check
                 //    is unchanged: small blobs get every pixel, larger ones a handful of
-                //    sampled points. Tiny blobs keep the old ±1 diagonal search. ──
+                //    sampled points. Tiny blobs keep the old ±1 diagonal search.
+                //
+                //    The normal white-loot scan stays bounded by MaxLootProbesPerRegion
+                //    so UI clutter can never stall it. The SOD/SOP pink pass has NO
+                //    probe budget: it probes EVERY candidate pixel in this single pass,
+                //    as one continuous mouse sweep. The old per-pass budget (16 probes)
+                //    aborted the pass after a few samples and relied on the state machine
+                //    to retry with a rotating offset — each retry re-captured and
+                //    re-scanned the whole window first, which is exactly what produced
+                //    the visible "move x times → pause → move x times" rhythm. ──
                 int probesUsed = 0;
-                int probeBudget = pinkOnly ? MaxPinkProbesPerRegion : MaxLootProbesPerRegion;
                 foreach (WhiteComponent component in candidates)
                 {
                     if (ShouldAbortLoot())
@@ -1141,13 +1147,9 @@ namespace DriverScanTester.Services
                     }
 
                     bool addDiagonals = component.Area <= TinyProbeWithDiagonalsArea;
-                    // Cover the pink square fully, rotating across bounded passes.
                     List<Point> points = pinkOnly ? component.Points : SelectProbePoints(component);
-                    int start = pinkOnly ? _pinkProbeOffset % points.Count : 0;
-                    for (int probeIndex = 0; probeIndex < points.Count; probeIndex++)
+                    foreach (Point probe in points)
                     {
-                        Point probe = points[(start + probeIndex) % points.Count];
-                        if (pinkOnly) _pinkProbeOffset++;
                         if (_scanToken.IsCancellationRequested || ShouldAbortLoot())
                             return false;
                         if (TryCollectAt(probe.X, probe.Y, pinkOnly)) { diagnosticOutcome = "collected"; return true; }
@@ -1164,9 +1166,10 @@ namespace DriverScanTester.Services
 
                         diagnosticWhiteHits.Add(probe);
 
-                        if (probesUsed >= probeBudget)
+                        // Only the normal white-loot scan keeps the probe budget.
+                        if (!pinkOnly && probesUsed >= MaxLootProbesPerRegion)
                         {
-                            _log($"[Loot] {regionName}: probe budget ({probeBudget}) exhausted — " +
+                            _log($"[Loot] {regionName}: probe budget ({MaxLootProbesPerRegion}) exhausted — " +
                                  $"{diagnosticWhiteHits.Count} probed px of {targetPoints.Count} {pixelNoun} px in {components.Count} components; " +
                                  $"aborting region (likely UI/effect clutter).");
                             diagnosticOutcome = "too-many-white";
@@ -1212,6 +1215,119 @@ namespace DriverScanTester.Services
             return false;
         }
 
+        /// <summary>
+        /// Phase A of a region pass: collects every target pixel of the clamped scan
+        /// region — pure white for normal loot, the hot-pink family for SOD/SOP.
+        ///
+        /// The frame is read through one LockBits bulk copy instead of a
+        /// <see cref="Bitmap.GetPixel"/> call per pixel. The pink pass sweeps the
+        /// WHOLE client area (~1M px) and used to spend hundreds of milliseconds per
+        /// pass in GDI+ GetPixel overhead; that pause is what made the pink sweep look
+        /// like "move x times, stop, move x times". With the bulk read the pixel pass
+        /// costs a few milliseconds instead.
+        /// </summary>
+        private void CollectScanTargetPoints(
+            int xStart, int xEnd, int yStart, int yEnd,
+            bool applyExcludeZone, int exclXMin, int exclXMax, int exclYMin, int exclYMax,
+            bool pinkOnly, List<Point> targetPoints)
+        {
+            Bitmap bitmap = _bitmap;
+            PixelFormat format = bitmap.PixelFormat;
+
+            // Only 32bpp formats have the 4-byte BGRA layout this reader assumes.
+            // Anything else (should not happen — the bitmap is created 32bppArgb)
+            // falls back to the slow GetPixel path below.
+            if (Image.GetPixelFormatSize(format) == 32)
+            {
+                BitmapData? data = null;
+                try
+                {
+                    data = bitmap.LockBits(
+                        new Rectangle(0, 0, bitmap.Width, bitmap.Height),
+                        ImageLockMode.ReadOnly,
+                        format);
+
+                    int stride = data.Stride;
+                    int bytes = Math.Abs(stride) * data.Height;
+                    if (_scanBuffer.Length < bytes)
+                        _scanBuffer = new byte[bytes];
+                    Marshal.Copy(data.Scan0, _scanBuffer, 0, bytes);
+
+                    CollectTargetPointsFromBuffer(
+                        _scanBuffer, stride, data.Height,
+                        xStart, xEnd, yStart, yEnd,
+                        applyExcludeZone, exclXMin, exclXMax, exclYMin, exclYMax,
+                        pinkOnly, targetPoints);
+                    return;
+                }
+                catch
+                {
+                    // LockBits/Marshal failed for an unexpected reason — drop any
+                    // partially collected points and use the safe fallback below.
+                    targetPoints.Clear();
+                }
+                finally
+                {
+                    if (data != null)
+                        bitmap.UnlockBits(data);
+                }
+            }
+
+            // Fallback: per-pixel GDI+ read (slow, but always works).
+            for (int x = xStart; x < xEnd; x++)
+            {
+                for (int y = yStart; y < yEnd; y++)
+                {
+                    if (applyExcludeZone &&
+                        x >= exclXMin && x <= exclXMax && y >= exclYMin && y <= exclYMax)
+                        continue; // character exclude zone
+
+                    Color pixelColor = bitmap.GetPixel(x, y);
+                    bool isTarget = pinkOnly
+                        ? IsPinkLootMaskPixel(pixelColor)
+                        : (pixelColor.R == 255 && pixelColor.G == 255 && pixelColor.B == 255);
+                    if (isTarget)
+                        targetPoints.Add(new Point(x, y));
+                }
+            }
+        }
+
+        /// <summary>
+        /// Testable core of Phase A: parses a raw 32bpp BGRA frame buffer and collects
+        /// every target pixel. Byte order in memory is B, G, R, A; <paramref name="stride"/> may
+        /// be negative for bottom-up frames. Normal loot = pure white; pink mode = the
+        /// SOD/SOP hot-pink family with artificial mob-marker magenta removed.
+        /// </summary>
+        internal static void CollectTargetPointsFromBuffer(
+            byte[] buffer, int stride, int bitmapHeight,
+            int xStart, int xEnd, int yStart, int yEnd,
+            bool applyExcludeZone, int exclXMin, int exclXMax, int exclYMin, int exclYMax,
+            bool pinkOnly, List<Point> targetPoints)
+        {
+            bool bottomUp = stride < 0;
+            int absStride = Math.Abs(stride);
+            for (int x = xStart; x < xEnd; x++)
+            {
+                bool xOutsideExclude = !applyExcludeZone || x < exclXMin || x > exclXMax;
+                for (int y = yStart; y < yEnd; y++)
+                {
+                    if (!xOutsideExclude && y >= exclYMin && y <= exclYMax)
+                        continue; // character exclude zone
+
+                    int row = bottomUp ? bitmapHeight - 1 - y : y;
+                    int offset = row * absStride + x * 4;
+                    int b = buffer[offset];
+                    int g = buffer[offset + 1];
+                    int r = buffer[offset + 2];
+                    bool isTarget = pinkOnly
+                        ? IsPinkLootMaskPixel(r, g, b)
+                        : (r == 255 && g == 255 && b == 255);
+                    if (isTarget)
+                        targetPoints.Add(new Point(x, y));
+                }
+            }
+        }
+
         // ════════════════════════════════════════════════════════════════
         //  WHITE-PIXEL SHAPE FILTER (loot candidate detection)
         //  Mob names, target rings, weapon lines and sprite highlights are
@@ -1245,11 +1361,6 @@ namespace DriverScanTester.Services
 
         /// <summary>Hard cap on mouseover probes per region pass — replaces the old raw-white-count abort.</summary>
         private const int MaxLootProbesPerRegion = 400;
-
-        /// <summary>Probe budget for the SOD/SOP pink scan: pink-colored terrain/AoE
-        /// noise produces more candidate blobs than the white shape filter, so the
-        /// pink pass gets a bigger (still bounded) budget.</summary>
-        private const int MaxPinkProbesPerRegion = 16;
 
         /// <summary>Text-cluster detection: a horizontal run of at least this many glyph-like blobs is a mob name.</summary>
         private const int TextClusterMinGlyphs = 5;

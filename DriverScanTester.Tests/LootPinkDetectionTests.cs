@@ -284,5 +284,97 @@ namespace DriverScanTester.Tests
             LootSystem.WhiteComponent component = Assert.Single(components);
             Assert.True(LootSystem.IsPinkLootCandidate(component));
         }
+
+        // ── Bulk LockBits buffer reader (Phase A of the loot scan) ──
+        // The pink sweep reads the whole captured frame as one 32bpp BGRA buffer
+        // instead of calling Bitmap.GetPixel per pixel. These tests pin the byte
+        // order, the pink/white classifiers and the exclude-zone handling so a
+        // regression cannot silently invert colors or shift rows.
+
+        private static byte[] BgraBuffer(
+            int width, int height, int stride,
+            params (int X, int Y, byte R, byte G, byte B)[] pixels)
+        {
+            var buffer = new byte[Math.Abs(stride) * height];
+            foreach (var pixel in pixels)
+            {
+                int row = stride < 0 ? height - 1 - pixel.Y : pixel.Y;
+                int offset = row * Math.Abs(stride) + pixel.X * 4;
+                buffer[offset] = pixel.B;
+                buffer[offset + 1] = pixel.G;
+                buffer[offset + 2] = pixel.R;
+                buffer[offset + 3] = 255;
+            }
+            return buffer;
+        }
+
+        [Fact]
+        public void BulkBufferReader_ReadsBgraAndAppliesPinkLootMask()
+        {
+            const int width = 3;
+            const int height = 2;
+            const int stride = width * 4;
+            byte[] buffer = BgraBuffer(width, height, stride,
+                (0, 0, 255, 34, 175),   // hot pink — loot family
+                (1, 0, 255, 255, 255),  // white loot
+                (2, 0, 255, 0, 255),    // pure magenta — artificial marker, excluded
+                (0, 1, 239, 21, 148),   // dark hot pink — loot family
+                (1, 1, 0, 0, 0),        // black
+                (2, 1, 128, 128, 128)); // gray floor
+
+            var pinkPoints = new List<Point>();
+            LootSystem.CollectTargetPointsFromBuffer(
+                buffer, stride, height, 0, width, 0, height,
+                applyExcludeZone: false, 0, 0, 0, 0,
+                pinkOnly: true, pinkPoints);
+            Assert.Equal(new[] { new Point(0, 0), new Point(0, 1) }, pinkPoints);
+
+            var whitePoints = new List<Point>();
+            LootSystem.CollectTargetPointsFromBuffer(
+                buffer, stride, height, 0, width, 0, height,
+                applyExcludeZone: false, 0, 0, 0, 0,
+                pinkOnly: false, whitePoints);
+            Assert.Equal(new[] { new Point(1, 0) }, whitePoints);
+        }
+
+        [Fact]
+        public void BulkBufferReader_AppliesCharacterExcludeZone()
+        {
+            const int width = 4;
+            const int height = 1;
+            const int stride = width * 4;
+            byte[] buffer = BgraBuffer(width, height, stride,
+                (0, 0, 255, 34, 175),
+                (1, 0, 255, 34, 175),
+                (2, 0, 255, 34, 175),
+                (3, 0, 255, 34, 175));
+
+            var points = new List<Point>();
+            LootSystem.CollectTargetPointsFromBuffer(
+                buffer, stride, height, 0, width, 0, height,
+                applyExcludeZone: true, exclXMin: 1, exclXMax: 2, exclYMin: 0, exclYMax: 0,
+                pinkOnly: true, points);
+
+            Assert.Equal(new[] { new Point(0, 0), new Point(3, 0) }, points);
+        }
+
+        [Fact]
+        public void BulkBufferReader_HandlesBottomUpFrames()
+        {
+            const int width = 2;
+            const int height = 2;
+            const int stride = -width * 4; // bottom-up frame
+            byte[] buffer = BgraBuffer(width, height, stride,
+                (0, 0, 255, 34, 175),
+                (1, 1, 255, 34, 175));
+
+            var points = new List<Point>();
+            LootSystem.CollectTargetPointsFromBuffer(
+                buffer, stride, height, 0, width, 0, height,
+                applyExcludeZone: false, 0, 0, 0, 0,
+                pinkOnly: true, points);
+
+            Assert.Equal(new[] { new Point(0, 0), new Point(1, 1) }, points);
+        }
     }
 }
