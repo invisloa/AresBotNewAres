@@ -17,6 +17,10 @@ namespace DriverScanTester.Services
         // Virtual-key and scan codes
         internal const byte VK_W = BotConstants.Keyboard.VkW;
         internal const byte SCAN_W = BotConstants.Keyboard.ScanW;
+        internal const byte VK_1 = BotConstants.HealMana.Vk1;
+        internal const byte SCAN_1 = BotConstants.HealMana.ScanCode1;
+        internal const byte VK_2 = BotConstants.HealMana.Vk2;
+        internal const byte SCAN_2 = BotConstants.HealMana.ScanCode2;
         internal const byte VK_TAB = BotConstants.Keyboard.VkTab;
         internal const byte SCAN_TAB = BotConstants.Keyboard.ScanTab;
         internal const byte VK_3 = BotConstants.Keyboard.Vk3;

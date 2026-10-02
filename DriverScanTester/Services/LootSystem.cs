@@ -47,6 +47,9 @@ namespace DriverScanTester.Services
         //                  sweep the WHOLE game window for PINK pixels in ONE continuous
         //                  mouse pass over every candidate pixel, collect each SOD/SOP
         //                  found, and repeat a fresh sweep after each successful pickup.
+        //                  When a confirmed SOD/SOP pickup cannot fit (bag at the weight
+        //                  limit) the player first drinks the potion type it has more of
+        //                  (HP/mana) — one potion frees enough weight for one 1-lb scroll.
         //   ScanComplete→ a full scan pass found no items; hold briefly so the movement
         //                  system can walk away, then restart the cycle from Idle
         private enum LootMachineState { Idle, PostMobTab, AreaLoot, AreaLootWait, Scan, PinkScan, ScanComplete }
@@ -1604,11 +1607,102 @@ namespace DriverScanTester.Services
             if (_memoryService.IsLootMouseOver())
             {
                 if (pinkOnly)
+                {
                     _log("[Loot] Pink candidate mouseover matches calibration — collecting.");
+
+                    // A SOD/SOP scroll weighs 1 lb: when the bag is at the weight limit
+                    // the pickup would fail, so free weight BEFORE clicking the scroll.
+                    MakeRoomForScrollIfFull();
+                }
                 CollectionClick();
                 return true;
             }
             return false;
+        }
+
+        /// <summary>
+        /// Which potion stack the bot drinks to free weight for a SOD/SOP scroll.
+        /// </summary>
+        internal enum WeightReliefPotion { None, Hp, Mana }
+
+        /// <summary>
+        /// True when the player's bag has no room for one SOD/SOP scroll
+        /// (<see cref="BotConstants.Loot.ScrollWeightPounds"/> lb). An unreadable
+        /// weight (max ≤ 0) never requests relief.
+        /// </summary>
+        internal static bool NeedsWeightReliefForScroll(int currentWeight, int maxWeight)
+            => maxWeight > 0 &&
+               currentWeight + BotConstants.Loot.ScrollWeightPounds > maxWeight;
+
+        /// <summary>
+        /// Picks the potion stack to drink for weight relief: the type the player has
+        /// MORE of (ties go to HP). The last potion of each type is never drunk — it is
+        /// the inventory-slot reserve (<see cref="BotConstants.Repot.PotionSlotReserve"/>).
+        /// Returns <see cref="WeightReliefPotion.None"/> when both stacks are at the reserve.
+        /// </summary>
+        internal static WeightReliefPotion ChooseWeightReliefPotion(int hpPotions, int manaPotions)
+        {
+            int reserve = BotConstants.Repot.PotionSlotReserve;
+            bool hpAvailable = hpPotions > reserve;
+            bool manaAvailable = manaPotions > reserve;
+
+            if (!hpAvailable && !manaAvailable)
+                return WeightReliefPotion.None;
+            if (hpAvailable && (!manaAvailable || hpPotions >= manaPotions))
+                return WeightReliefPotion.Hp;
+            return WeightReliefPotion.Mana;
+        }
+
+        /// <summary>
+        /// Frees weight for one SOD/SOP scroll when the bag is full. The pink scan
+        /// already confirmed a loot item under the cursor; without relief the click
+        /// would walk to the scroll and fail with the game's "too heavy" message.
+        /// The potion type the player has more of is drunk (key 1 = HP, key 2 = mana)
+        /// — one potion is enough for one 1-lb scroll — and the weight is polled until
+        /// the scroll fits or the timeout expires. The last potion of each type is
+        /// always kept as the inventory-slot reserve; when both stacks are at the
+        /// reserve nothing can be drunk and the pickup is attempted anyway.
+        /// </summary>
+        private void MakeRoomForScrollIfFull()
+        {
+            var (currentWeight, maxWeight) = _memoryService.GetWeight();
+            if (!NeedsWeightReliefForScroll(currentWeight, maxWeight))
+                return;
+
+            _log($"[Loot] SOD/SOP found but weight is full ({currentWeight}/{maxWeight}) — drinking a potion to free {BotConstants.Loot.ScrollWeightPounds} lb.");
+
+            int hpPotions = _memoryService.GetHpPotionCount();
+            int manaPotions = _memoryService.GetManaPotionCount();
+            WeightReliefPotion choice = ChooseWeightReliefPotion(hpPotions, manaPotions);
+            if (choice == WeightReliefPotion.None)
+            {
+                _log($"[Loot] Weight full ({currentWeight}/{maxWeight}) but both potion stacks are at the slot reserve (HP {hpPotions}, mana {manaPotions}) — cannot free weight.");
+                return;
+            }
+
+            if (choice == WeightReliefPotion.Hp)
+                GameInput.PressKey(GameInput.VK_1, GameInput.SCAN_1);
+            else
+                GameInput.PressKey(GameInput.VK_2, GameInput.SCAN_2);
+
+            _log($"[Loot] Drank {(choice == WeightReliefPotion.Hp ? "HP" : "mana")} potion (had HP {hpPotions}, mana {manaPotions}) — waiting for the weight to drop.");
+
+            // The game applies the drink and updates the weight value asynchronously;
+            // poll briefly until the scroll fits (or the timeout / abort hits).
+            var deadline = DateTime.UtcNow.AddMilliseconds(BotConstants.Delays.WeightReliefTimeoutMs);
+            do
+            {
+                Thread.Sleep(BotConstants.Delays.WeightReliefPollMs);
+                if (_scanToken.IsCancellationRequested || ShouldAbortLoot())
+                    return;
+                (currentWeight, maxWeight) = _memoryService.GetWeight();
+            }
+            while (NeedsWeightReliefForScroll(currentWeight, maxWeight) && DateTime.UtcNow < deadline);
+
+            if (NeedsWeightReliefForScroll(currentWeight, maxWeight))
+                _log($"[Loot] Weight still full ({currentWeight}/{maxWeight}) after the potion — attempting the pickup anyway.");
+            else
+                _log($"[Loot] Weight now {currentWeight}/{maxWeight} — room for the SOD/SOP scroll.");
         }
 
         private void CollectionClick()

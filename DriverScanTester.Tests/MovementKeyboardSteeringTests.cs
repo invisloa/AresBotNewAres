@@ -92,25 +92,92 @@ namespace DriverScanTester.Tests
         }
 
         [Theory]
-        [InlineData(0f, false)]
-        [InlineData(100f, false)]
-        [InlineData(-100f, false)]
-        [InlineData(100.1f, true)]
-        [InlineData(-100.1f, true)]
-        [InlineData(180f, true)]
-        [InlineData(-180f, true)]
-        public void OnlyHeadingErrorsAboveTheThresholdSnapTheCameraDirectly(float signedError, bool expected)
+        [InlineData(0f, (int)KeyboardTurnDirective.None)]
+        [InlineData(5f, (int)KeyboardTurnDirective.None)]
+        [InlineData(10f, (int)KeyboardTurnDirective.None)]
+        [InlineData(10.1f, (int)KeyboardTurnDirective.NormalRight)]
+        [InlineData(-10f, (int)KeyboardTurnDirective.None)]
+        [InlineData(-10.1f, (int)KeyboardTurnDirective.NormalLeft)]
+        [InlineData(59.9f, (int)KeyboardTurnDirective.NormalRight)]
+        [InlineData(60f, (int)KeyboardTurnDirective.NormalRight)]
+        [InlineData(60.1f, (int)KeyboardTurnDirective.FastRight)]
+        [InlineData(-59.9f, (int)KeyboardTurnDirective.NormalLeft)]
+        [InlineData(-60f, (int)KeyboardTurnDirective.NormalLeft)]
+        [InlineData(-60.1f, (int)KeyboardTurnDirective.FastLeft)]
+        [InlineData(180f, (int)KeyboardTurnDirective.FastRight)]
+        [InlineData(-180f, (int)KeyboardTurnDirective.FastLeft)]
+        public void DecideKeyboardTurnUsesTheToleranceAndFastTurnThresholdBoundaries(
+            float signedError,
+            int expected)
         {
-            MethodInfo method = typeof(MovementSystem).GetMethod("ShouldSnapCameraForLargeTurn", PrivateStatic)
-                ?? throw new InvalidOperationException("MovementSystem.ShouldSnapCameraForLargeTurn was not found.");
+            Assert.Equal((KeyboardTurnDirective)expected, MovementSystem.DecideKeyboardTurn(signedError));
+        }
 
-            Assert.Equal(expected, (bool)method.Invoke(null, new object[] { signedError })!);
+        [Theory]
+        [InlineData(350f, 10f, (int)KeyboardTurnDirective.NormalRight)]
+        [InlineData(10f, 350f, (int)KeyboardTurnDirective.NormalLeft)]
+        [InlineData(300f, 10f, (int)KeyboardTurnDirective.FastRight)]
+        [InlineData(60f, 350f, (int)KeyboardTurnDirective.FastLeft)]
+        public void DecideKeyboardTurnUsesTheShortestSignedErrorAcrossNorth(
+            float current,
+            float target,
+            int expected)
+        {
+            float signedError = GeometryUtils.GetShortestBearingDiffDeg(current, target);
+
+            Assert.Equal((KeyboardTurnDirective)expected, MovementSystem.DecideKeyboardTurn(signedError));
         }
 
         [Fact]
-        public void KeyboardTurnCameraSnapThresholdMatchesTheGameplayRequirement()
+        public void KeyboardFastTurnConstantsMatchTheGameplayRequirement()
         {
-            Assert.Equal(100f, BotConstants.Movement.KeyboardTurnCameraSnapThresholdDegrees);
+            Assert.Equal(10f, BotConstants.Movement.KeyboardTurnToleranceDegrees);
+            Assert.Equal(60f, BotConstants.Movement.KeyboardFastTurnThresholdDegrees);
+            Assert.True(BotConstants.Movement.KeyboardFastTurnMouseEdgeMarginPx > 0);
+            Assert.True(BotConstants.Movement.KeyboardFastTurnMouseReassertTolerancePx >= 0);
+        }
+
+        [Fact]
+        public void KeyboardTurnDirectiveMapsToExactlyOneKeyAndItsMatchingMouseSide()
+        {
+            Assert.Equal(("None", "None"), MapDirective(KeyboardTurnDirective.None));
+            Assert.Equal(("RightD", "None"), MapDirective(KeyboardTurnDirective.NormalRight));
+            Assert.Equal(("RightD", "RightD"), MapDirective(KeyboardTurnDirective.FastRight));
+            Assert.Equal(("LeftA", "None"), MapDirective(KeyboardTurnDirective.NormalLeft));
+            Assert.Equal(("LeftA", "LeftA"), MapDirective(KeyboardTurnDirective.FastLeft));
+        }
+
+        [Fact]
+        public void KeyboardTurnTransitionsNeverOverlapAAndD()
+        {
+            // 0° -> 45° -> 75° -> 45° -> 75° left -> 0°, i.e. the requested
+            // state sequence: None -> D normal -> D fast -> D normal -> A fast -> None.
+            var sequence = new (float Error, KeyboardTurnDirective Expected)[]
+            {
+                (0f, KeyboardTurnDirective.None),
+                (45f, KeyboardTurnDirective.NormalRight),
+                (75f, KeyboardTurnDirective.FastRight),
+                (45f, KeyboardTurnDirective.NormalRight),
+                (-75f, KeyboardTurnDirective.FastLeft),
+                (0f, KeyboardTurnDirective.None)
+            };
+
+            foreach ((float error, KeyboardTurnDirective expected) in sequence)
+            {
+                KeyboardTurnDirective directive = MovementSystem.DecideKeyboardTurn(error);
+                Assert.Equal(expected, directive);
+
+                (string key, string mouseSide) = MapDirective(directive);
+                if (key == "None")
+                {
+                    Assert.Equal("None", mouseSide);
+                }
+                else
+                {
+                    Assert.True(key == "LeftA" || key == "RightD", $"Unexpected key {key}.");
+                    Assert.True(mouseSide == "None" || mouseSide == key, $"Mouse side {mouseSide} does not match key {key}.");
+                }
+            }
         }
 
         [Fact]
@@ -139,15 +206,42 @@ namespace DriverScanTester.Tests
             var movement = CreateMovement(_ => { });
             FieldInfo heldField = typeof(MovementSystem).GetField("_heldTurnKey", PrivateInstance)!;
             FieldInfo frozenField = typeof(MovementSystem).GetField("_keyboardFrozenBearingDeg", PrivateInstance)!;
+            FieldInfo fastMouseField = typeof(MovementSystem).GetField("_keyboardFastTurnMouseActive", PrivateInstance)!;
+            FieldInfo fastMouseSideField = typeof(MovementSystem).GetField("_keyboardFastTurnMouseDirection", PrivateInstance)!;
             heldField.SetValue(movement, Enum.Parse(TurnKeyStateType, "RightD"));
             frozenField.SetValue(movement, 91.5f);
+            fastMouseField.SetValue(movement, true);
+            fastMouseSideField.SetValue(movement, Enum.Parse(TurnKeyStateType, "RightD"));
 
             // No key-down is synthesized. StopMoving exercises only its allowed defensive
-            // W/A/D KEYUP cleanup and resets the logical owner state.
+            // W/A/D KEYUP cleanup and resets the logical owner state (including the
+            // fast-turn mouse ownership).
             movement.StopMoving();
 
             Assert.Equal("None", heldField.GetValue(movement)!.ToString());
             Assert.Null(frozenField.GetValue(movement));
+            Assert.False((bool)fastMouseField.GetValue(movement)!);
+            Assert.Equal("None", fastMouseSideField.GetValue(movement)!.ToString());
+        }
+
+        [Fact]
+        public void DirectCameraTakeoverReleasesKeyboardFastTurnMouseOwnership()
+        {
+            var movement = CreateMovement(_ => { });
+            FieldInfo fastMouseField = typeof(MovementSystem).GetField("_keyboardFastTurnMouseActive", PrivateInstance)!;
+            FieldInfo fastMouseSideField = typeof(MovementSystem).GetField("_keyboardFastTurnMouseDirection", PrivateInstance)!;
+            fastMouseField.SetValue(movement, true);
+            fastMouseSideField.SetValue(movement, Enum.Parse(TurnKeyStateType, "LeftA"));
+
+            // DirectCamera routes release the keyboard turn key through ReleaseTurnKey;
+            // the fast-turn mouse ownership must be cleaned up there too. No A/D is held,
+            // so no key-up is synthesized.
+            MethodInfo release = typeof(MovementSystem).GetMethod("ReleaseTurnKey", PrivateInstance)
+                ?? throw new InvalidOperationException("MovementSystem.ReleaseTurnKey was not found.");
+            release.Invoke(movement, new object[] { "direct camera steering" });
+
+            Assert.False((bool)fastMouseField.GetValue(movement)!);
+            Assert.Equal("None", fastMouseSideField.GetValue(movement)!.ToString());
         }
 
         [Fact]
@@ -248,6 +342,18 @@ namespace DriverScanTester.Tests
             string release = resultType.GetField("Item1")!.GetValue(result)!.ToString()!;
             string press = resultType.GetField("Item2")!.GetValue(result)!.ToString()!;
             return (release, press);
+        }
+
+        private static (string Key, string MouseSide) MapDirective(KeyboardTurnDirective directive)
+        {
+            MethodInfo keyMethod = typeof(MovementSystem).GetMethod("GetTurnKeyForDirective", PrivateStatic)
+                ?? throw new InvalidOperationException("MovementSystem.GetTurnKeyForDirective was not found.");
+            MethodInfo sideMethod = typeof(MovementSystem).GetMethod("GetFastTurnMouseSide", PrivateStatic)
+                ?? throw new InvalidOperationException("MovementSystem.GetFastTurnMouseSide was not found.");
+
+            string key = keyMethod.Invoke(null, new object[] { directive })!.ToString()!;
+            string mouseSide = sideMethod.Invoke(null, new object[] { directive })!.ToString()!;
+            return (key, mouseSide);
         }
 
         private static MovementSystem CreateMovement(Action<string> log)

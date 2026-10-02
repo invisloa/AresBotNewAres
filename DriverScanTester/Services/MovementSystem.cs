@@ -7,6 +7,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using DriverScanTester.Utils;
 
 namespace DriverScanTester.Services
 {
@@ -22,6 +23,21 @@ namespace DriverScanTester.Services
     {
         KeyboardTurn,
         DirectCamera
+    }
+
+    /// <summary>
+    /// Pure KeyboardTurn steering decision from the live signed bearing error.
+    /// Left/Right mirror the existing sign convention (negative shortest error = turn
+    /// left with A, positive = turn right with D); Fast* additionally needs the cursor
+    /// at the matching game-client edge for the game's natural x2 turn.
+    /// </summary>
+    internal enum KeyboardTurnDirective
+    {
+        None,
+        NormalLeft,
+        NormalRight,
+        FastLeft,
+        FastRight
     }
 
     public enum BotMode
@@ -739,6 +755,23 @@ namespace DriverScanTester.Services
         }
 
         private TurnKeyState _heldTurnKey = TurnKeyState.None;
+
+        /// <summary>True while MovementSystem owns the accelerated-turn cursor position.</summary>
+        private bool _keyboardFastTurnMouseActive = false;
+
+        /// <summary>Edge owned while fast turning (<see cref="TurnKeyState.LeftA"/> = left, RightD = right).</summary>
+        private TurnKeyState _keyboardFastTurnMouseDirection = TurnKeyState.None;
+
+        /// <summary>
+        /// Set when fast-turn assistance ended while its cursor could not be neutralized
+        /// right away (loot owns the cursor, or the client rectangle is temporarily
+        /// unresolvable). The next steering update/cleanup retries the neutralization.
+        /// </summary>
+        private bool _keyboardFastTurnMouseNeutralizePending = false;
+
+        /// <summary>Throttles the "fast-turn mouse unavailable" diagnostic to one message per episode.</summary>
+        private bool _keyboardFastTurnMouseFailureLogged = false;
+
         private bool _hasLastGameAngle = false;
         private float _lastSetGameAngle = 0f;
 
@@ -2346,46 +2379,73 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Feedback-controls A/D from the actual horizontal camera angle while keeping W held.
-        /// Heading errors above <see cref="BotConstants.Movement.KeyboardTurnCameraSnapThresholdDegrees"/>
-        /// bypass the A/D feedback loop and snap the camera directly instead, so the character
-        /// does not walk a wide arc away from the waypoint while a very large turn completes.
-        /// W stays held in both paths.
+        /// The live camera is re-read on every update: inside the tolerance no turn key is
+        /// held, up to and including 60° A/D alone steers, and above 60° the matching mouse
+        /// edge is also held so the game's natural x2 turn applies. W stays held in every
+        /// branch; the mouse assistance is released again as soon as the error drops back to
+        /// the normal A/D range.
         /// </summary>
         private void ApplyKeyboardSteeringBearing(float bearingDeg)
         {
             float desiredBearingDeg = GeometryUtils.NormalizeBearingDeg(bearingDeg);
 
-            // Keep the complete W + turn-key ownership transition atomic with StopMoving.
+            // Keep the complete W + turn-key + mouse-edge ownership transition atomic with StopMoving.
             lock (_inputLock)
             {
                 StartMoving();
 
                 float currentRadians = _memoryService.GetCameraAngle();
                 float currentBearingDeg = GeometryUtils.ConvertRadiansToBearingDeg(currentRadians);
-                TurnKeyState desiredTurnKey = GetDesiredTurnKey(
-                    currentBearingDeg,
-                    desiredBearingDeg,
-                    out float signedError);
-
-                // Very large corrections are not steered with A/D — snap the camera instead.
-                // ApplyDirectSteeringBearing releases any held A/D through ReleaseTurnKey,
-                // writes the new heading immediately (the camera filter lets a difference
-                // this large through) and keeps W held.
-                if (ShouldSnapCameraForLargeTurn(signedError))
-                {
-                    _log($"[Steering] Large turn {signedError:+0.0;-0.0;0.0}° (> {BotConstants.Movement.KeyboardTurnCameraSnapThresholdDegrees:F0}°) — direct camera snap. current={currentBearingDeg:F1}° target={desiredBearingDeg:F1}°");
-                    ApplyDirectSteeringBearing(desiredBearingDeg);
-                    return;
-                }
+                float signedError = GeometryUtils.GetShortestBearingDiffDeg(currentBearingDeg, desiredBearingDeg);
+                KeyboardTurnDirective directive = DecideKeyboardTurn(signedError);
 
                 string details = $"current={currentBearingDeg:F1}° target={desiredBearingDeg:F1}° error={signedError:+0.0;-0.0;0.0}°";
 
-                if (desiredTurnKey == TurnKeyState.None)
+                TurnKeyState desiredTurnKey = GetTurnKeyForDirective(directive);
+                if (directive == KeyboardTurnDirective.None)
                     SetTurnKey(TurnKeyState.None, $"target reached. {details}");
                 else
                     SetTurnKey(desiredTurnKey, details);
+
+                ApplyKeyboardFastTurnMouse(directive, details);
             }
         }
+
+        /// <summary>
+        /// Pure KeyboardTurn decision from the live signed bearing error: within the
+        /// inclusive tolerance no key, up to and including the fast-turn threshold normal
+        /// A/D steering, above it A/D plus the matching mouse edge. Strictly greater than
+        /// the threshold: an error of exactly 60° stays normal.
+        /// </summary>
+        internal static KeyboardTurnDirective DecideKeyboardTurn(float signedError)
+        {
+            float absError = Math.Abs(signedError);
+            if (absError <= BotConstants.Movement.KeyboardTurnToleranceDegrees)
+                return KeyboardTurnDirective.None;
+
+            bool fast = absError > BotConstants.Movement.KeyboardFastTurnThresholdDegrees;
+            bool left = GetTurnKeyForSignedError(signedError) == TurnKeyState.LeftA;
+
+            if (left)
+                return fast ? KeyboardTurnDirective.FastLeft : KeyboardTurnDirective.NormalLeft;
+            return fast ? KeyboardTurnDirective.FastRight : KeyboardTurnDirective.NormalRight;
+        }
+
+        /// <summary>Maps a pure steering directive to the A/D key that must be held.</summary>
+        private static TurnKeyState GetTurnKeyForDirective(KeyboardTurnDirective directive) => directive switch
+        {
+            KeyboardTurnDirective.NormalLeft or KeyboardTurnDirective.FastLeft => TurnKeyState.LeftA,
+            KeyboardTurnDirective.NormalRight or KeyboardTurnDirective.FastRight => TurnKeyState.RightD,
+            _ => TurnKeyState.None
+        };
+
+        /// <summary>Maps a pure steering directive to the mouse edge that provides the x2 turn.</summary>
+        private static TurnKeyState GetFastTurnMouseSide(KeyboardTurnDirective directive) => directive switch
+        {
+            KeyboardTurnDirective.FastLeft => TurnKeyState.LeftA,
+            KeyboardTurnDirective.FastRight => TurnKeyState.RightD,
+            _ => TurnKeyState.None
+        };
 
         /// <summary>
         /// Pure keyboard steering decision: positive shortest error means D, negative means A;
@@ -2398,11 +2458,7 @@ namespace DriverScanTester.Services
         {
             float normalizedTarget = GeometryUtils.NormalizeBearingDeg(desiredBearingDeg);
             signedError = GeometryUtils.GetShortestBearingDiffDeg(currentBearingDeg, normalizedTarget);
-
-            if (Math.Abs(signedError) <= BotConstants.Movement.KeyboardTurnToleranceDegrees)
-                return TurnKeyState.None;
-
-            return GetTurnKeyForSignedError(signedError);
+            return GetTurnKeyForDirective(DecideKeyboardTurn(signedError));
         }
 
         /// <summary>
@@ -2414,14 +2470,312 @@ namespace DriverScanTester.Services
             return signedError > 0f ? TurnKeyState.RightD : TurnKeyState.LeftA;
         }
 
+        // ── Fast-turn mouse ownership ────────────────────────────────────────────
+        // Above 60° each keyboard steering update also holds the cursor near the
+        // matching game-client edge, which makes the game turn at x2. MovementSystem
+        // owns that cursor position only while the fast turn is active: it is moved to
+        // the edge once on entry (and re-asserted only if something else moved it),
+        // returned to the horizontal client centre the moment the turn drops back to
+        // normal, and cleared by every movement cleanup path. It never fights an active
+        // loot/pink-scan cursor and never throws out of the movement update.
+
         /// <summary>
-        /// True when the heading error is so large that steering with W+A/D would make the
-        /// character walk a wide arc; such turns snap the camera directly instead.
-        /// Strictly greater than the threshold: an error exactly at the threshold still
-        /// uses the smooth A/D curve.
+        /// Applies the mouse half of the KeyboardTurn controller for the current directive:
+        /// normal/none releases any fast-turn help, fast acquires (or re-asserts) the
+        /// matching client edge. Called on every keyboard steering update.
         /// </summary>
-        private static bool ShouldSnapCameraForLargeTurn(float signedError)
-            => Math.Abs(signedError) > BotConstants.Movement.KeyboardTurnCameraSnapThresholdDegrees;
+        private void ApplyKeyboardFastTurnMouse(KeyboardTurnDirective directive, string details)
+        {
+            TurnKeyState requestedSide = GetFastTurnMouseSide(directive);
+            if (requestedSide == TurnKeyState.None)
+            {
+                // 10°..60° (and target reached): keep the normal A/D turn only.
+                ReleaseKeyboardFastTurnMouse($"normal A/D steering. {details}");
+                return;
+            }
+
+            // An active loot/pink scan currently owns the cursor: yield without touching
+            // it. A/D feedback steering continues unaffected and fast turn re-enters
+            // naturally once the scan is done (if the error is still above 60°).
+            if (IsLootMouseOperationActive())
+            {
+                ReleaseKeyboardFastTurnMouse($"loot cursor active. {details}");
+                return;
+            }
+
+            if (_keyboardFastTurnMouseActive && _keyboardFastTurnMouseDirection == requestedSide)
+            {
+                ReassertKeyboardFastTurnMouse(requestedSide, details);
+                return;
+            }
+
+            // Fresh entry or a side switch while fast turning. The A/D swap was already
+            // applied by SetTurnKey in this same update; move the cursor to the new edge.
+            bool hadActiveSide = _keyboardFastTurnMouseActive;
+            if (hadActiveSide)
+            {
+                _keyboardFastTurnMouseActive = false;
+                _keyboardFastTurnMouseDirection = TurnKeyState.None;
+                _log($"[Steering] Fast turn switched to {(requestedSide == TurnKeyState.LeftA ? "LEFT" : "RIGHT")}: {details}");
+            }
+
+            if (TrySetKeyboardFastTurnMouse(requestedSide, out string failure))
+            {
+                _keyboardFastTurnMouseActive = true;
+                _keyboardFastTurnMouseDirection = requestedSide;
+                _keyboardFastTurnMouseNeutralizePending = false;
+                _keyboardFastTurnMouseFailureLogged = false;
+                _log($"[Steering] Fast turn {(requestedSide == TurnKeyState.LeftA ? "LEFT" : "RIGHT")} entered: {details}");
+            }
+            else
+            {
+                // A side we previously owned may still have the cursor parked on its edge;
+                // keep a retry so it cannot keep contributing once the turn ends.
+                if (hadActiveSide)
+                    _keyboardFastTurnMouseNeutralizePending = true;
+
+                if (!_keyboardFastTurnMouseFailureLogged)
+                {
+                    _keyboardFastTurnMouseFailureLogged = true;
+                    _log($"[Steering] Fast turn mouse unavailable ({failure}) — continuing with A/D only. {details}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Central idempotent release of the KeyboardTurn mouse ownership. Clears the
+        /// logical state and returns the cursor to the horizontal client centre so it stops
+        /// contributing to the turn. When loot owns the cursor the physical move is deferred
+        /// instead of fighting it. Safe to call repeatedly, from inside
+        /// <see cref="_inputLock"/>, and never throws out of movement cleanup.
+        /// </summary>
+        private void ReleaseKeyboardFastTurnMouse(string reason)
+        {
+            bool wasActive;
+            TurnKeyState previousSide;
+            bool hadPendingNeutralize;
+
+            lock (_inputLock)
+            {
+                wasActive = _keyboardFastTurnMouseActive;
+                previousSide = _keyboardFastTurnMouseDirection;
+                hadPendingNeutralize = _keyboardFastTurnMouseNeutralizePending;
+                _keyboardFastTurnMouseActive = false;
+                _keyboardFastTurnMouseDirection = TurnKeyState.None;
+                if (wasActive)
+                    _keyboardFastTurnMouseFailureLogged = false;
+            }
+
+            if (!wasActive && !hadPendingNeutralize)
+                return;
+
+            if (wasActive)
+                _log($"[Steering] Fast turn {(previousSide == TurnKeyState.LeftA ? "LEFT" : "RIGHT")} released — {reason}");
+
+            if (IsLootMouseOperationActive())
+            {
+                _keyboardFastTurnMouseNeutralizePending = true;
+                return;
+            }
+
+            NeutralizeKeyboardFastTurnMouse();
+        }
+
+        /// <summary>
+        /// True while an existing loot/pink-scan operation owns the mouse cursor. The
+        /// fast-turn cursor must yield during those operations. A failing loot query
+        /// never takes movement down — it simply means "no active loot cursor".
+        /// </summary>
+        private bool IsLootMouseOperationActive()
+        {
+            try
+            {
+                LootSystem? loot = LootSystemRef;
+                if (loot == null)
+                    return false;
+
+                return loot.IsPinkScanPendingOrActive ||
+                       loot.IsLootCycleActive ||
+                       loot.IsCollecting ||
+                       loot.IsLootingActive;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Re-asserts the fast-turn edge only when the cursor actually drifted away from
+        /// it (small pixel tolerance), so it is never spammed while it is already there.
+        /// A resolution failure drops back to plain A/D steering.
+        /// </summary>
+        private void ReassertKeyboardFastTurnMouse(TurnKeyState side, string details)
+        {
+            try
+            {
+                if (!TryResolveKeyboardFastTurnClient(out KeyboardFastTurnClient client))
+                {
+                    ReleaseKeyboardFastTurnMouse($"client rect lost. {details}");
+                    return;
+                }
+
+                int targetX = GetKeyboardFastTurnEdgeX(client, side);
+                if (MouseOperations.TryGetCursorPosition(out int cursorX, out _) &&
+                    Math.Abs(cursorX - targetX) <= BotConstants.Movement.KeyboardFastTurnMouseReassertTolerancePx)
+                {
+                    return;
+                }
+
+                MouseOperations.SetCursorPositionAbsolute(targetX, ResolveKeyboardFastTurnCursorY(client));
+            }
+            catch (Exception)
+            {
+                ReleaseKeyboardFastTurnMouse($"cursor re-assert failed. {details}");
+            }
+        }
+
+        /// <summary>
+        /// Moves the cursor to the requested fast-turn edge. Returns false with a short
+        /// reason when the client rect or the native move cannot be resolved; the caller
+        /// then continues with normal A/D steering (never a direct camera snap).
+        /// </summary>
+        private static bool TrySetKeyboardFastTurnMouse(TurnKeyState side, out string failure)
+        {
+            failure = string.Empty;
+            try
+            {
+                if (!TryResolveKeyboardFastTurnClient(out KeyboardFastTurnClient client))
+                {
+                    failure = "game client rect unavailable";
+                    return false;
+                }
+
+                MouseOperations.SetCursorPositionAbsolute(
+                    GetKeyboardFastTurnEdgeX(client, side),
+                    ResolveKeyboardFastTurnCursorY(client));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                failure = ex.Message;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Returns the cursor to the horizontal client centre while keeping its Y, so the
+        /// edge position stops contributing to camera turning. Failure keeps a pending flag
+        /// so the next steering update retries; it never throws.
+        /// </summary>
+        private void NeutralizeKeyboardFastTurnMouse()
+        {
+            lock (_inputLock)
+            {
+                try
+                {
+                    if (!TryResolveKeyboardFastTurnClient(out KeyboardFastTurnClient client))
+                    {
+                        _keyboardFastTurnMouseNeutralizePending = true;
+                        return;
+                    }
+
+                    MouseOperations.SetCursorPositionAbsolute(
+                        GetKeyboardFastTurnNeutralX(client),
+                        ResolveKeyboardFastTurnCursorY(client));
+                    _keyboardFastTurnMouseNeutralizePending = false;
+                }
+                catch (Exception ex)
+                {
+                    _keyboardFastTurnMouseNeutralizePending = true;
+                    if (!_keyboardFastTurnMouseFailureLogged)
+                    {
+                        _keyboardFastTurnMouseFailureLogged = true;
+                        _log($"[Steering] Fast turn mouse neutralization failed: {ex.Message}");
+                    }
+                }
+            }
+        }
+
+        /// <summary>Validated game-client rectangle in screen coordinates.</summary>
+        private readonly struct KeyboardFastTurnClient
+        {
+            public KeyboardFastTurnClient(int left, int top, int right, int bottom)
+            {
+                Left = left;
+                Top = top;
+                Right = right;
+                Bottom = bottom;
+            }
+
+            public int Left { get; }
+            public int Top { get; }
+            public int Right { get; }
+            public int Bottom { get; }
+        }
+
+        /// <summary>
+        /// Resolves the current game client rectangle in screen coordinates with the existing
+        /// Win32 pattern (GetClientRect + ClientToScreen). Returns false when the window or
+        /// rectangle cannot be resolved; callers then fall back to plain A/D steering.
+        /// </summary>
+        private static bool TryResolveKeyboardFastTurnClient(out KeyboardFastTurnClient client)
+        {
+            client = default;
+
+            nint hwnd = FindWindow(null, "Legend of Ares");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Ares");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
+            if (hwnd == nint.Zero)
+                return false;
+
+            if (!GetClientRect(hwnd, out RECT rect))
+                return false;
+
+            POINT topLeft = new POINT { X = rect.Left, Y = rect.Top };
+            if (!ClientToScreen(hwnd, ref topLeft))
+                return false;
+
+            int width = rect.Right - rect.Left;
+            int height = rect.Bottom - rect.Top;
+            if (width <= 0 || height <= 0)
+                return false;
+
+            client = new KeyboardFastTurnClient(
+                topLeft.X,
+                topLeft.Y,
+                topLeft.X + width - 1,
+                topLeft.Y + height - 1);
+            return true;
+        }
+
+        /// <summary>Horizontal edge X for a fast-turn side, clamped inside the client.</summary>
+        private static int GetKeyboardFastTurnEdgeX(KeyboardFastTurnClient client, TurnKeyState side)
+        {
+            int margin = BotConstants.Movement.KeyboardFastTurnMouseEdgeMarginPx;
+            int edge = side == TurnKeyState.LeftA
+                ? client.Left + margin
+                : client.Right - margin;
+            return Math.Clamp(edge, client.Left, client.Right);
+        }
+
+        /// <summary>Horizontal client centre X — the neutral fast-turn position.</summary>
+        private static int GetKeyboardFastTurnNeutralX(KeyboardFastTurnClient client)
+            => client.Left + (client.Right - client.Left) / 2;
+
+        /// <summary>
+        /// Keeps the current cursor Y when it can be read (clamped inside the client),
+        /// otherwise uses the client vertical centre. The turn is horizontal, so Y is
+        /// never changed intentionally.
+        /// </summary>
+        private static int ResolveKeyboardFastTurnCursorY(KeyboardFastTurnClient client)
+        {
+            if (MouseOperations.TryGetCursorPosition(out _, out int cursorY))
+                return Math.Clamp(cursorY, client.Top, client.Bottom);
+
+            return client.Top + (client.Bottom - client.Top) / 2;
+        }
 
         /// <summary>
         /// Pure ownership transition. Returned values are the key to release first and
@@ -2485,6 +2839,9 @@ namespace DriverScanTester.Services
             {
                 SetTurnKey(TurnKeyState.None, reason);
                 _keyboardFrozenBearingDeg = null;
+                // Direct-camera takeover / recovery release: never leave the accelerated
+                // turn cursor behind when keyboard steering no longer owns the turn.
+                ReleaseKeyboardFastTurnMouse(reason);
             }
         }
 
@@ -3059,7 +3416,7 @@ namespace DriverScanTester.Services
         }
 
         [DllImport("user32.dll", SetLastError = true)]
-        private static extern nint FindWindow(string lpClassName, string lpWindowName);
+        private static extern nint FindWindow(string? lpClassName, string lpWindowName);
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool GetClientRect(nint hWnd, out RECT lpRect);
@@ -3187,6 +3544,7 @@ namespace DriverScanTester.Services
                         {
                             _heldTurnKey = TurnKeyState.None;
                             _keyboardFrozenBearingDeg = null;
+                            ReleaseKeyboardFastTurnMouse("StopMoving");
                         }
                     }
                 }

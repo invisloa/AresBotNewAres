@@ -297,12 +297,21 @@ namespace DriverScanTester
             public const float KeyboardTurnToleranceDegrees = 10.0f;
 
             /// <summary>
-            /// Heading error above which KeyboardTurn steering stops using W+A/D and snaps
-            /// the camera directly to the desired bearing instead. Large turns walked through
-            /// with A/D make the character run a wide arc away from the waypoint, so they are
-            /// applied as an immediate camera write (W stays held in both paths).
+            /// Heading error above which KeyboardTurn steering additionally moves the cursor
+            /// toward the matching game-client edge. The game then applies its natural x2 turn
+            /// while the A/D key keeps steering. Strictly greater than the threshold: an error
+            /// of exactly 60° still uses normal A/D-only steering.
             /// </summary>
-            public const float KeyboardTurnCameraSnapThresholdDegrees = 100.0f;
+            public const float KeyboardFastTurnThresholdDegrees = 60.0f;
+
+            /// <summary>Horizontal margin from the game-client edge used for the fast-turn cursor.</summary>
+            public const int KeyboardFastTurnMouseEdgeMarginPx = 20;
+
+            /// <summary>
+            /// Allowed cursor deviation (px) from the fast-turn edge before the cursor is
+            /// re-asserted, so the controller does not spam SetCursorPos every tick.
+            /// </summary>
+            public const int KeyboardFastTurnMouseReassertTolerancePx = 8;
 
             /// <summary>Grace period in seconds after pressing W during which stuck detection is ignored.</summary>
             public const double StuckGraceAfterStartSeconds = 1.25;
@@ -845,6 +854,14 @@ namespace DriverScanTester
             /// </summary>
             public const int LootPostKillDelayMs = 200;
 
+            /// <summary>Poll interval (ms) between player-weight reads after a
+            /// weight-relief potion was drunk for a SOD/SOP scroll.</summary>
+            public const int WeightReliefPollMs = 100;
+
+            /// <summary>Maximum time (ms) the pink scan waits for the player weight to
+            /// drop after a weight-relief potion before attempting the pickup anyway.</summary>
+            public const int WeightReliefTimeoutMs = 1000;
+
             // ── Teleport delays ──
             /// <summary>Delay after pressing teleport key.</summary>
             public const int TeleportKeyDownMs = 50;
@@ -1128,6 +1145,11 @@ namespace DriverScanTester
             /// <summary>How long a post-kill pink-scan request stays valid (ms). Requests older
             /// than this are dropped instead of starting a stale scan after a pause.</summary>
             public const int PinkScanRequestTtlMs = 5000;
+
+            /// <summary>Weight (lb) of one SOD/SOP scroll. When the player is at the weight
+            /// limit a confirmed pink pickup would fail, so the pink scan drinks a potion
+            /// to free enough weight for exactly one scroll.</summary>
+            public const int ScrollWeightPounds = 1;
 
             /// <summary>Small scan region X range. Centered on the character
             /// (was previously shifted +50 to the right).</summary>

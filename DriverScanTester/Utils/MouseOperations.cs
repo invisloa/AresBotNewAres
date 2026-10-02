@@ -23,8 +23,19 @@ namespace DriverScanTester.Utils
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetCursorPos(int x, int y);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetCursorPos(out POINT lpPoint);
+
         [DllImport("user32.dll")]
         private static extern void mouse_event(int dwFlags, int dx, int dy, int dwData, int dwExtraInfo);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT
+        {
+            public int X;
+            public int Y;
+        }
 
         // ── Debug logging ──
         /// <summary>
@@ -185,6 +196,25 @@ namespace DriverScanTester.Utils
         {
             Log?.Invoke($"[Mouse] SetCursorPositionAbsolute -> screen ({screenX},{screenY}) [no offset, no click]");
             SetCursorPos(screenX, screenY);
+        }
+
+        /// <summary>
+        /// Reads the current cursor position in absolute screen coordinates (no window
+        /// offset is applied). Returns false when the native call fails; callers must
+        /// then fall back to a safe neutral position instead of assuming (0,0).
+        /// </summary>
+        public static bool TryGetCursorPosition(out int screenX, out int screenY)
+        {
+            if (GetCursorPos(out POINT point))
+            {
+                screenX = point.X;
+                screenY = point.Y;
+                return true;
+            }
+
+            screenX = 0;
+            screenY = 0;
+            return false;
         }
     }
 }
