@@ -54,6 +54,11 @@ namespace DriverScanTester.Services
 
     public readonly record struct MobGroupingDecision(
         MobGroupingDirective Directive,
+        /// <summary>
+        /// Mob-direction analysis carried alongside the decision for diagnostics only.
+        /// It never drives gather movement: MovementSystem resolves gather steering from
+        /// the live route waypoint through MoveTowards.
+        /// </summary>
         MobGroupingDirection? Direction = null,
         int MoveNumber = 0,
         string Reason = "");
@@ -140,14 +145,5 @@ namespace DriverScanTester.Services
             int sector = (int)Math.Floor((clockwiseDegrees + 22.5) / 45.0) % 8;
             return Directions[sector];
         }
-
-        internal static (float X, float Y) ToScreenVector(MobGroupingDirection direction)
-        {
-            double radians = (int)direction * Math.PI / 4.0;
-            return ((float)Math.Sin(radians), (float)-Math.Cos(radians));
-        }
-
-        /// <summary>Clockwise camera-bearing offset, with North=0 and East=90 degrees.</summary>
-        internal static float ToBearingOffset(MobGroupingDirection direction) => (int)direction * 45f;
     }
 }

@@ -23,7 +23,6 @@ namespace DriverScanTester.Services
                 using (var centerBrush = new SolidBrush(Color.Yellow))
                 using (var playerPen = new Pen(Color.DeepSkyBlue, 2f))
                 using (var centroidPen = new Pen(Color.Gold, 2f))
-                using (var vectorPen = new Pen(Color.Cyan, 2f))
                 using (var font = new Font(FontFamily.GenericSansSerif, 11f, FontStyle.Bold))
                 using (var textBrush = new SolidBrush(Color.White))
                 using (var textBack = new SolidBrush(Color.FromArgb(190, 0, 0, 0)))
@@ -45,14 +44,14 @@ namespace DriverScanTester.Services
                         float centroidX = analysis.Centroid.X - detection.RoiClient.Left;
                         float centroidY = analysis.Centroid.Y - detection.RoiClient.Top;
                         graphics.DrawEllipse(centroidPen, centroidX - 5, centroidY - 5, 10, 10);
-                        var escape = MobGroupingDirectionMath.ToScreenVector(analysis.RecommendedEscapeDirection);
-                        graphics.DrawLine(vectorPen, anchorX, anchorY,
-                            anchorX + escape.X * detection.ClientHeight * 0.15f,
-                            anchorY + escape.Y * detection.ClientHeight * 0.15f);
                     }
 
+                    // Movement diagnostics show the analysis state only. There is deliberately
+                    // no escape-direction arrow: gather movement follows the live route waypoint
+                    // (resolved by MovementSystem), never RecommendedEscapeDirection.
                     string caption = $"{state} | mobs={analysis.DetectedMobCount} | avg={analysis.AverageSpread:F1}px | " +
-                                     $"max={analysis.MaximumSpread:F1}px | escape={analysis.RecommendedEscapeDirection}";
+                                     $"max={analysis.MaximumSpread:F1}px | wholeClustered={analysis.IsSufficientlyClustered} | " +
+                                     $"attackReadyCluster={analysis.HasAttackReadyCluster}";
                     SizeF size = graphics.MeasureString(caption, font);
                     graphics.FillRectangle(textBack, 5, 5, size.Width + 10, size.Height + 6);
                     graphics.DrawString(caption, font, textBrush, 10, 8);

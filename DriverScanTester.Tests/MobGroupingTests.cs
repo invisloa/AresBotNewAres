@@ -55,18 +55,41 @@ namespace DriverScanTester.Tests
             bool positionValid = true,
             float playerX = 0,
             float playerY = 0,
-            bool gatherNav = true)
+            bool gatherNav = true,
+            float gatherTargetX = 0,
+            float gatherTargetY = 0,
+            MovementSteeringMode gatherSteering = MovementSteeringMode.KeyboardTurn)
             => new(now, enabled, mode, combat, paused, stopping, transition, recovery,
-                lootHold, window, sample, analysis, positionValid, playerX, playerY, gatherNav);
+                lootHold, window, sample, analysis, positionValid, playerX, playerY, gatherNav,
+                gatherTargetX, gatherTargetY, gatherSteering);
 
         private static DateTime Utc(int milliseconds = 0) =>
             new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(milliseconds);
+
+        private static MobGroupAnalysis AnalyzeWithRadius(float radius, params MobPoint[] points)
+        {
+            var markers = points.Select(point => new MobMarker(
+                point, radius, 1f, MobMarkerSource.CyanCenter));
+            return MobGroupAnalyzer.Analyze(markers, Player);
+        }
+
+        private static MobGroupAnalysis AnalyzeMarkers(params MobMarker[] markers)
+            => MobGroupAnalyzer.Analyze(markers, Player);
 
         private static MobGroupingDecision Trigger(MobGroupingController controller, DateTime start)
         {
             MobGroupingDecision decision = default;
             foreach (int offset in new[] { 0, 225, 450, 675, 900, 1200 })
                 decision = controller.Tick(Input(start.AddMilliseconds(offset), Analyze(ScatteredPoints), sample: true));
+            return decision;
+        }
+
+        private static MobGroupingDecision TriggerWith(
+            MobGroupingController controller, DateTime start, params MobPoint[] points)
+        {
+            MobGroupingDecision decision = default;
+            foreach (int offset in new[] { 0, 225, 450, 675, 900, 1200 })
+                decision = controller.Tick(Input(start.AddMilliseconds(offset), Analyze(points), sample: true));
             return decision;
         }
 
@@ -458,6 +481,66 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void GatherStartLogIncludesWaypointSteeringAndDuration()
+        {
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add, new FixedDurationRandom(2374));
+            DateTime start = Utc();
+            MobGroupingDecision decision = default;
+            foreach (int offset in new[] { 0, 225, 450, 675, 900, 1200 })
+            {
+                decision = controller.Tick(Input(
+                    start.AddMilliseconds(offset), Analyze(ScatteredPoints), sample: true,
+                    playerX: 12.5f, playerY: -3.5f,
+                    gatherTargetX: 123.4f, gatherTargetY: 456.7f,
+                    gatherSteering: MovementSteeringMode.KeyboardTurn));
+            }
+
+            Assert.Equal(MobGroupingDirective.StartMove, decision.Directive);
+            string started = Assert.Single(lines, line => line.Contains("gather started:"));
+            Assert.Contains("mobs=3", started);
+            Assert.Contains("attackReadyCluster=False", started);
+            Assert.Contains(string.Format(System.Globalization.CultureInfo.CurrentCulture,
+                "waypoint=({0:F1},{1:F1})", 123.4f, 456.7f), started);
+            Assert.Contains("steering=KeyboardTurn", started);
+            Assert.Contains("duration=2374ms", started);
+            Assert.Contains("rescan=500ms", started);
+        }
+
+        [Fact]
+        public void GatherRescanLogIncludesFormationState()
+        {
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add, new FixedDurationRandom(3000));
+            Assert.Equal(MobGroupingDirective.StartMove, Trigger(controller, Utc()).Directive);
+
+            controller.Tick(Input(Utc(1700), Analyze(ScatteredPoints), sample: true, playerX: 5f));
+
+            string rescan = Assert.Single(lines, line => line.Contains("gather rescan:"));
+            Assert.Contains("mobs=3", rescan);
+            Assert.Contains("wholeClustered=False", rescan);
+            Assert.Contains("attackReadyCluster=False", rescan);
+        }
+
+        [Fact]
+        public void GatherCompletionLogDistinguishesWholeFormationFromAttackReadyCluster()
+        {
+            var wholeLines = new List<string>();
+            var wholeController = new MobGroupingController(wholeLines.Add, new FixedDurationRandom(3000));
+            Assert.Equal(MobGroupingDirective.StartMove, Trigger(wholeController, Utc()).Directive);
+            wholeController.Tick(Input(Utc(2200), Analyze(ClusteredPoints), sample: true, playerX: 10f));
+            Assert.Contains(wholeLines, line =>
+                line.Contains("gather finished early") && line.Contains("whole formation sufficiently clustered"));
+
+            var clusterLines = new List<string>();
+            var clusterController = new MobGroupingController(clusterLines.Add, new FixedDurationRandom(3000));
+            Assert.Equal(MobGroupingDirective.StartMove, Trigger(clusterController, Utc()).Directive);
+            clusterController.Tick(Input(Utc(2200), Analyze(AttackReadyClusterWithOutliers), sample: true, playerX: 10f));
+            Assert.Contains(clusterLines, line =>
+                line.Contains("gather finished early") && line.Contains("attack-ready cluster of 4 detected"));
+        }
+
+        [Fact]
         public void NoStaleRescanOrGatherWorkAfterTheGatherCompletes()
         {
             var controller = MakeController(3000);
@@ -747,7 +830,147 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void GatherNavigationTargetUsesLiveWaypointAndWaypointSteering()
+        public void ExactlyFourMobsWithOneOutlierDoNotFormAttackReadyClusterButStillGather()
+        {
+            // With exactly four detected mobs the whole formation IS the candidate: no
+            // four-mob subset rule applies, so a scattered formation with one outlier
+            // must still go through the normal gather path.
+            MobPoint[] threeGroupedAndOutlier =
+            {
+                new(95, 60), new(100, 65), new(105, 60), new(0, 60)
+            };
+            MobGroupAnalysis analysis = Analyze(threeGroupedAndOutlier);
+
+            Assert.Equal(4, analysis.DetectedMobCount);
+            Assert.True(analysis.IsScattered);
+            Assert.False(analysis.IsSufficientlyClustered);
+            Assert.False(analysis.HasAttackReadyCluster);
+            Assert.Equal(0, analysis.AttackReadyClusterMobCount);
+
+            var controller = MakeController(2000);
+            Assert.Equal(MobGroupingDirective.StartMove,
+                TriggerWith(controller, Utc(), threeGroupedAndOutlier).Directive);
+        }
+
+        [Fact]
+        public void FiveMobsWithFourClusterAndOutlierAttackTheClusterInsteadOfGathering()
+        {
+            // The minimum >4 case: four tightly clustered mobs plus one distant outlier.
+            // The exact subset search must be the only reason the scatter is tolerated.
+            MobPoint[] fourClusterAndOutlier =
+            {
+                new(95, 60), new(100, 65), new(105, 60), new(100, 55), new(0, 60)
+            };
+            MobGroupAnalysis analysis = Analyze(fourClusterAndOutlier);
+
+            Assert.Equal(5, analysis.DetectedMobCount);
+            Assert.True(analysis.IsScattered);
+            Assert.False(analysis.IsSufficientlyClustered);
+            Assert.True(analysis.HasAttackReadyCluster);
+            Assert.Equal(BotConstants.MobGrouping.AttackReadyClusterMobCount,
+                analysis.AttackReadyClusterMobCount);
+
+            var controller = new MobGroupingController();
+            for (int i = 0; i < 10; i++)
+            {
+                MobGroupingDecision decision = controller.Tick(Input(
+                    Utc(i * 225), analysis, sample: true));
+                Assert.NotEqual(MobGroupingDirective.StartMove, decision.Directive);
+            }
+            Assert.Equal(0, controller.GroupingsThisEncounter);
+        }
+
+        [Fact]
+        public void AttackReadyClusterAverageSpreadEqualityAtThresholdPasses()
+        {
+            // Four-subset spread is exactly the 24 px average success threshold
+            // (and 24 px maximum, inside the 44 px maximum threshold).
+            MobPoint[] formation =
+            {
+                new(76, 60), new(124, 60), new(100, 36), new(100, 84), new(0, 60)
+            };
+            MobGroupAnalysis analysis = Analyze(formation);
+
+            Assert.True(analysis.HasAttackReadyCluster);
+        }
+
+        [Fact]
+        public void AttackReadyClusterAverageSpreadJustBeyondThresholdFails()
+        {
+            // Same geometry with 24.5 px spread: the average threshold rejects the subset
+            // while the maximum threshold would still accept it.
+            MobPoint[] formation =
+            {
+                new(75.5f, 60), new(124.5f, 60), new(100, 35.5f), new(100, 84.5f), new(0, 60)
+            };
+            MobGroupAnalysis analysis = Analyze(formation);
+
+            Assert.False(analysis.HasAttackReadyCluster);
+            Assert.Equal(0, analysis.AttackReadyClusterMobCount);
+        }
+
+        [Fact]
+        public void AttackReadyClusterMaximumSpreadEqualityAtThresholdPasses()
+        {
+            // Two mobs sit exactly 44 px from the subset centroid (the maximum success
+            // threshold) while the other two sit 1 px away, so the average stays inside
+            // its 24 px limit and only the maximum boundary is exercised.
+            MobPoint[] formation =
+            {
+                new(144, 60), new(56, 60), new(99, 60), new(101, 60), new(0, 60)
+            };
+            MobGroupAnalysis analysis = Analyze(formation);
+
+            Assert.True(analysis.HasAttackReadyCluster);
+            Assert.Equal(BotConstants.MobGrouping.AttackReadyClusterMobCount,
+                analysis.AttackReadyClusterMobCount);
+        }
+
+        [Fact]
+        public void AttackReadyClusterMaximumSpreadJustBeyondThresholdFails()
+        {
+            // Same geometry with 44.5 px maximum spread: just beyond the maximum
+            // threshold while the average is still inside its own limit.
+            MobPoint[] formation =
+            {
+                new(144.5f, 60), new(55.5f, 60), new(99, 60), new(101, 60), new(0, 60)
+            };
+            MobGroupAnalysis analysis = Analyze(formation);
+
+            Assert.False(analysis.HasAttackReadyCluster);
+        }
+
+        [Fact]
+        public void AttackReadyClusterScalesSuccessThresholdsBySubsetAverageMarkerRadius()
+        {
+            // Four mobs sit 36 px from their local centroid: beyond the unscaled 24 px
+            // average-success threshold, but inside the thresholds scaled by a 36 px
+            // marker radius (36 / 18 = 2 -> 48 px average, 88 px maximum).
+            MobPoint[] geometry =
+            {
+                new(64, 60), new(136, 60), new(100, 24), new(100, 96), new(0, 60)
+            };
+
+            Assert.True(AnalyzeWithRadius(36f, geometry).HasAttackReadyCluster);
+            Assert.False(AnalyzeWithRadius(18f, geometry).HasAttackReadyCluster);
+
+            // The scale uses the SUBSET AVERAGE radius, not the minimum: three 36 px
+            // markers and one 18 px marker average to 31.5 px (scale 1.75 -> 42 px
+            // average threshold), which still accepts the 36 px spread even though the
+            // minimum-radius scale (1.0) would not.
+            var mixed = new[]
+            {
+                new MobMarker(new MobPoint(64, 60), 36f, 1f, MobMarkerSource.CyanCenter),
+                new MobMarker(new MobPoint(136, 60), 36f, 1f, MobMarkerSource.CyanCenter),
+                new MobMarker(new MobPoint(100, 24), 36f, 1f, MobMarkerSource.CyanCenter),
+                new MobMarker(new MobPoint(100, 96), 18f, 1f, MobMarkerSource.CyanCenter),
+                new MobMarker(new MobPoint(0, 60), 18f, 1f, MobMarkerSource.CyanCenter)
+            };
+            Assert.True(AnalyzeMarkers(mixed).HasAttackReadyCluster);
+        }
+
+        [Fact]
+        public void GatherNavigationTargetUsesLiveWaypointAndWaypointDirectCameraSteering()
         {
             var path = new List<Waypoint>
             {
@@ -762,6 +985,47 @@ namespace DriverScanTester.Tests
             Assert.Equal(5000f, targetX);
             Assert.Equal(5000f, targetY);
             Assert.Equal(MovementSteeringMode.DirectCamera, steering);
+            movement.DisposeMobGroupingDetector();
+        }
+
+        [Fact]
+        public void GatherNavigationTargetUsesKeyboardTurnWaypointOverride()
+        {
+            var path = new List<Waypoint>
+            {
+                new(5000, 5000, MovementPrecision.Medium, BotMode.MoveAndAttack,
+                    steeringMode: MovementSteeringMode.KeyboardTurn)
+            };
+            MovementSystem movement = new(CreateStubMemory(), _ => { }, 0, 0,
+                customPath: path, steeringMode: MovementSteeringMode.DirectCamera);
+
+            Assert.True(movement.TryGetGatherNavigationTarget(0, 0,
+                out float targetX, out float targetY, out MovementSteeringMode steering));
+            Assert.Equal(5000f, targetX);
+            Assert.Equal(5000f, targetY);
+            Assert.Equal(MovementSteeringMode.KeyboardTurn, steering);
+            movement.DisposeMobGroupingDetector();
+        }
+
+        [Theory]
+        [InlineData(null, MovementSteeringMode.DirectCamera, MovementSteeringMode.DirectCamera)]
+        [InlineData(null, MovementSteeringMode.KeyboardTurn, MovementSteeringMode.KeyboardTurn)]
+        public void GatherNavigationTargetFallsBackToMovementSystemDefaultSteering(
+            MovementSteeringMode? waypointMode,
+            MovementSteeringMode runnerDefault,
+            MovementSteeringMode expected)
+        {
+            var path = new List<Waypoint>
+            {
+                new(5000, 5000, MovementPrecision.Medium, BotMode.MoveAndAttack,
+                    steeringMode: waypointMode)
+            };
+            MovementSystem movement = new(CreateStubMemory(), _ => { }, 0, 0,
+                customPath: path, steeringMode: runnerDefault);
+
+            Assert.True(movement.TryGetGatherNavigationTarget(0, 0,
+                out _, out _, out MovementSteeringMode steering));
+            Assert.Equal(expected, steering);
             movement.DisposeMobGroupingDetector();
         }
 
@@ -784,6 +1048,141 @@ namespace DriverScanTester.Tests
             MovementSystem operationMovement = new(CreateStubMemory(), _ => { }, 0, 0, customPath: operationHead);
             Assert.False(operationMovement.CanGatherTowardCurrentNavigationTarget(0, 0));
             operationMovement.DisposeMobGroupingDetector();
+        }
+
+        [Fact]
+        public void GatherNavigationTargetRejectsEmptyWaypointQueueWithoutFinalStandby()
+        {
+            // No queued waypoint and no final-waypoint standby: there is no positional
+            // navigation target, so gather must return false instead of inventing one.
+            MovementSystem movement = new(CreateStubMemory(), _ => { }, 0, 0,
+                customPath: new List<Waypoint>());
+
+            Assert.False(movement.IsFinalStandbyActive);
+            Assert.False(movement.CanGatherTowardCurrentNavigationTarget(0, 0));
+            Assert.False(movement.TryGetGatherNavigationTarget(0, 0,
+                out _, out _, out _));
+            movement.DisposeMobGroupingDetector();
+        }
+
+        [Fact]
+        public void GatherWaypointBearingIsRecomputedFromLivePlayerPosition()
+        {
+            var path = new List<Waypoint>
+            {
+                new(100, 100, MovementPrecision.Medium, BotMode.MoveAndAttack,
+                    steeringMode: MovementSteeringMode.DirectCamera)
+            };
+            MovementSystem movement = new(CreateStubMemory(), _ => { }, 0, 0, customPath: path);
+            try
+            {
+                // The same waypoint resolves from both live player positions.
+                Assert.True(movement.TryGetGatherNavigationTarget(0, 0,
+                    out float firstTargetX, out float firstTargetY, out _));
+                Assert.True(movement.TryGetGatherNavigationTarget(60, 10,
+                    out float laterTargetX, out float laterTargetY, out _));
+                Assert.Equal(firstTargetX, laterTargetX);
+                Assert.Equal(firstTargetY, laterTargetY);
+                Assert.Equal(100f, firstTargetX);
+                Assert.Equal(100f, firstTargetY);
+
+                // The pure production bearing used by MoveTowards follows the player.
+                Assert.Equal(45f, MovementSystem.ComputeMoveTowardsBearingDeg(
+                    0, 0, firstTargetX, firstTargetY), 3);
+                float expectedLater = GeometryUtils.GetBearingToTargetDeg(60, 10, 100, 100);
+                Assert.Equal(expectedLater, MovementSystem.ComputeMoveTowardsBearingDeg(
+                    60, 10, laterTargetX, laterTargetY), 3);
+                Assert.NotEqual(
+                    MovementSystem.ComputeMoveTowardsBearingDeg(0, 0, firstTargetX, firstTargetY),
+                    MovementSystem.ComputeMoveTowardsBearingDeg(60, 10, laterTargetX, laterTargetY));
+
+                // The real gather step reuses that calculation: the applied bearing must
+                // change with the player's position for the SAME waypoint.
+                typeof(MovementSystem).GetField("_isMovingForward",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(movement, true);
+                MethodInfo applyGather = typeof(MovementSystem).GetMethod("ApplyGatherMovement",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!;
+                FieldInfo appliedBearing = typeof(MovementSystem).GetField("_lastSetBearingDeg",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+                Assert.True((bool)applyGather.Invoke(movement, new object[] { 0f, 0f })!);
+                Assert.Equal(45f, (float)appliedBearing.GetValue(movement)!, 3);
+
+                typeof(MovementSystem).GetField("_isMovingForward",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(movement, true);
+                Assert.True((bool)applyGather.Invoke(movement, new object[] { 60f, 10f })!);
+                Assert.Equal(expectedLater, (float)appliedBearing.GetValue(movement)!, 3);
+            }
+            finally
+            {
+                movement.DisposeMobGroupingDetector();
+            }
+        }
+
+        [Fact]
+        public void RecommendedEscapeDirectionCannotControlGatherMovement()
+        {
+            // Same geometry, player position, waypoint and steering; only the analysis
+            // direction differs. Gather target and applied waypoint bearing must be
+            // identical or the direction has been reconnected to movement.
+            (float TargetX, float TargetY, MovementSteeringMode Steering, float AppliedBearing) north =
+                CaptureGatherMovement(MobGroupingDirection.North);
+            (float TargetX, float TargetY, MovementSteeringMode Steering, float AppliedBearing) southWest =
+                CaptureGatherMovement(MobGroupingDirection.SouthWest);
+
+            Assert.Equal(north.TargetX, southWest.TargetX);
+            Assert.Equal(north.TargetY, southWest.TargetY);
+            Assert.Equal(north.Steering, southWest.Steering);
+            Assert.Equal(north.AppliedBearing, southWest.AppliedBearing);
+            Assert.Equal(45f, north.AppliedBearing, 3);
+        }
+
+        private static (float TargetX, float TargetY, MovementSteeringMode Steering, float AppliedBearing)
+            CaptureGatherMovement(MobGroupingDirection direction)
+        {
+            MobGroupAnalysis analysis = Analyze(ScatteredPoints) with
+            {
+                RecommendedEscapeDirection = direction
+            };
+            var controller = MakeController(2000);
+            MobGroupingDecision decision = default;
+            foreach (int offset in new[] { 0, 225, 450, 675, 900, 1200 })
+                decision = controller.Tick(Input(Utc(offset), analysis, sample: true));
+
+            Assert.Equal(MobGroupingDirective.StartMove, decision.Directive);
+            Assert.Equal(direction, decision.Direction);
+
+            var path = new List<Waypoint>
+            {
+                new(5000, 5000, MovementPrecision.Medium, BotMode.MoveAndAttack,
+                    steeringMode: MovementSteeringMode.DirectCamera)
+            };
+            MovementSystem movement = new(CreateStubMemory(), _ => { }, 0, 0, customPath: path);
+            try
+            {
+                Assert.True(movement.TryGetGatherNavigationTarget(10, 10,
+                    out float targetX, out float targetY, out MovementSteeringMode steering));
+
+                MethodInfo applyDecision = typeof(MovementSystem).GetMethod("ApplyMobGroupingDecision",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!;
+                applyDecision.Invoke(movement, new object[] { decision, Utc() });
+
+                // Keep W logically held so the measurement does not synthesize a keydown.
+                typeof(MovementSystem).GetField("_isMovingForward",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(movement, true);
+                MethodInfo applyGather = typeof(MovementSystem).GetMethod("ApplyGatherMovement",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!;
+                Assert.True((bool)applyGather.Invoke(movement, new object[] { 10f, 10f })!);
+                float appliedBearing = (float)typeof(MovementSystem)
+                    .GetField("_lastSetBearingDeg", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .GetValue(movement)!;
+
+                return (targetX, targetY, steering, appliedBearing);
+            }
+            finally
+            {
+                movement.DisposeMobGroupingDetector();
+            }
         }
 
         [Fact]
@@ -891,48 +1290,24 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void GroupingTargetBearingIsAbsoluteFromTheCameraAtMoveStart()
-        {
-            Assert.Equal(90f, MovementSystem.ComputeMobGroupingTargetBearingDeg(
-                0f, MobGroupingDirection.East));
-            Assert.Equal(10f, MovementSystem.ComputeMobGroupingTargetBearingDeg(
-                10f, MobGroupingDirection.North));
-            Assert.Equal(325f, MovementSystem.ComputeMobGroupingTargetBearingDeg(
-                10f, MobGroupingDirection.NorthWest));
-            Assert.Equal(350f, MovementSystem.ComputeMobGroupingTargetBearingDeg(
-                35f, MobGroupingDirection.NorthWest));
-            Assert.Equal(0f, MovementSystem.ComputeMobGroupingTargetBearingDeg(
-                315f, MobGroupingDirection.NorthEast));
-
-            // A second move started after the camera changed resolves a NEW absolute
-            // bearing — the first move's target is not reused.
-            Assert.NotEqual(
-                MovementSystem.ComputeMobGroupingTargetBearingDeg(0f, MobGroupingDirection.East),
-                MovementSystem.ComputeMobGroupingTargetBearingDeg(45f, MobGroupingDirection.East));
-        }
-
-        [Fact]
-        public void GroupingKeyboardFeedbackReleasesTheTurnKeyWithinTheConfiguredTolerance()
+        public void KeyboardFeedbackReleasesTheTurnKeyWithinTheConfiguredTolerance()
         {
             // KeyboardTurn re-evaluates this pure decision against the live camera bearing
-            // every tick; the stored grouping bearing stays fixed while the camera turns.
-            const float storedBearing = 90f;
-            Assert.Equal("RightD", DecideTurnKey(0f, storedBearing));
-            Assert.Equal("RightD", DecideTurnKey(60f, storedBearing));
-            Assert.Equal("None", DecideTurnKey(80f, storedBearing));
-            Assert.Equal("None", DecideTurnKey(90f, storedBearing));
-            Assert.Equal("None", DecideTurnKey(100f, storedBearing));
-            Assert.Equal("LeftA", DecideTurnKey(120f, storedBearing));
+            // every tick; MoveTowards recomputes the desired waypoint bearing from the
+            // player's current position before the decision runs.
+            const float waypointBearing = 90f;
+            Assert.Equal("RightD", DecideTurnKey(0f, waypointBearing));
+            Assert.Equal("RightD", DecideTurnKey(60f, waypointBearing));
+            Assert.Equal("None", DecideTurnKey(80f, waypointBearing));
+            Assert.Equal("None", DecideTurnKey(90f, waypointBearing));
+            Assert.Equal("None", DecideTurnKey(100f, waypointBearing));
+            Assert.Equal("LeftA", DecideTurnKey(120f, waypointBearing));
         }
 
         [Fact]
-        public void GroupingStopMovementClearsStoredBearingAndSteeringOwnership()
+        public void GroupingStopMovementClearsMovementOwnership()
         {
             MovementSystem movement = CreateMovementSystem();
-            FieldInfo bearingField = typeof(MovementSystem).GetField("_mobGroupingTargetBearingDeg",
-                BindingFlags.Instance | BindingFlags.NonPublic)!;
-            FieldInfo modeField = typeof(MovementSystem).GetField("_mobGroupingSteeringMode",
-                BindingFlags.Instance | BindingFlags.NonPublic)!;
             FieldInfo ownsField = typeof(MovementSystem).GetField("_mobGroupingOwnsMovement",
                 BindingFlags.Instance | BindingFlags.NonPublic)!;
             FieldInfo movingField = typeof(MovementSystem).GetField("_isMovingForward",
@@ -940,8 +1315,6 @@ namespace DriverScanTester.Tests
             MethodInfo apply = typeof(MovementSystem).GetMethod("ApplyMobGroupingDecision",
                 BindingFlags.Instance | BindingFlags.NonPublic)!;
 
-            bearingField.SetValue(movement, 123f);
-            modeField.SetValue(movement, MovementSteeringMode.KeyboardTurn);
             ownsField.SetValue(movement, true);
             movingField.SetValue(movement, true);
 
@@ -951,8 +1324,6 @@ namespace DriverScanTester.Tests
                 Utc()
             });
 
-            Assert.Equal(BotConstants.Movement.UnsetBearing, (float)bearingField.GetValue(movement)!);
-            Assert.Null(modeField.GetValue(movement));
             Assert.False((bool)ownsField.GetValue(movement)!);
             Assert.False((bool)movingField.GetValue(movement)!);
             movement.DisposeMobGroupingDetector();
@@ -962,10 +1333,6 @@ namespace DriverScanTester.Tests
         public void GroupingResumeCombatReleasesMovementBeforeCombatResumes()
         {
             MovementSystem movement = CreateMovementSystem();
-            FieldInfo bearingField = typeof(MovementSystem).GetField("_mobGroupingTargetBearingDeg",
-                BindingFlags.Instance | BindingFlags.NonPublic)!;
-            FieldInfo modeField = typeof(MovementSystem).GetField("_mobGroupingSteeringMode",
-                BindingFlags.Instance | BindingFlags.NonPublic)!;
             FieldInfo ownsField = typeof(MovementSystem).GetField("_mobGroupingOwnsMovement",
                 BindingFlags.Instance | BindingFlags.NonPublic)!;
             FieldInfo movingField = typeof(MovementSystem).GetField("_isMovingForward",
@@ -978,8 +1345,6 @@ namespace DriverScanTester.Tests
             MethodInfo apply = typeof(MovementSystem).GetMethod("ApplyMobGroupingDecision",
                 BindingFlags.Instance | BindingFlags.NonPublic)!;
 
-            bearingField.SetValue(movement, 90f);
-            modeField.SetValue(movement, MovementSteeringMode.KeyboardTurn);
             ownsField.SetValue(movement, true);
             movingField.SetValue(movement, true);
             skillField.SetValue(movement, true);
@@ -995,42 +1360,9 @@ namespace DriverScanTester.Tests
             Assert.False(movement.IsAttackKeyHeld);
             Assert.False((bool)movingField.GetValue(movement)!);
             Assert.False((bool)ownsField.GetValue(movement)!);
-            Assert.Equal(BotConstants.Movement.UnsetBearing, (float)bearingField.GetValue(movement)!);
-            Assert.Null(modeField.GetValue(movement));
             Assert.False((bool)typeof(CombatHandler)
                 .GetField("_externallySuspended", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .GetValue(combatHandler)!);
-            movement.DisposeMobGroupingDetector();
-        }
-
-        [Fact]
-        public void GroupingSteeringTickReusesTheStoredBearingWithoutDrift()
-        {
-            MovementSystem movement = CreateMovementSystem();
-            FieldInfo bearingField = typeof(MovementSystem).GetField("_mobGroupingTargetBearingDeg",
-                BindingFlags.Instance | BindingFlags.NonPublic)!;
-            FieldInfo modeField = typeof(MovementSystem).GetField("_mobGroupingSteeringMode",
-                BindingFlags.Instance | BindingFlags.NonPublic)!;
-            FieldInfo movingField = typeof(MovementSystem).GetField("_isMovingForward",
-                BindingFlags.Instance | BindingFlags.NonPublic)!;
-            MethodInfo steeringTick = typeof(MovementSystem).GetMethod("ApplyMobGroupingSteeringTick",
-                BindingFlags.Instance | BindingFlags.NonPublic)!;
-
-            // The stub camera reads 0°, so a stored bearing of 0° keeps the turn key at
-            // None and no A/D key event is synthesized. W is already "held" so StartMoving
-            // is a no-op too — this exercises the real per-tick steering path safely.
-            bearingField.SetValue(movement, 0f);
-            modeField.SetValue(movement, MovementSteeringMode.KeyboardTurn);
-            movingField.SetValue(movement, true);
-
-            for (int tick = 0; tick < 5; tick++)
-                steeringTick.Invoke(movement, null);
-
-            Assert.Equal(0f, (float)bearingField.GetValue(movement)!);
-            Assert.Equal("None", typeof(MovementSystem)
-                .GetField("_heldTurnKey", BindingFlags.Instance | BindingFlags.NonPublic)!
-                .GetValue(movement)!.ToString());
-            movement.StopMoving();
             movement.DisposeMobGroupingDetector();
         }
 
@@ -1138,10 +1470,6 @@ namespace DriverScanTester.Tests
             typeof(MovementSystem).GetField("_isSkillThreeHeld", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .SetValue(movement, true);
 
-            typeof(MovementSystem).GetField("_mobGroupingTargetBearingDeg",
-                BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(movement, 120f);
-            typeof(MovementSystem).GetField("_mobGroupingSteeringMode",
-                BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(movement, MovementSteeringMode.KeyboardTurn);
             object combatHandler = typeof(MovementSystem)
                 .GetField("_combatHandler", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .GetValue(movement)!;
@@ -1157,12 +1485,6 @@ namespace DriverScanTester.Tests
                 BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(movement)!);
             Assert.False((bool)typeof(MovementSystem).GetField("_mobGroupingOwnsMovement",
                 BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(movement)!);
-            Assert.Equal(BotConstants.Movement.UnsetBearing, (float)typeof(MovementSystem)
-                .GetField("_mobGroupingTargetBearingDeg", BindingFlags.Instance | BindingFlags.NonPublic)!
-                .GetValue(movement)!);
-            Assert.Null(typeof(MovementSystem)
-                .GetField("_mobGroupingSteeringMode", BindingFlags.Instance | BindingFlags.NonPublic)!
-                .GetValue(movement));
             movement.DisposeMobGroupingDetector();
         }
 

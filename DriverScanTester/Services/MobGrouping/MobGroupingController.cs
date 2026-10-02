@@ -19,7 +19,10 @@ namespace DriverScanTester.Services
         bool PlayerPositionValid,
         float PlayerX,
         float PlayerY,
-        bool HasGatherNavigationTarget = true);
+        bool HasGatherNavigationTarget = true,
+        float GatherTargetX = 0f,
+        float GatherTargetY = 0f,
+        MovementSteeringMode GatherSteeringMode = MovementSteeringMode.KeyboardTurn);
 
     /// <summary>
     /// Tick-driven, deterministic grouping state machine. It has no image, combat, keyboard,
@@ -143,14 +146,16 @@ namespace DriverScanTester.Services
                 // single predicate the gather verify step always used, fed by the
                 // 500 ms rescans. Waypoint navigation continues live every tick through
                 // the ordinary MovementSystem steering.
-                bool groupedEnough = input.DetectionCaptured &&
-                    input.Analysis is { IsValid: true } gatherAnalysis &&
-                    IsGatheringComplete(gatherAnalysis);
+                MobGroupAnalysis? rescan = input.DetectionCaptured &&
+                    input.Analysis is { IsValid: true } validRescan
+                    ? validRescan
+                    : null;
+                bool groupedEnough = rescan != null && IsGatheringComplete(rescan);
 
                 if (input.DetectionCaptured)
                 {
-                    if (input.Analysis is { IsValid: true } rescan)
-                        _log($"[MobGrouping] gather rescan: mobs={rescan.DetectedMobCount}, avg={rescan.AverageSpread:F1}px, max={rescan.MaximumSpread:F1}px.");
+                    if (rescan != null)
+                        _log($"[MobGrouping] gather rescan: mobs={rescan.DetectedMobCount}, avg={rescan.AverageSpread:F1}px, max={rescan.MaximumSpread:F1}px, wholeClustered={rescan.IsSufficientlyClustered}, attackReadyCluster={rescan.HasAttackReadyCluster}.");
                     else
                         _log("[MobGrouping] gather rescan: no valid detection this frame.");
                 }
@@ -174,9 +179,19 @@ namespace DriverScanTester.Services
 
                 double elapsedMs = (input.NowUtc - _gatherStartedAt).TotalMilliseconds;
                 if (groupedEnough)
-                    _log($"[MobGrouping] gather finished early at {elapsedMs:F0}ms: formation is sufficiently clustered - stopping movement and resuming combat.");
+                {
+                    // Keep the two completion reasons distinct: either the WHOLE formation
+                    // reached the success thresholds, or (with more than four mobs) only a
+                    // local attack-ready subset did. They are different gameplay states.
+                    string successReason = rescan!.IsSufficientlyClustered
+                        ? "whole formation sufficiently clustered"
+                        : $"attack-ready cluster of {BotConstants.MobGrouping.AttackReadyClusterMobCount} detected";
+                    _log($"[MobGrouping] gather finished early at {elapsedMs:F0}ms: {successReason} - stopping movement and resuming combat.");
+                }
                 else
+                {
                     _log($"[MobGrouping] gather deadline reached at {elapsedMs:F0}ms - stopping movement and resuming combat.");
+                }
                 return Finish();
             }
 
@@ -293,8 +308,7 @@ namespace DriverScanTester.Services
             _nextGatherRescanAt = input.NowUtc.AddMilliseconds(
                 BotConstants.MobGrouping.GatherRescanIntervalMs);
             SetState(MobGroupingState.GroupingMove);
-            _log($"[MobGrouping] grouping triggered: mobs={triggerAnalysis.DetectedMobCount}, avg={triggerAnalysis.AverageSpread:F1}px, max={triggerAnalysis.MaximumSpread:F1}px.");
-            _log($"[MobGrouping] gather movement started toward the current route waypoint: duration={gatherDurationMs}ms, rescan={BotConstants.MobGrouping.GatherRescanIntervalMs}ms.");
+            _log($"[MobGrouping] gather started: mobs={triggerAnalysis.DetectedMobCount}, avg={triggerAnalysis.AverageSpread:F1}, max={triggerAnalysis.MaximumSpread:F1}, attackReadyCluster={triggerAnalysis.HasAttackReadyCluster}, waypoint=({input.GatherTargetX:F1},{input.GatherTargetY:F1}), steering={input.GatherSteeringMode}, duration={gatherDurationMs}ms, rescan={BotConstants.MobGrouping.GatherRescanIntervalMs}ms.");
             return new MobGroupingDecision(
                 MobGroupingDirective.StartMove,
                 triggerAnalysis.RecommendedEscapeDirection,

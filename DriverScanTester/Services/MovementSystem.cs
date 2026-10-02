@@ -137,12 +137,6 @@ namespace DriverScanTester.Services
         private bool _mobGroupingOwnsMovement;
         private bool _resumeCombatSkillAfterGrouping;
         private bool _mobGroupingDisposed;
-        // Absolute grouping target captured at movement start and the steering mode
-        // resolved for this movement. KeyboardTurn must re-evaluate A/D from the live
-        // camera every tick against this fixed bearing; it must never be recomputed
-        // relative to the changing camera during the walk.
-        private float _mobGroupingTargetBearingDeg = UnsetBearing;
-        private MovementSteeringMode? _mobGroupingSteeringMode;
 
         public WaypointRecoveryExecutor? WaypointRecoveryExecutor { get; set; }
         /// <summary>Set by the host so grouping cannot start while its shared pause switch is active.</summary>
@@ -386,43 +380,20 @@ namespace DriverScanTester.Services
             _resumeCombatSkillAfterGrouping = true;
             _mobGroupingOwnsMovement = true;
 
-            // No bearing is snapshotted here. ApplyGatherMovement resolves the live
+            // Nothing is snapshotted here. ApplyGatherMovement resolves the live
             // world-space route waypoint every tick and reuses MoveTowards so the desired
-            // heading follows the player naturally; RecommendedEscapeDirection no longer
+            // heading follows the player naturally; RecommendedEscapeDirection never
             // drives physical movement.
-            ClearMobGroupingSteeringState();
         }
 
         /// <summary>
-        /// Pure conversion of the grouping direction (relative to the camera at movement
-        /// start) into the absolute bearing stored for the whole movement. Kept separate
-        /// so the no-drift behavior is unit-testable without native key events.
+        /// Pure bearing used by <see cref="MoveTowards"/>: exposed so tests can verify the
+        /// gather walk recomputes its heading from the player's current world position
+        /// instead of reusing a bearing captured once at movement start.
         /// </summary>
-        internal static float ComputeMobGroupingTargetBearingDeg(
-            float cameraBearingDeg,
-            MobGroupingDirection direction)
-            => GeometryUtils.NormalizeBearingDeg(
-                cameraBearingDeg + MobGroupingDirectionMath.ToBearingOffset(direction));
-
-        /// <summary>
-        /// Legacy test hook for the removed bearing-snapshot steering path. Production
-        /// gather movement now flows through <see cref="ApplyGatherMovement"/>, which
-        /// recomputes the waypoint bearing live. This method is kept only so the existing
-        /// ownership/steering state tests can exercise the stored fields directly.
-        /// </summary>
-        private void ApplyMobGroupingSteeringTick()
-        {
-            if (_mobGroupingTargetBearingDeg == UnsetBearing || !_mobGroupingSteeringMode.HasValue)
-                return;
-            ApplySteeringBearing(_mobGroupingTargetBearingDeg, _mobGroupingSteeringMode.Value);
-        }
-
-        /// <summary>Clears the legacy stored per-movement grouping bearing and steering mode.</summary>
-        private void ClearMobGroupingSteeringState()
-        {
-            _mobGroupingTargetBearingDeg = UnsetBearing;
-            _mobGroupingSteeringMode = null;
-        }
+        internal static float ComputeMoveTowardsBearingDeg(
+            float currX, float currY, float targetX, float targetY)
+            => GeometryUtils.GetBearingToTargetDeg(currX, currY, targetX, targetY);
 
         /// <summary>
         /// Resolves the temporary gather navigation target from the ordinary route: the
@@ -509,7 +480,6 @@ namespace DriverScanTester.Services
                 StopMoving();
                 _mobGroupingOwnsMovement = false;
             }
-            ClearMobGroupingSteeringState();
             ReleaseSkillThree();
             _combatHandler.ResumeAfterExternalMovement();
             _resumeCombatSkillAfterGrouping = resumeCombat && CurrentMode == BotMode.MoveAndAttack;
@@ -691,6 +661,13 @@ namespace DriverScanTester.Services
             bool recovery = _isUnstuckRoutineActive || _reverseDiagonalRecovery.IsActive ||
                 IsWaypointSpecialRecoveryActive;
 
+            // The controller receives the live waypoint target and the resolved steering
+            // mode purely for logging/diagnostics; the physical gather step still runs
+            // through ApplyGatherMovement/TryGetGatherNavigationTarget.
+            bool hasGatherTarget = TryGetGatherNavigationTarget(
+                currX, currY, out float gatherTargetX, out float gatherTargetY,
+                out MovementSteeringMode gatherSteeringMode);
+
             return new MobGroupingTickInput(
                 nowUtc,
                 enabled,
@@ -707,7 +684,10 @@ namespace DriverScanTester.Services
                 positionValid,
                 currX,
                 currY,
-                CanGatherTowardCurrentNavigationTarget(currX, currY));
+                hasGatherTarget,
+                gatherTargetX,
+                gatherTargetY,
+                gatherSteeringMode);
         }
 
         private void ApplyMobGroupingDecision(MobGroupingDecision decision, DateTime nowUtc)
@@ -720,7 +700,6 @@ namespace DriverScanTester.Services
                 case MobGroupingDirective.StopMovement:
                     StopMoving();
                     _mobGroupingOwnsMovement = false;
-                    ClearMobGroupingSteeringState();
                     break;
                 case MobGroupingDirective.ResumeCombat:
                     FinishMobGroupingOwnership(resumeCombat: true, nowUtc);
@@ -2629,7 +2608,7 @@ namespace DriverScanTester.Services
 
         private void MoveTowards(float currX, float currY, float targetX, float targetY, MovementSteeringMode steeringMode)
         {
-            float targetBearingDeg = GeometryUtils.GetBearingToTargetDeg(currX, currY, targetX, targetY);
+            float targetBearingDeg = ComputeMoveTowardsBearingDeg(currX, currY, targetX, targetY);
 
             if (steeringMode == MovementSteeringMode.KeyboardTurn)
             {
