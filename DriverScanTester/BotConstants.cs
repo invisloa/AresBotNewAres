@@ -304,14 +304,20 @@ namespace DriverScanTester
             /// </summary>
             public const float KeyboardFastTurnThresholdDegrees = 60.0f;
 
-            /// <summary>Horizontal margin from the game-client edge used for the fast-turn cursor.</summary>
-            public const int KeyboardFastTurnMouseEdgeMarginPx = 20;
+            /// <summary>
+            /// Horizontal/vertical margin from the game-client edge used for the fast-turn
+            /// cursor. The game only activates its x2 border turn when the cursor is
+            /// essentially at the client boundary, so this must stay at 1–2 px — a larger
+            /// inset (e.g. 20 px) silently keeps the turn at x1.
+            /// </summary>
+            public const int KeyboardFastTurnMouseEdgeMarginPx = 1;
 
             /// <summary>
-            /// Allowed cursor deviation (px) from the fast-turn edge before the cursor is
-            /// re-asserted, so the controller does not spam SetCursorPos every tick.
+            /// Allowed cursor deviation (px) from the fast-turn edge. Used both to decide
+            /// whether the cursor already sits at the edge (no SetCursorPos spam) and to
+            /// verify the physical position after a move via GetCursorPos.
             /// </summary>
-            public const int KeyboardFastTurnMouseReassertTolerancePx = 8;
+            public const int KeyboardFastTurnMouseReassertTolerancePx = 2;
 
             /// <summary>Grace period in seconds after pressing W during which stuck detection is ignored.</summary>
             public const double StuckGraceAfterStartSeconds = 1.25;

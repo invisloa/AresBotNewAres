@@ -104,6 +104,10 @@ namespace DriverScanTester.Tests
         [InlineData(-59.9f, (int)KeyboardTurnDirective.NormalLeft)]
         [InlineData(-60f, (int)KeyboardTurnDirective.NormalLeft)]
         [InlineData(-60.1f, (int)KeyboardTurnDirective.FastLeft)]
+        [InlineData(100f, (int)KeyboardTurnDirective.FastRight)]
+        [InlineData(-100f, (int)KeyboardTurnDirective.FastLeft)]
+        [InlineData(150f, (int)KeyboardTurnDirective.FastRight)]
+        [InlineData(-150f, (int)KeyboardTurnDirective.FastLeft)]
         [InlineData(180f, (int)KeyboardTurnDirective.FastRight)]
         [InlineData(-180f, (int)KeyboardTurnDirective.FastLeft)]
         public void DecideKeyboardTurnUsesTheToleranceAndFastTurnThresholdBoundaries(
@@ -133,8 +137,46 @@ namespace DriverScanTester.Tests
         {
             Assert.Equal(10f, BotConstants.Movement.KeyboardTurnToleranceDegrees);
             Assert.Equal(60f, BotConstants.Movement.KeyboardFastTurnThresholdDegrees);
-            Assert.True(BotConstants.Movement.KeyboardFastTurnMouseEdgeMarginPx > 0);
-            Assert.True(BotConstants.Movement.KeyboardFastTurnMouseReassertTolerancePx >= 0);
+            // The game only accelerates at the actual client boundary, so the cursor must
+            // be 1–2 px inside it — a larger inset silently stays at x1.
+            Assert.InRange(BotConstants.Movement.KeyboardFastTurnMouseEdgeMarginPx, 1, 2);
+            // A cursor counts as being at the edge only within a 2 px tolerance.
+            Assert.Equal(2, BotConstants.Movement.KeyboardFastTurnMouseReassertTolerancePx);
+        }
+
+        [Theory]
+        [InlineData(500, 1280, true, 1, 501)]
+        [InlineData(500, 1280, false, 1, 1778)]
+        [InlineData(500, 1280, true, 2, 502)]
+        [InlineData(500, 1280, false, 2, 1777)]
+        [InlineData(447, 1280, true, 1, 448)]
+        [InlineData(447, 1280, false, 1, 1725)]
+        public void FastTurnEdgeCoordinatesSitJustInsideTheClient(
+            int clientLeft,
+            int clientWidth,
+            bool leftSide,
+            int edgeMargin,
+            int expected)
+        {
+            int actual = MovementSystem.ComputeKeyboardFastTurnEdgeX(clientLeft, clientWidth, leftSide, edgeMargin);
+
+            Assert.Equal(expected, actual);
+            // The target must remain INSIDE the inclusive client range.
+            Assert.InRange(actual, clientLeft, clientLeft + clientWidth - 1);
+        }
+
+        [Theory]
+        [InlineData(500, 1280, 1140)]
+        [InlineData(447, 1280, 1087)]
+        public void FastTurnNeutralCoordinateIsTheClientHorizontalCentre(
+            int clientLeft,
+            int clientWidth,
+            int expected)
+        {
+            int actual = MovementSystem.ComputeKeyboardFastTurnNeutralX(clientLeft, clientWidth);
+
+            Assert.Equal(expected, actual);
+            Assert.InRange(actual, clientLeft, clientLeft + clientWidth - 1);
         }
 
         [Fact]
@@ -145,6 +187,32 @@ namespace DriverScanTester.Tests
             Assert.Equal(("RightD", "RightD"), MapDirective(KeyboardTurnDirective.FastRight));
             Assert.Equal(("LeftA", "None"), MapDirective(KeyboardTurnDirective.NormalLeft));
             Assert.Equal(("LeftA", "LeftA"), MapDirective(KeyboardTurnDirective.FastLeft));
+        }
+
+        [Fact]
+        public void FastTurnSideSwitchMapsToOppositeTurnKeyAndMouseEdge()
+        {
+            KeyboardTurnDirective right = MovementSystem.DecideKeyboardTurn(120f);
+            KeyboardTurnDirective left = MovementSystem.DecideKeyboardTurn(-120f);
+
+            Assert.Equal(KeyboardTurnDirective.FastRight, right);
+            Assert.Equal(KeyboardTurnDirective.FastLeft, left);
+            Assert.Equal(("RightD", "RightD"), MapDirective(right));
+            Assert.Equal(("LeftA", "LeftA"), MapDirective(left));
+        }
+
+        [Fact]
+        public void SameSideNormalAndFastTransitionsDoNotTouchTheTurnKey()
+        {
+            // NormalRight and FastRight both own D; NormalLeft and FastLeft both own A.
+            Assert.Equal(("None", "None"), TransitionKeys(KeyboardTurnDirective.NormalRight, KeyboardTurnDirective.FastRight));
+            Assert.Equal(("None", "None"), TransitionKeys(KeyboardTurnDirective.FastRight, KeyboardTurnDirective.NormalRight));
+            Assert.Equal(("None", "None"), TransitionKeys(KeyboardTurnDirective.NormalLeft, KeyboardTurnDirective.FastLeft));
+            Assert.Equal(("None", "None"), TransitionKeys(KeyboardTurnDirective.FastLeft, KeyboardTurnDirective.NormalLeft));
+
+            // Opposite-side fast transition swaps exactly one key for the other.
+            Assert.Equal(("RightD", "LeftA"), TransitionKeys(KeyboardTurnDirective.FastRight, KeyboardTurnDirective.FastLeft));
+            Assert.Equal(("LeftA", "RightD"), TransitionKeys(KeyboardTurnDirective.FastLeft, KeyboardTurnDirective.FastRight));
         }
 
         [Fact]
@@ -343,6 +411,11 @@ namespace DriverScanTester.Tests
             string press = resultType.GetField("Item2")!.GetValue(result)!.ToString()!;
             return (release, press);
         }
+
+        private static (string Release, string Press) TransitionKeys(
+            KeyboardTurnDirective current,
+            KeyboardTurnDirective desired)
+            => Transition(MapDirective(current).Key, MapDirective(desired).Key);
 
         private static (string Key, string MouseSide) MapDirective(KeyboardTurnDirective directive)
         {

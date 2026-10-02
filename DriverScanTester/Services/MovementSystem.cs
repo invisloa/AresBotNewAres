@@ -772,6 +772,9 @@ namespace DriverScanTester.Services
         /// <summary>Throttles the "fast-turn mouse unavailable" diagnostic to one message per episode.</summary>
         private bool _keyboardFastTurnMouseFailureLogged = false;
 
+        /// <summary>Throttles the "cursor did not physically reach the fast-turn edge" warning to one message per episode.</summary>
+        private bool _keyboardFastTurnMouseWarningLogged = false;
+
         private bool _hasLastGameAngle = false;
         private float _lastSetGameAngle = 0f;
 
@@ -2407,7 +2410,7 @@ namespace DriverScanTester.Services
                 else
                     SetTurnKey(desiredTurnKey, details);
 
-                ApplyKeyboardFastTurnMouse(directive, details);
+                ApplyKeyboardFastTurnMouse(directive, currentBearingDeg, desiredBearingDeg, signedError, details);
             }
         }
 
@@ -2484,13 +2487,24 @@ namespace DriverScanTester.Services
         /// normal/none releases any fast-turn help, fast acquires (or re-asserts) the
         /// matching client edge. Called on every keyboard steering update.
         /// </summary>
-        private void ApplyKeyboardFastTurnMouse(KeyboardTurnDirective directive, string details)
+        private void ApplyKeyboardFastTurnMouse(
+            KeyboardTurnDirective directive,
+            float currentBearingDeg,
+            float desiredBearingDeg,
+            float signedError,
+            string details)
         {
             TurnKeyState requestedSide = GetFastTurnMouseSide(directive);
             if (requestedSide == TurnKeyState.None)
             {
                 // 10°..60° (and target reached): keep the normal A/D turn only.
-                ReleaseKeyboardFastTurnMouse($"normal A/D steering. {details}");
+                string normalTarget = directive switch
+                {
+                    KeyboardTurnDirective.NormalLeft => "NORMAL LEFT",
+                    KeyboardTurnDirective.NormalRight => "NORMAL RIGHT",
+                    _ => "NO TURN"
+                };
+                ReleaseKeyboardFastTurnMouse($"{normalTarget} error={signedError:+0.0;-0.0;0.0}° mouse neutralized. {details}");
                 return;
             }
 
@@ -2503,9 +2517,13 @@ namespace DriverScanTester.Services
                 return;
             }
 
+            string diagnosticContext =
+                $"current={currentBearingDeg:F1} target={desiredBearingDeg:F1} error={signedError:+0.0;-0.0;0.0} " +
+                $"turn={(requestedSide == TurnKeyState.LeftA ? "A" : "D")} held={GetTurnKeyName(_heldTurnKey)}";
+
             if (_keyboardFastTurnMouseActive && _keyboardFastTurnMouseDirection == requestedSide)
             {
-                ReassertKeyboardFastTurnMouse(requestedSide, details);
+                ReassertKeyboardFastTurnMouse(requestedSide, diagnosticContext);
                 return;
             }
 
@@ -2519,13 +2537,14 @@ namespace DriverScanTester.Services
                 _log($"[Steering] Fast turn switched to {(requestedSide == TurnKeyState.LeftA ? "LEFT" : "RIGHT")}: {details}");
             }
 
-            if (TrySetKeyboardFastTurnMouse(requestedSide, out string failure))
+            if (MoveKeyboardFastTurnMouseToEdge(requestedSide, diagnosticContext, isEntry: true, out int targetMouseX, out string failure))
             {
                 _keyboardFastTurnMouseActive = true;
                 _keyboardFastTurnMouseDirection = requestedSide;
                 _keyboardFastTurnMouseNeutralizePending = false;
                 _keyboardFastTurnMouseFailureLogged = false;
-                _log($"[Steering] Fast turn {(requestedSide == TurnKeyState.LeftA ? "LEFT" : "RIGHT")} entered: {details}");
+                _log($"[Steering] FAST {(requestedSide == TurnKeyState.LeftA ? "LEFT" : "RIGHT")} entered error={signedError:+0.0;-0.0;0.0}° " +
+                     $"{(requestedSide == TurnKeyState.LeftA ? "A=DOWN D=UP" : "A=UP D=DOWN")} targetMouseX={targetMouseX}");
             }
             else
             {
@@ -2563,7 +2582,10 @@ namespace DriverScanTester.Services
                 _keyboardFastTurnMouseActive = false;
                 _keyboardFastTurnMouseDirection = TurnKeyState.None;
                 if (wasActive)
+                {
                     _keyboardFastTurnMouseFailureLogged = false;
+                    _keyboardFastTurnMouseWarningLogged = false;
+                }
             }
 
             if (!wasActive && !hadPendingNeutralize)
@@ -2606,17 +2628,18 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Re-asserts the fast-turn edge only when the cursor actually drifted away from
-        /// it (small pixel tolerance), so it is never spammed while it is already there.
-        /// A resolution failure drops back to plain A/D steering.
+        /// Re-asserts the fast-turn edge only when the physical cursor actually drifted
+        /// away from it (small pixel tolerance), so SetCursorPos is never spammed while
+        /// the cursor is already at the edge. A resolution failure drops back to plain
+        /// A/D steering.
         /// </summary>
-        private void ReassertKeyboardFastTurnMouse(TurnKeyState side, string details)
+        private void ReassertKeyboardFastTurnMouse(TurnKeyState side, string context)
         {
             try
             {
                 if (!TryResolveKeyboardFastTurnClient(out KeyboardFastTurnClient client))
                 {
-                    ReleaseKeyboardFastTurnMouse($"client rect lost. {details}");
+                    ReleaseKeyboardFastTurnMouse($"client rect lost. {context}");
                     return;
                 }
 
@@ -2627,21 +2650,31 @@ namespace DriverScanTester.Services
                     return;
                 }
 
-                MouseOperations.SetCursorPositionAbsolute(targetX, ResolveKeyboardFastTurnCursorY(client));
+                MoveKeyboardFastTurnMouseToEdge(side, context, isEntry: false, out _, out _);
             }
             catch (Exception)
             {
-                ReleaseKeyboardFastTurnMouse($"cursor re-assert failed. {details}");
+                ReleaseKeyboardFastTurnMouse($"cursor re-assert failed. {context}");
             }
         }
 
         /// <summary>
-        /// Moves the cursor to the requested fast-turn edge. Returns false with a short
-        /// reason when the client rect or the native move cannot be resolved; the caller
-        /// then continues with normal A/D steering (never a direct camera snap).
+        /// Moves the physical cursor to the requested fast-turn client edge, reads it back
+        /// with GetCursorPos and logs the physical-input diagnostic on fast entries and
+        /// direction changes. Returns false with a short reason only when the client rect
+        /// or the native move cannot be resolved; the caller then continues with normal
+        /// A/D steering (never a direct camera snap). A cursor that did not physically
+        /// reach the edge keeps the logical fast-turn ownership so the next update retries,
+        /// but the warning is throttled so a stolen cursor cannot flood the log.
         /// </summary>
-        private static bool TrySetKeyboardFastTurnMouse(TurnKeyState side, out string failure)
+        private bool MoveKeyboardFastTurnMouseToEdge(
+            TurnKeyState side,
+            string context,
+            bool isEntry,
+            out int targetX,
+            out string failure)
         {
+            targetX = 0;
             failure = string.Empty;
             try
             {
@@ -2651,9 +2684,35 @@ namespace DriverScanTester.Services
                     return false;
                 }
 
-                MouseOperations.SetCursorPositionAbsolute(
-                    GetKeyboardFastTurnEdgeX(client, side),
-                    ResolveKeyboardFastTurnCursorY(client));
+                targetX = GetKeyboardFastTurnEdgeX(client, side);
+                int targetY = ResolveKeyboardFastTurnCursorY(client);
+                MouseOperations.SetCursorPositionAbsolute(targetX, targetY);
+
+                bool actualKnown = MouseOperations.TryGetCursorPosition(out int actualX, out int actualY);
+                if (!actualKnown)
+                    actualY = targetY;
+
+                int clientWidth = client.Right - client.Left + 1;
+                string diagnostic =
+                    $"[Steering][FastTurn] {context} client=({client.Left}..{client.Right}) width={clientWidth} " +
+                    $"edgeTargetX={targetX} actualCursorX={(actualKnown ? actualX.ToString() : "?")} cursorY={actualY}";
+
+                bool edgeReached = actualKnown &&
+                    Math.Abs(actualX - targetX) <= BotConstants.Movement.KeyboardFastTurnMouseReassertTolerancePx;
+
+                if (edgeReached)
+                {
+                    _keyboardFastTurnMouseWarningLogged = false;
+                    if (isEntry)
+                        _log(diagnostic);
+                }
+                else if (!_keyboardFastTurnMouseWarningLogged)
+                {
+                    _keyboardFastTurnMouseWarningLogged = true;
+                    _log($"{diagnostic} — WARNING requested {(side == TurnKeyState.LeftA ? "left" : "right")} edge X={targetX} " +
+                         $"but actual cursor X={(actualKnown ? actualX.ToString() : "unreadable")} — fast-turn acceleration may not activate.");
+                }
+
                 return true;
             }
             catch (Exception ex)
@@ -2752,27 +2811,48 @@ namespace DriverScanTester.Services
 
         /// <summary>Horizontal edge X for a fast-turn side, clamped inside the client.</summary>
         private static int GetKeyboardFastTurnEdgeX(KeyboardFastTurnClient client, TurnKeyState side)
-        {
-            int margin = BotConstants.Movement.KeyboardFastTurnMouseEdgeMarginPx;
-            int edge = side == TurnKeyState.LeftA
-                ? client.Left + margin
-                : client.Right - margin;
-            return Math.Clamp(edge, client.Left, client.Right);
-        }
+            => ComputeKeyboardFastTurnEdgeX(
+                client.Left,
+                client.Right - client.Left + 1,
+                side == TurnKeyState.LeftA,
+                BotConstants.Movement.KeyboardFastTurnMouseEdgeMarginPx);
 
         /// <summary>Horizontal client centre X — the neutral fast-turn position.</summary>
         private static int GetKeyboardFastTurnNeutralX(KeyboardFastTurnClient client)
-            => client.Left + (client.Right - client.Left) / 2;
+            => ComputeKeyboardFastTurnNeutralX(client.Left, client.Right - client.Left + 1);
 
         /// <summary>
-        /// Keeps the current cursor Y when it can be read (clamped inside the client),
-        /// otherwise uses the client vertical centre. The turn is horizontal, so Y is
-        /// never changed intentionally.
+        /// Pure fast-turn edge X for a client rectangle: <paramref name="clientWidth"/> is
+        /// the client's pixel width, the margin keeps the cursor 1–2 px INSIDE the visible
+        /// client (the game only activates its x2 border turn at the actual boundary), and
+        /// the result is clamped inside the inclusive client range.
+        /// </summary>
+        internal static int ComputeKeyboardFastTurnEdgeX(int clientLeft, int clientWidth, bool leftSide, int edgeMargin)
+        {
+            int clientRight = clientLeft + Math.Max(clientWidth, 1) - 1;
+            int x = leftSide
+                ? clientLeft + edgeMargin
+                : clientRight - edgeMargin;
+            return Math.Clamp(x, clientLeft, clientRight);
+        }
+
+        /// <summary>Pure horizontally-neutral fast-turn X (client horizontal centre).</summary>
+        internal static int ComputeKeyboardFastTurnNeutralX(int clientLeft, int clientWidth)
+            => clientLeft + Math.Max(clientWidth, 1) / 2;
+
+        /// <summary>
+        /// Keeps the current cursor Y when it can be read (clamped inside the client with a
+        /// small vertical safety margin), otherwise uses the client vertical centre. The
+        /// turn is horizontal, so Y is never changed intentionally.
         /// </summary>
         private static int ResolveKeyboardFastTurnCursorY(KeyboardFastTurnClient client)
         {
+            int margin = BotConstants.Movement.KeyboardFastTurnMouseEdgeMarginPx;
+            int minY = client.Top + margin;
+            int maxY = Math.Max(minY, client.Bottom - margin);
+
             if (MouseOperations.TryGetCursorPosition(out _, out int cursorY))
-                return Math.Clamp(cursorY, client.Top, client.Bottom);
+                return Math.Clamp(cursorY, minY, maxY);
 
             return client.Top + (client.Bottom - client.Top) / 2;
         }
