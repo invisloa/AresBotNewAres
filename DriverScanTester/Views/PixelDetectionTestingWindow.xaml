@@ -19,7 +19,7 @@
                    Margin="0,0,0,12"
                    TextWrapping="Wrap"
                    Foreground="DimGray"
-                   Text="Runs the selected detector against a fresh capture of the game client. These tests are read-only: they do not move the mouse, target objects, collect loot, or teleport."/>
+                   Text="Sets the camera to the selected detector's scan view, then captures the game client. Other-player marker tests run regardless of city state. The camera view changes, but tests do not move the mouse, target objects, collect loot, or teleport."/>
 
         <DockPanel Grid.Row="1" Margin="0,0,0,10" LastChildFill="False">
             <TextBlock DockPanel.Dock="Left"

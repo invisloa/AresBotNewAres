@@ -17,18 +17,23 @@ namespace DriverScanTester.ViewModels
     public sealed class PixelDetectionTestingViewModel : BaseViewModel
     {
         private readonly Action _focusGameWindow;
+        private readonly Func<PixelDetectionTestKind, string> _prepareCamera;
         private readonly Action<string> _mainLog;
         private readonly PlayerMarkerPixelDetector _playerMarkerDetector = new();
         private string _logText = string.Empty;
         private bool _isTesting;
         private PixelDetectionTestKind _selectedTest = PixelDetectionTestKind.OtherPlayerMarkers;
 
-        public PixelDetectionTestingViewModel(Action focusGameWindow, Action<string> mainLog)
+        public PixelDetectionTestingViewModel(
+            Action focusGameWindow,
+            Action<string> mainLog,
+            Func<PixelDetectionTestKind, string> prepareCamera)
         {
             _focusGameWindow = focusGameWindow ?? throw new ArgumentNullException(nameof(focusGameWindow));
             _mainLog = mainLog ?? (_ => { });
+            _prepareCamera = prepareCamera ?? throw new ArgumentNullException(nameof(prepareCamera));
             TestCommand = new RelayCommand(async _ => await RunTestAsync(), _ => !IsTesting);
-            AppendLog("Ready. Select a detector and click Test. Tests do not move the mouse or collect items.");
+            AppendLog("Ready. Select a detector and click Test. Tests set the camera view, but do not move the mouse or collect items.");
         }
 
         public PixelDetectionTestKind SelectedTest
@@ -63,7 +68,7 @@ namespace DriverScanTester.ViewModels
             IsTesting = true;
             PixelDetectionTestKind selectedTest = SelectedTest;
             string testName = selectedTest == PixelDetectionTestKind.OtherPlayerMarkers
-                ? "Other-player marker detection"
+                ? "Other-player marker detection (city-independent)"
                 : "SOD/SOP pink loot detection";
             AppendLog($"Starting {testName}...");
             _mainLog($"[Detection Test] Starting {testName}.");
@@ -71,6 +76,10 @@ namespace DriverScanTester.ViewModels
             try
             {
                 _focusGameWindow();
+                AppendLog("Preparing the camera for this detector...");
+                string cameraStatus = _prepareCamera(selectedTest);
+                AppendLog(cameraStatus);
+                _mainLog("[Detection Test] " + cameraStatus);
                 await Task.Delay(250);
 
                 string result = await Task.Run(() => RunSelectedTestOnCapturedFrame(selectedTest));
@@ -91,18 +100,34 @@ namespace DriverScanTester.ViewModels
 
         private string RunSelectedTestOnCapturedFrame(PixelDetectionTestKind selectedTest)
         {
-            using Bitmap? frame = ScreenshotService.CaptureGameClientFrame();
+            using Bitmap? frame = ScreenshotService.CaptureGameClientFrame(out Point referenceClientOrigin);
             if (frame == null)
                 return "Could not capture the game client. Make sure Legend of Ares is open.";
 
             if (selectedTest == PixelDetectionTestKind.OtherPlayerMarkers)
             {
-                MobPoint localPlayerAnchor = MobMarkerDetector.GetPlayerAnchor(frame.Width, frame.Height);
-                bool found = _playerMarkerDetector.ContainsOtherPlayerMarker(
-                    frame, localPlayerAnchor.X, localPlayerAnchor.Y);
-                return found
-                    ? $"Other-player marker FOUND in {frame.Width}x{frame.Height} client frame. (The local-player anchor area is excluded.)"
-                    : $"No other-player marker found in {frame.Width}x{frame.Height} client frame.";
+                // This manual diagnostic is intentionally city-independent; inspect the
+                // captured client pixels even when the runtime loot scan is city-gated.
+                Rectangle characterExclusionArea = PlayerMarkerPixelDetector.GetLootCharacterExclusionArea(
+                    frame.Width, frame.Height,
+                    referenceClientOrigin.X, referenceClientOrigin.Y);
+                bool found = _playerMarkerDetector.TryFindOtherPlayerMarker(
+                    frame, characterExclusionArea, out PlayerMarkerCandidate candidate);
+                if (!found)
+                    return $"No yellow/green marker-shaped component found in {frame.Width}x{frame.Height} client frame.";
+
+                string? screenshotPath = ScreenshotService.SavePlayerMarkerDiagnosticScreenshot(
+                    frame, candidate, characterExclusionArea);
+                string screenshotStatus = screenshotPath == null
+                    ? "Annotated screenshot could not be saved."
+                    : $"Annotated screenshot: {screenshotPath}";
+                return $"Yellow/green pixel component ACCEPTED as a marker (not proof of another player): " +
+                       $"{candidate.Faction}, box=({candidate.Bounds.X},{candidate.Bounds.Y}) " +
+                       $"{candidate.Bounds.Width}x{candidate.Bounds.Height}, pixels={candidate.PixelCount}, " +
+                       $"fill={candidate.FillRatio:P0}, aspect={candidate.AspectRatio:F2}, " +
+                       $"center=({candidate.Center.X:F1},{candidate.Center.Y:F1}); " +
+                       $"loot-exclusion area=({characterExclusionArea.X},{characterExclusionArea.Y}," +
+                       $"{characterExclusionArea.Width}x{characterExclusionArea.Height}). {screenshotStatus}";
             }
 
             var result = LootSystem.AnalyzePinkFrame(frame);

@@ -498,6 +498,9 @@ namespace DriverScanTester.Services
             WriteShort(cameraBase + CameraDistanceOffset, distance);
         }
 
+        public bool TrySetCameraDistance(short distance)
+            => TrySetCameraShort(CameraDistanceOffset, distance);
+
         /// <summary>
         /// Writes the camera vertical "lock" (16-bit) value used by the sell view,
         /// e.g. 16310. The address is +0x1BE relative to the camera base, which
@@ -510,6 +513,19 @@ namespace DriverScanTester.Services
             if (cameraBase == 0) return;
 
             WriteShort(cameraBase + (ulong)BotConstants.MemoryOffsets.CameraVerticalLockOffset, value);
+        }
+
+        public bool TrySetCameraVerticalLock(short value)
+            => TrySetCameraShort((ulong)BotConstants.MemoryOffsets.CameraVerticalLockOffset, value);
+
+        private bool TrySetCameraShort(ulong cameraFieldOffset, short value)
+        {
+            ulong cameraBase = ReadPointer(_moduleBase + CameraPtrOffset);
+            if (cameraBase == 0)
+                return false;
+
+            ulong address = cameraBase + cameraFieldOffset;
+            return WriteShort(address, value) && ReadShort(address) == value;
         }
 
         public int GetSelectedTargetId()

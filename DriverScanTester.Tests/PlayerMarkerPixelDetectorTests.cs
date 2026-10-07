@@ -28,7 +28,7 @@ namespace DriverScanTester.Tests
 
             var detector = new PlayerMarkerPixelDetector();
 
-            Assert.True(detector.ContainsOtherPlayerMarker(frame, 80, 120));
+            Assert.True(detector.ContainsOtherPlayerMarker(frame, new Rectangle(130, 90, 40, 40)));
         }
 
         [Fact]
@@ -39,18 +39,27 @@ namespace DriverScanTester.Tests
 
             var detector = new PlayerMarkerPixelDetector();
 
-            Assert.True(detector.ContainsOtherPlayerMarker(frame, 80, 120));
+            Assert.True(detector.ContainsOtherPlayerMarker(frame, new Rectangle(130, 90, 40, 40)));
         }
 
         [Fact]
-        public void IgnoresLocalPlayersOwnFactionMarker()
+        public void IgnoresMarkerInsideLootCharacterExclusionArea()
         {
             using Bitmap frame = CreateFrame();
             FillRectangle(frame, new Rectangle(94, 114, 14, 14), Color.FromArgb(0, 255, 0));
 
             var detector = new PlayerMarkerPixelDetector();
 
-            Assert.False(detector.ContainsOtherPlayerMarker(frame, 100, 120));
+            Assert.False(detector.ContainsOtherPlayerMarker(frame, new Rectangle(80, 100, 40, 40)));
+        }
+
+        [Fact]
+        public void LootCharacterExclusionAreaMatchesLootScannerReferenceCoordinates()
+        {
+            Rectangle area = PlayerMarkerPixelDetector.GetLootCharacterExclusionArea(
+                1024, 768, referenceClientOriginX: 450, referenceClientOriginY: 103);
+
+            Assert.Equal(new Rectangle(430, 315, 161, 171), area);
         }
 
         [Fact]
@@ -61,7 +70,7 @@ namespace DriverScanTester.Tests
 
             var detector = new PlayerMarkerPixelDetector();
 
-            Assert.False(detector.ContainsOtherPlayerMarker(frame, 80, 120));
+            Assert.False(detector.ContainsOtherPlayerMarker(frame, new Rectangle(80, 100, 40, 40)));
         }
 
         private static Bitmap CreateFrame() => new(320, 240, PixelFormat.Format32bppArgb);

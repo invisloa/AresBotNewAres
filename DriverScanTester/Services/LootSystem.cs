@@ -1351,9 +1351,11 @@ namespace DriverScanTester.Services
 
             try
             {
-                MobPoint localPlayerAnchor = MobMarkerDetector.GetPlayerAnchor(_bitmap.Width, _bitmap.Height);
+                Rectangle characterExclusionArea = PlayerMarkerPixelDetector.GetLootCharacterExclusionArea(
+                    _bitmap.Width, _bitmap.Height,
+                    _referenceClientOriginX, _referenceClientOriginY);
                 bool candidateVisible = _playerMarkerPixelDetector.ContainsOtherPlayerMarker(
-                    _bitmap, localPlayerAnchor.X, localPlayerAnchor.Y);
+                    _bitmap, characterExclusionArea);
                 if (!candidateVisible)
                 {
                     _otherPlayerMarkerWasVisible = false;
@@ -1399,9 +1401,11 @@ namespace DriverScanTester.Services
                     return false;
                 }
 
-                MobPoint localPlayerAnchor = MobMarkerDetector.GetPlayerAnchor(_bitmap.Width, _bitmap.Height);
+                Rectangle characterExclusionArea = PlayerMarkerPixelDetector.GetLootCharacterExclusionArea(
+                    _bitmap.Width, _bitmap.Height,
+                    _referenceClientOriginX, _referenceClientOriginY);
                 bool stillVisible = _playerMarkerPixelDetector.ContainsOtherPlayerMarker(
-                    _bitmap, localPlayerAnchor.X, localPlayerAnchor.Y);
+                    _bitmap, characterExclusionArea);
                 _playerMarkerConfirmationPending = false;
                 _playerMarkerCandidateDetectedAt = DateTime.MinValue;
                 _otherPlayerMarkerWasVisible = stillVisible;

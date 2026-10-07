@@ -5,11 +5,18 @@ using System.Runtime.InteropServices;
 
 namespace DriverScanTester.Services
 {
+    internal readonly record struct PlayerMarkerCandidate(
+        string Faction,
+        Rectangle Bounds,
+        int PixelCount,
+        float FillRatio,
+        float AspectRatio,
+        PointF Center);
+
     /// <summary>
     /// Detects the installed top-down player faction markers: Empire yellow squares
-    /// (RGB #FFFF00) and Alliance green triangles (RGB #00FF00). The local player's
-    /// marker is ignored around the stable player anchor; only other on-screen markers
-    /// are reported.
+    /// (RGB #FFFF00) and Alliance green triangles (RGB #00FF00). Components overlapping
+    /// the loot scanner's existing character-exclusion area are ignored.
     /// </summary>
     internal sealed class PlayerMarkerPixelDetector
     {
@@ -24,19 +31,24 @@ namespace DriverScanTester.Services
         private const int MinimumComponentPixels = 12;
         private const int MinimumComponentDimension = 4;
         private const float MaximumComponentDimensionAtReferenceHeight = 72f;
-        private const float LocalPlayerExclusionRadiusFactor = 1.75f;
 
         private byte[] _pixelKinds = Array.Empty<byte>();
         private int[] _queue = Array.Empty<int>();
         private byte[] _rowBytes = Array.Empty<byte>();
 
         /// <summary>
-        /// Returns true if the client frame contains a compact faction marker outside
-        /// the local-player exclusion area. The marker components are read in bulk from
-        /// the captured frame; no additional screen capture is required.
+        /// Returns true if the client frame contains a compact faction marker that does
+        /// not overlap the loot scanner's existing character-exclusion rectangle.
         /// </summary>
-        public bool ContainsOtherPlayerMarker(Bitmap bitmap, float localPlayerAnchorX, float localPlayerAnchorY)
+        public bool ContainsOtherPlayerMarker(Bitmap bitmap, Rectangle lootCharacterExclusionArea)
+            => TryFindOtherPlayerMarker(bitmap, lootCharacterExclusionArea, out _);
+
+        public bool TryFindOtherPlayerMarker(
+            Bitmap bitmap,
+            Rectangle lootCharacterExclusionArea,
+            out PlayerMarkerCandidate candidate)
         {
+            candidate = default;
             if (bitmap == null || bitmap.Width <= 0 || bitmap.Height <= 0)
                 return false;
 
@@ -80,7 +92,8 @@ namespace DriverScanTester.Services
                     }
                 }
 
-                return HasOtherMarkerComponent(width, height, localPlayerAnchorX, localPlayerAnchorY);
+                return TryFindOtherMarkerComponent(
+                    width, height, lootCharacterExclusionArea, out candidate);
             }
             finally
             {
@@ -102,16 +115,37 @@ namespace DriverScanTester.Services
             return NoMarker;
         }
 
-        private bool HasOtherMarkerComponent(int width, int height, float localPlayerAnchorX, float localPlayerAnchorY)
+        internal static Rectangle GetLootCharacterExclusionArea(
+            int clientWidth,
+            int clientHeight,
+            int referenceClientOriginX,
+            int referenceClientOriginY)
         {
+            if (clientWidth <= 0 || clientHeight <= 0)
+                return Rectangle.Empty;
+
+            Rectangle clientBounds = new(0, 0, clientWidth, clientHeight);
+            Rectangle configuredArea = Rectangle.FromLTRB(
+                BotConstants.Loot.ExcludeXMin - referenceClientOriginX,
+                BotConstants.Loot.ExcludeYMin - referenceClientOriginY,
+                BotConstants.Loot.ExcludeXMax - referenceClientOriginX + 1,
+                BotConstants.Loot.ExcludeYMax - referenceClientOriginY + 1);
+            return Rectangle.Intersect(clientBounds, configuredArea);
+        }
+
+        private bool TryFindOtherMarkerComponent(
+            int width,
+            int height,
+            Rectangle lootCharacterExclusionArea,
+            out PlayerMarkerCandidate candidate)
+        {
+            candidate = default;
             float scale = height / BotConstants.MobGrouping.ReferenceClientHeightPx;
             float maxDimension = Math.Max(
                 MinimumComponentDimension,
                 MaximumComponentDimensionAtReferenceHeight * scale);
-            float localPlayerExclusionRadius = Math.Max(
-                12f,
-                BotConstants.MobGrouping.ExpectedMarkerRadiusPx * scale * LocalPlayerExclusionRadiusFactor);
-            float localPlayerExclusionRadiusSquared = localPlayerExclusionRadius * localPlayerExclusionRadius;
+            Rectangle clientBounds = new(0, 0, width, height);
+            Rectangle exclusionArea = Rectangle.Intersect(clientBounds, lootCharacterExclusionArea);
             int pixelCount = width * height;
 
             for (int start = 0; start < pixelCount; start++)
@@ -170,8 +204,12 @@ namespace DriverScanTester.Services
                     }
                 }
 
-                int componentWidth = maxX - minX + 1;
-                int componentHeight = maxY - minY + 1;
+                Rectangle componentBounds = Rectangle.FromLTRB(minX, minY, maxX + 1, maxY + 1);
+                if (componentBounds.IntersectsWith(exclusionArea))
+                    continue;
+
+                int componentWidth = componentBounds.Width;
+                int componentHeight = componentBounds.Height;
                 int largestDimension = Math.Max(componentWidth, componentHeight);
                 int smallestDimension = Math.Min(componentWidth, componentHeight);
                 if (count < MinimumComponentPixels || smallestDimension < MinimumComponentDimension ||
@@ -187,12 +225,14 @@ namespace DriverScanTester.Services
 
                 float centerX = sumX / (float)count;
                 float centerY = sumY / (float)count;
-                float dxFromPlayer = centerX - localPlayerAnchorX;
-                float dyFromPlayer = centerY - localPlayerAnchorY;
-                if (dxFromPlayer * dxFromPlayer + dyFromPlayer * dyFromPlayer <=
-                    localPlayerExclusionRadiusSquared)
-                    continue;
 
+                candidate = new PlayerMarkerCandidate(
+                    markerKind == EmpireMarker ? "Empire/yellow" : "Alliance/green",
+                    componentBounds,
+                    count,
+                    fillRatio,
+                    aspectRatio,
+                    new PointF(centerX, centerY));
                 return true;
             }
 

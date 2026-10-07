@@ -30,6 +30,9 @@ namespace DriverScanTester.Services
         private static extern bool GetClientRect(nint hwnd, out ClientRect rect);
 
         [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool GetWindowRect(nint hwnd, out ClientRect rect);
+
+        [DllImport("user32.dll", SetLastError = true)]
         private static extern bool ClientToScreen(nint hwnd, ref ClientPoint point);
 
         /// <summary>Folder for town-teleport screenshots (Screenshots/TownPortals).</summary>
@@ -181,7 +184,17 @@ namespace DriverScanTester.Services
         /// The caller owns and must dispose the returned bitmap. Returns null on failure.
         /// </summary>
         public static Bitmap? CaptureGameClientFrame(Action<string>? log = null)
+            => CaptureGameClientFrame(out _, log);
+
+        /// <summary>
+        /// Captures the game client and returns the reference client origin used to map
+        /// the loot scanner's legacy screen coordinates into this frame.
+        /// </summary>
+        public static Bitmap? CaptureGameClientFrame(
+            out Point referenceClientOrigin,
+            Action<string>? log = null)
         {
+            referenceClientOrigin = Point.Empty;
             nint hwnd = FindWindow(null, "Legend of Ares");
             if (hwnd == nint.Zero) hwnd = FindWindow(null, "Ares");
             if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
@@ -203,6 +216,19 @@ namespace DriverScanTester.Services
             {
                 log?.Invoke("[Detection Test] Could not resolve the game client screen position.");
                 return null;
+            }
+
+            if (GetWindowRect(hwnd, out ClientRect windowRect))
+            {
+                const int expectedWindowX = 447;
+                const int expectedWindowY = 77;
+                referenceClientOrigin = new Point(
+                    topLeft.X - (windowRect.Left - expectedWindowX),
+                    topLeft.Y - (windowRect.Top - expectedWindowY));
+            }
+            else
+            {
+                log?.Invoke("[Detection Test] Could not read the game window position; using the loot scanner's zero-origin fallback.");
             }
 
             int width = rect.Right - rect.Left;
@@ -251,6 +277,54 @@ namespace DriverScanTester.Services
             catch (Exception ex)
             {
                 log($"[PlayerPixels] Failed to save player-marker screenshot: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Saves the manual player-marker test frame with the accepted pixel component
+        /// and the loot-scanner character-exclusion area outlined. Returns null on failure.
+        /// </summary>
+        internal static string? SavePlayerMarkerDiagnosticScreenshot(
+            Bitmap frame,
+            PlayerMarkerCandidate candidate,
+            Rectangle characterExclusionArea)
+        {
+            try
+            {
+                using Bitmap annotated = frame.Clone(
+                    new Rectangle(0, 0, frame.Width, frame.Height), frame.PixelFormat);
+                using (Graphics graphics = Graphics.FromImage(annotated))
+                using (var candidatePen = new Pen(Color.Red, 3f))
+                using (var exclusionPen = new Pen(Color.Cyan, 2f))
+                {
+                    graphics.DrawRectangle(
+                        candidatePen,
+                        candidate.Bounds.X,
+                        candidate.Bounds.Y,
+                        Math.Max(1, candidate.Bounds.Width - 1),
+                        Math.Max(1, candidate.Bounds.Height - 1));
+                    if (characterExclusionArea.Width > 0 && characterExclusionArea.Height > 0)
+                    {
+                        graphics.DrawRectangle(
+                            exclusionPen,
+                            characterExclusionArea.X,
+                            characterExclusionArea.Y,
+                            Math.Max(1, characterExclusionArea.Width - 1),
+                            Math.Max(1, characterExclusionArea.Height - 1));
+                    }
+                }
+
+                string folder = ResolveScreenshotsDir(PlayerPixelsFolder);
+                Directory.CreateDirectory(folder);
+                string filePath = Path.Combine(
+                    folder,
+                    $"Test-{DateTime.Now:yyyy-MM-dd_HH-mm-ss-fff}.png");
+                annotated.Save(filePath, ImageFormat.Png);
+                return filePath;
+            }
+            catch
+            {
+                return null;
             }
         }
 

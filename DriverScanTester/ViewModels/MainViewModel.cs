@@ -767,7 +767,10 @@ namespace DriverScanTester.ViewModels
         {
             try
             {
-                var viewModel = new PixelDetectionTestingViewModel(FocusGameWindow, AppendBotLog);
+                var viewModel = new PixelDetectionTestingViewModel(
+                    FocusGameWindow,
+                    AppendBotLog,
+                    PrepareDetectionTestCamera);
                 var window = new Views.PixelDetectionTestingWindow
                 {
                     DataContext = viewModel,
@@ -779,6 +782,46 @@ namespace DriverScanTester.ViewModels
             {
                 AppendBotLog("Open pixel detection testing window error: " + ex.Message);
             }
+        }
+
+        private string PrepareDetectionTestCamera(PixelDetectionTestKind testKind)
+        {
+            if (!_isAttached || _attachedPid == 0)
+                throw new InvalidOperationException("Attach to the game before preparing the detection-test camera.");
+
+            ulong moduleBase = FindModuleInScanner("Ares.exe", false);
+            if (moduleBase == 0 && _pointerScanner != null)
+            {
+                _pointerScanner.RefreshModules();
+                moduleBase = FindModuleInScanner("Ares.exe", true);
+            }
+            if (moduleBase == 0)
+                throw new InvalidOperationException("Could not resolve the Ares.exe module base for camera setup.");
+
+            short cameraDistance = testKind switch
+            {
+                PixelDetectionTestKind.OtherPlayerMarkers => BotConstants.Camera.OtherPlayerMarkerScanDistance,
+                _ => BotConstants.Camera.SodSopLootScanDistance
+            };
+            short verticalLock = BotConstants.Camera.DefaultVerticalLock;
+
+            var memoryService = new GameMemoryService(
+                _attachedPid,
+                DriverRead,
+                DriverWrite,
+                moduleBase,
+                GetPointerSize(),
+                AppendBotLog);
+            bool distanceSet = memoryService.TrySetCameraDistance(cameraDistance);
+            bool verticalLockSet = memoryService.TrySetCameraVerticalLock(verticalLock);
+            if (!distanceSet || !verticalLockSet)
+                throw new InvalidOperationException(
+                    $"Camera setup did not verify (distance={distanceSet}, vertical lock={verticalLockSet}).");
+
+            string testName = testKind == PixelDetectionTestKind.OtherPlayerMarkers
+                ? "other-player marker"
+                : "SOD/SOP loot";
+            return $"Camera prepared for {testName} detection: distance={cameraDistance}, vertical angle lock={verticalLock}.";
         }
 
         public void ShowSearchAddressWindow()
