@@ -106,6 +106,12 @@ namespace DriverScanTester.Services
         /// </summary>
         private int _postRepotVerifyRetryCount;
 
+        /// <summary>
+        /// Player-marker detections since the last complete EXP loop. First incident gets
+        /// the shorter cooldown; repeated incidents before natural repot get 30 minutes.
+        /// </summary>
+        private int _playerMarkerInterruptionsSinceFullExpCycle;
+
         /// <summary>Current phase of the bot workflow.</summary>
         public BotPhase CurrentPhase
         {
@@ -286,6 +292,7 @@ namespace DriverScanTester.Services
             _pathStepRetryCount = 0;
             _teleportRetryCount = 0;
             _postRepotVerifyRetryCount = 0;
+            _playerMarkerInterruptionsSinceFullExpCycle = 0;
 
             _focusGameWindow();
             _log("[Coordinator] Workflow started.");
@@ -780,6 +787,7 @@ namespace DriverScanTester.Services
 
             using var expCts = CancellationTokenSource.CreateLinkedTokenSource(token);
             var expToken = expCts.Token;
+            int otherPlayerMarkerDetected = 0;
 
             var pathTask = _pathRunner.RunPathAsync(waypoints, loop: true, expToken);
 
@@ -796,7 +804,15 @@ namespace DriverScanTester.Services
                 lootSystem = new LootSystem(_memoryService, _log)
                 {
                     LootPriorityMode = _profile.LootPriority,
-                    PinkLootOnlyMode = !hasAttackLootRoute && hasAttackOnlyRoute
+                    PinkLootOnlyMode = !hasAttackLootRoute && hasAttackOnlyRoute,
+                    OtherPlayerMarkerDetected = () =>
+                    {
+                        if (Interlocked.Exchange(ref otherPlayerMarkerDetected, 1) == 0)
+                        {
+                            _log("[ExpLoop] Other player pixels detected — interrupting EXP and returning to the city.");
+                            expCts.Cancel();
+                        }
+                    }
                 };
 
                 // Give the movement system a reference to the loot system so it can hold
@@ -818,11 +834,13 @@ namespace DriverScanTester.Services
                             // is OnlyMove. Heal stays always on (separate task).
                             if (_pathRunner.CurrentMovement?.IsMoveOnlyActive == true)
                             {
+                                lootSystem.PlayerMarkerScanEnabled = false;
                                 await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
                                 continue;
                             }
                             if (_pathRunner.CurrentMovement?.IsWaypointSpecialRecoveryActive == true)
                             {
+                                lootSystem.PlayerMarkerScanEnabled = false;
                                 await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
                                 continue;
                             }
@@ -830,8 +848,10 @@ namespace DriverScanTester.Services
                             // Track the current waypoint mode: MoveAndAttack waypoints use
                             // the SOD/SOP pink-only scan; MoveAndAttackAndLoot keeps the
                             // normal white-pixel loot cycle.
-                            lootSystem.PinkLootOnlyMode =
-                                _pathRunner.CurrentMovement?.CurrentMode == BotMode.MoveAndAttack;
+                            BotMode? currentMode = _pathRunner.CurrentMovement?.CurrentMode;
+                            lootSystem.PinkLootOnlyMode = currentMode == BotMode.MoveAndAttack;
+                            lootSystem.PlayerMarkerScanEnabled =
+                                currentMode == BotMode.MoveAndAttack || currentMode == BotMode.MoveAndAttackAndLoot;
 
                             await lootSystem.Update(expToken);
                             await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
@@ -974,6 +994,43 @@ namespace DriverScanTester.Services
             if (token.IsCancellationRequested)
                 return false;
 
+            if (Volatile.Read(ref otherPlayerMarkerDetected) != 0)
+            {
+                CurrentPhase = BotPhase.NeedRepot;
+                _playerMarkerInterruptionsSinceFullExpCycle++;
+                int cooldownMs = _playerMarkerInterruptionsSinceFullExpCycle == 1
+                    ? BotConstants.Delays.OtherPlayerInitialCooldownMs
+                    : BotConstants.Delays.OtherPlayerRepeatCooldownMs;
+
+                _log("[PlayerPixels] EXP interrupted because another player marker was detected. Teleporting to city.");
+                await TeleportToCity(token);
+                if (token.IsCancellationRequested)
+                    return false;
+
+                if (_memoryService.GetIsInCity())
+                {
+                    _log($"[PlayerPixels] Waiting {cooldownMs / 60000} minutes in the city before restarting the profile cycle.");
+                    try
+                    {
+                        await PausableDelayAsync(cooldownMs, token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return false;
+                    }
+                    if (token.IsCancellationRequested)
+                        return false;
+                }
+                else
+                {
+                    _log("[PlayerPixels] City arrival was not confirmed; skipping the cooldown and handing recovery to the Repot step.");
+                }
+
+                AdvanceRoute(step, pool);
+                RedirectToRepotStep("other player marker detected during EXP");
+                return false;
+            }
+
             if (waypointRepotRequested ||
                 _pathRunner.LastStopReason == PathRunStopReason.WaypointRepotRequested)
             {
@@ -1002,6 +1059,8 @@ namespace DriverScanTester.Services
             // flow like Repot → ... → ExpLoop → Operation (after hunt) → Repot works:
             // after hunting, any following steps run, and the cycle returns to Repot.
             AdvanceRoute(step, pool);
+            if (repotNeeded)
+                _playerMarkerInterruptionsSinceFullExpCycle = 0;
             CompletedCycles++;
             _log($"[ExpLoop] Full repot->exp cycle #{CompletedCycles} completed. Advancing to the next flow step.");
             OnCycleCompleted?.Invoke(CompletedCycles);

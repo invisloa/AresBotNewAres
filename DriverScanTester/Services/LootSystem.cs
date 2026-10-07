@@ -77,6 +77,11 @@ namespace DriverScanTester.Services
         /// <see cref="Bitmap.GetPixel"/> call per pixel.
         /// </summary>
         private byte[] _scanBuffer = Array.Empty<byte>();
+        private readonly PlayerMarkerPixelDetector _playerMarkerPixelDetector = new();
+        private bool _otherPlayerMarkerWasVisible;
+        private bool _playerMarkerConfirmationPending;
+        private DateTime _playerMarkerCandidateDetectedAt = DateTime.MinValue;
+        private bool _playerMarkerScanEnabled;
         private volatile bool _pinkScanRequested;
         private DateTime _pinkScanRequestedAt = DateTime.MinValue;
 
@@ -130,6 +135,25 @@ namespace DriverScanTester.Services
         /// mode; while false the normal MoveAndAttackAndLoot behaviour is unchanged.
         /// </summary>
         public bool PinkLootOnlyMode { get; set; } = false;
+
+        /// <summary>
+        /// Enables player-marker pixel checks during loot scan passes. The host sets this
+        /// for MoveAndAttack and MoveAndAttackAndLoot waypoints; loot scanning also
+        /// requires that the player is outside the city.
+        /// </summary>
+        public bool PlayerMarkerScanEnabled
+        {
+            get => _playerMarkerScanEnabled;
+            set
+            {
+                _playerMarkerScanEnabled = value;
+                if (!value)
+                    ResetPlayerMarkerConfirmation();
+            }
+        }
+
+        /// <summary>Called once when another player marker first appears in a scan episode.</summary>
+        public Action? OtherPlayerMarkerDetected { get; set; }
 
         /// <summary>
         /// Requests an immediate post-kill SOD/SOP pink scan. Called by the movement
@@ -488,6 +512,7 @@ namespace DriverScanTester.Services
             //    folders, browser, etc.) and potentially cause damage. ──
             if (!IsGameWindowFocused())
             {
+                ResetPlayerMarkerConfirmation();
                 StopScanSpacebarSpam();
                 if (_lootState != LootMachineState.Idle)
                 {
@@ -510,6 +535,7 @@ namespace DriverScanTester.Services
             // ── If in city, NEVER scan — cancel any loot in progress. ──
             if (_memoryService.GetIsInCity())
             {
+                ResetPlayerMarkerConfirmation();
                 StopScanSpacebarSpam();
                 if (_lootState != LootMachineState.Idle)
                 {
@@ -518,6 +544,13 @@ namespace DriverScanTester.Services
                 }
                 IsLootingActive = false;
                 await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                return;
+            }
+
+            if (ConfirmPlayerMarkerIfDue())
+            {
+                if (!token.IsCancellationRequested)
+                    await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
                 return;
             }
 
@@ -777,7 +810,7 @@ namespace DriverScanTester.Services
                     // ONE region (big), PINK pixels only. Pink drops found are
                     // collected and the pass repeats until a full pass finds none left.
                     // No small-region pass, no white-blob scan, no spacebar area-loot.
-                    _memoryService.SetCameraDistance(BotConstants.Camera.LootScanDistance);
+                    _memoryService.SetCameraDistance(BotConstants.Camera.SodSopLootScanDistance);
 
                     if (DateTime.UtcNow < _nextActionTime)
                     {
@@ -903,7 +936,7 @@ namespace DriverScanTester.Services
         /// </summary>
         private bool PinkPixelScan()
         {
-            _memoryService.SetCameraDistance(BotConstants.Camera.LootScanDistance);
+            _memoryService.SetCameraDistance(BotConstants.Camera.SodSopLootScanDistance);
             return ScanRegion(bigX, bigY, "BigScan-Pink", pinkOnly: true);
         }
 
@@ -967,6 +1000,81 @@ namespace DriverScanTester.Services
         internal static bool IsPinkLootMaskPixel(int r, int g, int b)
             => IsSodSopPinkPixel(r, g, b) && !MobMarkerDetector.IsMagentaMarkerPixel(r, g, b);
 
+        /// <summary>
+        /// Analyzes a captured frame with the same pink pixel mask, connected-component
+        /// labeling, minimum blob size and artificial mob-marker rejection used by the
+        /// live SOD/SOP scan. It performs no mouse movement, memory mouseover checks or loot.
+        /// </summary>
+        internal static (int PinkPixels, int Components, int LootCandidates, int MobMarkerRings, int TinyComponents)
+            AnalyzePinkFrame(Bitmap bitmap)
+        {
+            ArgumentNullException.ThrowIfNull(bitmap);
+            if (bitmap.Width <= 0 || bitmap.Height <= 0)
+                return (0, 0, 0, 0, 0);
+
+            Bitmap? converted = null;
+            Bitmap scanBitmap = bitmap;
+            BitmapData? data = null;
+            var targetPoints = new List<Point>();
+            try
+            {
+                if (Image.GetPixelFormatSize(bitmap.PixelFormat) != 32)
+                {
+                    converted = new Bitmap(bitmap.Width, bitmap.Height, PixelFormat.Format32bppArgb);
+                    using (Graphics graphics = Graphics.FromImage(converted))
+                        graphics.DrawImageUnscaled(bitmap, 0, 0);
+                    scanBitmap = converted;
+                }
+
+                data = scanBitmap.LockBits(
+                    new Rectangle(0, 0, scanBitmap.Width, scanBitmap.Height),
+                    ImageLockMode.ReadOnly,
+                    scanBitmap.PixelFormat);
+                int stride = data.Stride;
+                int bytes = Math.Abs(stride) * data.Height;
+                byte[] buffer = new byte[bytes];
+                Marshal.Copy(data.Scan0, buffer, 0, bytes);
+                CollectTargetPointsFromBuffer(
+                    buffer, stride, data.Height,
+                    0, data.Width, 0, data.Height,
+                    applyExcludeZone: false,
+                    exclXMin: 0, exclXMax: 0, exclYMin: 0, exclYMax: 0,
+                    pinkOnly: true,
+                    targetPoints: targetPoints);
+            }
+            finally
+            {
+                if (data != null)
+                {
+                    try { scanBitmap.UnlockBits(data); }
+                    catch { /* Keep the test scanner safe if GDI+ rejects an unlock. */ }
+                }
+                converted?.Dispose();
+            }
+
+            List<WhiteComponent> components = LabelWhiteComponents(targetPoints);
+            int lootCandidates = 0;
+            int mobMarkerRings = 0;
+            int tinyComponents = 0;
+            foreach (WhiteComponent component in components)
+            {
+                if (!IsPinkLootCandidate(component))
+                {
+                    if (component.Width < BotConstants.Loot.PinkMinCandidateWidth ||
+                        component.Height < BotConstants.Loot.PinkMinCandidateHeight)
+                        tinyComponents++;
+                    continue;
+                }
+
+                if (IsMobMarkerRingComponent(component, bitmap))
+                    mobMarkerRings++;
+                else
+                    lootCandidates++;
+            }
+
+            return (targetPoints.Count, components.Count, lootCandidates, mobMarkerRings, tinyComponents);
+        }
+
         private bool ScanRegion(int[] xRange, int[] yRange, string regionName, bool pinkOnly = false)
         {
             string pixelNoun = pinkOnly ? "pink" : "white";
@@ -992,6 +1100,15 @@ namespace DriverScanTester.Services
                 if (_bitmap == null || _clientWidth <= 0 || _clientHeight <= 0)
                 {
                     diagnosticOutcome = "capture-failed";
+                    return false;
+                }
+
+                // Check the full client frame for another player's faction marker on
+                // every loot pixel-scan pass, regardless of the loot scan rectangle.
+                ScanForOtherPlayerPixels();
+                if (_scanToken.IsCancellationRequested)
+                {
+                    diagnosticOutcome = "cancelled-after-player-detection";
                     return false;
                 }
 
@@ -1056,6 +1173,7 @@ namespace DriverScanTester.Services
                 {
                     _log($"[Loot] {regionName}: city/combat detected before scan — aborting.");
                     diagnosticOutcome = "city-abort";
+                    ResetPlayerMarkerConfirmation();
                     return false;
                 }
 
@@ -1216,6 +1334,102 @@ namespace DriverScanTester.Services
                     pixelNoun);
             }
             return false;
+        }
+
+        private void ScanForOtherPlayerPixels()
+        {
+            if (!PlayerMarkerScanEnabled || _bitmap == null || _memoryService.GetIsInCity())
+            {
+                ResetPlayerMarkerConfirmation();
+                return;
+            }
+
+            // Do not act on repeated intermediate frames. The scheduled confirmation
+            // below deliberately takes a fresh frame after the full delay.
+            if (_playerMarkerConfirmationPending)
+                return;
+
+            try
+            {
+                MobPoint localPlayerAnchor = MobMarkerDetector.GetPlayerAnchor(_bitmap.Width, _bitmap.Height);
+                bool candidateVisible = _playerMarkerPixelDetector.ContainsOtherPlayerMarker(
+                    _bitmap, localPlayerAnchor.X, localPlayerAnchor.Y);
+                if (!candidateVisible)
+                {
+                    _otherPlayerMarkerWasVisible = false;
+                    return;
+                }
+                if (_otherPlayerMarkerWasVisible)
+                    return;
+
+                _otherPlayerMarkerWasVisible = true;
+                _playerMarkerConfirmationPending = true;
+                _playerMarkerCandidateDetectedAt = DateTime.UtcNow;
+                _log($"[PlayerPixels] Candidate marker detected; will recheck in {BotConstants.Delays.OtherPlayerMarkerConfirmMs} ms before taking action.");
+            }
+            catch (Exception ex)
+            {
+                ResetPlayerMarkerConfirmation();
+                _log($"[PlayerPixels] Marker scan failed: {ex.Message}");
+            }
+        }
+
+        private bool ConfirmPlayerMarkerIfDue()
+        {
+            if (!PlayerMarkerScanEnabled || !_playerMarkerConfirmationPending)
+                return false;
+
+            if ((DateTime.UtcNow - _playerMarkerCandidateDetectedAt).TotalMilliseconds <
+                BotConstants.Delays.OtherPlayerMarkerConfirmMs)
+                return false;
+
+            try
+            {
+                CaptureScreen();
+                if (_bitmap == null || _clientWidth <= 0 || _clientHeight <= 0)
+                {
+                    ResetPlayerMarkerConfirmation();
+                    _log("[PlayerPixels] Confirmation capture failed; ignoring the candidate.");
+                    return false;
+                }
+
+                if (_memoryService.GetIsInCity())
+                {
+                    ResetPlayerMarkerConfirmation();
+                    return false;
+                }
+
+                MobPoint localPlayerAnchor = MobMarkerDetector.GetPlayerAnchor(_bitmap.Width, _bitmap.Height);
+                bool stillVisible = _playerMarkerPixelDetector.ContainsOtherPlayerMarker(
+                    _bitmap, localPlayerAnchor.X, localPlayerAnchor.Y);
+                _playerMarkerConfirmationPending = false;
+                _playerMarkerCandidateDetectedAt = DateTime.MinValue;
+                _otherPlayerMarkerWasVisible = stillVisible;
+
+                if (!stillVisible)
+                {
+                    _log("[PlayerPixels] Candidate disappeared during the 5-second confirmation scan; continuing normally.");
+                    return false;
+                }
+
+                _log("[PlayerPixels] Other-player marker confirmed after the delay.");
+                ScreenshotService.SavePlayerMarkerScreenshot(_bitmap, _log);
+                OtherPlayerMarkerDetected?.Invoke();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ResetPlayerMarkerConfirmation();
+                _log($"[PlayerPixels] Confirmation scan failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        private void ResetPlayerMarkerConfirmation()
+        {
+            _otherPlayerMarkerWasVisible = false;
+            _playerMarkerConfirmationPending = false;
+            _playerMarkerCandidateDetectedAt = DateTime.MinValue;
         }
 
         /// <summary>

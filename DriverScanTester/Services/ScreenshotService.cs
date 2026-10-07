@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Runtime.InteropServices;
 
 namespace DriverScanTester.Services
 {
@@ -16,11 +17,29 @@ namespace DriverScanTester.Services
     /// </summary>
     public static class ScreenshotService
     {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ClientRect { public int Left; public int Top; public int Right; public int Bottom; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ClientPoint { public int X; public int Y; }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern nint FindWindow(string? className, string windowName);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool GetClientRect(nint hwnd, out ClientRect rect);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool ClientToScreen(nint hwnd, ref ClientPoint point);
+
         /// <summary>Folder for town-teleport screenshots (Screenshots/TownPortals).</summary>
         public const string TownPortalsFolder = "TownPortals";
 
         /// <summary>Project-root folder for loot pixel-scan diagnostics (LootSSFolder).</summary>
         public const string LootScanFolder = "LootSSFolder";
+
+        /// <summary>Folder for screenshots captured when another player's marker is detected.</summary>
+        public const string PlayerPixelsFolder = "PlayerPixels";
 
         /// <summary>
         /// Master switch for loot-scan diagnostics. When false,
@@ -155,6 +174,84 @@ namespace DriverScanTester.Services
                 // Fall through to exe-local LootSSFolder.
             }
             return Path.Combine(baseDir, LootScanFolder);
+        }
+
+        /// <summary>
+        /// Captures the game window's client area for a manual pixel-detection test.
+        /// The caller owns and must dispose the returned bitmap. Returns null on failure.
+        /// </summary>
+        public static Bitmap? CaptureGameClientFrame(Action<string>? log = null)
+        {
+            nint hwnd = FindWindow(null, "Legend of Ares");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Ares");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
+            if (hwnd == nint.Zero)
+            {
+                log?.Invoke("[Detection Test] Could not find the game window.");
+                return null;
+            }
+
+            if (!GetClientRect(hwnd, out ClientRect rect))
+            {
+                log?.Invoke("[Detection Test] Could not read the game client rectangle.");
+                return null;
+            }
+
+            ClientPoint topLeft = new() { X = 0, Y = 0 };
+            if (!ClientToScreen(hwnd, ref topLeft))
+            {
+                log?.Invoke("[Detection Test] Could not resolve the game client screen position.");
+                return null;
+            }
+
+            int width = rect.Right - rect.Left;
+            int height = rect.Bottom - rect.Top;
+            if (width <= 0 || height <= 0)
+            {
+                log?.Invoke("[Detection Test] Game client area is empty.");
+                return null;
+            }
+
+            Bitmap? frame = null;
+            try
+            {
+                frame = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+                using (Graphics graphics = Graphics.FromImage(frame))
+                    graphics.CopyFromScreen(topLeft.X, topLeft.Y, 0, 0, frame.Size);
+                return frame;
+            }
+            catch (Exception ex)
+            {
+                frame?.Dispose();
+                log?.Invoke($"[Detection Test] Game client capture failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Saves the captured game-client frame when another player's faction marker is
+        /// detected. Uses the same project/executable-relative Screenshots location as
+        /// other bot captures. Never throws.
+        /// </summary>
+        public static void SavePlayerMarkerScreenshot(Bitmap? frame, Action<string> log)
+        {
+            if (frame == null)
+                return;
+
+            try
+            {
+                string screenshotsDir = ResolveScreenshotsDir(PlayerPixelsFolder);
+                Directory.CreateDirectory(screenshotsDir);
+                string fileName = $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss-fff}.png";
+                string filePath = Path.Combine(screenshotsDir, fileName);
+                frame.Save(filePath, ImageFormat.Png);
+                log($"[PlayerPixels] Other-player marker detected; screenshot saved: {filePath}");
+            }
+            catch (Exception ex)
+            {
+                log($"[PlayerPixels] Failed to save player-marker screenshot: {ex.Message}");
+            }
         }
 
         /// <summary>

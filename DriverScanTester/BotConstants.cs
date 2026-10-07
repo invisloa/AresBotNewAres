@@ -27,9 +27,11 @@ namespace DriverScanTester
             /// <summary>Default camera distance lock for waypoints and movement.</summary>
             public const short DefaultDistanceLock = 17020;
 
-            /// <summary>Camera distance used during loot pixel scan — zoomed in closer so
-            /// ground items appear larger and their white highlights are more detectable.</summary>
+            /// <summary>Camera distance used during normal white-loot pixel scans.</summary>
             public const short LootScanDistance = 16800;
+
+            /// <summary>Camera distance used only during SOD/SOP pink-pixel loot scans.</summary>
+            public const short SodSopLootScanDistance = 16950;
 
             /// <summary>Default camera vertical lock value, matching the sell-view vertical (16310).</summary>
             public const short DefaultVerticalLock = 16310;
@@ -118,7 +120,7 @@ namespace DriverScanTester
         public static class SpeedPotion
         {
             /// <summary>Attack speed value at which bot drinks speed potions (key 7 + key 8).</summary>
-            public const short AttackSpeedThreshold = 16384;
+            public const short AttackSpeedThreshold = 16341; //16341 +2 speed //16384 +3 speed
 
             /// <summary>Interval in seconds between attack-speed checks.</summary>
             public const double CheckIntervalSeconds = 5.0;
@@ -318,6 +320,23 @@ namespace DriverScanTester
             /// verify the physical position after a move via GetCursorPos.
             /// </summary>
             public const int KeyboardFastTurnMouseReassertTolerancePx = 2;
+
+            /// <summary>
+            /// Inward cursor displacement (px) from the automated fast-turn edge that is
+            /// treated as deliberate human mouse movement. Beyond this the bot relinquishes
+            /// the cursor without moving it. Small in-edge jitter stays inside the
+            /// re-assert tolerance; a deliberate move toward the bot UI or the client
+            /// interior is several times this distance.
+            /// </summary>
+            public const int KeyboardFastTurnHumanOverrideDistancePx = 24;
+
+            /// <summary>
+            /// Suppression period (ms) after a human mouse override during which fast-turn
+            /// mouse assistance must not call SetCursorPos. A/D steering continues. After
+            /// it expires, reacquisition additionally requires the game to be foreground
+            /// and the cursor to be back inside the game client.
+            /// </summary>
+            public const int KeyboardFastTurnHumanOverrideCooldownMs = 1500;
 
             /// <summary>Grace period in seconds after pressing W during which stuck detection is ignored.</summary>
             public const double StuckGraceAfterStartSeconds = 1.25;
@@ -767,6 +786,15 @@ namespace DriverScanTester
 
             /// <summary>Delay when bot is in Failed state before re-checking.</summary>
             public const int FailedStateMs = 1000;
+
+            /// <summary>Delay before confirming a newly detected other-player marker.</summary>
+            public const int OtherPlayerMarkerConfirmMs = 5000;
+
+            /// <summary>Initial full-profile cooldown after another player marker is confirmed.</summary>
+            public const int OtherPlayerInitialCooldownMs = 10 * 60 * 1000;
+
+            /// <summary>Cooldown after repeated detections before a full EXP/repot cycle completes.</summary>
+            public const int OtherPlayerRepeatCooldownMs = 30 * 60 * 1000;
 
             /// <summary>Default phase transition delay.</summary>
             public const int DefaultPhaseMs = 100;

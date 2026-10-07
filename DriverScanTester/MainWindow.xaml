@@ -13,6 +13,7 @@
             <RowDefinition Height="Auto"/> <!-- Main Scan Actions -->
             <RowDefinition Height="Auto"/> <!-- Filters & Refinement -->
             <RowDefinition Height="Auto"/> <!-- Tools & Bot -->
+            <RowDefinition Height="Auto"/> <!-- Mouseover Calibration -->
             <RowDefinition Height="*"/>    <!-- Log -->
         </Grid.RowDefinitions>
 
@@ -99,6 +100,7 @@
                     <Button Content="Search Address" Command="{Binding ShowSearchAddressCommand}" Width="110" Style="{StaticResource SecondaryActionButtonStyle}"/>
                     <Button Content="Lock Window" Command="{Binding ShowLockWindowCommand}" Width="105" Style="{StaticResource SecondaryActionButtonStyle}"/>
                     <Button Content="Hex Window" Command="{Binding ShowHexWindowCommand}" Width="100" Style="{StaticResource SecondaryActionButtonStyle}"/>
+                    <Button Content="Pixel Tests" Command="{Binding OpenPixelDetectionTestingCommand}" Width="90" Style="{StaticResource SecondaryActionButtonStyle}" ToolTip="Test player-marker and SOD/SOP pixel detection."/>
                     <Separator Width="1" Margin="10,2" Background="LightGray"/>
                     <Label Content="Pointer Target:" VerticalAlignment="Center"/>
                     <TextBox Width="120" Text="{Binding PointerTargetText, UpdateSourceTrigger=PropertyChanged}" VerticalAlignment="Center"/>
@@ -116,8 +118,23 @@
             </GroupBox>
         </Grid>
 
-        <!-- Row 4: Log output -->
-        <Grid Grid.Row="4">
+        <!-- Row 4: Mouseover calibration -->
+        <GroupBox Header="Mouseover Calibration" Grid.Row="4" Margin="0,0,0,10">
+            <WrapPanel Orientation="Horizontal">
+                <Button Content="Capture NPC Mouseover" Command="{Binding CaptureNpcMouseOverCommand}"
+                        Width="160" Style="{StaticResource SecondaryActionButtonStyle}"
+                        ToolTip="Hover the seller NPC in the game, then click to capture its mouseover value (SellerPointedValue)."/>
+                <Button Content="Capture Item Mouseover" Command="{Binding CaptureItemMouseOverCommand}"
+                        Width="160" Style="{StaticResource SecondaryActionButtonStyle}"
+                        ToolTip="Hover a loot item in the game, then click to capture its mouseover value (LootMouseOverValue)."/>
+                <TextBlock Text="Hover the target NPC or item in the game, then capture its mouseover value. Calibration is saved to MouseCalibration.json and restored on restart."
+                           VerticalAlignment="Center" FontSize="10" Foreground="Gray" FontStyle="Italic"
+                           TextWrapping="Wrap" Margin="10,0,0,0"/>
+            </WrapPanel>
+        </GroupBox>
+
+        <!-- Row 5: Log output -->
+        <Grid Grid.Row="5">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>

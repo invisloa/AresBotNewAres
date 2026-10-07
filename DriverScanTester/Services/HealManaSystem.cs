@@ -21,6 +21,11 @@ namespace DriverScanTester.Services
         /// </summary>
         private bool _hpReserveLogged;
         private bool _manaReserveLogged;
+        // Track the latest low stat value handled after a potion press. Repeated
+        // reads must not resend the key; a worsening value can trigger another
+        // potion immediately, with no time-based cooldown.
+        private short? _hpLastHandledLowValue;
+        private short? _manaLastHandledLowValue;
 
         // Constants for heal/mana
         private const int VK_1 = BotConstants.HealMana.Vk1;
@@ -143,13 +148,29 @@ namespace DriverScanTester.Services
                     else
                     {
                         _manaReserveLogged = false;
-                        _log($"Threshold met for key 2. Value: {val2.Value}. Pressing key.");
-                        await PressKey(VK_2, SCAN_CODE_2, token);
+                        if (!_manaLastHandledLowValue.HasValue ||
+                            val2.Value < _manaLastHandledLowValue.Value)
+                        {
+                            // Record before awaiting so a repeated read of the same stale
+                            // value cannot issue a second keypress.
+                            _manaLastHandledLowValue = val2.Value;
+                            _log($"Threshold met for key 2. Value: {val2.Value}. Pressing key.");
+                            await PressKey(VK_2, SCAN_CODE_2, token);
+                        }
+                        else if (_manaLastHandledLowValue.HasValue &&
+                                 val2.Value > _manaLastHandledLowValue.Value)
+                        {
+                            // Remember recovery too; if mana subsequently drops again,
+                            // the worsening reading can trigger immediately.
+                            _manaLastHandledLowValue = val2.Value;
+                        }
                     }
                 }
                 else
                 {
                     _manaReserveLogged = false;
+                    if (val2.HasValue && val2.Value >= Threshold2)
+                        _manaLastHandledLowValue = null;
                 }
 
                 // --- Logic for '1' ---
@@ -168,13 +189,29 @@ namespace DriverScanTester.Services
                     else
                     {
                         _hpReserveLogged = false;
-                        _log($"Threshold met for key 1. Value: {val1.Value}. Pressing key.");
-                        await PressKey(VK_1, SCAN_CODE_1, token);
+                        if (!_hpLastHandledLowValue.HasValue ||
+                            val1.Value < _hpLastHandledLowValue.Value)
+                        {
+                            // Record before awaiting so a repeated read of the same stale
+                            // value cannot issue a second keypress.
+                            _hpLastHandledLowValue = val1.Value;
+                            _log($"Threshold met for key 1. Value: {val1.Value}. Pressing key.");
+                            await PressKey(VK_1, SCAN_CODE_1, token);
+                        }
+                        else if (_hpLastHandledLowValue.HasValue &&
+                                 val1.Value > _hpLastHandledLowValue.Value)
+                        {
+                            // Remember recovery too; if HP subsequently drops again,
+                            // the worsening reading can trigger immediately.
+                            _hpLastHandledLowValue = val1.Value;
+                        }
                     }
                 }
                 else
                 {
                     _hpReserveLogged = false;
+                    if (val1.HasValue && val1.Value >= Threshold1)
+                        _hpLastHandledLowValue = null;
                 }
             }
             catch (TaskCanceledException) { }

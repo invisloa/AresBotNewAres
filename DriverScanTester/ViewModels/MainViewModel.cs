@@ -197,7 +197,10 @@ namespace DriverScanTester.ViewModels
         public ICommand RunBotCommand { get; }
         public ICommand OpenPathEditorCommand { get; }
         public ICommand OpenBotWindowCommand { get; }
+        public ICommand OpenPixelDetectionTestingCommand { get; }
         public ICommand ClearLogCommand { get; }
+        public ICommand CaptureNpcMouseOverCommand { get; }
+        public ICommand CaptureItemMouseOverCommand { get; }
 
         public delegate bool DriverWriteDelegate(uint pid, ulong remoteAddr, byte[] src, out uint wrote);
         // ---------- Driver plumbing ----------
@@ -286,7 +289,10 @@ namespace DriverScanTester.ViewModels
             RunBotCommand = new RelayCommand(_ => ToggleMovementBot(), _ => _isAttached);
             OpenPathEditorCommand = new RelayCommand(_ => OpenPathEditor(), _ => _isAttached);
             OpenBotWindowCommand = new RelayCommand(_ => OpenBotWindow(), _ => _isAttached);
+            OpenPixelDetectionTestingCommand = new RelayCommand(_ => OpenPixelDetectionTestingWindow(), _ => _isAttached);
             ClearLogCommand = new RelayCommand(_ => ClearLog(), _ => true);
+            CaptureNpcMouseOverCommand = new RelayCommand(_ => CaptureNpcMouseOver(), _ => _isAttached);
+            CaptureItemMouseOverCommand = new RelayCommand(_ => CaptureItemMouseOver(), _ => _isAttached);
 
             // Restore the last mouseover calibration ('Mouseover NPC' / 'Mouseover Item')
             // from disk so the bot works without re-calibrating after an app restart.
@@ -674,6 +680,9 @@ namespace DriverScanTester.ViewModels
             else if (!_isLootBotRunning)
             {
                 _lootSystem = new LootSystem(memoryService, AppendBotLog);
+                Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 0);
+                _lootSystem.OtherPlayerMarkerDetected =
+                    () => HandleStandalonePlayerMarkerDetected(memoryService, profile);
                 if (_movementSystem != null)
                     _movementSystem.LootSystemRef = _lootSystem;
                 _lootBotCts = new CancellationTokenSource();
@@ -681,6 +690,94 @@ namespace DriverScanTester.ViewModels
                 var lootToken = _lootBotCts.Token;
                 Task.Run(() => LootBotLoop(lootToken), lootToken);
                 AppendBotLog("Loot Bot started.");
+            }
+        }
+
+        private void HandleStandalonePlayerMarkerDetected(GameMemoryService memoryService, BotProfile profile)
+        {
+            if (Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 1) != 0)
+                return;
+
+            AppendBotLog("[PlayerPixels] Standalone path detected another player — stopping movement/loot/heal and teleporting to the city. It will stay there until manually restarted.");
+            _movementBotCts?.Cancel();
+            _lootBotCts?.Cancel();
+            _healManaBotCts?.Cancel();
+            _movementSystem?.StopMoving();
+            _movementSystem?.ReleaseCombatKeys();
+
+            Application.Current?.Dispatcher?.Invoke(() =>
+            {
+                _isMovementBotRunning = false;
+                _isLootBotRunning = false;
+                _isHealManaBotRunning = false;
+                OnPropertyChanged(nameof(IsMovementBotRunningInternal));
+                OnPropertyChanged(nameof(IsLootBotRunningInternal));
+                OnPropertyChanged(nameof(IsHealManaBotRunningInternal));
+            });
+
+            _ = Task.Run(() => TeleportStandaloneBotToCityAsync(memoryService, profile));
+        }
+
+        private async Task TeleportStandaloneBotToCityAsync(GameMemoryService memoryService, BotProfile profile)
+        {
+            try
+            {
+                // Let the cancelled movement loop finish its current tick before sending
+                // the teleport key, so no movement input races the city transition.
+                await Task.Delay(BotConstants.Delays.PathRunnerTickMs * 2);
+
+                if (!memoryService.GetIsInCity())
+                {
+                    FocusGameWindow();
+                    byte vk = (byte)profile.TeleportKey;
+                    byte scan = (byte)profile.TeleportScanCode;
+                    AppendBotLog($"[PlayerPixels] Pressing town teleport (vk={vk}).");
+                    GameInput.keybd_event(vk, scan, 0, 0);
+                    await Task.Delay(BotConstants.Delays.TeleportKeyDownMs);
+                    GameInput.keybd_event(vk, scan, (uint)GameInput.KEYEVENTF_KEYUP, 0);
+                    ScreenshotService.CaptureFullScreen(
+                        ScreenshotService.TownPortalsFolder, AppendBotLog, "[PlayerPixels]");
+
+                    bool arrived = false;
+                    for (int i = 0; i < BotConstants.Delays.TeleportWaitIterations; i++)
+                    {
+                        await Task.Delay(BotConstants.Delays.TeleportWaitIterationMs);
+                        if (!memoryService.GetIsInCity())
+                            continue;
+                        arrived = true;
+                        break;
+                    }
+
+                    if (!arrived)
+                        AppendBotLog("[PlayerPixels] City teleport was not confirmed; standalone bots remain stopped.");
+                    else
+                        await Task.Delay(BotConstants.Delays.PostTeleportUiLoadMs);
+                }
+
+                if (memoryService.GetIsInCity())
+                    AppendBotLog("[PlayerPixels] In the city. Path-test mode will not repot or resume automatically.");
+            }
+            catch (Exception ex)
+            {
+                AppendBotLog($"[PlayerPixels] Standalone city teleport failed: {ex.Message}");
+            }
+        }
+
+        private void OpenPixelDetectionTestingWindow()
+        {
+            try
+            {
+                var viewModel = new PixelDetectionTestingViewModel(FocusGameWindow, AppendBotLog);
+                var window = new Views.PixelDetectionTestingWindow
+                {
+                    DataContext = viewModel,
+                    Owner = Application.Current?.MainWindow
+                };
+                window.Show();
+            }
+            catch (Exception ex)
+            {
+                AppendBotLog("Open pixel detection testing window error: " + ex.Message);
             }
         }
 
@@ -2896,6 +2993,7 @@ namespace DriverScanTester.ViewModels
         private bool _elevationWarningLogged;
         private CancellationTokenSource? _movementBotCts;
         private CancellationTokenSource? _healManaBotCts;
+        private int _standalonePlayerMarkerStopHandled;
         private CancellationTokenSource? _lootBotCts;
         private MovementSystem? _movementSystem;
         private HealManaSystem? _healManaSystem;
@@ -3773,7 +3871,11 @@ namespace DriverScanTester.ViewModels
                         }
 
                         var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
+                        var profile = _workflowCoordinator?.ActiveProfile ?? new BotProfile();
                         _lootSystem = new LootSystem(memoryService, AppendBotLog);
+                        Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 0);
+                        _lootSystem.OtherPlayerMarkerDetected =
+                            () => HandleStandalonePlayerMarkerDetected(memoryService, profile);
                         if (_movementSystem != null)
                             _movementSystem.LootSystemRef = _lootSystem;
                         _lootBotCts = new CancellationTokenSource();
@@ -3906,11 +4008,13 @@ namespace DriverScanTester.ViewModels
                             // Heal stays always on (separate HealMana task).
                             if (_movementSystem?.IsWaypointSpecialRecoveryActive == true)
                             {
+                                _lootSystem.PlayerMarkerScanEnabled = false;
                                 await PauseController.PausableDelayAsync(10, token);
                                 continue;
                             }
                             if (_movementSystem?.IsMoveOnlyActive == true)
                             {
+                                _lootSystem.PlayerMarkerScanEnabled = false;
                                 await PauseController.PausableDelayAsync(10, token);
                                 continue;
                             }
@@ -3918,8 +4022,11 @@ namespace DriverScanTester.ViewModels
                             // Track the current waypoint mode: MoveAndAttack waypoints use
                             // the SOD/SOP pink-only scan; MoveAndAttackAndLoot keeps the
                             // normal white-pixel loot cycle.
-                            _lootSystem.PinkLootOnlyMode =
-                                _movementSystem?.CurrentMode == Services.BotMode.MoveAndAttack;
+                            Services.BotMode? currentMode = _movementSystem?.CurrentMode;
+                            _lootSystem.PinkLootOnlyMode = currentMode == Services.BotMode.MoveAndAttack;
+                            _lootSystem.PlayerMarkerScanEnabled =
+                                currentMode == Services.BotMode.MoveAndAttack ||
+                                currentMode == Services.BotMode.MoveAndAttackAndLoot;
 
                             await _lootSystem.Update(token);
                             await PauseController.PausableDelayAsync(10, token); // Update rate for loot

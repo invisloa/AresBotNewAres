@@ -775,6 +775,23 @@ namespace DriverScanTester.Services
         /// <summary>Throttles the "cursor did not physically reach the fast-turn edge" warning to one message per episode.</summary>
         private bool _keyboardFastTurnMouseWarningLogged = false;
 
+        /// <summary>
+        /// Human-override suppression deadline (UTC). While the current time is before it,
+        /// no fast-turn cursor write may happen. Reacquisition additionally requires the
+        /// game to be foreground and the cursor to be back inside the game client.
+        /// </summary>
+        private DateTime _keyboardFastTurnMouseSuppressedUntilUtc = DateTime.MinValue;
+
+        /// <summary>True once the current human-override episode was logged (throttles the per-tick check).</summary>
+        private bool _keyboardFastTurnMouseHumanOverrideLogged = false;
+
+        /// <summary>
+        /// Edge that still needs a deferred neutralization because another owner (loot)
+        /// held the cursor at release time. Used to confirm the human did not move the
+        /// cursor before the delayed neutralization runs.
+        /// </summary>
+        private TurnKeyState _keyboardFastTurnMouseNeutralizePendingDirection = TurnKeyState.None;
+
         private bool _hasLastGameAngle = false;
         private float _lastSetGameAngle = 0f;
 
@@ -2486,6 +2503,9 @@ namespace DriverScanTester.Services
         /// Applies the mouse half of the KeyboardTurn controller for the current directive:
         /// normal/none releases any fast-turn help, fast acquires (or re-asserts) the
         /// matching client edge. Called on every keyboard steering update.
+        /// The human user always outranks this automation: the cursor is only touched while
+        /// the game is foreground, the cursor is inside the game client, no human-override
+        /// suppression is active and no loot/pink scan owns the mouse.
         /// </summary>
         private void ApplyKeyboardFastTurnMouse(
             KeyboardTurnDirective directive,
@@ -2497,23 +2517,61 @@ namespace DriverScanTester.Services
             TurnKeyState requestedSide = GetFastTurnMouseSide(directive);
             if (requestedSide == TurnKeyState.None)
             {
-                // 10°..60° (and target reached): keep the normal A/D turn only.
+                // Natural end of the fast turn (10°..60° / target reached): release the
+                // edge without fighting a human who has taken the cursor.
                 string normalTarget = directive switch
                 {
                     KeyboardTurnDirective.NormalLeft => "NORMAL LEFT",
                     KeyboardTurnDirective.NormalRight => "NORMAL RIGHT",
                     _ => "NO TURN"
                 };
-                ReleaseKeyboardFastTurnMouse($"{normalTarget} error={signedError:+0.0;-0.0;0.0}° mouse neutralized. {details}");
+                ReleaseKeyboardFastTurnMouse($"{normalTarget} error={signedError:+0.0;-0.0;0.0}° mouse released. {details}");
                 return;
             }
 
-            // An active loot/pink scan currently owns the cursor: yield without touching
-            // it. A/D feedback steering continues unaffected and fast turn re-enters
-            // naturally once the scan is done (if the error is still above 60°).
+            // Priority 2: an active loot/pink scan owns the cursor. Yield without touching
+            // it; A/D feedback steering continues unaffected. Loot movement is never
+            // classified as human movement.
             if (IsLootMouseOperationActive())
             {
                 ReleaseKeyboardFastTurnMouse($"loot cursor active. {details}");
+                return;
+            }
+
+            // Resolve the game client and the physical cursor once for this update.
+            bool clientResolved = TryResolveKeyboardFastTurnClient(out KeyboardFastTurnClient client);
+            if (!clientResolved)
+            {
+                ReleaseKeyboardFastTurnMouse("game client rect unavailable");
+                return;
+            }
+
+            bool gameForeground = IsKeyboardFastTurnGameForeground(client);
+            bool cursorKnown = MouseOperations.TryGetCursorPosition(out int cursorX, out int cursorY);
+            bool cursorInside = cursorKnown &&
+                                IsCursorInsideKeyboardFastTurnClient(client, cursorX, cursorY);
+
+            // Priority 1: the human user always wins. If the game is not foreground or the
+            // cursor is outside the client, relinquish immediately and leave the physical
+            // cursor exactly where the user put it — never pull it back into the game.
+            if (!gameForeground)
+            {
+                ReleaseKeyboardFastTurnMouseForHumanOverride(
+                    "Game lost foreground focus — mouse acceleration released without repositioning cursor.");
+                return;
+            }
+
+            if (!cursorKnown)
+            {
+                ReleaseKeyboardFastTurnMouseForHumanOverride(
+                    "Cursor position unavailable — mouse acceleration suspended.");
+                return;
+            }
+
+            if (!cursorInside)
+            {
+                ReleaseKeyboardFastTurnMouseForHumanOverride(
+                    "Human mouse override detected — cursor outside the game client. Mouse acceleration suspended.");
                 return;
             }
 
@@ -2521,20 +2579,55 @@ namespace DriverScanTester.Services
                 $"current={currentBearingDeg:F1} target={desiredBearingDeg:F1} error={signedError:+0.0;-0.0;0.0} " +
                 $"turn={(requestedSide == TurnKeyState.LeftA ? "A" : "D")} held={GetTurnKeyName(_heldTurnKey)}";
 
-            if (_keyboardFastTurnMouseActive && _keyboardFastTurnMouseDirection == requestedSide)
+            // We already own an edge: verify the human did not pull the cursor away from it.
+            if (_keyboardFastTurnMouseActive)
             {
-                ReassertKeyboardFastTurnMouse(requestedSide, diagnosticContext);
-                return;
-            }
+                TurnKeyState ownedSide = _keyboardFastTurnMouseDirection;
+                int ownedTargetX = GetKeyboardFastTurnEdgeX(client, ownedSide);
+                int inward = ComputeKeyboardFastTurnInwardDisplacement(
+                    ownedSide == TurnKeyState.LeftA, ownedTargetX, cursorX);
 
-            // Fresh entry or a side switch while fast turning. The A/D swap was already
-            // applied by SetTurnKey in this same update; move the cursor to the new edge.
-            bool hadActiveSide = _keyboardFastTurnMouseActive;
-            if (hadActiveSide)
-            {
+                if (IsKeyboardFastTurnHumanDisplacement(
+                        ownedSide == TurnKeyState.LeftA,
+                        ownedTargetX,
+                        cursorX,
+                        BotConstants.Movement.KeyboardFastTurnHumanOverrideDistancePx))
+                {
+                    ReleaseKeyboardFastTurnMouseForHumanOverride(
+                        $"Human mouse override detected — cursor moved {inward}px away from the automated edge. Mouse acceleration suspended.");
+                    return;
+                }
+
+                if (ownedSide == requestedSide)
+                {
+                    ReassertKeyboardFastTurnMouse(requestedSide, client, cursorX, diagnosticContext);
+                    return;
+                }
+
+                // Live heading changed side: swap the edge in this same update.
                 _keyboardFastTurnMouseActive = false;
                 _keyboardFastTurnMouseDirection = TurnKeyState.None;
                 _log($"[Steering] Fast turn switched to {(requestedSide == TurnKeyState.LeftA ? "LEFT" : "RIGHT")}: {details}");
+            }
+
+            // Eligibility gate: heading > 60° and no human cooldown and no other mouse owner.
+            if (!MayUseKeyboardFastTurnMouse(
+                    headingRequiresFastTurn: true,
+                    gameForeground: gameForeground,
+                    cursorInsideGameClient: cursorInside,
+                    suppressionExpired: DateTime.UtcNow >= _keyboardFastTurnMouseSuppressedUntilUtc,
+                    otherMouseOwnerActive: false))
+            {
+                // Human-override cooldown still running (or a race on any other flag):
+                // A/D steering continues and the cursor is never touched.
+                return;
+            }
+
+            if (_keyboardFastTurnMouseSuppressedUntilUtc != DateTime.MinValue)
+            {
+                _keyboardFastTurnMouseSuppressedUntilUtc = DateTime.MinValue;
+                _keyboardFastTurnMouseHumanOverrideLogged = false;
+                _log("[Steering][FastTurn] Mouse acceleration available again — game focused and cursor returned inside client.");
             }
 
             if (MoveKeyboardFastTurnMouseToEdge(requestedSide, diagnosticContext, isEntry: true, out int targetMouseX, out string failure))
@@ -2542,43 +2635,87 @@ namespace DriverScanTester.Services
                 _keyboardFastTurnMouseActive = true;
                 _keyboardFastTurnMouseDirection = requestedSide;
                 _keyboardFastTurnMouseNeutralizePending = false;
+                _keyboardFastTurnMouseNeutralizePendingDirection = TurnKeyState.None;
                 _keyboardFastTurnMouseFailureLogged = false;
+                _keyboardFastTurnMouseHumanOverrideLogged = false;
                 _log($"[Steering] FAST {(requestedSide == TurnKeyState.LeftA ? "LEFT" : "RIGHT")} entered error={signedError:+0.0;-0.0;0.0}° " +
                      $"{(requestedSide == TurnKeyState.LeftA ? "A=DOWN D=UP" : "A=UP D=DOWN")} targetMouseX={targetMouseX}");
             }
-            else
+            else if (!_keyboardFastTurnMouseFailureLogged)
             {
-                // A side we previously owned may still have the cursor parked on its edge;
-                // keep a retry so it cannot keep contributing once the turn ends.
-                if (hadActiveSide)
-                    _keyboardFastTurnMouseNeutralizePending = true;
-
-                if (!_keyboardFastTurnMouseFailureLogged)
-                {
-                    _keyboardFastTurnMouseFailureLogged = true;
-                    _log($"[Steering] Fast turn mouse unavailable ({failure}) — continuing with A/D only. {details}");
-                }
+                _keyboardFastTurnMouseFailureLogged = true;
+                _log($"[Steering] Fast turn mouse unavailable ({failure}) — continuing with A/D only. {details}");
             }
         }
 
         /// <summary>
-        /// Central idempotent release of the KeyboardTurn mouse ownership. Clears the
-        /// logical state and returns the cursor to the horizontal client centre so it stops
-        /// contributing to the turn. When loot owns the cursor the physical move is deferred
-        /// instead of fighting it. Safe to call repeatedly, from inside
-        /// <see cref="_inputLock"/>, and never throws out of movement cleanup.
+        /// Human-override release: the user took the physical cursor (moved it out of the
+        /// game client, away from the automated edge, focused another window, or the
+        /// cursor became unreadable). Clears the logical fast-turn ownership, suppresses
+        /// reacquisition for the cooldown and NEVER moves the cursor — the user's current
+        /// physical position is preserved exactly. A/D steering continues unaffected.
+        /// Safe to call repeatedly; the transition is logged only once per episode.
+        /// </summary>
+        private void ReleaseKeyboardFastTurnMouseForHumanOverride(string message)
+        {
+            bool wasActive;
+            TurnKeyState previousSide;
+            bool alreadyLogged;
+
+            lock (_inputLock)
+            {
+                wasActive = _keyboardFastTurnMouseActive;
+                previousSide = _keyboardFastTurnMouseDirection;
+                alreadyLogged = _keyboardFastTurnMouseHumanOverrideLogged;
+
+                _keyboardFastTurnMouseActive = false;
+                _keyboardFastTurnMouseDirection = TurnKeyState.None;
+                _keyboardFastTurnMouseNeutralizePending = false;
+                _keyboardFastTurnMouseNeutralizePendingDirection = TurnKeyState.None;
+                _keyboardFastTurnMouseSuppressedUntilUtc = DateTime.UtcNow.AddMilliseconds(
+                    BotConstants.Movement.KeyboardFastTurnHumanOverrideCooldownMs);
+
+                if (wasActive || !alreadyLogged)
+                    _keyboardFastTurnMouseHumanOverrideLogged = true;
+
+                _keyboardFastTurnMouseFailureLogged = false;
+                _keyboardFastTurnMouseWarningLogged = false;
+            }
+
+            if (wasActive || !alreadyLogged)
+            {
+                string side = previousSide == TurnKeyState.LeftA
+                    ? "LEFT"
+                    : previousSide == TurnKeyState.RightD ? "RIGHT" : "NONE";
+                string releaseTag = wasActive ? $" (fast {side} released)" : string.Empty;
+                _log($"[Steering][FastTurn] {message}{releaseTag}");
+            }
+        }
+
+        /// <summary>
+        /// Central idempotent release of the KeyboardTurn mouse ownership for natural
+        /// transitions and movement cleanup. Returns the cursor to the horizontal client
+        /// centre so it stops contributing to the turn, but ONLY while the bot still
+        /// clearly owns the interaction (game foreground, cursor inside the client, no
+        /// human suppression and the cursor still near the automated edge). If the human
+        /// moved the cursor it is left exactly where it is. When loot owns the cursor the
+        /// neutralization is deferred instead of fighting it. Safe to call repeatedly,
+        /// from inside <see cref="_inputLock"/>, and never throws out of movement cleanup.
         /// </summary>
         private void ReleaseKeyboardFastTurnMouse(string reason)
         {
             bool wasActive;
             TurnKeyState previousSide;
             bool hadPendingNeutralize;
+            TurnKeyState pendingSide;
 
             lock (_inputLock)
             {
                 wasActive = _keyboardFastTurnMouseActive;
                 previousSide = _keyboardFastTurnMouseDirection;
                 hadPendingNeutralize = _keyboardFastTurnMouseNeutralizePending;
+                pendingSide = _keyboardFastTurnMouseNeutralizePendingDirection;
+
                 _keyboardFastTurnMouseActive = false;
                 _keyboardFastTurnMouseDirection = TurnKeyState.None;
                 if (wasActive)
@@ -2597,10 +2734,15 @@ namespace DriverScanTester.Services
             if (IsLootMouseOperationActive())
             {
                 _keyboardFastTurnMouseNeutralizePending = true;
+                _keyboardFastTurnMouseNeutralizePendingDirection = wasActive ? previousSide : pendingSide;
                 return;
             }
 
-            NeutralizeKeyboardFastTurnMouse();
+            // Never reposition if the human/focus/client state says the bot no longer
+            // owns the cursor; NeutralizeKeyboardFastTurnMouse re-checks before writing.
+            _keyboardFastTurnMouseNeutralizePending = false;
+            _keyboardFastTurnMouseNeutralizePendingDirection = TurnKeyState.None;
+            NeutralizeKeyboardFastTurnMouse(wasActive ? previousSide : pendingSide);
         }
 
         /// <summary>
@@ -2628,34 +2770,23 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Re-asserts the fast-turn edge only when the physical cursor actually drifted
-        /// away from it (small pixel tolerance), so SetCursorPos is never spammed while
-        /// the cursor is already at the edge. A resolution failure drops back to plain
-        /// A/D steering.
+        /// Keeps the owned edge while the fast turn is active. Large inward movement is
+        /// handled as a human override by the caller before this is reached; this only
+        /// corrects small jitter within the human-override distance and does nothing when
+        /// the cursor is already at the edge. Every write is re-checked by
+        /// <see cref="MoveKeyboardFastTurnMouseToEdge"/> and never throws.
         /// </summary>
-        private void ReassertKeyboardFastTurnMouse(TurnKeyState side, string context)
+        private void ReassertKeyboardFastTurnMouse(
+            TurnKeyState side,
+            KeyboardFastTurnClient client,
+            int cursorX,
+            string context)
         {
-            try
-            {
-                if (!TryResolveKeyboardFastTurnClient(out KeyboardFastTurnClient client))
-                {
-                    ReleaseKeyboardFastTurnMouse($"client rect lost. {context}");
-                    return;
-                }
+            int targetX = GetKeyboardFastTurnEdgeX(client, side);
+            if (Math.Abs(cursorX - targetX) <= BotConstants.Movement.KeyboardFastTurnMouseReassertTolerancePx)
+                return;
 
-                int targetX = GetKeyboardFastTurnEdgeX(client, side);
-                if (MouseOperations.TryGetCursorPosition(out int cursorX, out _) &&
-                    Math.Abs(cursorX - targetX) <= BotConstants.Movement.KeyboardFastTurnMouseReassertTolerancePx)
-                {
-                    return;
-                }
-
-                MoveKeyboardFastTurnMouseToEdge(side, context, isEntry: false, out _, out _);
-            }
-            catch (Exception)
-            {
-                ReleaseKeyboardFastTurnMouse($"cursor re-assert failed. {context}");
-            }
+            MoveKeyboardFastTurnMouseToEdge(side, context, isEntry: false, out _, out _);
         }
 
         /// <summary>
@@ -2678,9 +2809,11 @@ namespace DriverScanTester.Services
             failure = string.Empty;
             try
             {
-                if (!TryResolveKeyboardFastTurnClient(out KeyboardFastTurnClient client))
+                // Every physical fast-turn write must pass the ownership gate: no human
+                // suppression, game foreground and cursor inside the client.
+                if (!CanKeyboardFastTurnMouseWrite(TurnKeyState.None, out KeyboardFastTurnClient client, out _, out _))
                 {
-                    failure = "game client rect unavailable";
+                    failure = "mouse not available (human override / focus / cursor)";
                     return false;
                 }
 
@@ -2724,29 +2857,26 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Returns the cursor to the horizontal client centre while keeping its Y, so the
-        /// edge position stops contributing to camera turning. Failure keeps a pending flag
-        /// so the next steering update retries; it never throws.
+        /// edge position stops contributing to camera turning. The write is skipped unless
+        /// the bot still fully owns the cursor (game foreground, cursor inside the client,
+        /// no human suppression and the cursor still near the owned edge) — any human
+        /// signal leaves the physical cursor exactly where the user put it. Never throws.
         /// </summary>
-        private void NeutralizeKeyboardFastTurnMouse()
+        private void NeutralizeKeyboardFastTurnMouse(TurnKeyState ownedSide)
         {
             lock (_inputLock)
             {
                 try
                 {
-                    if (!TryResolveKeyboardFastTurnClient(out KeyboardFastTurnClient client))
-                    {
-                        _keyboardFastTurnMouseNeutralizePending = true;
+                    if (!CanKeyboardFastTurnMouseWrite(ownedSide, out KeyboardFastTurnClient client, out _, out _))
                         return;
-                    }
 
                     MouseOperations.SetCursorPositionAbsolute(
                         GetKeyboardFastTurnNeutralX(client),
                         ResolveKeyboardFastTurnCursorY(client));
-                    _keyboardFastTurnMouseNeutralizePending = false;
                 }
                 catch (Exception ex)
                 {
-                    _keyboardFastTurnMouseNeutralizePending = true;
                     if (!_keyboardFastTurnMouseFailureLogged)
                     {
                         _keyboardFastTurnMouseFailureLogged = true;
@@ -2756,17 +2886,88 @@ namespace DriverScanTester.Services
             }
         }
 
-        /// <summary>Validated game-client rectangle in screen coordinates.</summary>
+        /// <summary>
+        /// Single ownership gate for every physical fast-turn cursor write. Returns false
+        /// when a human-override suppression is active, the game is not foreground, the
+        /// cursor cannot be read or lies outside the game client, or — when an owned edge
+        /// is given — the cursor moved significantly away from that edge. All failures
+        /// mean "do not touch the mouse"; A/D steering continues unaffected.
+        /// </summary>
+        private bool CanKeyboardFastTurnMouseWrite(
+            TurnKeyState ownedSide,
+            out KeyboardFastTurnClient client,
+            out int cursorX,
+            out int cursorY)
+        {
+            client = default;
+            cursorX = 0;
+            cursorY = 0;
+
+            if (DateTime.UtcNow < _keyboardFastTurnMouseSuppressedUntilUtc)
+                return false;
+
+            try
+            {
+                if (!TryResolveKeyboardFastTurnClient(out client))
+                    return false;
+
+                if (!IsKeyboardFastTurnGameForeground(client))
+                    return false;
+
+                if (!MouseOperations.TryGetCursorPosition(out cursorX, out cursorY))
+                    return false;
+
+                if (!IsCursorInsideKeyboardFastTurnClient(client, cursorX, cursorY))
+                    return false;
+
+                if (ownedSide != TurnKeyState.None)
+                {
+                    int targetX = GetKeyboardFastTurnEdgeX(client, ownedSide);
+                    if (IsKeyboardFastTurnHumanDisplacement(
+                            ownedSide == TurnKeyState.LeftA,
+                            targetX,
+                            cursorX,
+                            BotConstants.Movement.KeyboardFastTurnHumanOverrideDistancePx))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// True while the resolved game window owns the foreground. Fast-turn mouse
+        /// automation must never reposition the cursor while the user is in another
+        /// window (bot UI, editor, browser, Alt+Tab target).
+        /// </summary>
+        private static bool IsKeyboardFastTurnGameForeground(KeyboardFastTurnClient client)
+        {
+            if (client.Hwnd == nint.Zero)
+                return false;
+
+            nint foreground = GetForegroundWindow();
+            return foreground != nint.Zero && foreground == client.Hwnd;
+        }
+
+        /// <summary>Validated game window handle and client rectangle in screen coordinates.</summary>
         private readonly struct KeyboardFastTurnClient
         {
-            public KeyboardFastTurnClient(int left, int top, int right, int bottom)
+            public KeyboardFastTurnClient(nint hwnd, int left, int top, int right, int bottom)
             {
+                Hwnd = hwnd;
                 Left = left;
                 Top = top;
                 Right = right;
                 Bottom = bottom;
             }
 
+            public nint Hwnd { get; }
             public int Left { get; }
             public int Top { get; }
             public int Right { get; }
@@ -2802,6 +3003,7 @@ namespace DriverScanTester.Services
                 return false;
 
             client = new KeyboardFastTurnClient(
+                hwnd,
                 topLeft.X,
                 topLeft.Y,
                 topLeft.X + width - 1,
@@ -2839,6 +3041,68 @@ namespace DriverScanTester.Services
         /// <summary>Pure horizontally-neutral fast-turn X (client horizontal centre).</summary>
         internal static int ComputeKeyboardFastTurnNeutralX(int clientLeft, int clientWidth)
             => clientLeft + Math.Max(clientWidth, 1) / 2;
+
+        /// <summary>
+        /// Pure fast-turn mouse eligibility gate. The human user always outranks this
+        /// automation: every flag must allow it before any cursor write. A/D steering is
+        /// independent and continues whenever this returns false.
+        /// </summary>
+        internal static bool MayUseKeyboardFastTurnMouse(
+            bool headingRequiresFastTurn,
+            bool gameForeground,
+            bool cursorInsideGameClient,
+            bool suppressionExpired,
+            bool otherMouseOwnerActive)
+            => headingRequiresFastTurn
+               && gameForeground
+               && cursorInsideGameClient
+               && suppressionExpired
+               && !otherMouseOwnerActive;
+
+        /// <summary>
+        /// Inward cursor displacement (px) from the automated fast-turn edge. Positive
+        /// means the cursor moved toward the game interior, i.e. away from the edge the
+        /// bot owns — the signature of deliberate human movement.
+        /// </summary>
+        internal static int ComputeKeyboardFastTurnInwardDisplacement(
+            bool leftSide,
+            int targetEdgeX,
+            int cursorX)
+            => leftSide ? cursorX - targetEdgeX : targetEdgeX - cursorX;
+
+        /// <summary>
+        /// True when the cursor moved farther inward than the configured human-override
+        /// distance: beyond that the bot must relinquish the cursor without moving it.
+        /// </summary>
+        internal static bool IsKeyboardFastTurnHumanDisplacement(
+            bool leftSide,
+            int targetEdgeX,
+            int cursorX,
+            int overrideDistancePx)
+            => ComputeKeyboardFastTurnInwardDisplacement(leftSide, targetEdgeX, cursorX) > overrideDistancePx;
+
+        /// <summary>
+        /// True when the cursor lies inside the inclusive game-client rectangle. The
+        /// game-client area (GetClientRect + ClientToScreen) is used, never the outer
+        /// window rectangle, so the bot UI and desktop stay human-owned.
+        /// </summary>
+        internal static bool IsCursorInsideKeyboardFastTurnClient(
+            int clientLeft,
+            int clientTop,
+            int clientRight,
+            int clientBottom,
+            int cursorX,
+            int cursorY)
+            => cursorX >= clientLeft && cursorX <= clientRight &&
+               cursorY >= clientTop && cursorY <= clientBottom;
+
+        /// <summary>Overload using an already-resolved client rectangle.</summary>
+        private static bool IsCursorInsideKeyboardFastTurnClient(
+            KeyboardFastTurnClient client,
+            int cursorX,
+            int cursorY)
+            => IsCursorInsideKeyboardFastTurnClient(
+                client.Left, client.Top, client.Right, client.Bottom, cursorX, cursorY);
 
         /// <summary>
         /// Keeps the current cursor Y when it can be read (clamped inside the client with a
@@ -3497,6 +3761,9 @@ namespace DriverScanTester.Services
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern nint FindWindow(string? lpClassName, string lpWindowName);
+
+        [DllImport("user32.dll")]
+        private static extern nint GetForegroundWindow();
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool GetClientRect(nint hWnd, out RECT lpRect);

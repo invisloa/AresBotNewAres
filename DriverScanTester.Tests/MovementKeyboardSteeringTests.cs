@@ -142,6 +142,92 @@ namespace DriverScanTester.Tests
             Assert.InRange(BotConstants.Movement.KeyboardFastTurnMouseEdgeMarginPx, 1, 2);
             // A cursor counts as being at the edge only within a 2 px tolerance.
             Assert.Equal(2, BotConstants.Movement.KeyboardFastTurnMouseReassertTolerancePx);
+            // Deliberate human movement is only concluded past a sensible distance...
+            Assert.InRange(BotConstants.Movement.KeyboardFastTurnHumanOverrideDistancePx, 15, 30);
+            // ...and the suppression cooldown keeps the bot off the mouse for 1–1.5s.
+            Assert.InRange(BotConstants.Movement.KeyboardFastTurnHumanOverrideCooldownMs, 1000, 1500);
+        }
+
+        [Theory]
+        [InlineData(true, true, true, true, false, true)]
+        [InlineData(false, true, true, true, false, false)] // heading no longer needs fast turn
+        [InlineData(true, false, true, true, false, false)] // game not foreground
+        [InlineData(true, true, false, true, false, false)] // cursor outside client
+        [InlineData(true, true, true, false, false, false)] // human-override cooldown
+        [InlineData(true, true, true, true, true, false)] // loot/pink owns the mouse
+        public void MayUseKeyboardFastTurnMouseRequiresEveryOwnershipCondition(
+            bool headingRequiresFastTurn,
+            bool gameForeground,
+            bool cursorInsideGameClient,
+            bool suppressionExpired,
+            bool otherMouseOwnerActive,
+            bool expected)
+        {
+            Assert.Equal(expected, MovementSystem.MayUseKeyboardFastTurnMouse(
+                headingRequiresFastTurn,
+                gameForeground,
+                cursorInsideGameClient,
+                suppressionExpired,
+                otherMouseOwnerActive));
+        }
+
+        [Theory]
+        [InlineData(500, 500, true)]
+        [InlineData(447, 500, true)]
+        [InlineData(1726, 500, true)]
+        [InlineData(446, 500, false)] // just left of the client
+        [InlineData(1727, 500, false)] // just right of the client
+        [InlineData(500, 99, false)] // above the client
+        [InlineData(500, 901, false)] // below the client
+        public void CursorInsideClientUsesTheInclusiveGameClientRectangle(
+            int cursorX,
+            int cursorY,
+            bool expected)
+        {
+            bool actual = MovementSystem.IsCursorInsideKeyboardFastTurnClient(
+                clientLeft: 447,
+                clientTop: 100,
+                clientRight: 1726,
+                clientBottom: 900,
+                cursorX: cursorX,
+                cursorY: cursorY);
+
+            Assert.Equal(expected, actual);
+        }
+
+        [Theory]
+        [InlineData(false, 1278, 1277, false)] // 1 px inward — jitter
+        [InlineData(false, 1278, 1270, false)] // 8 px inward — below override distance
+        [InlineData(false, 1278, 1254, false)] // exactly at the override distance
+        [InlineData(false, 1278, 1253, true)] // past the override distance — human
+        [InlineData(false, 1278, 1200, true)] // clearly human
+        [InlineData(true, 1, 2, false)]
+        [InlineData(true, 1, 25, false)]
+        [InlineData(true, 1, 26, true)]
+        [InlineData(true, 1, 40, true)]
+        public void HumanDisplacementIsDetectedOnlyPastTheOverrideDistance(
+            bool leftSide,
+            int targetEdgeX,
+            int cursorX,
+            bool expected)
+        {
+            Assert.Equal(expected, MovementSystem.IsKeyboardFastTurnHumanDisplacement(
+                leftSide, targetEdgeX, cursorX, BotConstants.Movement.KeyboardFastTurnHumanOverrideDistancePx));
+        }
+
+        [Theory]
+        [InlineData(false, 1278, 1200, 78)]
+        [InlineData(true, 1, 40, 39)]
+        [InlineData(false, 1278, 1280, -2)] // outward toward the border is not human
+        [InlineData(true, 1, 0, -1)]
+        public void InwardDisplacementIsPositiveTowardTheGameInterior(
+            bool leftSide,
+            int targetEdgeX,
+            int cursorX,
+            int expected)
+        {
+            Assert.Equal(expected, MovementSystem.ComputeKeyboardFastTurnInwardDisplacement(
+                leftSide, targetEdgeX, cursorX));
         }
 
         [Theory]
@@ -276,20 +362,54 @@ namespace DriverScanTester.Tests
             FieldInfo frozenField = typeof(MovementSystem).GetField("_keyboardFrozenBearingDeg", PrivateInstance)!;
             FieldInfo fastMouseField = typeof(MovementSystem).GetField("_keyboardFastTurnMouseActive", PrivateInstance)!;
             FieldInfo fastMouseSideField = typeof(MovementSystem).GetField("_keyboardFastTurnMouseDirection", PrivateInstance)!;
+            FieldInfo pendingField = typeof(MovementSystem).GetField("_keyboardFastTurnMouseNeutralizePending", PrivateInstance)!;
+            FieldInfo pendingSideField = typeof(MovementSystem).GetField("_keyboardFastTurnMouseNeutralizePendingDirection", PrivateInstance)!;
             heldField.SetValue(movement, Enum.Parse(TurnKeyStateType, "RightD"));
             frozenField.SetValue(movement, 91.5f);
             fastMouseField.SetValue(movement, true);
             fastMouseSideField.SetValue(movement, Enum.Parse(TurnKeyStateType, "RightD"));
+            pendingField.SetValue(movement, true);
+            pendingSideField.SetValue(movement, Enum.Parse(TurnKeyStateType, "RightD"));
 
             // No key-down is synthesized. StopMoving exercises only its allowed defensive
             // W/A/D KEYUP cleanup and resets the logical owner state (including the
-            // fast-turn mouse ownership).
+            // fast-turn mouse ownership). Stop must NOT leave a queued cursor reposition.
             movement.StopMoving();
 
             Assert.Equal("None", heldField.GetValue(movement)!.ToString());
             Assert.Null(frozenField.GetValue(movement));
             Assert.False((bool)fastMouseField.GetValue(movement)!);
             Assert.Equal("None", fastMouseSideField.GetValue(movement)!.ToString());
+            Assert.False((bool)pendingField.GetValue(movement)!);
+            Assert.Equal("None", pendingSideField.GetValue(movement)!.ToString());
+        }
+
+        [Fact]
+        public void HumanOverrideReleaseClearsOwnershipWithoutSchedulingNeutralization()
+        {
+            var movement = CreateMovement(_ => { });
+            FieldInfo activeField = typeof(MovementSystem).GetField("_keyboardFastTurnMouseActive", PrivateInstance)!;
+            FieldInfo directionField = typeof(MovementSystem).GetField("_keyboardFastTurnMouseDirection", PrivateInstance)!;
+            FieldInfo pendingField = typeof(MovementSystem).GetField("_keyboardFastTurnMouseNeutralizePending", PrivateInstance)!;
+            FieldInfo pendingSideField = typeof(MovementSystem).GetField("_keyboardFastTurnMouseNeutralizePendingDirection", PrivateInstance)!;
+            FieldInfo suppressedField = typeof(MovementSystem).GetField("_keyboardFastTurnMouseSuppressedUntilUtc", PrivateInstance)!;
+            activeField.SetValue(movement, true);
+            directionField.SetValue(movement, Enum.Parse(TurnKeyStateType, "RightD"));
+            pendingField.SetValue(movement, true);
+            pendingSideField.SetValue(movement, Enum.Parse(TurnKeyStateType, "RightD"));
+
+            MethodInfo release = typeof(MovementSystem).GetMethod("ReleaseKeyboardFastTurnMouseForHumanOverride", PrivateInstance)
+                ?? throw new InvalidOperationException("MovementSystem.ReleaseKeyboardFastTurnMouseForHumanOverride was not found.");
+            DateTime before = DateTime.UtcNow;
+            release.Invoke(movement, new object[] { "test human override" });
+
+            Assert.False((bool)activeField.GetValue(movement)!);
+            Assert.Equal("None", directionField.GetValue(movement)!.ToString());
+            // A human override must never schedule a later cursor reposition.
+            Assert.False((bool)pendingField.GetValue(movement)!);
+            Assert.Equal("None", pendingSideField.GetValue(movement)!.ToString());
+            DateTime suppressedUntil = (DateTime)suppressedField.GetValue(movement)!;
+            Assert.True(suppressedUntil > before, "Human override must set the suppression deadline.");
         }
 
         [Fact]
