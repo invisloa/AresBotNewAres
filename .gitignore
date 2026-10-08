@@ -33,7 +33,12 @@ bld/
 [Ll]og/
 [Ll]ogs/
 LootSSFolder/
+# Ignore generated screenshots generally, but allow death screenshots to be committed.
 Screenshots/
+!DriverScanTester/Screenshots/
+DriverScanTester/Screenshots/*
+!DriverScanTester/Screenshots/Dead/
+!DriverScanTester/Screenshots/PlayerPixels/
 
 # Visual Studio 2015/2017 cache/options directory
 .vs/
