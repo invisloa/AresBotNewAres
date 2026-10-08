@@ -1354,8 +1354,8 @@ namespace DriverScanTester.Services
                 Rectangle characterExclusionArea = PlayerMarkerPixelDetector.GetLootCharacterExclusionArea(
                     _bitmap.Width, _bitmap.Height,
                     _referenceClientOriginX, _referenceClientOriginY);
-                bool candidateVisible = _playerMarkerPixelDetector.ContainsOtherPlayerMarker(
-                    _bitmap, characterExclusionArea);
+                bool candidateVisible = _playerMarkerPixelDetector.TryFindOtherPlayerMarker(
+                    _bitmap, characterExclusionArea, out PlayerMarkerCandidate candidate);
                 if (!candidateVisible)
                 {
                     _otherPlayerMarkerWasVisible = false;
@@ -1367,7 +1367,10 @@ namespace DriverScanTester.Services
                 _otherPlayerMarkerWasVisible = true;
                 _playerMarkerConfirmationPending = true;
                 _playerMarkerCandidateDetectedAt = DateTime.UtcNow;
-                _log($"[PlayerPixels] Candidate marker detected; will recheck in {BotConstants.Delays.OtherPlayerMarkerConfirmMs} ms before taking action.");
+                _log($"[PlayerPixels] Candidate marker detected: {DescribePlayerMarkerCandidate(candidate)}; " +
+                     $"character-exclusion={FormatRectangle(characterExclusionArea)}; " +
+                     $"HUD exclusions={FormatRectangles(PlayerMarkerPixelDetector.GetHudExclusionAreas(_bitmap.Width, _bitmap.Height))}. " +
+                     $"Will recheck in {BotConstants.Delays.OtherPlayerMarkerConfirmMs} ms.");
             }
             catch (Exception ex)
             {
@@ -1404,8 +1407,8 @@ namespace DriverScanTester.Services
                 Rectangle characterExclusionArea = PlayerMarkerPixelDetector.GetLootCharacterExclusionArea(
                     _bitmap.Width, _bitmap.Height,
                     _referenceClientOriginX, _referenceClientOriginY);
-                bool stillVisible = _playerMarkerPixelDetector.ContainsOtherPlayerMarker(
-                    _bitmap, characterExclusionArea);
+                bool stillVisible = _playerMarkerPixelDetector.TryFindOtherPlayerMarker(
+                    _bitmap, characterExclusionArea, out PlayerMarkerCandidate confirmedCandidate);
                 _playerMarkerConfirmationPending = false;
                 _playerMarkerCandidateDetectedAt = DateTime.MinValue;
                 _otherPlayerMarkerWasVisible = stillVisible;
@@ -1416,8 +1419,15 @@ namespace DriverScanTester.Services
                     return false;
                 }
 
-                _log("[PlayerPixels] Other-player marker confirmed after the delay.");
-                ScreenshotService.SavePlayerMarkerScreenshot(_bitmap, _log);
+                _log($"[PlayerPixels] Other-player marker confirmed after the delay: " +
+                     $"{DescribePlayerMarkerCandidate(confirmedCandidate)}; " +
+                     $"character-exclusion={FormatRectangle(characterExclusionArea)}.");
+                ScreenshotService.SavePlayerMarkerScreenshot(
+                    _bitmap,
+                    confirmedCandidate,
+                    characterExclusionArea,
+                    PlayerMarkerPixelDetector.GetHudExclusionAreas(_bitmap.Width, _bitmap.Height),
+                    _log);
                 OtherPlayerMarkerDetected?.Invoke();
                 return true;
             }
@@ -1428,6 +1438,20 @@ namespace DriverScanTester.Services
                 return false;
             }
         }
+
+        private static string DescribePlayerMarkerCandidate(PlayerMarkerCandidate candidate)
+        {
+            return $"{candidate.Faction} bounds={FormatRectangle(candidate.Bounds)} " +
+                   $"pixels={candidate.PixelCount} fill={candidate.FillRatio:P0} " +
+                   $"aspect={candidate.AspectRatio:F2} " +
+                   $"center=({candidate.Center.X:F1},{candidate.Center.Y:F1})";
+        }
+
+        private static string FormatRectangle(Rectangle rectangle)
+            => $"({rectangle.X},{rectangle.Y},{rectangle.Width}x{rectangle.Height})";
+
+        private static string FormatRectangles(Rectangle[] rectangles)
+            => string.Join(";", Array.ConvertAll(rectangles, FormatRectangle));
 
         private void ResetPlayerMarkerConfirmation()
         {

@@ -256,28 +256,69 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Saves the captured game-client frame when another player's faction marker is
-        /// detected. Uses the same project/executable-relative Screenshots location as
-        /// other bot captures. Never throws.
+        /// Saves an annotated game-client frame when another player's faction marker is
+        /// confirmed. The candidate, local-character exclusion, and ignored HUD regions
+        /// are outlined so false positives can be diagnosed from the saved image.
+        /// Never throws.
         /// </summary>
-        public static void SavePlayerMarkerScreenshot(Bitmap? frame, Action<string> log)
+        internal static void SavePlayerMarkerScreenshot(
+            Bitmap? frame,
+            PlayerMarkerCandidate candidate,
+            Rectangle characterExclusionArea,
+            IReadOnlyList<Rectangle> hudExclusionAreas,
+            Action<string> log)
         {
             if (frame == null)
                 return;
 
             try
             {
+                using Bitmap annotated = frame.Clone(
+                    new Rectangle(0, 0, frame.Width, frame.Height), frame.PixelFormat);
+                using (Graphics graphics = Graphics.FromImage(annotated))
+                using (var candidatePen = new Pen(Color.Red, 3f))
+                using (var characterPen = new Pen(Color.Cyan, 2f))
+                using (var hudPen = new Pen(Color.Orange, 2f))
+                using (var captionFont = new Font(FontFamily.GenericSansSerif, 10f, FontStyle.Bold))
+                {
+                    DrawRectangleOutline(graphics, candidatePen, candidate.Bounds);
+                    DrawRectangleOutline(graphics, characterPen, characterExclusionArea);
+                    foreach (Rectangle hudArea in hudExclusionAreas)
+                        DrawRectangleOutline(graphics, hudPen, hudArea);
+
+                    string caption = $"{candidate.Faction} | px={candidate.PixelCount} | " +
+                                     $"fill={candidate.FillRatio:P0} | aspect={candidate.AspectRatio:F2}";
+                    SizeF captionSize = graphics.MeasureString(caption, captionFont);
+                    using var captionBackground = new SolidBrush(Color.FromArgb(210, 0, 0, 0));
+                    using var captionBrush = new SolidBrush(Color.White);
+                    graphics.FillRectangle(captionBackground, 4, 4, captionSize.Width + 12, captionSize.Height + 8);
+                    graphics.DrawString(caption, captionFont, captionBrush, 10, 8);
+                }
+
                 string screenshotsDir = ResolveScreenshotsDir(PlayerPixelsFolder);
                 Directory.CreateDirectory(screenshotsDir);
                 string fileName = $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss-fff}.png";
                 string filePath = Path.Combine(screenshotsDir, fileName);
-                frame.Save(filePath, ImageFormat.Png);
-                log($"[PlayerPixels] Other-player marker detected; screenshot saved: {filePath}");
+                annotated.Save(filePath, ImageFormat.Png);
+                log($"[PlayerPixels] Annotated confirmed-marker screenshot saved: {filePath}");
             }
             catch (Exception ex)
             {
                 log($"[PlayerPixels] Failed to save player-marker screenshot: {ex.Message}");
             }
+        }
+
+        private static void DrawRectangleOutline(Graphics graphics, Pen pen, Rectangle bounds)
+        {
+            if (bounds.Width <= 0 || bounds.Height <= 0)
+                return;
+
+            graphics.DrawRectangle(
+                pen,
+                bounds.X,
+                bounds.Y,
+                Math.Max(1, bounds.Width - 1),
+                Math.Max(1, bounds.Height - 1));
         }
 
         /// <summary>
@@ -296,6 +337,7 @@ namespace DriverScanTester.Services
                 using (Graphics graphics = Graphics.FromImage(annotated))
                 using (var candidatePen = new Pen(Color.Red, 3f))
                 using (var exclusionPen = new Pen(Color.Cyan, 2f))
+                using (var hudPen = new Pen(Color.Orange, 2f))
                 {
                     graphics.DrawRectangle(
                         candidatePen,
@@ -311,6 +353,18 @@ namespace DriverScanTester.Services
                             characterExclusionArea.Y,
                             Math.Max(1, characterExclusionArea.Width - 1),
                             Math.Max(1, characterExclusionArea.Height - 1));
+                    }
+                    foreach (Rectangle hudArea in PlayerMarkerPixelDetector.GetHudExclusionAreas(
+                                 frame.Width, frame.Height))
+                    {
+                        if (hudArea.Width <= 0 || hudArea.Height <= 0)
+                            continue;
+                        graphics.DrawRectangle(
+                            hudPen,
+                            hudArea.X,
+                            hudArea.Y,
+                            Math.Max(1, hudArea.Width - 1),
+                            Math.Max(1, hudArea.Height - 1));
                     }
                 }
 
