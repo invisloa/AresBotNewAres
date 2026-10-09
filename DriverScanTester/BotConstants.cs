@@ -34,7 +34,7 @@ namespace DriverScanTester
             public const short OtherPlayerMarkerScanDistance = 16950;
 
             /// <summary>Camera distance used only during SOD/SOP pink-pixel loot scans.</summary>
-            public const short SodSopLootScanDistance = 16950;
+            public const short SodSopLootScanDistance = 17000;
 
             /// <summary>Default camera vertical lock value, matching the sell-view vertical (16310).</summary>
             public const short DefaultVerticalLock = 16310;
@@ -891,6 +891,9 @@ namespace DriverScanTester
             /// </summary>
             public const int LootPostKillDelayMs = 200;
 
+            /// <summary>Wait after setting the SOD/SOP scan camera distance before capturing the frame.</summary>
+            public const int SodSopCameraSettleMs = 50;
+
             /// <summary>Poll interval (ms) between player-weight reads after a
             /// weight-relief potion was drunk for a SOD/SOP scroll.</summary>
             public const int WeightReliefPollMs = 100;
@@ -1182,6 +1185,16 @@ namespace DriverScanTester
             /// <summary>How long a post-kill pink-scan request stays valid (ms). Requests older
             /// than this are dropped instead of starting a stale scan after a pause.</summary>
             public const int PinkScanRequestTtlMs = 5000;
+
+            /// <summary>Delay (ms) after a kill before the background SOD/SOP rescan runs. The bot
+            /// keeps moving and fighting while it waits and while the rescan runs — the rescan never
+            /// holds movement or combat.</summary>
+            public const int PinkRescanDelayMs = 1000;
+
+            /// <summary>How long (ms) a pending background rescan stays valid after its due time.
+            /// An older rescan is dropped (e.g. after a long focus loss) instead of sweeping a screen
+            /// the bot has long since left.</summary>
+            public const int PinkRescanExpireMs = 5000;
 
             /// <summary>Weight (lb) of one SOD/SOP scroll. When the player is at the weight
             /// limit a confirmed pink pickup would fail, so the pink scan drinks a potion

@@ -1492,17 +1492,17 @@ namespace DriverScanTester.Services
                     cameraDistanceToApply = GetCombatRetargetCameraDistance();
                 }
 
-                // While the loot system is mid-cycle (MoveAndAttackAndLoot, or the
-                // MoveAndAttack SOD/SOP pink scan), do NOT override the camera — the
-                // pixel scan needs its zoomed view (LootScanDistance) to detect ground
-                // items. Without this the movement reverts the camera every tick and the
-                // live scan misses everything that the "Test Loot" scan (which runs
-                // without movement) detects. The movement restores its own camera
-                // distance once the loot cycle finishes.
+                // While the loot system is mid-cycle (MoveAndAttackAndLoot, the MoveAndAttack
+                // SOD/SOP pink scan, or the background SOD/SOP rescan that runs while the bot
+                // keeps walking), do NOT override the camera — the pixel scan needs its zoomed
+                // view (LootScanDistance) to detect ground items. Without this the movement
+                // reverts the camera every tick and the live scan misses everything that the
+                // "Test Loot" scan (which runs without movement) detects. The movement restores
+                // its own camera distance once the loot cycle finishes.
                 bool lootScanning = (currentMode == BotMode.MoveAndAttackAndLoot ||
                                      currentMode == BotMode.MoveAndAttack) &&
                                     LootSystemRef != null &&
-                                    LootSystemRef.IsLootCycleActive;
+                                    (LootSystemRef.IsLootCycleActive || LootSystemRef.IsPinkRescanActive);
                 if (!lootScanning)
                 {
                     _memoryService.SetCameraDistance(cameraDistanceToApply);
@@ -2759,6 +2759,7 @@ namespace DriverScanTester.Services
                     return false;
 
                 return loot.IsPinkScanPendingOrActive ||
+                       loot.IsPinkRescanActive ||
                        loot.IsLootCycleActive ||
                        loot.IsCollecting ||
                        loot.IsLootingActive;

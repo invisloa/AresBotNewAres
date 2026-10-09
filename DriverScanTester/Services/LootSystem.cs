@@ -85,6 +85,13 @@ namespace DriverScanTester.Services
         private volatile bool _pinkScanRequested;
         private DateTime _pinkScanRequestedAt = DateTime.MinValue;
 
+        /// <summary>Time the pending background SOD/SOP rescan runs (MinValue = none). Armed at each
+        /// kill; it runs while movement and combat continue (see <see cref="RunPinkRescan"/>).</summary>
+        private DateTime _pinkRescanAt = DateTime.MinValue;
+
+        /// <summary>True while a background rescan pass owns the camera and cursor.</summary>
+        private volatile bool _pinkRescanActive;
+
         /// <summary>
         /// Time since the last item was collected. Used by the movement system to extend
         /// its post-combat loot wait while the loot system is still making progress
@@ -179,6 +186,13 @@ namespace DriverScanTester.Services
         /// </summary>
         public bool IsPinkScanPendingOrActive =>
             _pinkScanRequested || _lootState == LootMachineState.PinkScan;
+
+        /// <summary>
+        /// True while the background SOD/SOP rescan pass runs. Unlike
+        /// <see cref="IsPinkScanPendingOrActive"/> this does NOT hold movement or combat:
+        /// movement only yields the camera and the cursor to the pass.
+        /// </summary>
+        public bool IsPinkRescanActive => _pinkRescanActive;
 
         /// <summary>
         /// True while the loot machine is in its post-kill looting phase (loot priority
@@ -536,6 +550,7 @@ namespace DriverScanTester.Services
             if (_memoryService.GetIsInCity())
             {
                 ResetPlayerMarkerConfirmation();
+                _pinkRescanAt = DateTime.MinValue;
                 StopScanSpacebarSpam();
                 if (_lootState != LootMachineState.Idle)
                 {
@@ -620,6 +635,34 @@ namespace DriverScanTester.Services
                 _lootState = LootMachineState.PinkScan;
                 _nextActionTime = DateTime.UtcNow.AddMilliseconds(BotConstants.Delays.LootPostKillDelayMs);
                 _consecutiveEmptySpacePresses = 0;
+
+                // Arm the background rescan for this kill. A kill that arrives while an
+                // earlier rescan is still pending re-arms it, so the rescan always sweeps the
+                // latest drops instead of firing before them.
+                _pinkRescanAt = DateTime.UtcNow.AddMilliseconds(BotConstants.Loot.PinkRescanDelayMs);
+            }
+
+            // ── Background SOD/SOP rescan (MoveAndAttack) ──
+            // Runs PinkRescanDelayMs after the kill while movement and combat keep going:
+            // no hold is set here, the pass only takes the camera and the cursor
+            // (IsPinkRescanActive). It is placed before the selected-mob pause below, so a
+            // fight that starts during the wait never cancels it.
+            PinkRescanAction rescan = DecidePinkRescan(
+                PinkLootOnlyMode,
+                _lootState == LootMachineState.PinkScan,
+                _pinkRescanAt,
+                DateTime.UtcNow,
+                TimeSpan.FromMilliseconds(BotConstants.Loot.PinkRescanExpireMs));
+            if (rescan == PinkRescanAction.Expire)
+            {
+                _log("[Loot] SOD/SOP rescan dropped (expired or mode changed).");
+                _pinkRescanAt = DateTime.MinValue;
+            }
+            else if (rescan == PinkRescanAction.Run)
+            {
+                RunPinkRescan();
+                await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                return;
             }
 
             // ── A selected mob pauses loot ──
@@ -810,12 +853,15 @@ namespace DriverScanTester.Services
                     // ONE region (big), PINK pixels only. Pink drops found are
                     // collected and the pass repeats until a full pass finds none left.
                     // No small-region pass, no white-blob scan, no spacebar area-loot.
-                    _memoryService.SetCameraDistance(BotConstants.Camera.SodSopLootScanDistance);
-
                     if (DateTime.UtcNow < _nextActionTime)
                     {
                         break; // post-kill delay — let the drops appear first
                     }
+
+                    // Apply the scan zoom only when the post-kill wait is over, then
+                    // allow the game to render at that distance before capturing pixels.
+                    _memoryService.SetCameraDistance(BotConstants.Camera.SodSopLootScanDistance);
+                    await Task.Delay(BotConstants.Delays.SodSopCameraSettleMs, token);
 
                     if (PinkPixelScan())
                     {
@@ -936,8 +982,63 @@ namespace DriverScanTester.Services
         /// </summary>
         private bool PinkPixelScan()
         {
-            _memoryService.SetCameraDistance(BotConstants.Camera.SodSopLootScanDistance);
             return ScanRegion(bigX, bigY, "BigScan-Pink", pinkOnly: true);
+        }
+
+        /// <summary>What the loot loop should do with a pending background rescan this tick.</summary>
+        internal enum PinkRescanAction { None, Wait, Run, Expire }
+
+        /// <summary>
+        /// Pure decision for the background SOD/SOP rescan. <c>None</c>: nothing pending.
+        /// <c>Wait</c>: pending but not due yet, or a post-kill pass is still running (it owns
+        /// the loop). <c>Run</c>: due and inside its validity window. <c>Expire</c>: outside
+        /// PinkLootOnly mode, or more than <paramref name="expireAfter"/> past due.
+        /// </summary>
+        internal static PinkRescanAction DecidePinkRescan(
+            bool pinkLootOnly, bool pinkPassActive, DateTime dueAt, DateTime now, TimeSpan expireAfter)
+        {
+            if (dueAt == DateTime.MinValue)
+                return PinkRescanAction.None;
+            if (!pinkLootOnly)
+                return PinkRescanAction.Expire;
+            if (pinkPassActive || now < dueAt)
+                return PinkRescanAction.Wait;
+            if (now - dueAt > expireAfter)
+                return PinkRescanAction.Expire;
+            return PinkRescanAction.Run;
+        }
+
+        /// <summary>
+        /// One background SOD/SOP rescan pass, <see cref="BotConstants.Loot.PinkRescanDelayMs"/>
+        /// after a kill. Unlike the post-kill check it does not hold movement or combat: it
+        /// only takes the camera and the cursor (<see cref="IsPinkRescanActive"/> makes movement
+        /// yield those). A pass that collects something re-arms itself shortly, so remaining
+        /// drops are drained; an empty pass ends the rescan.
+        /// </summary>
+        private void RunPinkRescan()
+        {
+            _log("[Loot] SOD/SOP background rescan — bot keeps moving and fighting.");
+            _pinkRescanActive = true;
+            try
+            {
+                _memoryService.SetCameraDistance(BotConstants.Camera.SodSopLootScanDistance);
+                Thread.Sleep(BotConstants.Delays.SodSopCameraSettleMs);
+
+                if (PinkPixelScan())
+                {
+                    _lastItemCollectedAt = DateTime.UtcNow;
+                    _pinkRescanAt = DateTime.UtcNow.AddMilliseconds(50);
+                }
+                else
+                {
+                    _log($"[Loot] SOD/SOP background rescan finished — nothing more collected{KillElapsed()}.");
+                    _pinkRescanAt = DateTime.MinValue;
+                }
+            }
+            finally
+            {
+                _pinkRescanActive = false;
+            }
         }
 
         // ── SOD/SOP hot-pink pixel classifier thresholds ──
