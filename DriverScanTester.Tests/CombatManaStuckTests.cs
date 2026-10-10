@@ -186,6 +186,23 @@ namespace DriverScanTester.Tests
             Assert.Equal(CombatAction.TabAfterKill, Evaluate(handler, memory));
         }
 
+        /// <summary>A kill signal is immediate even when the ordinary TAB cooldown has not elapsed.</summary>
+        [Fact]
+        public void TargetVanishedDuringTabCooldown_StillReportsKillImmediately()
+        {
+            var stub = new MemoryStub { Mana = 1400, Action = 39 };
+            var handler = new CombatHandler(NoLog);
+            GameMemoryService memory = stub.Create(NoLog);
+
+            Assert.Equal(CombatAction.Attack, Evaluate(handler, memory));
+            typeof(CombatHandler).GetField("_lastMoveModeTabTime", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .SetValue(handler, DateTime.Now);
+
+            stub.TargetId = 0;
+
+            Assert.Equal(CombatAction.TabAfterKill, Evaluate(handler, memory));
+        }
+
         /// <summary>
         /// When the target vanishes right after being attacked (mob died, target cleared)
         /// the first TAB cycle must carry the kill signal; later cycles are plain TABs.

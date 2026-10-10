@@ -109,11 +109,23 @@
             </GroupBox>
 
             <GroupBox Header="Bot" Grid.Column="1" Margin="5,0,0,0" MinWidth="265">
-                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button Content="Bot Control Panel" Command="{Binding OpenBotWindowCommand}"
-                            Style="{StaticResource PrimaryActionButtonStyle}"/>
-                    <Button Content="Path / Profile Editor" Command="{Binding OpenPathEditorCommand}"
-                            Style="{StaticResource SecondaryActionButtonStyle}"/>
+                <StackPanel VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal">
+                        <Button Content="Bot Control Panel" Command="{Binding OpenBotWindowCommand}"
+                                Style="{StaticResource PrimaryActionButtonStyle}"/>
+                        <Button Content="Path / Profile Editor" Command="{Binding OpenPathEditorCommand}"
+                                Style="{StaticResource SecondaryActionButtonStyle}"/>
+                    </StackPanel>
+                    <StackPanel Margin="4,5,0,0">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="HP potion when HP &lt; " VerticalAlignment="Center"/>
+                            <TextBlock Text="{Binding HpPotionUseThresholdText}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="Mana potion when mana &lt; " VerticalAlignment="Center"/>
+                            <TextBlock Text="{Binding ManaPotionUseThresholdText}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </StackPanel>
                 </StackPanel>
             </GroupBox>
         </Grid>

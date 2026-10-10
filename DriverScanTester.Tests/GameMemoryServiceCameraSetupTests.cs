@@ -29,15 +29,15 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void TrySetSodSopLootScanViewUses17000Distance()
+        public void TrySetSodSopLootScanViewUses17050Distance()
         {
             var memory = new MemoryFixture();
             memory.Set(ModuleBase + BotConstants.MemoryOffsets.CameraPtr, BitConverter.GetBytes(CameraBase));
             GameMemoryService service = memory.CreateService();
 
-            Assert.Equal((short)17000, BotConstants.Camera.SodSopLootScanDistance);
+            Assert.Equal((short)17050, BotConstants.Camera.SodSopLootScanDistance);
             Assert.True(service.TrySetCameraDistance(BotConstants.Camera.SodSopLootScanDistance));
-            Assert.Equal((short)17000,
+            Assert.Equal((short)17050,
                 memory.ReadShort(CameraBase + BotConstants.MemoryOffsets.CameraDistance));
         }
 

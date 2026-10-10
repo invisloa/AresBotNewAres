@@ -19,9 +19,8 @@ namespace DriverScanTester.Services
         TabTarget,
         /// <summary>
         /// A fight just ended — the previously selected mob died (or went stuck/idle for
-        /// the idle timeout) and TAB should cycle to the next target. Distinct from
-        /// <see cref="TabTarget"/> so MoveAndAttack SOD/SOP mode can run its post-kill
-        /// pink scan before selecting the next target.
+        /// the idle timeout). Distinct from <see cref="TabTarget"/> so MoveAndAttack
+        /// SOD/SOP mode can check for a nearby mob before starting its pink loot scan.
         /// </summary>
         TabAfterKill,
         /// <summary>Press 3 to use attack skill (and stop moving).</summary>
@@ -297,10 +296,8 @@ namespace DriverScanTester.Services
             {
                 // ── Not attacking — cycle target periodically ──
                 // If a target was being attacked and vanished since the previous
-                // evaluation, this TAB follows a kill: report TabAfterKill so
-                // MoveAndAttack SOD/SOP mode can run its post-kill pink scan. The
-                // first TAB after the loss carries the flag; later cycles are plain
-                // TabTarget.
+                // evaluation, report TabAfterKill so MoveAndAttack SOD/SOP mode can
+                // perform its close-camera target check before scanning for loot.
                 bool killedSinceLastEvaluation = _wasAttacking;
                 _wasAttacking = false;
                 _combatIdleStartTime = DateTime.MinValue;
@@ -317,7 +314,11 @@ namespace DriverScanTester.Services
                 // mob gets selected, and the post-combat loot pause in MovementSystem
                 // gives the loot scan its window after a kill. Suppressing TAB here
                 // entirely would leave the bot with no way to ever acquire a target.
-                if ((DateTime.Now - _lastMoveModeTabTime).TotalSeconds >= MOVE_MODE_TAB_INTERVAL_SECONDS)
+                // A kill must be handled immediately, even when the normal target-cycle
+                // cooldown has not elapsed. Otherwise the kill signal is lost on this
+                // no-target tick and the later TAB cannot run the post-kill close check.
+                if (killedSinceLastEvaluation ||
+                    (DateTime.Now - _lastMoveModeTabTime).TotalSeconds >= MOVE_MODE_TAB_INTERVAL_SECONDS)
                 {
                     _log("[Key] TAB (target cycle — move mode)");
                     _lastMoveModeTabTime = DateTime.Now;
@@ -428,6 +429,12 @@ namespace DriverScanTester.Services
         {
             if (timestamp != DateTime.MinValue)
                 timestamp = timestamp.Add(shift);
+        }
+
+        /// <summary>Records a TAB pressed by MovementSystem outside normal combat evaluation.</summary>
+        public void NotifyTargetCyclePressed()
+        {
+            _lastMoveModeTabTime = DateTime.Now;
         }
 
         /// <summary>

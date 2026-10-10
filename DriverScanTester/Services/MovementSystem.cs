@@ -281,10 +281,9 @@ namespace DriverScanTester.Services
         private DateTime _lootWaitDeadline = DateTime.MinValue;
 
         // ── Post-kill SOD/SOP pink-scan hold (MoveAndAttack) ──
-        // After each kill in MoveAndAttack mode the loot system runs one pink big-region
-        // scan for SOD/SOP drops. Combat is suspended until that whole scan cycle
-        // finishes (requested → repeating passes → no pink left), so the drop check is
-        // never skipped by TAB selecting the next mob or by walking away.
+        // After a kill, first TAB at the closest camera distance. A nearby mob takes
+        // priority; only when that check finds none does the loot system run its pink
+        // scan, holding combat/movement until the drop check finishes.
         /// <summary>True while the pink-scan hold is active (prevents log spam).</summary>
         private bool _pinkScanHoldActive = false;
         /// <summary>When the current pink-scan hold started (UtcNow) — safety timeout.</summary>
@@ -945,6 +944,9 @@ namespace DriverScanTester.Services
         private const short CombatRetargetMidCameraDistance = BotConstants.Camera.CombatRetargetMidDistance;
         private CombatRetargetCameraStage _combatRetargetCameraStage = CombatRetargetCameraStage.None;
         private bool _combatRetargetAwaitingSelection = false;
+        private bool _postKillCloseTargetCheckPending;
+        private int _postKillTargetIdBeforeTab;
+        private bool _postPinkScanTargetCheckPending;
 
         public MovementSystem(
             GameMemoryService memoryService,
@@ -1189,6 +1191,7 @@ namespace DriverScanTester.Services
                 _pinkScanHoldActive = false;
                 _pinkScanHoldSince = DateTime.MinValue;
                 _pinkScanHoldTimedOut = false;
+                _postPinkScanTargetCheckPending = false;
                 if (LootSystemRef != null && (LootSystemRef.IsCollecting || LootSystemRef.IsLootingActive))
                 {
                     if (_tickCount % _stateLogInterval == 0)
@@ -1226,11 +1229,9 @@ namespace DriverScanTester.Services
             // the else branch when the loot phase actually ends.
 
             // ── Post-kill SOD/SOP pink-scan hold (MoveAndAttack) ──
-            // After each kill in MoveAndAttack mode the loot system runs one pink
-            // big-region scan for SOD/SOP drops and repeats it until no pink pixels are
-            // left. While that request/scan is pending, combat (TAB/attack) and waypoint
-            // movement are suspended so the drop check always finishes — the loot system
-            // keeps scanning even if TAB already selected the next mob.
+            // The close-camera TAB check runs first. If it found no nearby mob, the
+            // loot system scans for SOD/SOP drops and repeats until no pink pixels are
+            // left; combat and waypoint movement stay suspended for that whole scan.
             if (LootSystemRef != null && LootSystemRef.IsPinkScanPendingOrActive)
             {
                 if (_pinkScanHoldSince == DateTime.MinValue)
@@ -1256,6 +1257,8 @@ namespace DriverScanTester.Services
             }
             else
             {
+                if (_pinkScanHoldActive)
+                    _postPinkScanTargetCheckPending = true;
                 _pinkScanHoldSince = DateTime.MinValue;
                 _pinkScanHoldTimedOut = false;
                 _pinkScanHoldActive = false;
@@ -1493,12 +1496,9 @@ namespace DriverScanTester.Services
                 }
 
                 // While the loot system is mid-cycle (MoveAndAttackAndLoot, the MoveAndAttack
-                // SOD/SOP pink scan, or the background SOD/SOP rescan that runs while the bot
-                // keeps walking), do NOT override the camera — the pixel scan needs its zoomed
-                // view (LootScanDistance) to detect ground items. Without this the movement
-                // reverts the camera every tick and the live scan misses everything that the
-                // "Test Loot" scan (which runs without movement) detects. The movement restores
-                // its own camera distance once the loot cycle finishes.
+                // SOD/SOP pink scan, or the delayed SOD/SOP rescan), do NOT override the camera:
+                // the pixel scan needs its zoomed view to detect drops. Camera distance is
+                // restored before target cycling resumes.
                 bool lootScanning = (currentMode == BotMode.MoveAndAttackAndLoot ||
                                      currentMode == BotMode.MoveAndAttack) &&
                                     LootSystemRef != null &&
@@ -1509,14 +1509,17 @@ namespace DriverScanTester.Services
                     _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
                 }
 
-                if (canUseCombatRetargetSearch && _combatRetargetCameraStage != CombatRetargetCameraStage.None)
+                if (canUseCombatRetargetSearch && _combatRetargetCameraStage != CombatRetargetCameraStage.None &&
+                    LootSystemRef?.IsPinkRescanActive != true)
                 {
-                    if (targetId > 0)
+                    if (GameMemoryService.IsMobTargetId(targetId) &&
+                        (!_postKillCloseTargetCheckPending || targetId != _postKillTargetIdBeforeTab))
                     {
                         _log($"[CombatRetarget] Mob selected at camera {cameraDistanceToApply}. Resuming normal combat.");
                         ClearCombatRetargetSearch();
                     }
-                    else if (mobSelected)
+                    else if (mobSelected &&
+                             (!_postKillCloseTargetCheckPending || targetId != _postKillTargetIdBeforeTab))
                     {
                         _log($"[CombatRetarget] Mob selected at camera {cameraDistanceToApply}. Starting attack.");
                         ClearCombatRetargetSearch();
@@ -1534,10 +1537,19 @@ namespace DriverScanTester.Services
                     {
                         ReleaseSkillThree();
                         _log($"[CombatRetarget] Camera -> {cameraDistanceToApply}, TAB");
-                        await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
-                        GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
+                        if (!await PressTargetTabAfterCameraSettle(token))
+                            return;
                         _combatRetargetAwaitingSelection = true;
                         await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
+                        return;
+                    }
+                    else if (_postKillCloseTargetCheckPending)
+                    {
+                        _log($"[CombatRetarget] No close mob selected at {CombatRetargetVeryLowCameraDistance} — starting SOD/SOP loot scan.");
+                        ReleaseSkillThree();
+                        ClearCombatRetargetSearch();
+                        LootSystemRef?.RequestPinkScan();
+                        await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
                         return;
                     }
                     else if (_combatRetargetCameraStage == CombatRetargetCameraStage.VeryLowSearch)
@@ -1550,8 +1562,8 @@ namespace DriverScanTester.Services
                         _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
                         ReleaseSkillThree();
                         _log($"[CombatRetarget] Camera -> {CombatRetargetLowCameraDistance}, TAB");
-                        await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
-                        GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
+                        if (!await PressTargetTabAfterCameraSettle(token))
+                            return;
                         _combatRetargetAwaitingSelection = true;
                         await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
                         return;
@@ -1566,8 +1578,8 @@ namespace DriverScanTester.Services
                         _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
                         ReleaseSkillThree();
                         _log($"[CombatRetarget] Camera -> {CombatRetargetMidCameraDistance}, TAB");
-                        await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
-                        GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
+                        if (!await PressTargetTabAfterCameraSettle(token))
+                            return;
                         _combatRetargetAwaitingSelection = true;
                         await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
                         return;
@@ -1587,6 +1599,52 @@ namespace DriverScanTester.Services
 
             // ── Combat mode handling ──
         RUN_COMBAT_ONLY:
+            // The delayed SOD/SOP sweep owns the zoomed camera and cursor. Let any
+            // current attack finish, but do not run target cycling while the camera is
+            // at loot distance; resume watchdog timing after the sweep is done.
+            if (LootSystemRef?.IsPinkRescanActive == true)
+            {
+                _combatHandler.SuspendForExternalMovement();
+                await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                return;
+            }
+            _combatHandler.ResumeAfterExternalMovement();
+
+            // After the post-kill pink check, restore the waypoint's normal camera
+            // distance before looking for another target. A delayed rescan can postpone
+            // this TAB, but it must never happen at the loot-scan zoom.
+            if (currentMode != BotMode.MoveAndAttack)
+                _postPinkScanTargetCheckPending = false;
+
+            if (_postPinkScanTargetCheckPending && currentMode == BotMode.MoveAndAttack)
+            {
+                _postPinkScanTargetCheckPending = false;
+                short normalCameraDistance = _finalStandbyActive
+                    ? _finalStandbyWaypoint.CameraDistanceLock
+                    : _waypoints.Count > 0
+                        ? _waypoints.Peek().CameraDistanceLock
+                        : Waypoint.DefaultCameraDistanceLock;
+                _memoryService.SetCameraDistance(normalCameraDistance);
+                _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+
+                if (!mobSelected)
+                {
+                    _log($"[CombatRetarget] Pink scan finished — camera restored to {normalCameraDistance}; checking for mobs with TAB.");
+                    ReleaseSkillThree();
+                    await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
+                    if (LootSystemRef?.IsPinkRescanActive == true)
+                    {
+                        _postPinkScanTargetCheckPending = true;
+                        _combatHandler.SuspendForExternalMovement();
+                        return;
+                    }
+                    GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
+                    _combatHandler.NotifyTargetCyclePressed();
+                    await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
+                    return;
+                }
+            }
+
             // Single authoritative combat-context read for both the active-grouping
             // cancellation and the observation gate below. It is the same expression
             // grouping has always used to decide whether a real combat encounter exists.
@@ -1614,7 +1672,8 @@ namespace DriverScanTester.Services
                 _log($"[RouteResync] pending set: reason={combatAction}");
             }
 
-            if (combatAction != CombatAction.Unstuck && combatAction != CombatAction.RepositionAndRetry &&
+            if (combatAction != CombatAction.TabAfterKill &&
+                combatAction != CombatAction.Unstuck && combatAction != CombatAction.RepositionAndRetry &&
                 TryObserveOrStartMobGrouping(
                     currentMode,
                     hasCombatContext,
@@ -1628,10 +1687,26 @@ namespace DriverScanTester.Services
             {
                 case CombatAction.TabAfterKill:
                     _resumeCombatSkillAfterGrouping = false;
-                    // A fight just ended (mob died / went idle). In MoveAndAttack SOD/SOP
-                    // mode request the post-kill pink big-region scan BEFORE TAB selects
-                    // the next target; the pink-scan hold above then suspends combat
-                    // until the SOD/SOP drop check finishes.
+                    if (currentMode == BotMode.MoveAndAttack && LootSystemRef?.PinkLootOnlyMode == true)
+                    {
+                        // First cycle TAB at the closest retarget camera. Keep fighting if
+                        // that finds a nearby mob; only request the SOD/SOP scan when the
+                        // close-range check finds nothing.
+                        LootSystemRef.SchedulePinkRescanAfterKill();
+                        _postKillCloseTargetCheckPending = true;
+                        _postKillTargetIdBeforeTab = targetId;
+                        StartCombatRetargetSearch();
+                        _memoryService.SetCameraDistance(CombatRetargetVeryLowCameraDistance);
+                        _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+                        ReleaseSkillThree();
+                        _log($"[CombatRetarget] Mob killed — checking for nearby mobs at {CombatRetargetVeryLowCameraDistance} before SOD/SOP loot scan.");
+                        if (!await PressTargetTabAfterCameraSettle(token))
+                            return;
+                        _combatRetargetAwaitingSelection = true;
+                        await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
+                        return;
+                    }
+
                     LootSystemRef?.RequestPinkScan();
                     goto case CombatAction.TabTarget;
 
@@ -1647,8 +1722,8 @@ namespace DriverScanTester.Services
                         _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
                         ReleaseSkillThree();
                         _log($"[CombatRetarget] Camera -> {CombatRetargetVeryLowCameraDistance}, TAB");
-                        await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
-                        GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
+                        if (!await PressTargetTabAfterCameraSettle(token))
+                            return;
                         _combatRetargetAwaitingSelection = true;
                         await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
                         return;
@@ -1656,7 +1731,14 @@ namespace DriverScanTester.Services
 
                     _log("[Key] TAB (target cycle)");
                     ReleaseSkillThree();
+                    if (LootSystemRef?.IsPinkRescanActive == true)
+                    {
+                        _postPinkScanTargetCheckPending = currentMode == BotMode.MoveAndAttack;
+                        _combatHandler.SuspendForExternalMovement();
+                        return;
+                    }
                     GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
+                    _combatHandler.NotifyTargetCyclePressed();
                     await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
                     return;
 
@@ -3756,7 +3838,13 @@ namespace DriverScanTester.Services
             _combatHandler.ResetState();
 
             _log("[Combat] Retrying attack — TAB, then attack if a target is selected.");
+            if (LootSystemRef?.IsPinkRescanActive == true)
+            {
+                _combatHandler.SuspendForExternalMovement();
+                return;
+            }
             GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
+            _combatHandler.NotifyTargetCyclePressed();
             await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
         }
 
@@ -3952,10 +4040,26 @@ namespace DriverScanTester.Services
             _combatRetargetAwaitingSelection = false;
         }
 
+        private async Task<bool> PressTargetTabAfterCameraSettle(CancellationToken token)
+        {
+            await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
+            if (LootSystemRef?.IsPinkRescanActive == true)
+            {
+                _combatHandler.SuspendForExternalMovement();
+                return false;
+            }
+
+            GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
+            _combatHandler.NotifyTargetCyclePressed();
+            return true;
+        }
+
         private void ClearCombatRetargetSearch()
         {
             _combatRetargetCameraStage = CombatRetargetCameraStage.None;
             _combatRetargetAwaitingSelection = false;
+            _postKillCloseTargetCheckPending = false;
+            _postKillTargetIdBeforeTab = 0;
         }
 
         private short GetCombatRetargetCameraDistance()

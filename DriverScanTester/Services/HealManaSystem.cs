@@ -34,8 +34,8 @@ namespace DriverScanTester.Services
         private const byte SCAN_CODE_2 = BotConstants.HealMana.ScanCode2; // Scan code for '2'
         private const int KEYEVENTF_KEYUP = BotConstants.Keyboard.KeyEventKeyUp;
 
-        // Shared fallback/manual thresholds. The Bot Window initializes its manual
-        // values from player max HP/mana when it opens; workflow instances set profile values.
+        // Shared fallback/manual thresholds. MainViewModel initializes the manual
+        // values from player max HP/mana on attach; workflow instances set profile values.
         public static short Threshold2 = BotConstants.HealMana.MpThreshold;        // Threshold for key '2' (MP?)
         public static short Threshold1 = BotConstants.HealMana.HpThreshold;       // Threshold for key '1' (HP?)
 
@@ -72,8 +72,8 @@ namespace DriverScanTester.Services
             _usePlayerBasedThresholds = usePlayerBasedThresholds;
 
             // Player-based initialization remains available to callers that opt in.
-            // The manual Bot Window initializes its thresholds when opened and creates
-            // this system with player-based initialization disabled.
+            // MainViewModel initializes the manual thresholds on attach and creates this
+            // system with player-based initialization disabled.
             if (_usePlayerBasedThresholds && !TryLoadPlayerThresholds())
             {
                 _log("[HealMana] Player max HP/mana not readable yet — will retry while the bot runs.");

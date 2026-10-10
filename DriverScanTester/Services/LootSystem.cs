@@ -77,9 +77,11 @@ namespace DriverScanTester.Services
         /// <see cref="Bitmap.GetPixel"/> call per pixel.
         /// </summary>
         private byte[] _scanBuffer = Array.Empty<byte>();
+        private const int OtherPlayerMarkerRequiredChecks = 3;
         private readonly PlayerMarkerPixelDetector _playerMarkerPixelDetector = new();
         private bool _otherPlayerMarkerWasVisible;
         private bool _playerMarkerConfirmationPending;
+        private int _playerMarkerChecksConfirmed;
         private DateTime _playerMarkerCandidateDetectedAt = DateTime.MinValue;
         private bool _playerMarkerScanEnabled;
         private volatile bool _pinkScanRequested;
@@ -163,11 +165,10 @@ namespace DriverScanTester.Services
         public Action? OtherPlayerMarkerDetected { get; set; }
 
         /// <summary>
-        /// Requests an immediate post-kill SOD/SOP pink scan. Called by the movement
-        /// system the moment a fight ends (CombatHandler.TabAfterKill), so the scan is
-        /// not missed if TAB re-selects a mob before the loot task observes the
-        /// selected→not-selected transition. No-op unless <see cref="PinkLootOnlyMode"/>
-        /// is enabled. The request is consumed by <see cref="Update"/>.
+        /// Requests the immediate post-kill SOD/SOP pink scan after MovementSystem has
+        /// tried a close-camera TAB and found no nearby mob. No-op unless
+        /// <see cref="PinkLootOnlyMode"/> is enabled. The request is consumed by
+        /// <see cref="Update"/>.
         /// </summary>
         public void RequestPinkScan()
         {
@@ -176,7 +177,21 @@ namespace DriverScanTester.Services
 
             _pinkScanRequestedAt = DateTime.UtcNow;
             _pinkScanRequested = true;
-            _log("[Loot] SOD/SOP pink scan requested (post-kill).");
+            _log("[Loot] SOD/SOP pink scan requested (no close mob found after kill).");
+        }
+
+        /// <summary>
+        /// Arms the delayed background SOD/SOP rescan for a kill without starting the
+        /// immediate scan. Movement first checks for a nearby mob and requests the
+        /// immediate scan only when that close-range TAB finds none.
+        /// </summary>
+        public void SchedulePinkRescanAfterKill()
+        {
+            if (!PinkLootOnlyMode)
+                return;
+
+            _lastKillAt = DateTime.UtcNow;
+            _pinkRescanAt = _lastKillAt.AddMilliseconds(BotConstants.Loot.PinkRescanDelayMs);
         }
 
         /// <summary>
@@ -188,9 +203,9 @@ namespace DriverScanTester.Services
             _pinkScanRequested || _lootState == LootMachineState.PinkScan;
 
         /// <summary>
-        /// True while the background SOD/SOP rescan pass runs. Unlike
-        /// <see cref="IsPinkScanPendingOrActive"/> this does NOT hold movement or combat:
-        /// movement only yields the camera and the cursor to the pass.
+        /// True while the background SOD/SOP rescan pass runs. Movement yields the camera
+        /// and cursor and suspends target-cycle evaluation for the pass, so TAB is never
+        /// sent while the scan zoom is active.
         /// </summary>
         public bool IsPinkRescanActive => _pinkRescanActive;
 
@@ -573,9 +588,9 @@ namespace DriverScanTester.Services
             bool isMobSelected = _memoryService.IsMobSelected();
 
             // ── Post-kill SOD/SOP pink-scan request (MoveAndAttack) ──
-            // The movement system requests this the moment a fight ends. Consume the
-            // flag on every tick (even when it is dropped) so a stale request can never
-            // hold the movement system forever.
+            // Movement requests this only after its close-camera TAB finds no nearby mob.
+            // Consume the flag on every tick (even when dropped) so a stale request can
+            // never hold the movement system forever.
             bool pinkScanRequested = _pinkScanRequested;
             if (pinkScanRequested)
             {
@@ -593,19 +608,19 @@ namespace DriverScanTester.Services
                 }
             }
 
-            // Mob just died (was selected → no longer selected) → normally TAB first to
-            // check if there are more mobs to kill before starting loot. In loot-priority
-            // mode the TAB check is skipped — looting comes first: wait ~200ms so the
-            // drops appear, then loot everything before the next target is even selected.
-            // In SOD/SOP pink-only mode the request above (or this transition) starts a
-            // pink big-region scan instead of the normal loot cycle.
+            // Mob just died (was selected → no longer selected). Movement owns the
+            // close-camera TAB check in SOD/SOP mode, so the loot loop only arms the
+            // delayed background rescan here; it must not start the immediate pink scan
+            // before Movement has checked for nearby mobs. Loot-priority and normal loot
+            // modes retain their existing behavior.
             if (_wasMobSelectedPrev && !isMobSelected)
             {
                 _wasMobSelectedPrev = false;
                 _lastKillAt = DateTime.UtcNow;
                 if (PinkLootOnlyMode)
                 {
-                    pinkScanRequested = true;
+                    SchedulePinkRescanAfterKill();
+                    _log("[Loot] Mob killed — immediate SOD/SOP scan deferred until the close-camera mob check finishes.");
                 }
                 else if (LootPriorityMode)
                 {
@@ -643,10 +658,9 @@ namespace DriverScanTester.Services
             }
 
             // ── Background SOD/SOP rescan (MoveAndAttack) ──
-            // Runs PinkRescanDelayMs after the kill while movement and combat keep going:
-            // no hold is set here, the pass only takes the camera and the cursor
-            // (IsPinkRescanActive). It is placed before the selected-mob pause below, so a
-            // fight that starts during the wait never cancels it.
+            // Runs PinkRescanDelayMs after the kill. Movement yields camera ownership and
+            // suspends target-cycle evaluation while the pass uses the camera/cursor, but
+            // the delayed scan never cancels itself just because a mob is selected.
             PinkRescanAction rescan = DecidePinkRescan(
                 PinkLootOnlyMode,
                 _lootState == LootMachineState.PinkScan,
@@ -1467,11 +1481,12 @@ namespace DriverScanTester.Services
 
                 _otherPlayerMarkerWasVisible = true;
                 _playerMarkerConfirmationPending = true;
+                _playerMarkerChecksConfirmed = 1;
                 _playerMarkerCandidateDetectedAt = DateTime.UtcNow;
                 _log($"[PlayerPixels] Candidate marker detected: {DescribePlayerMarkerCandidate(candidate)}; " +
                      $"character-exclusion={FormatRectangle(characterExclusionArea)}; " +
                      $"HUD exclusions={FormatRectangles(PlayerMarkerPixelDetector.GetHudExclusionAreas(_bitmap.Width, _bitmap.Height))}. " +
-                     $"Will recheck in {BotConstants.Delays.OtherPlayerMarkerConfirmMs} ms.");
+                     $"Check 1/{OtherPlayerMarkerRequiredChecks}; will recheck in {BotConstants.Delays.OtherPlayerMarkerConfirmMs} ms.");
             }
             catch (Exception ex)
             {
@@ -1485,8 +1500,10 @@ namespace DriverScanTester.Services
             if (!PlayerMarkerScanEnabled || !_playerMarkerConfirmationPending)
                 return false;
 
-            if ((DateTime.UtcNow - _playerMarkerCandidateDetectedAt).TotalMilliseconds <
-                BotConstants.Delays.OtherPlayerMarkerConfirmMs)
+            int delayMs = _playerMarkerChecksConfirmed == 1
+                ? BotConstants.Delays.OtherPlayerMarkerConfirmMs
+                : BotConstants.Delays.OtherPlayerMarkerFinalConfirmMs;
+            if ((DateTime.UtcNow - _playerMarkerCandidateDetectedAt).TotalMilliseconds < delayMs)
                 return false;
 
             try
@@ -1510,17 +1527,31 @@ namespace DriverScanTester.Services
                     _referenceClientOriginX, _referenceClientOriginY);
                 bool stillVisible = _playerMarkerPixelDetector.TryFindOtherPlayerMarker(
                     _bitmap, characterExclusionArea, out PlayerMarkerCandidate confirmedCandidate);
-                _playerMarkerConfirmationPending = false;
-                _playerMarkerCandidateDetectedAt = DateTime.MinValue;
-                _otherPlayerMarkerWasVisible = stillVisible;
-
                 if (!stillVisible)
                 {
-                    _log("[PlayerPixels] Candidate disappeared during the 5-second confirmation scan; continuing normally.");
+                    _log($"[PlayerPixels] Candidate disappeared during check " +
+                         $"{_playerMarkerChecksConfirmed + 1}/{OtherPlayerMarkerRequiredChecks}; continuing normally.");
+                    ResetPlayerMarkerConfirmation();
                     return false;
                 }
 
-                _log($"[PlayerPixels] Other-player marker confirmed after the delay: " +
+                _otherPlayerMarkerWasVisible = true;
+                _playerMarkerChecksConfirmed++;
+                if (_playerMarkerChecksConfirmed < OtherPlayerMarkerRequiredChecks)
+                {
+                    _playerMarkerCandidateDetectedAt = DateTime.UtcNow;
+                    _log($"[PlayerPixels] Other-player marker confirmed " +
+                         $"({_playerMarkerChecksConfirmed}/{OtherPlayerMarkerRequiredChecks}): " +
+                         $"{DescribePlayerMarkerCandidate(confirmedCandidate)}; " +
+                         $"character-exclusion={FormatRectangle(characterExclusionArea)}. " +
+                         $"Will perform the final check in {BotConstants.Delays.OtherPlayerMarkerFinalConfirmMs} ms.");
+                    return false;
+                }
+
+                _playerMarkerConfirmationPending = false;
+                _playerMarkerCandidateDetectedAt = DateTime.MinValue;
+                _log($"[PlayerPixels] Other-player marker confirmed on all " +
+                     $"{OtherPlayerMarkerRequiredChecks} consecutive checks: " +
                      $"{DescribePlayerMarkerCandidate(confirmedCandidate)}; " +
                      $"character-exclusion={FormatRectangle(characterExclusionArea)}.");
                 ScreenshotService.SavePlayerMarkerScreenshot(
@@ -1558,6 +1589,7 @@ namespace DriverScanTester.Services
         {
             _otherPlayerMarkerWasVisible = false;
             _playerMarkerConfirmationPending = false;
+            _playerMarkerChecksConfirmed = 0;
             _playerMarkerCandidateDetectedAt = DateTime.MinValue;
         }
 

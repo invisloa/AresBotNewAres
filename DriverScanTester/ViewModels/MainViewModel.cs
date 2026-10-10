@@ -218,6 +218,8 @@ namespace DriverScanTester.ViewModels
         private uint _attachedPid;
         private bool _isAttached;
         public bool IsAttached => _isAttached;
+        public string HpPotionUseThresholdText => IsAttached ? HealManaThreshold1.ToString() : "--";
+        public string ManaPotionUseThresholdText => IsAttached ? HealManaThreshold2.ToString() : "--";
         private int _cachedPointerSize; // 0 => unknown (lazy init)
 
         private readonly struct ScanWindow
@@ -332,21 +334,21 @@ namespace DriverScanTester.ViewModels
 
         public void OpenPathEditorInternal() => OpenPathEditor();
 
-        private sealed class ManualHealManaThresholdInitializationResult
+        private sealed class HealManaThresholdInitializationResult
         {
             public List<string> LogLines { get; } = new();
         }
 
         /// <summary>
-        /// Reads the player's maximum stats during Bot Window initialization. Retries
-        /// briefly for login/map transitions, then independently initializes each value
-        /// that was successfully read while retaining the other current threshold.
+        /// Reads the player's maximum stats after attaching. Retries briefly for
+        /// login/map transitions, then independently initializes each value that was
+        /// successfully read while retaining the other current threshold.
         /// </summary>
-        private async Task<ManualHealManaThresholdInitializationResult> InitializeManualHealManaThresholdsFromPlayer()
+        private async Task<HealManaThresholdInitializationResult> InitializeHealManaThresholdsFromPlayer()
         {
             const int maxAttempts = 4;
             const int retryDelayMs = 300;
-            var result = new ManualHealManaThresholdInitializationResult();
+            var result = new HealManaThresholdInitializationResult();
             int? maxHp = null;
             int? maxMana = null;
 
@@ -392,12 +394,12 @@ namespace DriverScanTester.ViewModels
                                 DriverWrite,
                                 moduleBase,
                                 GetPointerSize(),
-                                AppendBotLog);
+                                AppendLog);
                             MaxHpManaReadResult read = await Task.Run(memoryService.GetMaxHpMana);
                             result.LogLines.Add(FormatMaxHpManaReadDiagnostic(attempt, maxAttempts, read));
 
-                            // Keep the first valid value for each stat while retrying only
-                            // to fill a missing value. No UI exists yet, so edits cannot be lost.
+                            // Keep the first valid value for each stat and retry only to
+                            // fill a missing value; thresholds are applied after retries finish.
                             if (maxHp == null && read.MaxHpReadSucceeded && read.MaxHp > 0)
                                 maxHp = read.MaxHp;
                             if (maxMana == null && read.MaxManaReadSucceeded && read.MaxMana > 0)
@@ -475,7 +477,7 @@ namespace DriverScanTester.ViewModels
                    $"MaxMana final address={maxManaAddress}, {maxManaStatus}.";
         }
 
-        private async void OpenBotWindow()
+        private void OpenBotWindow()
         {
             if (_botWindow != null)
             {
@@ -487,16 +489,11 @@ namespace DriverScanTester.ViewModels
                 _botWindow.Focus();
                 return;
             }
-            if (_isBotWindowOpening)
-                return;
 
-            _isBotWindowOpening = true;
             BotViewModel? botVm = null;
             Views.BotWindow? win = null;
             try
             {
-                ManualHealManaThresholdInitializationResult initialization =
-                    await InitializeManualHealManaThresholdsFromPlayer();
                 botVm = new BotViewModel(this);
                 win = new Views.BotWindow
                 {
@@ -516,8 +513,6 @@ namespace DriverScanTester.ViewModels
                     botVm.Dispose();
                 };
                 win.Show();
-                foreach (string line in initialization.LogLines)
-                    botVm.AppendBotLog(line);
             }
             catch (Exception ex)
             {
@@ -528,10 +523,6 @@ namespace DriverScanTester.ViewModels
                 }
                 botVm?.Dispose();
                 AppendLog("OpenBotWindow error: " + ex.Message);
-            }
-            finally
-            {
-                _isBotWindowOpening = false;
             }
         }
 
@@ -1189,7 +1180,7 @@ namespace DriverScanTester.ViewModels
 
         // ========================= Actions =========================
 
-        private void Attach()
+        private async void Attach()
         {
             try
             {
@@ -1197,6 +1188,9 @@ namespace DriverScanTester.ViewModels
                 _hDevice = null;
                 if (_hProcess != nint.Zero) { PsApi.CloseHandle(_hProcess); _hProcess = nint.Zero; }
                 _isAttached = false;
+                OnPropertyChanged(nameof(IsAttached));
+                OnPropertyChanged(nameof(HpPotionUseThresholdText));
+                OnPropertyChanged(nameof(ManaPotionUseThresholdText));
                 DisposePointerScanner();
                 InvalidateCommands();
 
@@ -1242,9 +1236,17 @@ namespace DriverScanTester.ViewModels
 
                 _attachedPid = pid;
                 _isAttached = true;
+                OnPropertyChanged(nameof(IsAttached));
+                OnPropertyChanged(nameof(HpPotionUseThresholdText));
+                OnPropertyChanged(nameof(ManaPotionUseThresholdText));
                 AppendLog($"Attached to device. PID={_attachedPid}");
                 InitializePointerScanner();
                 InvalidateCommands();
+
+                HealManaThresholdInitializationResult initialization =
+                    await InitializeHealManaThresholdsFromPlayer();
+                foreach (string line in initialization.LogLines)
+                    AppendLog(line);
             }
             catch (Exception ex)
             {
@@ -2074,7 +2076,6 @@ namespace DriverScanTester.ViewModels
         /// <summary>Optional sink for bot log lines (the Bot window's log). Null when the Bot window is not open.</summary>
         private Action<string>? _botLogSink;
         private Views.BotWindow? _botWindow;
-        private bool _isBotWindowOpening;
 
         /// <summary>
         /// Routes a bot log line to the bot log (Bot window) when it is open; falls back
@@ -3237,6 +3238,10 @@ namespace DriverScanTester.ViewModels
                 {
                     OnPropertyChanged(nameof(IsWorkflowRunning));
                     OnPropertyChanged(nameof(WorkflowPhaseText));
+                    OnPropertyChanged(nameof(HealManaThreshold1));
+                    OnPropertyChanged(nameof(HealManaThreshold2));
+                    OnPropertyChanged(nameof(HpPotionUseThresholdText));
+                    OnPropertyChanged(nameof(ManaPotionUseThresholdText));
                 });
             };
             _workflowCoordinator.OnCurrentStepChanged = stepText =>
@@ -3486,13 +3491,25 @@ namespace DriverScanTester.ViewModels
         public short HealManaThreshold1
         {
             get => HealManaSystem.Threshold1;
-            set => HealManaSystem.Threshold1 = value;
+            set
+            {
+                if (HealManaSystem.Threshold1 == value) return;
+                HealManaSystem.Threshold1 = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(HpPotionUseThresholdText));
+            }
         }
 
         public short HealManaThreshold2
         {
             get => HealManaSystem.Threshold2;
-            set => HealManaSystem.Threshold2 = value;
+            set
+            {
+                if (HealManaSystem.Threshold2 == value) return;
+                HealManaSystem.Threshold2 = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(ManaPotionUseThresholdText));
+            }
         }
         
                 private void StartHotkeyListener()

@@ -34,7 +34,7 @@ namespace DriverScanTester
             public const short OtherPlayerMarkerScanDistance = 16950;
 
             /// <summary>Camera distance used only during SOD/SOP pink-pixel loot scans.</summary>
-            public const short SodSopLootScanDistance = 17000;
+            public const short SodSopLootScanDistance = 17050;
 
             /// <summary>Default camera vertical lock value, matching the sell-view vertical (16310).</summary>
             public const short DefaultVerticalLock = 16310;
@@ -790,8 +790,11 @@ namespace DriverScanTester
             /// <summary>Delay when bot is in Failed state before re-checking.</summary>
             public const int FailedStateMs = 1000;
 
-            /// <summary>Delay before confirming a newly detected other-player marker.</summary>
+            /// <summary>Delay before the second consecutive other-player marker check.</summary>
             public const int OtherPlayerMarkerConfirmMs = 5000;
+
+            /// <summary>Delay from the second to the third consecutive other-player marker check.</summary>
+            public const int OtherPlayerMarkerFinalConfirmMs = 10_000;
 
             /// <summary>Initial full-profile cooldown after another player marker is confirmed.</summary>
             public const int OtherPlayerInitialCooldownMs = 10 * 60 * 1000;
