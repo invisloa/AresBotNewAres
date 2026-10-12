@@ -29,6 +29,21 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void TryGetCameraDistanceReadsTheCurrentValueAndFailsOnMissingPointer()
+        {
+            var memory = new MemoryFixture();
+            memory.Set(ModuleBase + BotConstants.MemoryOffsets.CameraPtr, BitConverter.GetBytes(CameraBase));
+            memory.Set(CameraBase + BotConstants.MemoryOffsets.CameraDistance, BitConverter.GetBytes((short)17020));
+            GameMemoryService service = memory.CreateService();
+
+            Assert.True(service.TryGetCameraDistance(out short distance));
+            Assert.Equal((short)17020, distance);
+
+            GameMemoryService noCamera = new MemoryFixture().CreateService();
+            Assert.False(noCamera.TryGetCameraDistance(out _));
+        }
+
+        [Fact]
         public void TrySetSodSopLootScanViewUses17050Distance()
         {
             var memory = new MemoryFixture();

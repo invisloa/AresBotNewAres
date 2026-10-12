@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,6 +12,42 @@ namespace DriverScanTester.Services
 {
     public class LootSystem
     {
+        internal enum LootScanPassResult { Collected, NoItem, CaptureFailed, Cancelled }
+        private enum LootProbeResult { Miss, Collected, CaptureInvalid, Cancelled }
+
+        internal readonly record struct PixelCollectionStats(
+            int PixelsExamined,
+            int RawPinkPixels,
+            int MarkerPixelsRejected,
+            int MaskPixels);
+
+        internal sealed record PinkComponentSummary(
+            Rectangle Bounds,
+            int PixelCount,
+            float FillRatio,
+            bool IsLootCandidate,
+            IReadOnlyList<Point> ProbePoints);
+
+        internal sealed class PinkFrameAnalysisResult
+        {
+            internal int Width { get; init; }
+            internal int Height { get; init; }
+            internal int TotalPixelsExamined { get; init; }
+            internal int RawPinkPixels { get; init; }
+            internal int MarkerPixelsRejected { get; init; }
+            internal int PinkPixels { get; init; }
+            internal int Components { get; init; }
+            internal int LootCandidates { get; init; }
+            internal int SizeOrShapeRejectedComponents { get; init; }
+            internal int MobMarkerRings { get; init; }
+            internal int TinyComponents { get; init; }
+            internal int FinalProbeCount { get; init; }
+            internal IReadOnlyList<PinkComponentSummary> CandidateDetails { get; init; } = Array.Empty<PinkComponentSummary>();
+            internal IReadOnlyList<WhiteComponent> CandidateComponents { get; init; } = Array.Empty<WhiteComponent>();
+            internal IReadOnlyList<WhiteComponent> AllComponents { get; init; } = Array.Empty<WhiteComponent>();
+        }
+
+        private const int MaxDiagnosticPinkComponentDetails = 8;
         private readonly GameMemoryService _memoryService;
         private readonly Action<string> _log;
 
@@ -28,6 +65,13 @@ namespace DriverScanTester.Services
 
         private Bitmap _bitmap;
         private Graphics _graphics;
+        private readonly object _captureGate = new();
+        private readonly object _cameraCursorOwnershipGate = new();
+        private StableLootCaptureResult _lastCaptureResult;
+        private LootClientGeometry? _lastStableCaptureGeometry;
+        private string _lastLoggedCaptureFailure = string.Empty;
+        private DateTime _lastCaptureFailureLogAt = DateTime.MinValue;
+        private bool _focusCaptureSkipLogged;
 
         // ── Scan-phase spacebar spam ──
         // A background task spams spacebar while the pixel scan is running,
@@ -43,9 +87,9 @@ namespace DriverScanTester.Services
         //                  if no change after several tries → switch to Scan
         //   Scan        → pixel-scan: label white blobs, filter ring/name/line shapes,
         //                  probe only loot-like blobs (small compact sparkles)
-        //   PinkScan   → SOD/SOP-only mode (MoveAndAttack waypoints): after each kill,
-        //                  sweep the WHOLE game window for PINK pixels in ONE continuous
-        //                  mouse pass over every candidate pixel, collect each SOD/SOP
+        //   PinkScan   → SOD/SOP-only mode (MoveAndAttack waypoints): after the close-mob
+        //                  check, sweep the WHOLE captured client bitmap for PINK pixels
+        //                  in ONE continuous mouse pass over every candidate pixel,
         //                  found, and repeat a fresh sweep after each successful pickup.
         //                  When a confirmed SOD/SOP pickup cannot fit (bag at the weight
         //                  limit) the player first drinks the potion type it has more of
@@ -53,11 +97,13 @@ namespace DriverScanTester.Services
         //   ScanComplete→ a full scan pass found no items; hold briefly so the movement
         //                  system can walk away, then restart the cycle from Idle
         private enum LootMachineState { Idle, PostMobTab, AreaLoot, AreaLootWait, Scan, PinkScan, ScanComplete }
-        private LootMachineState _lootState = LootMachineState.Idle;
+        private volatile LootMachineState _lootState = LootMachineState.Idle;
         private DateTime _nextActionTime = DateTime.MinValue;
         private int _inventoryChecksumBefore;
         private int _consecutiveEmptySpacePresses;
+        private int _consecutivePinkCaptureFailures;
         private const int MaxEmptySpacePressesBeforeScan = 3;
+        private const int MaxImmediatePinkCaptureFailures = 3;
 
         /// <summary>Until this time the ScanComplete state holds (no area-loot/scan).</summary>
         private DateTime _scanCompleteUntil = DateTime.MinValue;
@@ -66,9 +112,9 @@ namespace DriverScanTester.Services
         private DateTime _lastItemCollectedAt = DateTime.MinValue;
 
         // ── SOD/SOP pink-scan request (MoveAndAttack post-kill) ──
-        // The movement system requests the pink scan the moment CombatHandler reports a
-        // finished fight (TabAfterKill), so the scan is not missed when TAB re-selects a
-        // mob before the loot task's own selected→not-selected transition is observed.
+        // The movement system requests the immediate pink scan only after its close-camera
+        // TAB check finds no nearby mob. The independent generation scheduler still arms
+        // delayed background work for every kill, including kills followed by a close retarget.
         private CancellationToken _scanToken;
 
         /// <summary>
@@ -86,13 +132,13 @@ namespace DriverScanTester.Services
         private bool _playerMarkerScanEnabled;
         private volatile bool _pinkScanRequested;
         private DateTime _pinkScanRequestedAt = DateTime.MinValue;
-
-        /// <summary>Time the pending background SOD/SOP rescan runs (MinValue = none). Armed at each
-        /// kill; it runs while movement and combat continue (see <see cref="RunPinkRescan"/>).</summary>
-        private DateTime _pinkRescanAt = DateTime.MinValue;
+        private readonly PinkRescanScheduler _pinkRescanScheduler = new();
+        private bool _pinkScanOwnsCameraCursor;
+        private short? _pinkScanRestoreDistance;
 
         /// <summary>True while a background rescan pass owns the camera and cursor.</summary>
         private volatile bool _pinkRescanActive;
+        private volatile bool _pinkLootOnlyMode;
 
         /// <summary>
         /// Time since the last item was collected. Used by the movement system to extend
@@ -117,7 +163,7 @@ namespace DriverScanTester.Services
             _lootState == LootMachineState.Scan ||
             _lootState == LootMachineState.PinkScan;
 
-        /// <summary>Game window handle — stored during ResolveClientOrigin().</summary>
+        /// <summary>Most recently resolved game window handle.</summary>
         private nint _hwnd;
 
         /// <summary>
@@ -143,7 +189,24 @@ namespace DriverScanTester.Services
         /// the usual loot cycle). Set per-tick by the host from the current waypoint
         /// mode; while false the normal MoveAndAttackAndLoot behaviour is unchanged.
         /// </summary>
-        public bool PinkLootOnlyMode { get; set; } = false;
+        public bool PinkLootOnlyMode
+        {
+            get => _pinkLootOnlyMode;
+            set
+            {
+                lock (_cameraCursorOwnershipGate)
+                {
+                    bool changed = _pinkLootOnlyMode != value;
+                    _pinkLootOnlyMode = value;
+                    if (!value &&
+                        (changed || _pinkScanRequested || _pinkScanOwnsCameraCursor ||
+                         _lootState == LootMachineState.PinkScan))
+                    {
+                        CancelPinkModeWorkLocked();
+                    }
+                }
+            }
+        }
 
         /// <summary>
         /// Enables player-marker pixel checks during loot scan passes. The host sets this
@@ -172,11 +235,17 @@ namespace DriverScanTester.Services
         /// </summary>
         public void RequestPinkScan()
         {
-            if (!PinkLootOnlyMode)
-                return;
+            DateTime now = DateTime.UtcNow;
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (!_pinkLootOnlyMode)
+                    return;
 
-            _pinkScanRequestedAt = DateTime.UtcNow;
-            _pinkScanRequested = true;
+                _pinkScanRequestedAt = now;
+                _pinkScanRequested = true;
+                _pinkRescanScheduler.ScheduleKill(
+                    now, TimeSpan.FromMilliseconds(BotConstants.Loot.PinkRescanDelayMs));
+            }
             _log("[Loot] SOD/SOP pink scan requested (no close mob found after kill).");
         }
 
@@ -187,11 +256,16 @@ namespace DriverScanTester.Services
         /// </summary>
         public void SchedulePinkRescanAfterKill()
         {
-            if (!PinkLootOnlyMode)
-                return;
+            DateTime now = DateTime.UtcNow;
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (!_pinkLootOnlyMode)
+                    return;
 
-            _lastKillAt = DateTime.UtcNow;
-            _pinkRescanAt = _lastKillAt.AddMilliseconds(BotConstants.Loot.PinkRescanDelayMs);
+                _lastKillAt = now;
+                _pinkRescanScheduler.ScheduleKill(
+                    now, TimeSpan.FromMilliseconds(BotConstants.Loot.PinkRescanDelayMs));
+            }
         }
 
         /// <summary>
@@ -208,6 +282,81 @@ namespace DriverScanTester.Services
         /// sent while the scan zoom is active.
         /// </summary>
         public bool IsPinkRescanActive => _pinkRescanActive;
+
+        /// <summary>
+        /// Runs a movement camera write only when loot does not own the camera. The
+        /// shared gate makes the ownership check and write atomic with scan startup.
+        /// </summary>
+        internal bool TryRunMovementCameraAction(Action action)
+        {
+            ArgumentNullException.ThrowIfNull(action);
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (LootOwnsCameraOrCursorLocked())
+                    return false;
+                action();
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Runs a movement cursor write only when loot does not own the cursor. The
+        /// shared gate prevents fast-turn mouse positioning from racing a loot probe.
+        /// </summary>
+        internal bool TryRunMovementCursorAction(Action action)
+        {
+            ArgumentNullException.ThrowIfNull(action);
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (LootOwnsCameraOrCursorLocked())
+                    return false;
+                action();
+                return true;
+            }
+        }
+
+        internal bool TryRunMovementTargetAction(Action action)
+        {
+            ArgumentNullException.ThrowIfNull(action);
+            lock (_cameraCursorOwnershipGate)
+            {
+                bool pinkOwnsTargeting = _pinkScanRequested || _pinkScanOwnsCameraCursor ||
+                                         _pinkRescanActive || _isCollecting ||
+                                         _lootState == LootMachineState.PinkScan;
+                if (pinkOwnsTargeting)
+                    return false;
+                action();
+                return true;
+            }
+        }
+
+        private bool LootOwnsCameraOrCursorLocked()
+            => _pinkScanRequested || _pinkScanOwnsCameraCursor || _pinkRescanActive ||
+               _isCollecting || IsLootCycleActive;
+
+        private void CancelPinkModeWorkLocked()
+        {
+            _pinkScanRequested = false;
+            _pinkScanRequestedAt = DateTime.MinValue;
+            _pinkRescanScheduler.Cancel();
+
+            // A currently executing rescan retains ownership until its finally block
+            // restores the camera. A queued/immediate pass can be safely released now.
+            if (_pinkRescanActive)
+                return;
+
+            if (_pinkScanOwnsCameraCursor || _lootState == LootMachineState.PinkScan)
+                RestorePinkCameraLocked();
+            _pinkScanOwnsCameraCursor = false;
+            if (_lootState == LootMachineState.PinkScan)
+            {
+                _lootState = LootMachineState.Idle;
+                _nextActionTime = DateTime.MinValue;
+                _isCollecting = false;
+                IsLootingActive = false;
+            }
+            _consecutivePinkCaptureFailures = 0;
+        }
 
         /// <summary>
         /// True while the loot machine is in its post-kill looting phase (loot priority
@@ -233,7 +382,7 @@ namespace DriverScanTester.Services
         /// true — scanning alone never interrupts the attack.
         /// </summary>
         public bool IsCollecting => _isCollecting;
-        private bool _isCollecting = false;
+        private volatile bool _isCollecting = false;
 
         /// <summary>Previous tick's IsMobSelected value — used to detect mob death.</summary>
         private bool _wasMobSelectedPrev = false;
@@ -254,6 +403,7 @@ namespace DriverScanTester.Services
         private int _clientWidth;
         private int _clientHeight;
         private bool _hasClientOrigin;
+        private LootClientGeometry? _lastLoggedGeometry;
 
         // ── Coordinate offset from reference window position ──
         // The hardcoded scan coordinates in BotConstants.Loot are SCREEN-ABSOLUTE values
@@ -287,9 +437,9 @@ namespace DriverScanTester.Services
             _bitmap = null!;
             _graphics = null!;
 
-            // Resolve client area once at construction; if the window is moved
-            // the resolution will be re-tried on each capture failure.
-            ResolveClientOrigin();
+            // Resolve once for startup diagnostics. CaptureScreen refreshes all geometry
+            // before every frame, even when this initial resolution succeeded.
+            RefreshClientOrigin();
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -332,129 +482,130 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Looks up the game window, stores its client-area top-left corner and dimensions,
-        /// and computes the coordinate offset from the reference window position (447,77)
-        /// that the hardcoded scan coordinates were designed for.
-        /// Falls back to (0,0) if the window cannot be found.
+        /// Refreshes the game handle, window rectangle, client origin and client size.
+        /// Failed geometry is invalidated; no screen-origin fallback is allowed for a loot
+        /// capture because it would turn a bad capture into a false empty scan.
         /// </summary>
-        private void ResolveClientOrigin()
+        private LootClientGeometry? RefreshClientOrigin()
         {
-            _hwnd = FindWindow(null, "Legend of Ares");
-            if (_hwnd == nint.Zero) _hwnd = FindWindow(null, "Ares");
-            if (_hwnd == nint.Zero) _hwnd = FindWindow(null, "Nostalgia");
-            if (_hwnd == nint.Zero) _hwnd = FindWindow(null, "Epic Of Ares Client");
-
-            if (_hwnd == nint.Zero)
+            nint hwnd = FindGameWindow();
+            if (hwnd == nint.Zero)
             {
-                _log("[LootSystem] Game window not found — falling back to screen origin (0,0).");
-                _clientOriginX = 0;
-                _clientOriginY = 0;
-                _clientWidth = 0;
-                _clientHeight = 0;
-                _referenceClientOriginX = 0;
-                _referenceClientOriginY = 0;
-                _coordOffsetX = 0;
-                _coordOffsetY = 0;
-                _hasClientOrigin = false;
-                return;
+                InvalidateClientGeometry();
+                return null;
             }
 
-            if (!GetClientRect(_hwnd, out RECT clientRect))
+            _hwnd = hwnd;
+            if (!GetClientRect(hwnd, out RECT clientRect) ||
+                !GetWindowRect(hwnd, out RECT windowRect))
             {
-                _log("[LootSystem] GetClientRect failed — falling back to screen origin (0,0).");
-                _clientOriginX = 0;
-                _clientOriginY = 0;
-                _clientWidth = 0;
-                _clientHeight = 0;
-                _referenceClientOriginX = 0;
-                _referenceClientOriginY = 0;
-                _coordOffsetX = 0;
-                _coordOffsetY = 0;
-                _hasClientOrigin = false;
-                return;
+                InvalidateClientGeometry(hwnd);
+                return new LootClientGeometry(hwnd, Rectangle.Empty, Point.Empty, Size.Empty);
             }
 
-            POINT topLeft = new POINT { X = 0, Y = 0 };
-            if (!ClientToScreen(_hwnd, ref topLeft))
+            POINT topLeft = new() { X = 0, Y = 0 };
+            if (!ClientToScreen(hwnd, ref topLeft))
             {
-                _log("[LootSystem] ClientToScreen failed — falling back to screen origin (0,0).");
-                _clientOriginX = 0;
-                _clientOriginY = 0;
-                _clientWidth = 0;
-                _clientHeight = 0;
-                _referenceClientOriginX = 0;
-                _referenceClientOriginY = 0;
-                _coordOffsetX = 0;
-                _coordOffsetY = 0;
-                _hasClientOrigin = false;
-                return;
+                InvalidateClientGeometry(hwnd);
+                return new LootClientGeometry(hwnd, Rectangle.Empty, Point.Empty, Size.Empty);
             }
 
-            _clientOriginX = topLeft.X;
-            _clientOriginY = topLeft.Y;
-            int newWidth = clientRect.Right - clientRect.Left;
-            int newHeight = clientRect.Bottom - clientRect.Top;
-            _hasClientOrigin = true;
-
-            // Recreate bitmap if actual client dimensions changed or bitmap not yet created.
-            if (_bitmap == null || _bitmap.Width != newWidth || _bitmap.Height != newHeight)
+            int width = clientRect.Right - clientRect.Left;
+            int height = clientRect.Bottom - clientRect.Top;
+            var geometry = new LootClientGeometry(
+                hwnd,
+                Rectangle.FromLTRB(windowRect.Left, windowRect.Top, windowRect.Right, windowRect.Bottom),
+                new Point(topLeft.X, topLeft.Y),
+                new Size(width, height));
+            if (!geometry.IsValid)
             {
+                InvalidateClientGeometry(hwnd);
+                return geometry;
+            }
+
+            try
+            {
+                ApplyClientGeometry(geometry);
+            }
+            catch
+            {
+                InvalidateClientGeometry(hwnd);
+                throw;
+            }
+            if (_lastLoggedGeometry != geometry)
+            {
+                _lastLoggedGeometry = geometry;
+                _log($"[LootSystem] Game window at screen ({windowRect.Left}, {windowRect.Top}), " +
+                     $"client area ({_clientOriginX}, {_clientOriginY}) size {_clientWidth}x{_clientHeight}");
+                _log($"[LootSystem] Coord offset from reference: ({_coordOffsetX}, {_coordOffsetY}), " +
+                     $"reference client origin: ({_referenceClientOriginX}, {_referenceClientOriginY})");
+            }
+            return geometry;
+        }
+
+        private static nint FindGameWindow()
+        {
+            nint hwnd = FindWindow(null, "Legend of Ares");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Ares");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
+            return hwnd;
+        }
+
+        private void ApplyClientGeometry(LootClientGeometry geometry)
+        {
+            _hwnd = geometry.WindowHandle;
+            _clientOriginX = geometry.ClientScreenOrigin.X;
+            _clientOriginY = geometry.ClientScreenOrigin.Y;
+            _clientWidth = geometry.ClientSize.Width;
+            _clientHeight = geometry.ClientSize.Height;
+
+            Point offset = geometry.CoordinateOffset;
+            Point referenceOrigin = geometry.ReferenceClientOrigin;
+            _coordOffsetX = offset.X;
+            _coordOffsetY = offset.Y;
+            _referenceClientOriginX = referenceOrigin.X;
+            _referenceClientOriginY = referenceOrigin.Y;
+
+            // Keep the capture resources when the client size is unchanged. Build the
+            // replacement before disposing the previous bitmap so a failed allocation
+            // cannot leave a partially initialized capture pair.
+            if (_bitmap == null || _bitmap.Width != _clientWidth || _bitmap.Height != _clientHeight)
+            {
+                var replacement = new Bitmap(_clientWidth, _clientHeight, PixelFormat.Format32bppArgb);
+                Graphics replacementGraphics;
+                try
+                {
+                    replacementGraphics = Graphics.FromImage(replacement);
+                }
+                catch
+                {
+                    replacement.Dispose();
+                    throw;
+                }
+
                 _graphics?.Dispose();
                 _bitmap?.Dispose();
-                _clientWidth = Math.Max(newWidth, 1);
-                _clientHeight = Math.Max(newHeight, 1);
-                _bitmap = new Bitmap(_clientWidth, _clientHeight);
-                _graphics = Graphics.FromImage(_bitmap);
+                _bitmap = replacement;
+                _graphics = replacementGraphics;
                 _log($"[LootSystem] Bitmap resized to actual client area: {_clientWidth} x {_clientHeight}");
             }
-            else
-            {
-                _clientWidth = newWidth;
-                _clientHeight = newHeight;
-            }
 
-            // ── Compute coordinate offset from reference window position ──
-            // Hardcoded coordinates in BotConstants.Loot are screen-absolute values
-            // designed for when the window was at (ExpectedWindowX=447, ExpectedWindowY=77).
-            //
-            // The reference client origin is what ClientToScreen returned at that position.
-            // It equals ExpectedWindow + border/title-bar sizes.
-            //
-            // borderX = clientOriginX - windowRect.Left  (constant for this window style)
-            // titleY  = clientOriginY - windowRect.Top   (constant for this window style)
-            //
-            // referenceClientOriginX = ExpectedWindowX + borderX
-            //                        = ExpectedWindowX + (clientOriginX - windowRect.Left)
-            //                        = clientOriginX - (windowRect.Left - ExpectedWindowX)
-            //                        = clientOriginX - coordOffsetX
-            //
-            // coordOffsetX = windowRect.Left - ExpectedWindowX
-            // coordOffsetY = windowRect.Top  - ExpectedWindowY
+            _hasClientOrigin = true;
+        }
 
-            if (!GetWindowRect(_hwnd, out RECT windowRect))
-            {
-                _log("[LootSystem] GetWindowRect failed — cannot compute reference offset. Falling back to raw client-relative.");
-                _referenceClientOriginX = 0;
-                _referenceClientOriginY = 0;
-                _coordOffsetX = 0;
-                _coordOffsetY = 0;
-            }
-            else
-            {
-                const int expectedWindowX = 447;
-                const int expectedWindowY = 77;
-
-                _coordOffsetX = windowRect.Left - expectedWindowX;
-                _coordOffsetY = windowRect.Top - expectedWindowY;
-
-                _referenceClientOriginX = _clientOriginX - _coordOffsetX;
-                _referenceClientOriginY = _clientOriginY - _coordOffsetY;
-            }
-
-            _log($"[LootSystem] Game window at screen ({windowRect.Left}, {windowRect.Top}), " +
-                 $"client area ({_clientOriginX}, {_clientOriginY}) size {_clientWidth}x{_clientHeight}");
-            _log($"[LootSystem] Coord offset from reference: ({_coordOffsetX}, {_coordOffsetY}), " +
-                 $"reference client origin: ({_referenceClientOriginX}, {_referenceClientOriginY})");
+        private void InvalidateClientGeometry(nint hwnd = default)
+        {
+            _hwnd = hwnd;
+            _clientOriginX = 0;
+            _clientOriginY = 0;
+            _clientWidth = 0;
+            _clientHeight = 0;
+            _referenceClientOriginX = 0;
+            _referenceClientOriginY = 0;
+            _coordOffsetX = 0;
+            _coordOffsetY = 0;
+            _hasClientOrigin = false;
         }
 
         // ── Coordinate conversion helpers ──
@@ -482,8 +633,9 @@ namespace DriverScanTester.Services
         /// </summary>
         private (int ScreenX, int ScreenY) BitmapLocalToScreen(int bitmapLocalX, int bitmapLocalY)
         {
-            return (bitmapLocalX + _referenceClientOriginX + _coordOffsetX,
-                    bitmapLocalY + _referenceClientOriginY + _coordOffsetY);
+            // The stable capture geometry owns the current origin; this is equivalent
+            // to legacy reference-origin + current offset, without stale-offset drift.
+            return (bitmapLocalX + _clientOriginX, bitmapLocalY + _clientOriginY);
         }
 
         /// <summary>
@@ -492,7 +644,9 @@ namespace DriverScanTester.Services
         /// </summary>
         private bool IsGameWindowFocused()
         {
-            return GetForegroundWindow() == _hwnd;
+            nint currentGameWindow = FindGameWindow();
+            _hwnd = currentGameWindow;
+            return currentGameWindow != nint.Zero && GetForegroundWindow() == currentGameWindow;
         }
 
         /// <summary>
@@ -532,26 +686,52 @@ namespace DriverScanTester.Services
                  $"(screen X=[{sx1}..{sx2}) Y=[{sy1}..{sy2}))");
         }
 
+        public void Stop()
+        {
+            StopScanSpacebarSpam();
+            CancelAllLootWork("loot loop stopped");
+        }
+
         public async Task Update(CancellationToken token)
         {
+            try
+            {
+                await UpdateCore(token);
+            }
+            catch (OperationCanceledException)
+            {
+                StopScanSpacebarSpam();
+                CancelAllLootWork("stop/cancellation during scan");
+                throw;
+            }
+        }
+
+        private async Task UpdateCore(CancellationToken token)
+        {
             _scanToken = token;
-            // ── Focus guard: if the game window is NOT the foreground window,
-            //    do NOT scan, click, or send any input.  Without this check the
-            //    loot bot would capture/click whatever window is on top (desktop,
-            //    folders, browser, etc.) and potentially cause damage. ──
+            if (token.IsCancellationRequested)
+            {
+                CancelAllLootWork("stop/cancellation");
+                StopScanSpacebarSpam();
+                return;
+            }
+
+            // ── Focus guard: resolve the current game handle before checking focus.
+            //    Do not capture or click if another window is foreground. ──
             if (!IsGameWindowFocused())
             {
                 ResetPlayerMarkerConfirmation();
                 StopScanSpacebarSpam();
-                if (_lootState != LootMachineState.Idle)
+                CancelAllLootWork("game window is not foreground");
+                if (!_focusCaptureSkipLogged)
                 {
-                    _lootState = LootMachineState.Idle;
-                    _consecutiveEmptySpacePresses = 0;
+                    _focusCaptureSkipLogged = true;
+                    _log("[LootCapture] CAPTURE SKIPPED status=NotForeground (no scan result recorded).");
                 }
-                IsLootingActive = false;
                 await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
                 return;
             }
+            _focusCaptureSkipLogged = false;
 
             // ── Startup guard: skip scans for the first 5 seconds so loot
             //    doesn't start before the movement bot begins moving. ──
@@ -565,17 +745,14 @@ namespace DriverScanTester.Services
             if (_memoryService.GetIsInCity())
             {
                 ResetPlayerMarkerConfirmation();
-                _pinkRescanAt = DateTime.MinValue;
                 StopScanSpacebarSpam();
-                if (_lootState != LootMachineState.Idle)
-                {
-                    _lootState = LootMachineState.Idle;
-                    _consecutiveEmptySpacePresses = 0;
-                }
-                IsLootingActive = false;
+                CancelAllLootWork("city entry");
                 await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
                 return;
             }
+
+            if (!PinkLootOnlyMode && _lootState == LootMachineState.PinkScan)
+                CancelPinkScanWork("waypoint mode changed");
 
             if (ConfirmPlayerMarkerIfDue())
             {
@@ -588,25 +765,35 @@ namespace DriverScanTester.Services
             bool isMobSelected = _memoryService.IsMobSelected();
 
             // ── Post-kill SOD/SOP pink-scan request (MoveAndAttack) ──
-            // Movement requests this only after its close-camera TAB finds no nearby mob.
-            // Consume the flag on every tick (even when dropped) so a stale request can
-            // never hold the movement system forever.
-            bool pinkScanRequested = _pinkScanRequested;
-            if (pinkScanRequested)
+            // Keep a fresh request marked pending until it is atomically transferred to
+            // the PinkScan state, so movement cannot steal camera/cursor ownership in
+            // the handoff. Delayed background work is independently generation-tracked.
+            bool pinkScanRequested = false;
+            bool droppedPinkRequest = false;
+            bool modeChangedPinkRequest = false;
+            lock (_cameraCursorOwnershipGate)
             {
-                _pinkScanRequested = false;
-                bool fresh = (DateTime.UtcNow - _pinkScanRequestedAt).TotalMilliseconds <=
-                             BotConstants.Loot.PinkScanRequestTtlMs;
-                if (!PinkLootOnlyMode)
+                if (_pinkScanRequested)
                 {
-                    pinkScanRequested = false;
-                }
-                else if (!fresh)
-                {
-                    _log("[Loot] Stale pink-scan request dropped (expired before it could start).");
-                    pinkScanRequested = false;
+                    bool fresh = (DateTime.UtcNow - _pinkScanRequestedAt).TotalMilliseconds <=
+                                 BotConstants.Loot.PinkScanRequestTtlMs;
+                    if (!_pinkLootOnlyMode || !fresh)
+                    {
+                        _pinkScanRequested = false;
+                        _pinkScanRequestedAt = DateTime.MinValue;
+                        droppedPinkRequest = !fresh;
+                        modeChangedPinkRequest = fresh && !_pinkLootOnlyMode;
+                    }
+                    else
+                    {
+                        pinkScanRequested = true;
+                    }
                 }
             }
+            if (modeChangedPinkRequest)
+                _log("[Loot] Pink scan request cancelled because SOD/SOP mode changed.");
+            else if (droppedPinkRequest)
+                _log("[Loot] Stale pink-scan request dropped (expired before it could start).");
 
             // Mob just died (was selected → no longer selected). Movement owns the
             // close-camera TAB check in SOD/SOP mode, so the loot loop only arms the
@@ -640,43 +827,79 @@ namespace DriverScanTester.Services
             }
 
             // ── Start the post-kill SOD/SOP pink scan ──
-            // The scan is NOT cancelled by a re-selected target (the check belongs to
-            // the mob that just died), so the state machine below keeps running even
-            // while a mob is selected — the movement system holds combat during the scan.
+            // Transfer request ownership atomically. Re-requests during an existing pass
+            // are coalesced; the scheduler retains any newer kill generation separately.
+            bool pinkScanStarted = false;
             if (pinkScanRequested)
             {
-                _log($"[Loot] Mob killed — SOD/SOP pink scan starting (big region only, pink pixels only; waiting {BotConstants.Delays.LootPostKillDelayMs}ms for drops).");
-                IsLootingActive = true;
-                _lootState = LootMachineState.PinkScan;
-                _nextActionTime = DateTime.UtcNow.AddMilliseconds(BotConstants.Delays.LootPostKillDelayMs);
-                _consecutiveEmptySpacePresses = 0;
-
-                // Arm the background rescan for this kill. A kill that arrives while an
-                // earlier rescan is still pending re-arms it, so the rescan always sweeps the
-                // latest drops instead of firing before them.
-                _pinkRescanAt = DateTime.UtcNow.AddMilliseconds(BotConstants.Loot.PinkRescanDelayMs);
+                lock (_cameraCursorOwnershipGate)
+                {
+                    if (_pinkLootOnlyMode && _pinkScanRequested && _lootState != LootMachineState.PinkScan)
+                    {
+                        _pinkScanRequested = false;
+                        _pinkScanRequestedAt = DateTime.MinValue;
+                        _pinkScanOwnsCameraCursor = true;
+                        IsLootingActive = true;
+                        _lootState = LootMachineState.PinkScan;
+                        _nextActionTime = DateTime.UtcNow.AddMilliseconds(BotConstants.Delays.LootPostKillDelayMs);
+                        _consecutiveEmptySpacePresses = 0;
+                        pinkScanStarted = true;
+                    }
+                    else if (_lootState == LootMachineState.PinkScan)
+                    {
+                        _pinkScanRequested = false;
+                        _pinkScanRequestedAt = DateTime.MinValue;
+                    }
+                }
             }
+            if (pinkScanStarted)
+                _log($"[Loot] SOD/SOP pink scan starting after close-mob check (big region, pink pixels; waiting {BotConstants.Delays.LootPostKillDelayMs}ms for drops).");
 
             // ── Background SOD/SOP rescan (MoveAndAttack) ──
-            // Runs PinkRescanDelayMs after the kill. Movement yields camera ownership and
-            // suspends target-cycle evaluation while the pass uses the camera/cursor, but
-            // the delayed scan never cancels itself just because a mob is selected.
+            // Work is coalesced by earliest due time and generation. A target may remain
+            // selected; that never cancels a due background scan. Immediate and background
+            // passes share one ownership gate, so their captures/cursor probes cannot overlap.
+            PinkRescanSnapshot schedulerSnapshot = _pinkRescanScheduler.Snapshot;
             PinkRescanAction rescan = DecidePinkRescan(
                 PinkLootOnlyMode,
-                _lootState == LootMachineState.PinkScan,
-                _pinkRescanAt,
+                _lootState == LootMachineState.PinkScan || _pinkScanRequested,
+                schedulerSnapshot.DueAtUtc,
                 DateTime.UtcNow,
                 TimeSpan.FromMilliseconds(BotConstants.Loot.PinkRescanExpireMs));
             if (rescan == PinkRescanAction.Expire)
             {
-                _log("[Loot] SOD/SOP rescan dropped (expired or mode changed).");
-                _pinkRescanAt = DateTime.MinValue;
+                _pinkRescanScheduler.Cancel();
             }
             else if (rescan == PinkRescanAction.Run)
             {
-                RunPinkRescan();
-                await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
-                return;
+                PinkRescanTicket ticket = default;
+                bool began;
+                lock (_cameraCursorOwnershipGate)
+                {
+                    began = _pinkLootOnlyMode && !_pinkScanRequested &&
+                            _lootState != LootMachineState.PinkScan && !_pinkRescanActive &&
+                            _pinkRescanScheduler.TryBegin(
+                                DateTime.UtcNow, _pinkLootOnlyMode,
+                                _lootState == LootMachineState.PinkScan || _pinkScanRequested,
+                                out ticket);
+                    if (began)
+                        _pinkRescanActive = true;
+                }
+
+                if (began)
+                {
+                    PinkRescanPassOutcome outcome = RunPinkRescan(ticket);
+                    _pinkRescanScheduler.Complete(
+                        ticket,
+                        DateTime.UtcNow,
+                        outcome,
+                        TimeSpan.FromMilliseconds(50),
+                        TimeSpan.FromMilliseconds(Math.Max(
+                            BotConstants.Delays.LootUpdateMs,
+                            BotConstants.Delays.SodSopCameraSettleMs)));
+                    await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                    return;
+                }
             }
 
             // ── A selected mob pauses loot ──
@@ -864,38 +1087,52 @@ namespace DriverScanTester.Services
 
                 case LootMachineState.PinkScan:
                     // ── SOD/SOP-only post-kill scan (MoveAndAttack waypoints) ──
-                    // ONE region (big), PINK pixels only. Pink drops found are
-                    // collected and the pass repeats until a full pass finds none left.
-                    // No small-region pass, no white-blob scan, no spacebar area-loot.
+                    // ONE whole-client pink pass. A valid empty pass completes normally;
+                    // capture failures are retried and never reported as zero-pink frames.
                     if (DateTime.UtcNow < _nextActionTime)
+                        break;
+
+                    SetPinkScanCameraDistance();
+                    if (_scanToken.WaitHandle.WaitOne(BotConstants.Delays.SodSopCameraSettleMs))
                     {
-                        break; // post-kill delay — let the drops appear first
+                        CancelPinkScanWork("cancelled during camera settle");
+                        break;
                     }
 
-                    // Apply the scan zoom only when the post-kill wait is over, then
-                    // allow the game to render at that distance before capturing pixels.
-                    _memoryService.SetCameraDistance(BotConstants.Camera.SodSopLootScanDistance);
-                    await Task.Delay(BotConstants.Delays.SodSopCameraSettleMs, token);
-
-                    if (PinkPixelScan())
+                    LootScanPassResult pinkResult = PinkPixelScan("post-kill");
+                    if (pinkResult == LootScanPassResult.Collected)
                     {
-                        // Pink SOD/SOP was found and collected — rescan next tick
-                        // to drain any remaining pink drops.
+                        _consecutivePinkCaptureFailures = 0;
                         _lastItemCollectedAt = DateTime.UtcNow;
                         _nextActionTime = DateTime.UtcNow.AddMilliseconds(50);
                     }
+                    else if (pinkResult == LootScanPassResult.NoItem)
+                    {
+                        string elapsed = KillElapsed();
+                        _lastKillAt = DateTime.MinValue;
+                        CompleteImmediatePinkScan(
+                            $"[Loot] Pink scan complete — valid frame had no remaining collectable SOD/SOP{elapsed}.");
+                    }
+                    else if (pinkResult == LootScanPassResult.CaptureFailed)
+                    {
+                        _consecutivePinkCaptureFailures++;
+                        if (_consecutivePinkCaptureFailures < MaxImmediatePinkCaptureFailures)
+                        {
+                            _log($"[Loot] SOD/SOP frame capture failed " +
+                                 $"({_consecutivePinkCaptureFailures}/{MaxImmediatePinkCaptureFailures}); retrying, not treating it as empty.");
+                            _nextActionTime = DateTime.UtcNow.AddMilliseconds(
+                                Math.Max(BotConstants.Delays.LootUpdateMs, BotConstants.Delays.SodSopCameraSettleMs));
+                        }
+                        else
+                        {
+                            _log($"[Loot] Immediate pink scan released after {MaxImmediatePinkCaptureFailures} capture failures; " +
+                                 "no empty result was recorded and the delayed scheduler remains pending.");
+                            CompleteImmediatePinkScan("[Loot] Immediate pink scan ended as unavailable; background retry remains queued.");
+                        }
+                    }
                     else
                     {
-                        // The full sweep probed EVERY pink candidate pixel in one
-                        // continuous pass and collected nothing — the remaining pink
-                        // pixels are false positives (AoE/terrain), not loot. Done.
-                        _log($"[Loot] Pink scan complete — no SOD/SOP left to loot{KillElapsed()}.");
-                        IsLootingActive = false;
-                        _lastKillAt = DateTime.MinValue;
-                        _lootState = LootMachineState.ScanComplete;
-                        _scanCompleteUntil = DateTime.UtcNow.AddMilliseconds(
-                            BotConstants.Delays.LootScanCompleteHoldMs);
-                        _consecutiveEmptySpacePresses = 0;
+                        CancelPinkScanWork("scan cancelled");
                     }
                     break;
 
@@ -938,6 +1175,8 @@ namespace DriverScanTester.Services
                     // Double-press spacebar with 30ms gap (same pattern as AreaLoot).
                     GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                     Thread.Sleep(30);
+                    if (token.IsCancellationRequested || GetForegroundWindow() != _hwnd)
+                        break;
                     GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                     Thread.Sleep(100);
                 }
@@ -973,15 +1212,9 @@ namespace DriverScanTester.Services
             // The movement/combat system restores its own distance on the next tick.
             _memoryService.SetCameraDistance(BotConstants.Camera.LootScanDistance);
 
-            if (ScanRegion(smallX, smallY, "SmallScan"))
-            {
+            if (ScanRegion(smallX, smallY, "SmallScan") == LootScanPassResult.Collected)
                 return true;
-            }
-            if (ScanRegion(bigX, bigY, "BigScan"))
-            {
-                return true;
-            }
-            return false;
+            return ScanRegion(bigX, bigY, "BigScan") == LootScanPassResult.Collected;
         }
 
         /// <summary>
@@ -994,19 +1227,17 @@ namespace DriverScanTester.Services
         /// sweep after each successful pickup so remaining drops are still collected,
         /// and a sweep that collects nothing ends the post-kill check.
         /// </summary>
-        private bool PinkPixelScan()
+        private LootScanPassResult PinkPixelScan(string scanReason)
         {
-            return ScanRegion(bigX, bigY, "BigScan-Pink", pinkOnly: true);
+            return ScanRegion(bigX, bigY, "BigScan-Pink", pinkOnly: true, scanReason: scanReason);
         }
 
         /// <summary>What the loot loop should do with a pending background rescan this tick.</summary>
         internal enum PinkRescanAction { None, Wait, Run, Expire }
 
         /// <summary>
-        /// Pure decision for the background SOD/SOP rescan. <c>None</c>: nothing pending.
-        /// <c>Wait</c>: pending but not due yet, or a post-kill pass is still running (it owns
-        /// the loop). <c>Run</c>: due and inside its validity window. <c>Expire</c>: outside
-        /// PinkLootOnly mode, or more than <paramref name="expireAfter"/> past due.
+        /// Pure decision for a coalesced background scan. A late pass is never expired:
+        /// pending kill work remains actionable until completed or explicitly cancelled.
         /// </summary>
         internal static PinkRescanAction DecidePinkRescan(
             bool pinkLootOnly, bool pinkPassActive, DateTime dueAt, DateTime now, TimeSpan expireAfter)
@@ -1017,41 +1248,65 @@ namespace DriverScanTester.Services
                 return PinkRescanAction.Expire;
             if (pinkPassActive || now < dueAt)
                 return PinkRescanAction.Wait;
-            if (now - dueAt > expireAfter)
-                return PinkRescanAction.Expire;
             return PinkRescanAction.Run;
         }
 
         /// <summary>
-        /// One background SOD/SOP rescan pass, <see cref="BotConstants.Loot.PinkRescanDelayMs"/>
-        /// after a kill. Unlike the post-kill check it does not hold movement or combat: it
-        /// only takes the camera and the cursor (<see cref="IsPinkRescanActive"/> makes movement
-        /// yield those). A pass that collects something re-arms itself shortly, so remaining
-        /// drops are drained; an empty pass ends the rescan.
+        /// Runs exactly one background SOD/SOP pass. The scheduler ticket identifies
+        /// which kill generation the capture can cover; later kills stay pending.
+        /// Camera restoration and cursor ownership are released in every exit path.
         /// </summary>
-        private void RunPinkRescan()
+        private PinkRescanPassOutcome RunPinkRescan(PinkRescanTicket ticket)
         {
-            _log("[Loot] SOD/SOP background rescan — bot keeps moving and fighting.");
-            _pinkRescanActive = true;
+            short previousCameraDistance = 0;
+            bool havePreviousCameraDistance = false;
+            _log($"[Loot] SOD/SOP background rescan starting for kill generation {ticket.Generation}; later kills remain queued.");
             try
             {
-                _memoryService.SetCameraDistance(BotConstants.Camera.SodSopLootScanDistance);
-                Thread.Sleep(BotConstants.Delays.SodSopCameraSettleMs);
+                lock (_cameraCursorOwnershipGate)
+                {
+                    _pinkRescanActive = true;
+                    havePreviousCameraDistance = _memoryService.TryGetCameraDistance(out previousCameraDistance);
+                    if (!havePreviousCameraDistance)
+                    {
+                        previousCameraDistance = BotConstants.Camera.DefaultDistanceLock;
+                        havePreviousCameraDistance = true;
+                        _log("[LootCamera] Previous camera distance unreadable; will restore the default lock after the rescan.");
+                    }
+                    _memoryService.SetCameraDistance(BotConstants.Camera.SodSopLootScanDistance);
+                }
 
-                if (PinkPixelScan())
+                if (_scanToken.IsCancellationRequested || !PinkLootOnlyMode)
+                    return PinkRescanPassOutcome.Cancelled;
+                if (_scanToken.WaitHandle.WaitOne(BotConstants.Delays.SodSopCameraSettleMs))
+                    return PinkRescanPassOutcome.Cancelled;
+
+                LootScanPassResult result = PinkPixelScan("background");
+                return result switch
                 {
-                    _lastItemCollectedAt = DateTime.UtcNow;
-                    _pinkRescanAt = DateTime.UtcNow.AddMilliseconds(50);
-                }
-                else
-                {
-                    _log($"[Loot] SOD/SOP background rescan finished — nothing more collected{KillElapsed()}.");
-                    _pinkRescanAt = DateTime.MinValue;
-                }
+                    LootScanPassResult.Collected => PinkRescanPassOutcome.ItemCollected,
+                    LootScanPassResult.NoItem => PinkRescanPassOutcome.NoItem,
+                    LootScanPassResult.CaptureFailed => PinkRescanPassOutcome.CaptureFailed,
+                    _ => PinkRescanPassOutcome.Cancelled
+                };
+            }
+            catch (Exception ex)
+            {
+                _log($"[Loot] SOD/SOP background scan failed: {ex.Message}");
+                return PinkRescanPassOutcome.CaptureFailed;
             }
             finally
             {
-                _pinkRescanActive = false;
+                lock (_cameraCursorOwnershipGate)
+                {
+                    if (havePreviousCameraDistance &&
+                        (!_memoryService.TryGetCameraDistance(out short currentDistance) ||
+                         currentDistance == BotConstants.Camera.SodSopLootScanDistance))
+                    {
+                        RestoreCameraDistance(previousCameraDistance);
+                    }
+                    _pinkRescanActive = false;
+                }
             }
         }
 
@@ -1116,81 +1371,94 @@ namespace DriverScanTester.Services
             => IsSodSopPinkPixel(r, g, b) && !MobMarkerDetector.IsMagentaMarkerPixel(r, g, b);
 
         /// <summary>
-        /// Analyzes a captured frame with the same pink pixel mask, connected-component
-        /// labeling, minimum blob size and artificial mob-marker rejection used by the
-        /// live SOD/SOP scan. It performs no mouse movement, memory mouseover checks or loot.
+        /// Analyzes a supplied frame with the exact Phase A reader, pink mask, connected
+        /// component labeler and production candidate filters. It performs no game input.
         /// </summary>
-        internal static (int PinkPixels, int Components, int LootCandidates, int MobMarkerRings, int TinyComponents)
-            AnalyzePinkFrame(Bitmap bitmap)
+        internal static PinkFrameAnalysisResult AnalyzePinkFrame(Bitmap bitmap)
         {
             ArgumentNullException.ThrowIfNull(bitmap);
-            if (bitmap.Width <= 0 || bitmap.Height <= 0)
-                return (0, 0, 0, 0, 0);
-
-            Bitmap? converted = null;
-            Bitmap scanBitmap = bitmap;
-            BitmapData? data = null;
             var targetPoints = new List<Point>();
-            try
-            {
-                if (Image.GetPixelFormatSize(bitmap.PixelFormat) != 32)
-                {
-                    converted = new Bitmap(bitmap.Width, bitmap.Height, PixelFormat.Format32bppArgb);
-                    using (Graphics graphics = Graphics.FromImage(converted))
-                        graphics.DrawImageUnscaled(bitmap, 0, 0);
-                    scanBitmap = converted;
-                }
+            PixelCollectionStats stats = CollectTargetPointsFromBitmap(bitmap, pinkOnly: true, targetPoints);
+            return AnalyzePinkMask(bitmap, targetPoints, stats);
+        }
 
-                data = scanBitmap.LockBits(
-                    new Rectangle(0, 0, scanBitmap.Width, scanBitmap.Height),
-                    ImageLockMode.ReadOnly,
-                    scanBitmap.PixelFormat);
-                int stride = data.Stride;
-                int bytes = Math.Abs(stride) * data.Height;
-                byte[] buffer = new byte[bytes];
-                Marshal.Copy(data.Scan0, buffer, 0, bytes);
-                CollectTargetPointsFromBuffer(
-                    buffer, stride, data.Height,
-                    0, data.Width, 0, data.Height,
-                    applyExcludeZone: false,
-                    exclXMin: 0, exclXMax: 0, exclYMin: 0, exclYMax: 0,
-                    pinkOnly: true,
-                    targetPoints: targetPoints);
-            }
-            finally
-            {
-                if (data != null)
-                {
-                    try { scanBitmap.UnlockBits(data); }
-                    catch { /* Keep the test scanner safe if GDI+ rejects an unlock. */ }
-                }
-                converted?.Dispose();
-            }
-
-            List<WhiteComponent> components = LabelWhiteComponents(targetPoints);
-            int lootCandidates = 0;
-            int mobMarkerRings = 0;
+        private static PinkFrameAnalysisResult AnalyzePinkMask(
+            Bitmap bitmap,
+            List<Point> maskPoints,
+            PixelCollectionStats stats)
+        {
+            List<WhiteComponent> components = LabelWhiteComponents(maskPoints);
+            var candidates = new List<WhiteComponent>();
+            var candidateDetails = new List<PinkComponentSummary>(MaxDiagnosticPinkComponentDetails);
+            var rejectedDetails = new List<PinkComponentSummary>(MaxDiagnosticPinkComponentDetails);
+            int markerRings = 0;
             int tinyComponents = 0;
+            int rejected = 0;
+            int probeCount = 0;
+
             foreach (WhiteComponent component in components)
             {
-                if (!IsPinkLootCandidate(component))
+                bool candidate = IsPinkLootCandidate(component);
+                if (candidate && IsMobMarkerRingComponent(component, bitmap))
                 {
+                    markerRings++;
+                    candidate = false;
+                }
+
+                if (candidate)
+                {
+                    candidates.Add(component);
+                    probeCount += component.Area; // Pink mode probes every component pixel.
+                }
+                else
+                {
+                    rejected++;
                     if (component.Width < BotConstants.Loot.PinkMinCandidateWidth ||
                         component.Height < BotConstants.Loot.PinkMinCandidateHeight)
                         tinyComponents++;
-                    continue;
                 }
 
-                if (IsMobMarkerRingComponent(component, bitmap))
-                    mobMarkerRings++;
-                else
-                    lootCandidates++;
+                List<PinkComponentSummary> destination = candidate ? candidateDetails : rejectedDetails;
+                if (destination.Count < MaxDiagnosticPinkComponentDetails)
+                {
+                    Rectangle bounds = Rectangle.FromLTRB(
+                        component.XMin, component.YMin, component.XMax + 1, component.YMax + 1);
+                    destination.Add(new PinkComponentSummary(
+                        bounds,
+                        component.Area,
+                        component.Area / (float)Math.Max(component.Width * component.Height, 1),
+                        candidate,
+                        candidate
+                            ? component.Points.Take(MaxDiagnosticPinkComponentDetails).ToArray()
+                            : Array.Empty<Point>()));
+                }
             }
 
-            return (targetPoints.Count, components.Count, lootCandidates, mobMarkerRings, tinyComponents);
+            return new PinkFrameAnalysisResult
+            {
+                Width = bitmap.Width,
+                Height = bitmap.Height,
+                TotalPixelsExamined = stats.PixelsExamined,
+                RawPinkPixels = stats.RawPinkPixels,
+                MarkerPixelsRejected = stats.MarkerPixelsRejected,
+                PinkPixels = stats.MaskPixels,
+                Components = components.Count,
+                LootCandidates = candidates.Count,
+                SizeOrShapeRejectedComponents = rejected,
+                MobMarkerRings = markerRings,
+                TinyComponents = tinyComponents,
+                FinalProbeCount = probeCount,
+                CandidateDetails = candidateDetails
+                    .Concat(rejectedDetails.Take(Math.Max(0, MaxDiagnosticPinkComponentDetails - candidateDetails.Count)))
+                    .ToArray(),
+                CandidateComponents = candidates,
+                AllComponents = components
+            };
         }
 
-        private bool ScanRegion(int[] xRange, int[] yRange, string regionName, bool pinkOnly = false)
+        private LootScanPassResult ScanRegion(
+            int[] xRange, int[] yRange, string regionName,
+            bool pinkOnly = false, string scanReason = "white-loot")
         {
             string pixelNoun = pinkOnly ? "pink" : "white";
 
@@ -1206,17 +1474,39 @@ namespace DriverScanTester.Services
             Rectangle diagnosticExcludeZone = Rectangle.Empty;
             int diagnosticWhiteCount = 0;
             string diagnosticOutcome = "scan-error";
+            LootClientGeometry? diagnosticGeometry = null;
+            PixelFormat diagnosticPixelFormat = PixelFormat.Undefined;
+            int diagnosticStride = 0;
+            PixelCollectionStats pixelStats = default;
+            PinkFrameAnalysisResult? pinkAnalysis = null;
+            int actualCursorProbes = 0;
+            DateTime scanStartedUtc = DateTime.UtcNow;
 
             try
             {
-                CaptureScreen();
-
-                // If bitmap capture failed (window not found, etc.), abort scan.
-                if (_bitmap == null || _clientWidth <= 0 || _clientHeight <= 0)
+                if (!CaptureScreen())
                 {
                     diagnosticOutcome = "capture-failed";
-                    return false;
+                    if (pinkOnly && ScreenshotService.LootScanCaptureEnabled)
+                        LogPinkCaptureFailureDiagnostics(scanStartedUtc, scanReason, _lastCaptureResult);
+                    return LootScanPassResult.CaptureFailed;
                 }
+                if (_bitmap == null || _clientWidth <= 0 || _clientHeight <= 0 ||
+                    _lastStableCaptureGeometry == null)
+                {
+                    diagnosticOutcome = "capture-failed";
+                    if (pinkOnly && ScreenshotService.LootScanCaptureEnabled)
+                        LogPinkCaptureFailureDiagnostics(scanStartedUtc, scanReason, _lastCaptureResult);
+                    _log($"[Loot] {regionName}: capture failed; scan was not interpreted as empty.");
+                    return LootScanPassResult.CaptureFailed;
+                }
+
+                diagnosticGeometry = _lastStableCaptureGeometry;
+                diagnosticPixelFormat = _bitmap.PixelFormat;
+                if (ScreenshotService.LootScanCaptureEnabled)
+                    diagnosticFrame = pinkOnly
+                        ? ScreenshotService.ClonePinkLootScanFrame(_bitmap)
+                        : ScreenshotService.CloneLootScanFrame(_bitmap);
 
                 // Check the full client frame for another player's faction marker on
                 // every loot pixel-scan pass, regardless of the loot scan rectangle.
@@ -1224,7 +1514,7 @@ namespace DriverScanTester.Services
                 if (_scanToken.IsCancellationRequested)
                 {
                     diagnosticOutcome = "cancelled-after-player-detection";
-                    return false;
+                    return LootScanPassResult.Cancelled;
                 }
 
                 // Convert hardcoded screen-absolute ranges → bitmap-local coordinates,
@@ -1266,11 +1556,11 @@ namespace DriverScanTester.Services
                 {
                     _log($"[Loot] {regionName}: clamped range is empty (out of client area).");
                     diagnosticOutcome = "empty-range";
-                    return false;
+                    return LootScanPassResult.NoItem;
                 }
 
-                // Snapshot the frame under analysis (see diagnostics comment above).
-                diagnosticFrame = ScreenshotService.CloneLootScanFrame(_bitmap);
+                // diagnosticFrame was cloned immediately after this successful capture,
+                // before a later capture, annotation or cursor action can change the pixels.
                 diagnosticScanRegion = new Rectangle(xStart, yStart, xEnd - xStart, yEnd - yStart);
                 diagnosticExcludeZone = applyExcludeZone
                     ? new Rectangle(exclXMin, exclYMin, exclXMax - exclXMin + 1, exclYMax - exclYMin + 1)
@@ -1289,7 +1579,7 @@ namespace DriverScanTester.Services
                     _log($"[Loot] {regionName}: city/combat detected before scan — aborting.");
                     diagnosticOutcome = "city-abort";
                     ResetPlayerMarkerConfirmation();
-                    return false;
+                    return LootScanPassResult.Cancelled;
                 }
 
                 // ── Phase A: collect every target pixel in the region — no input.
@@ -1302,49 +1592,57 @@ namespace DriverScanTester.Services
                 //    and only filtered survivors are probed. The frame is read in one
                 //    bulk LockBits copy (CollectScanTargetPoints), not GetPixel per px. ──
                 var targetPoints = new List<Point>();
-                CollectScanTargetPoints(
+                pixelStats = CollectScanTargetPoints(
                     xStart, xEnd, yStart, yEnd,
                     applyExcludeZone, exclXMin, exclXMax, exclYMin, exclYMax,
-                    pinkOnly, targetPoints);
+                    pinkOnly, targetPoints,
+                    out diagnosticPixelFormat,
+                    out diagnosticStride);
                 diagnosticWhiteCount = targetPoints.Count;
 
                 // ── Phase B: label 8-connected components and keep only loot-shaped
-                //    blobs. Target rings (long thin arcs), mob-name text (glyph rows),
-                //    weapon lines and oversized sprite highlights are dropped instead
-                //    of being probed; a dialog is one huge blob and is dropped too. ──
-                List<WhiteComponent> components = LabelWhiteComponents(targetPoints);
+                //    blobs. Pink mode uses the same helper as AnalyzePinkFrame, so its
+                //    tests and live Phase A/B filtering share the exact production path. ──
+                List<WhiteComponent> components;
                 var candidates = new List<WhiteComponent>();
-                int filteredComponents = 0;
-                int tinyPinkComponents = 0;
-                int mobMarkerComponents = 0;
-                foreach (WhiteComponent component in components)
+                int filteredComponents;
+                int tinyPinkComponents;
+                int mobMarkerComponents;
+                if (pinkOnly)
                 {
-                    bool isCandidate = pinkOnly
-                        ? IsPinkLootCandidate(component)
-                        : IsLootCandidate(component);
-                    if (isCandidate && pinkOnly && IsMobMarkerRingComponent(component, _bitmap))
-                    {
-                        // The artificial Hyena markers deliberately use saturated magenta and
-                        // overlap the legacy SOD/SOP color family. Exclude sparse marker-ring
-                        // geometry before probing; exact loot
-                        // mouseover remains authoritative for all actual SOD/SOP components.
-                        mobMarkerComponents++;
-                        isCandidate = false;
-                    }
+                    pinkAnalysis = AnalyzePinkMask(_bitmap, targetPoints, pixelStats);
+                    components = pinkAnalysis.AllComponents.ToList();
+                    candidates.AddRange(pinkAnalysis.CandidateComponents);
+                    filteredComponents = pinkAnalysis.SizeOrShapeRejectedComponents;
+                    tinyPinkComponents = pinkAnalysis.TinyComponents;
+                    mobMarkerComponents = pinkAnalysis.MobMarkerRings;
 
-                    if (isCandidate)
+                    if (ScreenshotService.LootScanCaptureEnabled && diagnosticGeometry.HasValue)
                     {
-                        candidates.Add(component);
-                    }
-                    else
-                    {
-                        filteredComponents++;
-                        if (pinkOnly &&
-                            (component.Width < BotConstants.Loot.PinkMinCandidateWidth ||
-                             component.Height < BotConstants.Loot.PinkMinCandidateHeight))
+                        if (diagnosticFrame != null)
                         {
-                            tinyPinkComponents++;
+                            string rawMetadata = BuildPinkFrameDiagnosticMetadata(
+                                scanStartedUtc, scanReason, diagnosticGeometry.Value,
+                                diagnosticPixelFormat, diagnosticStride, diagnosticScanRegion,
+                                pinkAnalysis, finalCursorProbes: -1);
+                            ScreenshotService.SaveLootScanRawFrame(
+                                diagnosticFrame, regionName, rawMetadata, _log);
+                            diagnosticFrame = null;
                         }
+                    }
+                }
+                else
+                {
+                    components = LabelWhiteComponents(targetPoints);
+                    filteredComponents = 0;
+                    tinyPinkComponents = 0;
+                    mobMarkerComponents = 0;
+                    foreach (WhiteComponent component in components)
+                    {
+                        if (IsLootCandidate(component))
+                            candidates.Add(component);
+                        else
+                            filteredComponents++;
                     }
                 }
 
@@ -1376,27 +1674,60 @@ namespace DriverScanTester.Services
                 int probesUsed = 0;
                 foreach (WhiteComponent component in candidates)
                 {
-                    if (ShouldAbortLoot())
+                    if (ShouldAbortLoot() || _scanToken.IsCancellationRequested ||
+                        (pinkOnly && !PinkLootOnlyMode))
                     {
-                        diagnosticOutcome = "city-abort";
-                        return false;
+                        diagnosticOutcome = "cancelled-before-probe";
+                        return LootScanPassResult.Cancelled;
                     }
 
                     bool addDiagonals = component.Area <= TinyProbeWithDiagonalsArea;
                     List<Point> points = pinkOnly ? component.Points : SelectProbePoints(component);
                     foreach (Point probe in points)
                     {
-                        if (_scanToken.IsCancellationRequested || ShouldAbortLoot())
-                            return false;
-                        if (TryCollectAt(probe.X, probe.Y, pinkOnly)) { diagnosticOutcome = "collected"; return true; }
+                        if (_scanToken.IsCancellationRequested || ShouldAbortLoot() ||
+                            (pinkOnly && !PinkLootOnlyMode))
+                        {
+                            diagnosticOutcome = "cancelled-during-probe";
+                            return LootScanPassResult.Cancelled;
+                        }
+                        actualCursorProbes++;
+                        LootProbeResult probeResult = TryCollectAt(probe.X, probe.Y, pinkOnly);
+                        if (probeResult == LootProbeResult.Collected)
+                        {
+                            diagnosticOutcome = "collected";
+                            return LootScanPassResult.Collected;
+                        }
+                        if (probeResult == LootProbeResult.CaptureInvalid)
+                        {
+                            diagnosticOutcome = "capture-geometry-changed-during-probes";
+                            return LootScanPassResult.CaptureFailed;
+                        }
+                        if (probeResult == LootProbeResult.Cancelled)
+                        {
+                            diagnosticOutcome = "probe-cancelled-or-focus-lost";
+                            return LootScanPassResult.Cancelled;
+                        }
                         probesUsed++;
 
                         if (addDiagonals)
                         {
-                            if (TryCollectAt(probe.X + 1, probe.Y + 1, pinkOnly)) { diagnosticOutcome = "collected"; return true; }
-                            if (TryCollectAt(probe.X - 1, probe.Y - 1, pinkOnly)) { diagnosticOutcome = "collected"; return true; }
-                            if (TryCollectAt(probe.X + 1, probe.Y - 1, pinkOnly)) { diagnosticOutcome = "collected"; return true; }
-                            if (TryCollectAt(probe.X - 1, probe.Y + 1, pinkOnly)) { diagnosticOutcome = "collected"; return true; }
+                            LootProbeResult diagonalResult = TryCollectAtWithCount(
+                                probe.X + 1, probe.Y + 1, pinkOnly, ref actualCursorProbes);
+                            if (diagonalResult != LootProbeResult.Miss)
+                                return HandleProbeResult(diagonalResult, ref diagnosticOutcome);
+                            diagonalResult = TryCollectAtWithCount(
+                                probe.X - 1, probe.Y - 1, pinkOnly, ref actualCursorProbes);
+                            if (diagonalResult != LootProbeResult.Miss)
+                                return HandleProbeResult(diagonalResult, ref diagnosticOutcome);
+                            diagonalResult = TryCollectAtWithCount(
+                                probe.X + 1, probe.Y - 1, pinkOnly, ref actualCursorProbes);
+                            if (diagonalResult != LootProbeResult.Miss)
+                                return HandleProbeResult(diagonalResult, ref diagnosticOutcome);
+                            diagonalResult = TryCollectAtWithCount(
+                                probe.X - 1, probe.Y + 1, pinkOnly, ref actualCursorProbes);
+                            if (diagonalResult != LootProbeResult.Miss)
+                                return HandleProbeResult(diagonalResult, ref diagnosticOutcome);
                             probesUsed += 4;
                         }
 
@@ -1409,7 +1740,7 @@ namespace DriverScanTester.Services
                                  $"{diagnosticWhiteHits.Count} probed px of {targetPoints.Count} {pixelNoun} px in {components.Count} components; " +
                                  $"aborting region (likely UI/effect clutter).");
                             diagnosticOutcome = "too-many-white";
-                            return false;
+                            return LootScanPassResult.NoItem;
                         }
                     }
                 }
@@ -1428,27 +1759,48 @@ namespace DriverScanTester.Services
                     _log($"[Loot] {regionName}: scanned {scanPixels} px, no {pixelNoun} pixels.");
                 }
                 diagnosticOutcome = "no-item";
+                return LootScanPassResult.NoItem;
             }
             catch (Exception ex)
             {
                 _log($"PixelScan error: {ex.Message}");
+                diagnosticOutcome = "scan-error";
+                return pinkOnly ? LootScanPassResult.CaptureFailed : LootScanPassResult.NoItem;
             }
             finally
             {
-                // Save whatever frame was captured (if any) with the scan overlay,
-                // regardless of how the region pass ended.
-                ScreenshotService.SaveLootScanFrame(
-                    diagnosticFrame,
-                    regionName,
-                    diagnosticOutcome,
-                    _log,
-                    diagnosticWhiteCount,
-                    diagnosticScanRegion,
-                    diagnosticExcludeZone,
-                    diagnosticWhiteHits,
-                    pixelNoun);
+                if (pinkOnly && ScreenshotService.LootScanCaptureEnabled &&
+                    pinkAnalysis != null && diagnosticGeometry.HasValue)
+                {
+                    LogPinkFrameDiagnostics(
+                        scanStartedUtc, scanReason, diagnosticGeometry.Value,
+                        diagnosticPixelFormat, diagnosticStride, diagnosticScanRegion,
+                        pinkAnalysis, actualCursorProbes, diagnosticOutcome);
+                }
+
+                // White-loot retains the existing annotated frame. Pink diagnostics save
+                // an exact unmodified clone separately, before it can be annotated.
+                if (diagnosticFrame != null)
+                {
+                    if (pinkOnly)
+                    {
+                        string metadata = diagnosticGeometry.HasValue && pinkAnalysis != null
+                            ? BuildPinkFrameDiagnosticMetadata(
+                                scanStartedUtc, scanReason, diagnosticGeometry.Value,
+                                diagnosticPixelFormat, diagnosticStride, diagnosticScanRegion,
+                                pinkAnalysis, actualCursorProbes)
+                            : $"timestampUtc={scanStartedUtc:O}; reason={scanReason}; captureStatus={_lastCaptureResult.Status}; outcome={diagnosticOutcome}";
+                        ScreenshotService.SaveLootScanRawFrame(diagnosticFrame, regionName, metadata, _log);
+                    }
+                    else
+                    {
+                        ScreenshotService.SaveLootScanFrame(
+                            diagnosticFrame, regionName, diagnosticOutcome, _log,
+                            diagnosticWhiteCount, diagnosticScanRegion, diagnosticExcludeZone,
+                            diagnosticWhiteHits, pixelNoun);
+                    }
+                }
             }
-            return false;
         }
 
         private void ScanForOtherPlayerPixels()
@@ -1508,8 +1860,7 @@ namespace DriverScanTester.Services
 
             try
             {
-                CaptureScreen();
-                if (_bitmap == null || _clientWidth <= 0 || _clientHeight <= 0)
+                if (!CaptureScreen() || _bitmap == null || _clientWidth <= 0 || _clientHeight <= 0)
                 {
                     ResetPlayerMarkerConfirmation();
                     _log("[PlayerPixels] Confirmation capture failed; ignoring the candidate.");
@@ -1582,6 +1933,74 @@ namespace DriverScanTester.Services
         private static string FormatRectangle(Rectangle rectangle)
             => $"({rectangle.X},{rectangle.Y},{rectangle.Width}x{rectangle.Height})";
 
+        private static string BuildPinkFrameDiagnosticMetadata(
+            DateTime timestampUtc,
+            string scanReason,
+            LootClientGeometry geometry,
+            PixelFormat pixelFormat,
+            int stride,
+            Rectangle scannedRectangle,
+            PinkFrameAnalysisResult analysis,
+            int finalCursorProbes,
+            string scanOutcome = "probes-pending")
+        {
+            string probes = finalCursorProbes < 0 ? "not-yet-run" : finalCursorProbes.ToString();
+            return $"timestampUtc={timestampUtc:O}; reason={scanReason}; frameCaptureStatus=Success; " +
+                   $"hwnd=0x{geometry.WindowHandle.ToInt64():X}; window={FormatRectangle(geometry.WindowRectangle)}; " +
+                   $"clientOrigin=({geometry.ClientScreenOrigin.X},{geometry.ClientScreenOrigin.Y}); " +
+                   $"client={geometry.ClientSize.Width}x{geometry.ClientSize.Height}; " +
+                   $"bitmap={analysis.Width}x{analysis.Height}; pixelFormat={pixelFormat}; stride={stride}; " +
+                   $"scannedRect={FormatRectangle(scannedRectangle)}; pixelsExamined={analysis.TotalPixelsExamined}; " +
+                   $"rawPink={analysis.RawPinkPixels}; markerRejected={analysis.MarkerPixelsRejected}; " +
+                   $"maskPixels={analysis.PinkPixels}; components={analysis.Components}; " +
+                   $"candidates={analysis.LootCandidates}; rejectedBySizeOrShape={analysis.SizeOrShapeRejectedComponents}; " +
+                   $"markerRingComponents={analysis.MobMarkerRings}; plannedProbes={analysis.FinalProbeCount}; " +
+                   $"actualProbes={probes}; scanOutcome={scanOutcome}";
+        }
+
+        private void LogPinkCaptureFailureDiagnostics(
+            DateTime timestampUtc,
+            string scanReason,
+            StableLootCaptureResult capture)
+        {
+            LootClientGeometry geometry = capture.Geometry;
+            string captureStatus = capture.Succeeded
+                ? "UnusableBitmapAfterCapture"
+                : $"Failed:{capture.Status}";
+            _log($"[LootPinkDiagnostic] timestampUtc={timestampUtc:O}; reason={scanReason}; " +
+                 $"frameCaptureStatus={captureStatus}; hwnd=0x{geometry.WindowHandle.ToInt64():X}; " +
+                 $"window={FormatRectangle(geometry.WindowRectangle)}; " +
+                 $"clientOrigin=({geometry.ClientScreenOrigin.X},{geometry.ClientScreenOrigin.Y}); " +
+                 $"client={geometry.ClientSize.Width}x{geometry.ClientSize.Height}; " +
+                 $"pixelFormat={(_bitmap?.PixelFormat.ToString() ?? "Undefined")}; stride=0; scannedRect=none; " +
+                 $"pixelsExamined=0; rawPink=0; markerRejected=0; maskPixels=0; components=0; " +
+                 $"candidates=0; rejectedBySizeOrShape=0; plannedProbes=0; actualProbes=0; " +
+                 $"scanOutcome=capture-failed; error={capture.Error}");
+        }
+
+        private void LogPinkFrameDiagnostics(
+            DateTime timestampUtc,
+            string scanReason,
+            LootClientGeometry geometry,
+            PixelFormat pixelFormat,
+            int stride,
+            Rectangle scannedRectangle,
+            PinkFrameAnalysisResult analysis,
+            int finalCursorProbes,
+            string scanOutcome)
+        {
+            _log("[LootPinkDiagnostic] " + BuildPinkFrameDiagnosticMetadata(
+                timestampUtc, scanReason, geometry, pixelFormat, stride,
+                scannedRectangle, analysis, finalCursorProbes, scanOutcome));
+            for (int i = 0; i < analysis.CandidateDetails.Count; i++)
+            {
+                PinkComponentSummary component = analysis.CandidateDetails[i];
+                _log($"[LootPinkDiagnostic] component[{i}] bounds={FormatRectangle(component.Bounds)} " +
+                     $"pixels={component.PixelCount} fill={component.FillRatio:F3} candidate={component.IsLootCandidate} " +
+                     $"probePoints={component.ProbePoints.Count}");
+            }
+        }
+
         private static string FormatRectangles(Rectangle[] rectangles)
             => string.Join(";", Array.ConvertAll(rectangles, FormatRectangle));
 
@@ -1593,117 +2012,325 @@ namespace DriverScanTester.Services
             _playerMarkerCandidateDetectedAt = DateTime.MinValue;
         }
 
+        private void CancelAllLootWork(string reason)
+        {
+            bool hadWork;
+            lock (_cameraCursorOwnershipGate)
+            {
+                PinkRescanSnapshot pendingRescan = _pinkRescanScheduler.Snapshot;
+                hadWork = _pinkScanRequested || _pinkScanOwnsCameraCursor || _pinkRescanActive ||
+                          _lootState != LootMachineState.Idle || IsLootingActive ||
+                          pendingRescan.Pending || pendingRescan.Active;
+                _pinkScanRequested = false;
+                _pinkScanRequestedAt = DateTime.MinValue;
+                _pinkRescanScheduler.Cancel();
+                RestorePinkCameraLocked();
+                _pinkScanOwnsCameraCursor = false;
+                _lootState = LootMachineState.Idle;
+                _consecutiveEmptySpacePresses = 0;
+                _consecutivePinkCaptureFailures = 0;
+                _scanCompleteUntil = DateTime.MinValue;
+                _lastKillAt = DateTime.MinValue;
+                _wasMobSelectedPrev = false;
+                IsLootingActive = false;
+            }
+            if (hadWork)
+                _log($"[Loot] Pink/loot work cleared: {reason}.");
+        }
+
+        private void CancelPinkScanWork(string reason)
+        {
+            lock (_cameraCursorOwnershipGate)
+            {
+                _pinkScanRequested = false;
+                _pinkScanRequestedAt = DateTime.MinValue;
+                _pinkRescanScheduler.Cancel();
+                RestorePinkCameraLocked();
+                _pinkScanOwnsCameraCursor = false;
+                if (_lootState == LootMachineState.PinkScan)
+                    _lootState = LootMachineState.Idle;
+                IsLootingActive = false;
+                _consecutiveEmptySpacePresses = 0;
+                _consecutivePinkCaptureFailures = 0;
+                _lastKillAt = DateTime.MinValue;
+            }
+            _log($"[Loot] SOD/SOP work cancelled: {reason}.");
+        }
+
+        private void RestorePinkCameraLocked()
+        {
+            if (_pinkScanRestoreDistance.HasValue &&
+                (!_memoryService.TryGetCameraDistance(out short currentDistance) ||
+                 currentDistance == BotConstants.Camera.SodSopLootScanDistance))
+            {
+                RestoreCameraDistance(_pinkScanRestoreDistance.Value);
+            }
+            _pinkScanRestoreDistance = null;
+        }
+
+        private void RestoreCameraDistance(short distance)
+        {
+            if (_memoryService.TrySetCameraDistance(distance))
+                return;
+
+            _memoryService.SetCameraDistance(distance);
+            if (!_memoryService.TryGetCameraDistance(out short restored) || restored != distance)
+                _log($"[LootCamera] Could not restore camera distance to {distance} after pink scan.");
+        }
+
+        private void SetPinkScanCameraDistance()
+        {
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (!_pinkScanRestoreDistance.HasValue)
+                {
+                    if (_memoryService.TryGetCameraDistance(out short previousDistance))
+                        _pinkScanRestoreDistance = previousDistance;
+                    else
+                    {
+                        _pinkScanRestoreDistance = BotConstants.Camera.DefaultDistanceLock;
+                        _log("[LootCamera] Previous camera distance unreadable; using the default lock for restoration.");
+                    }
+                }
+                _pinkScanOwnsCameraCursor = true;
+                _memoryService.SetCameraDistance(BotConstants.Camera.SodSopLootScanDistance);
+            }
+        }
+
+        private void CompleteImmediatePinkScan(string outcome)
+        {
+            lock (_cameraCursorOwnershipGate)
+            {
+                RestorePinkCameraLocked();
+                _pinkScanOwnsCameraCursor = false;
+                _lootState = LootMachineState.ScanComplete;
+                _scanCompleteUntil = DateTime.UtcNow.AddMilliseconds(BotConstants.Delays.LootScanCompleteHoldMs);
+                _consecutiveEmptySpacePresses = 0;
+                _consecutivePinkCaptureFailures = 0;
+                IsLootingActive = false;
+            }
+            _log(outcome);
+        }
+
         /// <summary>
         /// Phase A of a region pass: collects every target pixel of the clamped scan
         /// region — pure white for normal loot, the hot-pink family for SOD/SOP.
-        ///
-        /// The frame is read through one LockBits bulk copy instead of a
-        /// <see cref="Bitmap.GetPixel"/> call per pixel. The pink pass sweeps the
-        /// WHOLE client area (~1M px) and used to spend hundreds of milliseconds per
-        /// pass in GDI+ GetPixel overhead; that pause is what made the pink sweep look
-        /// like "move x times, stop, move x times". With the bulk read the pixel pass
-        /// costs a few milliseconds instead.
+        /// The bitmap is bulk-read row by row so positive and negative GDI+ strides map
+        /// to the same logical top-down client coordinates as GetPixel.
         /// </summary>
-        private void CollectScanTargetPoints(
+        private PixelCollectionStats CollectScanTargetPoints(
+            int xStart, int xEnd, int yStart, int yEnd,
+            bool applyExcludeZone, int exclXMin, int exclXMax, int exclYMin, int exclYMax,
+            bool pinkOnly, List<Point> targetPoints,
+            out PixelFormat sourcePixelFormat,
+            out int sourceStride)
+            => CollectBitmapTargetPoints(
+                _bitmap, xStart, xEnd, yStart, yEnd,
+                applyExcludeZone, exclXMin, exclXMax, exclYMin, exclYMax,
+                pinkOnly, targetPoints, ref _scanBuffer,
+                out sourcePixelFormat, out sourceStride);
+
+        internal static PixelCollectionStats CollectTargetPointsFromBitmap(
+            Bitmap bitmap, bool pinkOnly, List<Point> targetPoints)
+        {
+            byte[] reusableBuffer = Array.Empty<byte>();
+            return CollectBitmapTargetPoints(
+                bitmap, 0, bitmap.Width, 0, bitmap.Height,
+                applyExcludeZone: false, 0, 0, 0, 0,
+                pinkOnly, targetPoints, ref reusableBuffer, out _, out _);
+        }
+
+        private static PixelCollectionStats CollectBitmapTargetPoints(
+            Bitmap bitmap,
+            int xStart, int xEnd, int yStart, int yEnd,
+            bool applyExcludeZone, int exclXMin, int exclXMax, int exclYMin, int exclYMax,
+            bool pinkOnly, List<Point> targetPoints,
+            ref byte[] reusableBuffer,
+            out PixelFormat sourcePixelFormat,
+            out int sourceStride)
+        {
+            ArgumentNullException.ThrowIfNull(bitmap);
+            ArgumentNullException.ThrowIfNull(targetPoints);
+            sourcePixelFormat = bitmap.PixelFormat;
+            sourceStride = 0;
+            int initialCount = targetPoints.Count;
+
+            Bitmap? converted = null;
+            Bitmap scanBitmap = bitmap;
+            BitmapData? data = null;
+            bool useReferenceReader = false;
+            try
+            {
+                if (bitmap.PixelFormat != PixelFormat.Format32bppArgb)
+                {
+                    converted = new Bitmap(bitmap.Width, bitmap.Height, PixelFormat.Format32bppArgb);
+                    using (Graphics graphics = Graphics.FromImage(converted))
+                        graphics.DrawImageUnscaled(bitmap, 0, 0);
+                    scanBitmap = converted;
+                }
+
+                data = scanBitmap.LockBits(
+                    new Rectangle(0, 0, scanBitmap.Width, scanBitmap.Height),
+                    ImageLockMode.ReadOnly,
+                    PixelFormat.Format32bppArgb);
+                sourceStride = data.Stride;
+                int rowBytes = checked(scanBitmap.Width * 4);
+                int normalizedBytes = checked(rowBytes * scanBitmap.Height);
+                if (reusableBuffer.Length < normalizedBytes)
+                    reusableBuffer = new byte[normalizedBytes];
+
+                // Normalize logical bitmap rows to a positive, tightly packed stride.
+                // Copying Scan0 as one positive-length block is incorrect for negative
+                // stride and can reverse rows or read the wrong memory range.
+                for (int y = 0; y < scanBitmap.Height; y++)
+                {
+                    IntPtr sourceRow = IntPtr.Add(data.Scan0, checked(y * data.Stride));
+                    Marshal.Copy(sourceRow, reusableBuffer, y * rowBytes, rowBytes);
+                }
+
+                return CollectTargetPointsFromBuffer(
+                    reusableBuffer, rowBytes, scanBitmap.Height,
+                    xStart, xEnd, yStart, yEnd,
+                    applyExcludeZone, exclXMin, exclXMax, exclYMin, exclYMax,
+                    pinkOnly, targetPoints);
+            }
+            catch
+            {
+                targetPoints.RemoveRange(initialCount, targetPoints.Count - initialCount);
+                useReferenceReader = true;
+            }
+            finally
+            {
+                if (data != null)
+                {
+                    try { scanBitmap.UnlockBits(data); }
+                    catch { useReferenceReader = true; }
+                }
+                converted?.Dispose();
+            }
+
+            if (useReferenceReader)
+            {
+                sourceStride = 0;
+                return CollectTargetPointsFromBitmapReference(
+                    bitmap, xStart, xEnd, yStart, yEnd,
+                    applyExcludeZone, exclXMin, exclXMax, exclYMin, exclYMax,
+                    pinkOnly, targetPoints);
+            }
+
+            return default;
+        }
+
+        /// <summary>
+        /// Direct GetPixel reference reader and production fallback. It uses the same
+        /// production classifier as the bulk BGRA reader.
+        /// </summary>
+        internal static PixelCollectionStats CollectTargetPointsFromBitmapReference(
+            Bitmap bitmap,
             int xStart, int xEnd, int yStart, int yEnd,
             bool applyExcludeZone, int exclXMin, int exclXMax, int exclYMin, int exclYMax,
             bool pinkOnly, List<Point> targetPoints)
         {
-            Bitmap bitmap = _bitmap;
-            PixelFormat format = bitmap.PixelFormat;
-
-            // Only 32bpp formats have the 4-byte BGRA layout this reader assumes.
-            // Anything else (should not happen — the bitmap is created 32bppArgb)
-            // falls back to the slow GetPixel path below.
-            if (Image.GetPixelFormatSize(format) == 32)
-            {
-                BitmapData? data = null;
-                try
-                {
-                    data = bitmap.LockBits(
-                        new Rectangle(0, 0, bitmap.Width, bitmap.Height),
-                        ImageLockMode.ReadOnly,
-                        format);
-
-                    int stride = data.Stride;
-                    int bytes = Math.Abs(stride) * data.Height;
-                    if (_scanBuffer.Length < bytes)
-                        _scanBuffer = new byte[bytes];
-                    Marshal.Copy(data.Scan0, _scanBuffer, 0, bytes);
-
-                    CollectTargetPointsFromBuffer(
-                        _scanBuffer, stride, data.Height,
-                        xStart, xEnd, yStart, yEnd,
-                        applyExcludeZone, exclXMin, exclXMax, exclYMin, exclYMax,
-                        pinkOnly, targetPoints);
-                    return;
-                }
-                catch
-                {
-                    // LockBits/Marshal failed for an unexpected reason — drop any
-                    // partially collected points and use the safe fallback below.
-                    targetPoints.Clear();
-                }
-                finally
-                {
-                    if (data != null)
-                        bitmap.UnlockBits(data);
-                }
-            }
-
-            // Fallback: per-pixel GDI+ read (slow, but always works).
+            ArgumentNullException.ThrowIfNull(bitmap);
+            ArgumentNullException.ThrowIfNull(targetPoints);
+            int initialCount = targetPoints.Count;
+            int examined = 0;
+            int rawPink = 0;
+            int markerRejected = 0;
             for (int x = xStart; x < xEnd; x++)
             {
                 for (int y = yStart; y < yEnd; y++)
                 {
-                    if (applyExcludeZone &&
-                        x >= exclXMin && x <= exclXMax && y >= exclYMin && y <= exclYMax)
-                        continue; // character exclude zone
+                    if (applyExcludeZone && x >= exclXMin && x <= exclXMax &&
+                        y >= exclYMin && y <= exclYMax)
+                        continue;
 
-                    Color pixelColor = bitmap.GetPixel(x, y);
-                    bool isTarget = pinkOnly
-                        ? IsPinkLootMaskPixel(pixelColor)
-                        : (pixelColor.R == 255 && pixelColor.G == 255 && pixelColor.B == 255);
+                    examined++;
+                    Color color = bitmap.GetPixel(x, y);
+                    bool isTarget;
+                    if (pinkOnly)
+                    {
+                        bool raw = IsSodSopPinkPixel(color);
+                        if (raw) rawPink++;
+                        isTarget = IsPinkLootMaskPixel(color);
+                        if (raw && !isTarget) markerRejected++;
+                    }
+                    else
+                    {
+                        isTarget = color.R == 255 && color.G == 255 && color.B == 255;
+                    }
+
                     if (isTarget)
                         targetPoints.Add(new Point(x, y));
                 }
             }
+
+            return new PixelCollectionStats(examined, rawPink, markerRejected, targetPoints.Count - initialCount);
         }
 
         /// <summary>
         /// Testable core of Phase A: parses a raw 32bpp BGRA frame buffer and collects
-        /// every target pixel. Byte order in memory is B, G, R, A; <paramref name="stride"/> may
-        /// be negative for bottom-up frames. Normal loot = pure white; pink mode = the
-        /// SOD/SOP hot-pink family with artificial mob-marker magenta removed.
+        /// every target pixel. A negative stride means the supplied packed rows are
+        /// bottom-up; production normalizes BitmapData rows before calling this helper.
         /// </summary>
-        internal static void CollectTargetPointsFromBuffer(
+        internal static PixelCollectionStats CollectTargetPointsFromBuffer(
             byte[] buffer, int stride, int bitmapHeight,
             int xStart, int xEnd, int yStart, int yEnd,
             bool applyExcludeZone, int exclXMin, int exclXMax, int exclYMin, int exclYMax,
             bool pinkOnly, List<Point> targetPoints)
         {
+            ArgumentNullException.ThrowIfNull(buffer);
+            ArgumentNullException.ThrowIfNull(targetPoints);
+            long absStrideLong = Math.Abs((long)stride);
+            if (stride == 0 || bitmapHeight <= 0 || xStart < 0 || xEnd < xStart ||
+                yStart < 0 || yEnd < yStart || yEnd > bitmapHeight ||
+                (long)xEnd * 4 > absStrideLong ||
+                absStrideLong * bitmapHeight > buffer.Length)
+                throw new ArgumentOutOfRangeException(nameof(stride), "Invalid BGRA buffer geometry.");
+
+            int absStride = checked((int)absStrideLong);
             bool bottomUp = stride < 0;
-            int absStride = Math.Abs(stride);
+            int initialCount = targetPoints.Count;
+            int examined = 0;
+            int rawPink = 0;
+            int markerRejected = 0;
             for (int x = xStart; x < xEnd; x++)
             {
                 bool xOutsideExclude = !applyExcludeZone || x < exclXMin || x > exclXMax;
                 for (int y = yStart; y < yEnd; y++)
                 {
                     if (!xOutsideExclude && y >= exclYMin && y <= exclYMax)
-                        continue; // character exclude zone
+                        continue;
 
                     int row = bottomUp ? bitmapHeight - 1 - y : y;
-                    int offset = row * absStride + x * 4;
+                    long offsetLong = (long)row * absStride + (long)x * 4;
+                    if (offsetLong < 0 || offsetLong + 3 >= buffer.Length)
+                        throw new ArgumentOutOfRangeException(nameof(buffer), "A requested pixel falls outside the BGRA buffer.");
+                    int offset = (int)offsetLong;
                     int b = buffer[offset];
                     int g = buffer[offset + 1];
                     int r = buffer[offset + 2];
-                    bool isTarget = pinkOnly
-                        ? IsPinkLootMaskPixel(r, g, b)
-                        : (r == 255 && g == 255 && b == 255);
+                    examined++;
+
+                    bool isTarget;
+                    if (pinkOnly)
+                    {
+                        bool raw = IsSodSopPinkPixel(r, g, b);
+                        if (raw) rawPink++;
+                        isTarget = IsPinkLootMaskPixel(r, g, b);
+                        if (raw && !isTarget) markerRejected++;
+                    }
+                    else
+                    {
+                        isTarget = r == 255 && g == 255 && b == 255;
+                    }
+
                     if (isTarget)
                         targetPoints.Add(new Point(x, y));
                 }
             }
+
+            return new PixelCollectionStats(examined, rawPink, markerRejected, targetPoints.Count - initialCount);
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -1947,34 +2574,102 @@ namespace DriverScanTester.Services
             return probes;
         }
 
-        private void CaptureScreen()
+        private LootProbeResult CheckProbeCaptureOwnership(bool pinkOnly)
         {
-            // If we lost track of the client origin (e.g. window was moved),
-            // re-resolve it so the capture still targets the correct area.
-            if (!_hasClientOrigin)
-            {
-                ResolveClientOrigin();
-            }
+            if (_scanToken.IsCancellationRequested || ShouldAbortLoot() ||
+                (pinkOnly && !PinkLootOnlyMode))
+                return LootProbeResult.Cancelled;
 
-            // If the window was not found or bitmap not created, skip capture.
-            if (_bitmap == null || _graphics == null || _clientWidth <= 0 || _clientHeight <= 0)
+            lock (_captureGate)
             {
-                return;
-            }
+                LootClientGeometry? current = RefreshClientOrigin();
+                if (!current.HasValue || !current.Value.IsValid)
+                {
+                    _log("[LootCapture] Probe aborted: current client geometry became invalid.");
+                    return LootProbeResult.CaptureInvalid;
+                }
+                if (GetForegroundWindow() != current.Value.WindowHandle)
+                    return LootProbeResult.Cancelled;
 
-            _graphics.CopyFromScreen(_clientOriginX, _clientOriginY, 0, 0, _bitmap.Size);
+                if (!_lastStableCaptureGeometry.HasValue ||
+                    current.Value != _lastStableCaptureGeometry.Value)
+                {
+                    _log("[LootCapture] Probe aborted: client geometry changed since the analyzed frame.");
+                    return LootProbeResult.CaptureInvalid;
+                }
+                return LootProbeResult.Miss;
+            }
         }
 
-        private bool TryCollectAt(int x, int y, bool pinkOnly = false)
+        private bool CaptureScreen()
         {
-            WaitMouseInPosition(x, y, pinkOnly);
-
-            // If the player entered city, abort immediately. A mob being selected
-            // only aborts outside loot-priority mode.
-            if (_scanToken.IsCancellationRequested || ShouldAbortLoot())
+            lock (_captureGate)
             {
-                return false;
+                StableLootCaptureResult result = LootCaptureGeometry.CaptureStableFrame(
+                    RefreshClientOrigin,
+                    GetForegroundWindow,
+                    geometry =>
+                    {
+                        if (!_hasClientOrigin || _bitmap == null || _graphics == null ||
+                            _bitmap.Width != geometry.ClientSize.Width ||
+                            _bitmap.Height != geometry.ClientSize.Height)
+                        {
+                            throw new InvalidOperationException("Capture bitmap does not match the resolved client geometry.");
+                        }
+
+                        _graphics.CopyFromScreen(
+                            geometry.ClientScreenOrigin.X,
+                            geometry.ClientScreenOrigin.Y,
+                            0,
+                            0,
+                            geometry.ClientSize);
+                    });
+
+                _lastCaptureResult = result;
+                if (!result.Succeeded)
+                {
+                    _lastStableCaptureGeometry = null;
+                    string failureKey = $"{result.Status}:{result.Error}";
+                    DateTime now = DateTime.UtcNow;
+                    if (failureKey != _lastLoggedCaptureFailure ||
+                        (now - _lastCaptureFailureLogAt).TotalSeconds >= 1)
+                    {
+                        _lastLoggedCaptureFailure = failureKey;
+                        _lastCaptureFailureLogAt = now;
+                        LootClientGeometry g = result.Geometry;
+                        _log($"[LootCapture] CAPTURE FAILED status={result.Status} attempts={result.Attempts} " +
+                             $"hwnd=0x{g.WindowHandle.ToInt64():X} window={FormatRectangle(g.WindowRectangle)} " +
+                             $"clientOrigin=({g.ClientScreenOrigin.X},{g.ClientScreenOrigin.Y}) " +
+                             $"client={g.ClientSize.Width}x{g.ClientSize.Height} error={result.Error}");
+                    }
+                    return false;
+                }
+
+                _lastLoggedCaptureFailure = string.Empty;
+                _lastCaptureFailureLogAt = DateTime.MinValue;
+                _lastStableCaptureGeometry = result.Geometry;
+                if (result.Attempts > 1)
+                {
+                    _log($"[LootCapture] Geometry changed during capture; stable retry succeeded after {result.Attempts} attempts. " +
+                         $"hwnd=0x{result.Geometry.WindowHandle.ToInt64():X} " +
+                         $"window={FormatRectangle(result.Geometry.WindowRectangle)} " +
+                         $"clientOrigin=({result.Geometry.ClientScreenOrigin.X},{result.Geometry.ClientScreenOrigin.Y}) " +
+                         $"client={result.Geometry.ClientSize.Width}x{result.Geometry.ClientSize.Height}");
+                }
+                return true;
             }
+        }
+
+        private LootProbeResult TryCollectAt(int x, int y, bool pinkOnly = false)
+        {
+            LootProbeResult guard = CheckProbeCaptureOwnership(pinkOnly);
+            if (guard != LootProbeResult.Miss)
+                return guard;
+
+            WaitMouseInPosition(x, y, pinkOnly);
+            guard = CheckProbeCaptureOwnership(pinkOnly);
+            if (guard != LootProbeResult.Miss)
+                return guard;
 
             // Pink candidates are identified by the scan. Confirm lootability
             // with the calibrated mouseover, not the separate highlighted-type
@@ -1989,10 +2684,42 @@ namespace DriverScanTester.Services
                     // the pickup would fail, so free weight BEFORE clicking the scroll.
                     MakeRoomForScrollIfFull();
                 }
+
+                guard = CheckProbeCaptureOwnership(pinkOnly);
+                if (guard != LootProbeResult.Miss)
+                    return guard;
                 CollectionClick();
-                return true;
+                return LootProbeResult.Collected;
             }
-            return false;
+            return LootProbeResult.Miss;
+        }
+
+        private LootProbeResult TryCollectAtWithCount(
+            int x, int y, bool pinkOnly, ref int cursorProbes)
+        {
+            cursorProbes++;
+            return TryCollectAt(x, y, pinkOnly);
+        }
+
+        private static string ProbeOutcomeName(LootProbeResult result) => result switch
+        {
+            LootProbeResult.Collected => "collected",
+            LootProbeResult.CaptureInvalid => "capture-geometry-changed-during-probes",
+            _ => "probe-cancelled-or-focus-lost"
+        };
+
+        private static LootScanPassResult ProbeOutcomeToScanResult(LootProbeResult result) => result switch
+        {
+            LootProbeResult.Collected => LootScanPassResult.Collected,
+            LootProbeResult.CaptureInvalid => LootScanPassResult.CaptureFailed,
+            _ => LootScanPassResult.Cancelled
+        };
+
+        private static LootScanPassResult HandleProbeResult(
+            LootProbeResult result, ref string diagnosticOutcome)
+        {
+            diagnosticOutcome = ProbeOutcomeName(result);
+            return ProbeOutcomeToScanResult(result);
         }
 
         /// <summary>
@@ -2049,6 +2776,8 @@ namespace DriverScanTester.Services
             int hpPotions = _memoryService.GetHpPotionCount();
             int manaPotions = _memoryService.GetManaPotionCount();
             WeightReliefPotion choice = ChooseWeightReliefPotion(hpPotions, manaPotions);
+            if (_scanToken.IsCancellationRequested || ShouldAbortLoot() || !IsGameWindowFocused())
+                return;
             if (choice == WeightReliefPotion.None)
             {
                 _log($"[Loot] Weight full ({currentWeight}/{maxWeight}) but both potion stacks are at the slot reserve (HP {hpPotions}, mana {manaPotions}) — cannot free weight.");
@@ -2083,17 +2812,20 @@ namespace DriverScanTester.Services
         private void CollectionClick()
         {
             int positionBeforeClick = GetPositionX();
+            bool leftButtonDown = false;
             _isCollecting = true;
             try
             {
             // Release any held right button, then left-click to pick up the item.
             MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.RightUp);
             MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.LeftDown);
+            leftButtonDown = true;
 
             _log("Collecting item (SOD/SOP by pixel color + mouseover indicator).");
             Thread.Sleep(BotConstants.Delays.CollectClickHoldMs);
 
             MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.LeftUp);
+            leftButtonDown = false;
 
             // Spam spacebar while the character auto-walks to the clicked item.
             // There is NO hardcoded timeout — we track the player's X position
@@ -2114,14 +2846,16 @@ namespace DriverScanTester.Services
                 // If the player entered city, abort immediately. A mob being selected
                 // only aborts the spacebar spam outside loot-priority mode — in
                 // priority mode the walk to the clicked loot item must finish.
-                if (_scanToken.IsCancellationRequested || ShouldAbortLoot())
+                if (_scanToken.IsCancellationRequested || ShouldAbortLoot() || !IsGameWindowFocused())
                 {
-                    _log("[Loot] Stop/city detected during collection — aborting spacebar spam.");
+                    _log("[Loot] Stop/city/focus change detected during collection — aborting spacebar spam.");
                     break;
                 }
 
                 GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                 Thread.Sleep(30);
+                if (_scanToken.IsCancellationRequested || ShouldAbortLoot() || !IsGameWindowFocused())
+                    break;
                 GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                 Thread.Sleep(100);
 
@@ -2174,17 +2908,29 @@ namespace DriverScanTester.Services
             // Force a fresh screen capture here so the next scan does NOT use the
             // stale bitmap from before the click (character has moved, item is gone,
             // screen content has changed).
-            CaptureScreen();
-            _log("[Loot] Fresh screen capture forced after click.");
+            bool postClickCaptureSucceeded = CaptureScreen();
+            if (postClickCaptureSucceeded)
+            {
+                _log("[Loot] Fresh screen capture forced after click.");
 
-            // Loot diagnostics: also save the post-collection frame so the state the
-            // character ended up in (item gone / still on the ground / walked away)
-            // can be compared with the annotated frame from the scan that clicked it.
-            ScreenshotService.SaveLootScanFrame(
-                ScreenshotService.CloneLootScanFrame(_bitmap), "AfterClick", "post-click", _log);
+                // Loot diagnostics: also save the post-collection frame so the state the
+                // character ended up in (item gone / still on the ground / walked away)
+                // can be compared with the frame from the scan that clicked it.
+                ScreenshotService.SaveLootScanFrame(
+                    ScreenshotService.CloneLootScanFrame(_bitmap), "AfterClick", "post-click", _log);
+            }
+            else
+            {
+                _log("[LootCapture] Post-click frame capture failed; no frame was interpreted as empty.");
+            }
             }
             finally
             {
+                if (leftButtonDown)
+                {
+                    try { MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.LeftUp); }
+                    catch (Exception ex) { _log($"[Loot] Failed to release left mouse button after collection: {ex.Message}"); }
+                }
                 // Collection finished (item picked up / aborted) — the movement and
                 // combat systems may resume attacking.
                 _isCollecting = false;

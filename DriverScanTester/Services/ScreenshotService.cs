@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace DriverScanTester.Services
 {
@@ -51,6 +52,10 @@ namespace DriverScanTester.Services
         /// diagnostics off; flip to true to debug loot detection again.
         /// </summary>
         public static bool LootScanCaptureEnabled { get; set; } = false;
+        private const int MaximumPinkDiagnosticFramesPerProcess = 8;
+        private const int MaximumOtherLootDiagnosticFramesPerProcess = 4;
+        private static int _pinkDiagnosticFramesCloned;
+        private static int _otherLootDiagnosticFramesCloned;
 
         /// <summary>
         /// Clones the current loot-scan frame. The loot scanner reuses one bitmap for
@@ -60,8 +65,20 @@ namespace DriverScanTester.Services
         /// disabled or the clone fails. Never throws.
         /// </summary>
         public static Bitmap? CloneLootScanFrame(Bitmap? source)
+            => CloneLootScanFrameBounded(
+                source, ref _otherLootDiagnosticFramesCloned,
+                MaximumOtherLootDiagnosticFramesPerProcess);
+
+        /// <summary>Clones a pink Phase-A frame with a separate small diagnostic budget.</summary>
+        public static Bitmap? ClonePinkLootScanFrame(Bitmap? source)
+            => CloneLootScanFrameBounded(
+                source, ref _pinkDiagnosticFramesCloned,
+                MaximumPinkDiagnosticFramesPerProcess);
+
+        private static Bitmap? CloneLootScanFrameBounded(Bitmap? source, ref int cloneCount, int limit)
         {
-            if (!LootScanCaptureEnabled || source == null)
+            if (!LootScanCaptureEnabled || source == null ||
+                Interlocked.Increment(ref cloneCount) > limit)
                 return null;
 
             try
@@ -86,6 +103,39 @@ namespace DriverScanTester.Services
         /// <param name="label">Scan label, e.g. "SmallScan", "BigScan", "AfterClick".</param>
         /// <param name="outcome">Scan result, e.g. "collected", "no-item".</param>
         /// <param name="pixelLabel">Name of the detected pixel class in the caption ("white" / "pink").</param>
+        public static void SaveLootScanRawFrame(
+            Bitmap? frame,
+            string label,
+            string metadata,
+            Action<string> log)
+        {
+            if (frame == null)
+                return;
+
+            try
+            {
+                if (!LootScanCaptureEnabled)
+                    return;
+
+                string folder = ResolveLootScanDir();
+                Directory.CreateDirectory(folder);
+                string fileName = $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss-fff}_{label}_raw.png";
+                string filePath = Path.Combine(folder, fileName);
+                // Save the detached clone directly. Do not annotate it: this is the
+                // exact unmodified bitmap consumed by Phase A.
+                frame.Save(filePath, ImageFormat.Png);
+                log($"[LootSS] Raw {label} frame saved: {filePath}; {metadata}");
+            }
+            catch (Exception ex)
+            {
+                log($"[LootSS] Failed to save raw loot frame: {ex.Message}; {metadata}");
+            }
+            finally
+            {
+                frame.Dispose();
+            }
+        }
+
         public static void SaveLootScanFrame(
             Bitmap? frame,
             string label,

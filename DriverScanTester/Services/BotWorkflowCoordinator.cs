@@ -834,12 +834,14 @@ namespace DriverScanTester.Services
                             // is OnlyMove. Heal stays always on (separate task).
                             if (_pathRunner.CurrentMovement?.IsMoveOnlyActive == true)
                             {
+                                lootSystem.PinkLootOnlyMode = false;
                                 lootSystem.PlayerMarkerScanEnabled = false;
                                 await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
                                 continue;
                             }
                             if (_pathRunner.CurrentMovement?.IsWaypointSpecialRecoveryActive == true)
                             {
+                                lootSystem.PinkLootOnlyMode = false;
                                 lootSystem.PlayerMarkerScanEnabled = false;
                                 await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
                                 continue;
@@ -861,6 +863,10 @@ namespace DriverScanTester.Services
                     catch (Exception ex)
                     {
                         _log($"[ExpLoop] Loot system error: {ex.Message}");
+                    }
+                    finally
+                    {
+                        lootSystem?.Stop();
                     }
                 }, expToken);
                 _log(hasAttackLootRoute

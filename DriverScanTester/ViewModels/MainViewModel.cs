@@ -4068,12 +4068,14 @@ namespace DriverScanTester.ViewModels
                             // Heal stays always on (separate HealMana task).
                             if (_movementSystem?.IsWaypointSpecialRecoveryActive == true)
                             {
+                                _lootSystem.PinkLootOnlyMode = false;
                                 _lootSystem.PlayerMarkerScanEnabled = false;
                                 await PauseController.PausableDelayAsync(10, token);
                                 continue;
                             }
                             if (_movementSystem?.IsMoveOnlyActive == true)
                             {
+                                _lootSystem.PinkLootOnlyMode = false;
                                 _lootSystem.PlayerMarkerScanEnabled = false;
                                 await PauseController.PausableDelayAsync(10, token);
                                 continue;
@@ -4099,6 +4101,7 @@ namespace DriverScanTester.ViewModels
                     }
                     finally
                     {
+                        _lootSystem?.Stop();
                         Application.Current?.Dispatcher?.Invoke(() =>
                         {
                             _isLootBotRunning = false;

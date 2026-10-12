@@ -498,6 +498,15 @@ namespace DriverScanTester.Services
             WriteShort(cameraBase + CameraDistanceOffset, distance);
         }
 
+        public bool TryGetCameraDistance(out short distance)
+        {
+            distance = 0;
+            if (!TryReadPointer(_moduleBase + CameraPtrOffset, out ulong cameraBase) || cameraBase == 0)
+                return false;
+
+            return TryReadShort(cameraBase + CameraDistanceOffset, out distance);
+        }
+
         public bool TrySetCameraDistance(short distance)
             => TrySetCameraShort(CameraDistanceOffset, distance);
 

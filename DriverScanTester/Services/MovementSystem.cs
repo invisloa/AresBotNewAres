@@ -626,7 +626,7 @@ namespace DriverScanTester.Services
         /// higher-priority owner (pause, stop/cancellation, transition, recovery, loot hold
         /// or an invalid/unfocused window) holds the update, the ordinary combat pipeline
         /// must run on the SAME tick so a lost target can produce TabAfterKill and
-        /// <c>RequestPinkScan</c> immediately.
+        /// the close-camera retarget check immediately.
         /// </summary>
         internal static bool CanContinueAfterGroupingCancellation(
             bool paused,
@@ -1504,10 +1504,7 @@ namespace DriverScanTester.Services
                                     LootSystemRef != null &&
                                     (LootSystemRef.IsLootCycleActive || LootSystemRef.IsPinkRescanActive);
                 if (!lootScanning)
-                {
-                    _memoryService.SetCameraDistance(cameraDistanceToApply);
-                    _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
-                }
+                    TryApplyMovementCameraDistance(cameraDistanceToApply);
 
                 if (canUseCombatRetargetSearch && _combatRetargetCameraStage != CombatRetargetCameraStage.None &&
                     LootSystemRef?.IsPinkRescanActive != true)
@@ -1558,8 +1555,8 @@ namespace DriverScanTester.Services
                         _combatRetargetCameraStage = CombatRetargetCameraStage.LowSearch;
                         _combatRetargetAwaitingSelection = false;
 
-                        _memoryService.SetCameraDistance(CombatRetargetLowCameraDistance);
-                        _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+                        if (!TryApplyMovementCameraDistance(CombatRetargetLowCameraDistance))
+                            return;
                         ReleaseSkillThree();
                         _log($"[CombatRetarget] Camera -> {CombatRetargetLowCameraDistance}, TAB");
                         if (!await PressTargetTabAfterCameraSettle(token))
@@ -1574,8 +1571,8 @@ namespace DriverScanTester.Services
                         _combatRetargetCameraStage = CombatRetargetCameraStage.MidSearch;
                         _combatRetargetAwaitingSelection = false;
 
-                        _memoryService.SetCameraDistance(CombatRetargetMidCameraDistance);
-                        _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+                        if (!TryApplyMovementCameraDistance(CombatRetargetMidCameraDistance))
+                            return;
                         ReleaseSkillThree();
                         _log($"[CombatRetarget] Camera -> {CombatRetargetMidCameraDistance}, TAB");
                         if (!await PressTargetTabAfterCameraSettle(token))
@@ -1587,8 +1584,7 @@ namespace DriverScanTester.Services
                     else
                     {
                         _log($"[CombatRetarget] No mob selected at {CombatRetargetMidCameraDistance}. Restoring camera to {currentWaypoint.CameraDistanceLock}.");
-                        _memoryService.SetCameraDistance(currentWaypoint.CameraDistanceLock);
-                        _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+                        TryApplyMovementCameraDistance(currentWaypoint.CameraDistanceLock);
                         ClearCombatRetargetSearch();
                         await Task.Delay(BotConstants.Delays.CombatAttackWaitMs, token);
                         return;
@@ -1624,22 +1620,23 @@ namespace DriverScanTester.Services
                     : _waypoints.Count > 0
                         ? _waypoints.Peek().CameraDistanceLock
                         : Waypoint.DefaultCameraDistanceLock;
-                _memoryService.SetCameraDistance(normalCameraDistance);
-                _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+                if (!TryApplyMovementCameraDistance(normalCameraDistance))
+                {
+                    _postPinkScanTargetCheckPending = true;
+                    return;
+                }
 
                 if (!mobSelected)
                 {
                     _log($"[CombatRetarget] Pink scan finished — camera restored to {normalCameraDistance}; checking for mobs with TAB.");
                     ReleaseSkillThree();
                     await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
-                    if (LootSystemRef?.IsPinkRescanActive == true)
+                    if (!TryPressTargetCycleKey())
                     {
                         _postPinkScanTargetCheckPending = true;
                         _combatHandler.SuspendForExternalMovement();
                         return;
                     }
-                    GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
-                    _combatHandler.NotifyTargetCyclePressed();
                     await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
                     return;
                 }
@@ -1696,8 +1693,8 @@ namespace DriverScanTester.Services
                         _postKillCloseTargetCheckPending = true;
                         _postKillTargetIdBeforeTab = targetId;
                         StartCombatRetargetSearch();
-                        _memoryService.SetCameraDistance(CombatRetargetVeryLowCameraDistance);
-                        _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+                        if (!TryApplyMovementCameraDistance(CombatRetargetVeryLowCameraDistance))
+                            return;
                         ReleaseSkillThree();
                         _log($"[CombatRetarget] Mob killed — checking for nearby mobs at {CombatRetargetVeryLowCameraDistance} before SOD/SOP loot scan.");
                         if (!await PressTargetTabAfterCameraSettle(token))
@@ -1718,8 +1715,8 @@ namespace DriverScanTester.Services
                     {
                         _log($"[CombatRetarget] Target lost after attack. Lowering camera to {CombatRetargetVeryLowCameraDistance}.");
                         StartCombatRetargetSearch();
-                        _memoryService.SetCameraDistance(CombatRetargetVeryLowCameraDistance);
-                        _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+                        if (!TryApplyMovementCameraDistance(CombatRetargetVeryLowCameraDistance))
+                            return;
                         ReleaseSkillThree();
                         _log($"[CombatRetarget] Camera -> {CombatRetargetVeryLowCameraDistance}, TAB");
                         if (!await PressTargetTabAfterCameraSettle(token))
@@ -1731,14 +1728,12 @@ namespace DriverScanTester.Services
 
                     _log("[Key] TAB (target cycle)");
                     ReleaseSkillThree();
-                    if (LootSystemRef?.IsPinkRescanActive == true)
+                    if (!TryPressTargetCycleKey())
                     {
                         _postPinkScanTargetCheckPending = currentMode == BotMode.MoveAndAttack;
                         _combatHandler.SuspendForExternalMovement();
                         return;
                     }
-                    GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
-                    _combatHandler.NotifyTargetCyclePressed();
                     await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
                     return;
 
@@ -1958,8 +1953,7 @@ namespace DriverScanTester.Services
                 }
 
                 var target = _waypoints.Peek();
-                _memoryService.SetCameraDistance(target.CameraDistanceLock);
-                _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+                TryApplyMovementCameraDistance(target.CameraDistanceLock);
                 float distNow = GeometryUtils.Distance(currX, currY, target.X, target.Y);
                 float thresholdNow = GetEffectiveWaypointReachThreshold(target);
 
@@ -2827,6 +2821,34 @@ namespace DriverScanTester.Services
             NeutralizeKeyboardFastTurnMouse(wasActive ? previousSide : pendingSide);
         }
 
+        private bool TryApplyMovementCameraDistance(short distance)
+        {
+            void Apply()
+            {
+                _memoryService.SetCameraDistance(distance);
+                _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+            }
+
+            LootSystem? loot = LootSystemRef;
+            if (loot == null)
+            {
+                Apply();
+                return true;
+            }
+            return loot.TryRunMovementCameraAction(Apply);
+        }
+
+        private bool TryRunMovementCursorAction(Action action)
+        {
+            LootSystem? loot = LootSystemRef;
+            if (loot == null)
+            {
+                action();
+                return true;
+            }
+            return loot.TryRunMovementCursorAction(action);
+        }
+
         /// <summary>
         /// True while an existing loot/pink-scan operation owns the mouse cursor. The
         /// fast-turn cursor must yield during those operations. A failing loot query
@@ -2900,13 +2922,23 @@ namespace DriverScanTester.Services
                     return false;
                 }
 
-                targetX = GetKeyboardFastTurnEdgeX(client, side);
+                int edgeX = GetKeyboardFastTurnEdgeX(client, side);
+                targetX = edgeX;
                 int targetY = ResolveKeyboardFastTurnCursorY(client);
-                MouseOperations.SetCursorPositionAbsolute(targetX, targetY);
-
-                bool actualKnown = MouseOperations.TryGetCursorPosition(out int actualX, out int actualY);
-                if (!actualKnown)
-                    actualY = targetY;
+                int actualX = 0;
+                int actualY = targetY;
+                bool actualKnown = false;
+                if (!TryRunMovementCursorAction(() =>
+                    {
+                        MouseOperations.SetCursorPositionAbsolute(edgeX, targetY);
+                        actualKnown = MouseOperations.TryGetCursorPosition(out actualX, out actualY);
+                        if (!actualKnown)
+                            actualY = targetY;
+                    }))
+                {
+                    failure = "loot scan owns the cursor";
+                    return false;
+                }
 
                 int clientWidth = client.Right - client.Left + 1;
                 string diagnostic =
@@ -2954,9 +2986,14 @@ namespace DriverScanTester.Services
                     if (!CanKeyboardFastTurnMouseWrite(ownedSide, out KeyboardFastTurnClient client, out _, out _))
                         return;
 
-                    MouseOperations.SetCursorPositionAbsolute(
-                        GetKeyboardFastTurnNeutralX(client),
-                        ResolveKeyboardFastTurnCursorY(client));
+                    int neutralX = GetKeyboardFastTurnNeutralX(client);
+                    int neutralY = ResolveKeyboardFastTurnCursorY(client);
+                    if (!TryRunMovementCursorAction(() =>
+                        MouseOperations.SetCursorPositionAbsolute(neutralX, neutralY)))
+                    {
+                        _keyboardFastTurnMouseNeutralizePending = true;
+                        _keyboardFastTurnMouseNeutralizePendingDirection = ownedSide;
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -3533,8 +3570,7 @@ namespace DriverScanTester.Services
             ResetActionStuckTracking();
             _lastMoveProgressPos = null;
             _lastMoveProgressTime = DateTime.MinValue;
-            _memoryService.SetCameraDistance(target.CameraDistanceLock);
-            _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+            TryApplyMovementCameraDistance(target.CameraDistanceLock);
             if (succeeded)
             {
                 ResetBearingState();
@@ -3838,13 +3874,11 @@ namespace DriverScanTester.Services
             _combatHandler.ResetState();
 
             _log("[Combat] Retrying attack — TAB, then attack if a target is selected.");
-            if (LootSystemRef?.IsPinkRescanActive == true)
+            if (!TryPressTargetCycleKey())
             {
                 _combatHandler.SuspendForExternalMovement();
                 return;
             }
-            GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
-            _combatHandler.NotifyTargetCyclePressed();
             await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
         }
 
@@ -4043,15 +4077,29 @@ namespace DriverScanTester.Services
         private async Task<bool> PressTargetTabAfterCameraSettle(CancellationToken token)
         {
             await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
-            if (LootSystemRef?.IsPinkRescanActive == true)
+            if (TryPressTargetCycleKey())
+                return true;
+
+            _combatHandler.SuspendForExternalMovement();
+            return false;
+        }
+
+        private bool TryPressTargetCycleKey()
+        {
+            bool pressed = false;
+            void Press()
             {
-                _combatHandler.SuspendForExternalMovement();
-                return false;
+                GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
+                _combatHandler.NotifyTargetCyclePressed();
+                pressed = true;
             }
 
-            GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
-            _combatHandler.NotifyTargetCyclePressed();
-            return true;
+            LootSystem? loot = LootSystemRef;
+            if (loot == null)
+                Press();
+            else
+                loot.TryRunMovementTargetAction(Press);
+            return pressed;
         }
 
         private void ClearCombatRetargetSearch()

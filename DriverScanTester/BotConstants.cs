@@ -1189,14 +1189,15 @@ namespace DriverScanTester
             /// than this are dropped instead of starting a stale scan after a pause.</summary>
             public const int PinkScanRequestTtlMs = 5000;
 
-            /// <summary>Delay (ms) after a kill before the background SOD/SOP rescan runs. The bot
-            /// keeps moving and fighting while it waits and while the rescan runs — the rescan never
-            /// holds movement or combat.</summary>
+            /// <summary>Delay (ms) after a kill before the background SOD/SOP rescan runs.
+            /// Pending work is coalesced without postponing an earlier due time. The short scan
+            /// pass owns camera/cursor targeting only while active; existing held movement/skill
+            /// input is not restarted or reconfigured.</summary>
             public const int PinkRescanDelayMs = 1000;
 
-            /// <summary>How long (ms) a pending background rescan stays valid after its due time.
-            /// An older rescan is dropped (e.g. after a long focus loss) instead of sweeping a screen
-            /// the bot has long since left.</summary>
+            /// <summary>Legacy rescan age value retained for configuration/source compatibility.
+            /// Pending kill work is no longer dropped by age; focus loss, stop, city entry or a
+            /// mode change explicitly cancels incompatible work instead.</summary>
             public const int PinkRescanExpireMs = 5000;
 
             /// <summary>Weight (lb) of one SOD/SOP scroll. When the player is at the weight
