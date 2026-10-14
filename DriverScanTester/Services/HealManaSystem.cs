@@ -14,6 +14,10 @@ namespace DriverScanTester.Services
         private readonly GameMemoryService _memoryService;
         private readonly Action<string> _log;
         private bool _wasDead;
+        private bool _unconfirmedZeroHpLogged;
+
+        /// <summary>Called once when a zero-HP state is confirmed against the player's max HP.</summary>
+        public Action? PlayerDeathDetected { get; set; }
         /// <summary>
         /// One-shot flags for the slot-reserve log: while HP/mana potions sit at the
         /// reserve (1), the drink key is skipped and this suppresses the repeat log
@@ -121,15 +125,32 @@ namespace DriverScanTester.Services
                 {
                     if (!_wasDead)
                     {
-                        _wasDead = true;
-                        _log($"[Death] Player HP is 0 — player died. Capturing screenshot.");
-                        CaptureDeathScreenshot();
+                        // A failed/stale current-HP read can also look like zero. Confirm
+                        // the player structure is still readable before treating it as death.
+                        MaxHpManaReadResult maxStats = _memoryService.GetMaxHpMana();
+                        if (maxStats.MaxHpReadSucceeded && maxStats.MaxHp > 0)
+                        {
+                            _wasDead = true;
+                            _unconfirmedZeroHpLogged = false;
+                            _log("[Death] Player HP is 0 and max HP is readable — player is dead. Stopping bot actions and capturing screenshot.");
+                            PlayerDeathDetected?.Invoke();
+                            CaptureDeathScreenshot();
+                        }
+                        else if (!_unconfirmedZeroHpLogged)
+                        {
+                            _unconfirmedZeroHpLogged = true;
+                            _log("[Death] HP read as 0 but max HP could not be verified; not treating this as a confirmed death yet.");
+                        }
                     }
+
+                    // Never send potion/combat inputs while HP is zero.
+                    return;
                 }
                 else
                 {
                     // Reset death flag when HP is restored (player respawned/healed)
                     _wasDead = false;
+                    _unconfirmedZeroHpLogged = false;
                 }
 
                 // --- Logic for '2' ---
@@ -275,8 +296,15 @@ namespace DriverScanTester.Services
         private async Task PressKey(byte vkCode, byte scanCode, CancellationToken token)
         {
             keybd_event(vkCode, scanCode, 0, 0);
-            await Task.Delay(BotConstants.Delays.HealManaKeyPressMs, token); // Small delay to simulate key press duration
-            keybd_event(vkCode, scanCode, (uint)KEYEVENTF_KEYUP, 0);
+            try
+            {
+                await Task.Delay(BotConstants.Delays.HealManaKeyPressMs, token); // Small delay to simulate key press duration
+            }
+            finally
+            {
+                // A disconnect-triggered cancellation must not leave the potion key held.
+                keybd_event(vkCode, scanCode, (uint)KEYEVENTF_KEYUP, 0);
+            }
         }
     }
 }

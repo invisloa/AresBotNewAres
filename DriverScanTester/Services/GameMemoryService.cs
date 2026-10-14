@@ -264,8 +264,10 @@ namespace DriverScanTester.Services
             ulong playerBase = ReadPointer(ptrAddr);
             if (playerBase == 0) return (0, 0, false);
 
-            short xVal = ReadShort(playerBase + XOffset);
-            short yVal = ReadShort(playerBase + YOffset);
+            bool xRead = TryReadShort(playerBase + XOffset, out short xVal);
+            bool yRead = TryReadShort(playerBase + YOffset, out short yVal);
+            if (!xRead || !yRead)
+                return (0, 0, false);
 
             return ((float)xVal, (float)yVal, true);
         }
@@ -1147,10 +1149,12 @@ namespace DriverScanTester.Services
             ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
             if (playerBase == 0) return (null, null);
 
-            short hp = ReadShort(playerBase + HpOffset);
-            short mana = ReadShort(playerBase + ManaOffset);
+            bool hpRead = TryReadShort(playerBase + HpOffset, out short hp);
+            bool manaRead = TryReadShort(playerBase + ManaOffset, out short mana);
 
-            return (hp, mana);
+            // Preserve real zero values (dead / empty mana), but don't turn a failed
+            // memory read into a false zero — especially important for death detection.
+            return (hpRead ? hp : null, manaRead ? mana : null);
         }
 
         /// <summary>

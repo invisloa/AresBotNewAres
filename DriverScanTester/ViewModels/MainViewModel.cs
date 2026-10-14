@@ -627,6 +627,7 @@ namespace DriverScanTester.ViewModels
                 profile,
                 AppendBotLog,
                 FocusGameWindow);
+            Interlocked.Exchange(ref _gameFailureStopHandled, 0);
             _movementSystem = new MovementSystem(
                 memoryService,
                 AppendBotLog,
@@ -638,7 +639,8 @@ namespace DriverScanTester.ViewModels
                 loop,
                 waypointRecoveryExecutor: waypointRecoveryExecutor)
             {
-                MobGroupingPausePredicate = () => PauseController.IsPaused
+                MobGroupingPausePredicate = () => PauseController.IsPaused,
+                OnGameUnresponsiveDetected = HandleGameConnectionFailure
             };
             
             _movementBotCts = new CancellationTokenSource();
@@ -650,7 +652,10 @@ namespace DriverScanTester.ViewModels
             AppendBotLog($"Bot started with Custom Route ({path.Count} points). Loop: {loop}");
 
             // 4. Start Heal/Mana using the values initialized for the Bot Window.
-            _healManaSystem = new HealManaSystem(memoryService, AppendBotLog, usePlayerBasedThresholds: false);
+            _healManaSystem = new HealManaSystem(memoryService, AppendBotLog, usePlayerBasedThresholds: false)
+            {
+                PlayerDeathDetected = () => HandleGameConnectionFailure("Player death confirmed (HP is zero).")
+            };
             _healManaBotCts = new CancellationTokenSource();
             _isHealManaBotRunning = true;
             var hmToken = _healManaBotCts.Token;
@@ -682,6 +687,8 @@ namespace DriverScanTester.ViewModels
                 Task.Run(() => LootBotLoop(lootToken), lootToken);
                 AppendBotLog("Loot Bot started.");
             }
+
+            StartGameConnectionMonitor();
         }
 
         private void HandleStandalonePlayerMarkerDetected(GameMemoryService memoryService, BotProfile profile)
@@ -3054,6 +3061,9 @@ namespace DriverScanTester.ViewModels
         // Null means no timer is armed (run indefinitely).
         private CancellationTokenSource? _autoStopCts;
         private DateTime? _autoStopAt;
+        private int _gameFailureStopHandled;
+        private readonly object _gameConnectionMonitorLock = new();
+        private CancellationTokenSource? _gameConnectionMonitorCts;
 
         // --- Pause / Resume ---
         // Pause never cancels anything: every bot loop suspends in place at its next
@@ -3200,7 +3210,11 @@ namespace DriverScanTester.ViewModels
             var repotSystem = new RepotSystem(memoryService, AppendBotLog);
             var repotDetector = new RepotDetectorService(AppendBotLog);
             var pathLoader = new SavedPathLoader(AppendBotLog);
-            var pathRunner = new PathRunnerService(memoryService, AppendBotLog);
+            Interlocked.Exchange(ref _gameFailureStopHandled, 0);
+            var pathRunner = new PathRunnerService(memoryService, AppendBotLog)
+            {
+                OnGameUnresponsiveDetected = HandleGameConnectionFailure
+            };
             var itemSeller = new ItemSellerService(memoryService, AppendBotLog);
             var waypointRecoveryExecutor = new WaypointRecoveryExecutor(
                 memoryService,
@@ -3224,7 +3238,8 @@ namespace DriverScanTester.ViewModels
                 memoryService, repotSystem, repotDetector, pathLoader, pathRunner, operationRunner,
                 profile, AppendBotLog, FocusGameWindow)
             {
-                PauseController = PauseController
+                PauseController = PauseController,
+                OnPlayerDeathDetected = () => HandleGameConnectionFailure("Player death confirmed (HP is zero).")
             };
             pathRunner.PauseController = PauseController;
             operationRunner.PauseController = PauseController;
@@ -3265,9 +3280,11 @@ namespace DriverScanTester.ViewModels
                     OnPropertyChanged(nameof(IsWorkflowRunning));
                     OnPropertyChanged(nameof(WorkflowPhaseText));
                 });
+                StopGameConnectionMonitorIfIdle();
             };
 
             _workflowTask = Task.Run(() => _workflowCoordinator.StartAsync());
+            StartGameConnectionMonitor();
 
             OnPropertyChanged(nameof(IsWorkflowRunning));
             OnPropertyChanged(nameof(WorkflowPhaseText));
@@ -3285,6 +3302,7 @@ namespace DriverScanTester.ViewModels
             }
             ReleaseAllBotInputs();
             _workflowCoordinator.Stop();
+            StopGameConnectionMonitorIfIdle();
             MouseOperations.ResetWindowOffset();
             _workflowTask = null;
             AppendLog("Workflow stop requested. Window offset reset.");
@@ -3374,6 +3392,97 @@ namespace DriverScanTester.ViewModels
             }
         }
 
+        private void StartGameConnectionMonitor()
+        {
+            CancellationTokenSource monitorCts;
+            lock (_gameConnectionMonitorLock)
+            {
+                if (_gameConnectionMonitorCts is { IsCancellationRequested: false })
+                    return;
+
+                monitorCts = new CancellationTokenSource();
+                _gameConnectionMonitorCts = monitorCts;
+            }
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var detector = new GameDisconnectDialogDetector();
+                    if (!detector.IsAvailable)
+                    {
+                        AppendBotLog("[ConnectionWatchdog] Disconnect-dialog template unavailable; memory/movement watchdogs remain active.");
+                        return;
+                    }
+
+                    AppendBotLog("[ConnectionWatchdog] Watching the game window for the server-disconnected dialog.");
+                    while (!monitorCts.IsCancellationRequested)
+                    {
+                        using var frame = ScreenshotService.CaptureGameClientFrame();
+                        if (detector.IsDisconnected(frame))
+                        {
+                            HandleGameConnectionFailure("Detected the game message: 'The connection to server has been disconnected.'");
+                            return;
+                        }
+
+                        await Task.Delay(500, monitorCts.Token);
+                    }
+                }
+                catch (OperationCanceledException) { }
+                catch (Exception ex)
+                {
+                    AppendBotLog($"[ConnectionWatchdog] Visual monitor error: {ex.Message}; memory/movement watchdogs remain active.");
+                }
+                finally
+                {
+                    lock (_gameConnectionMonitorLock)
+                    {
+                        if (ReferenceEquals(_gameConnectionMonitorCts, monitorCts))
+                            _gameConnectionMonitorCts = null;
+                    }
+                    monitorCts.Dispose();
+                }
+            });
+        }
+
+        private void StopGameConnectionMonitor()
+        {
+            CancellationTokenSource? monitorCts;
+            lock (_gameConnectionMonitorLock)
+            {
+                monitorCts = _gameConnectionMonitorCts;
+                _gameConnectionMonitorCts = null;
+            }
+
+            try { monitorCts?.Cancel(); } catch { }
+        }
+
+        private void StopGameConnectionMonitorIfIdle()
+        {
+            if (_isMovementBotRunning || _isHealManaBotRunning || _isLootBotRunning ||
+                _workflowCoordinator?.IsRunning == true)
+                return;
+
+            StopGameConnectionMonitor();
+        }
+
+        /// <summary>
+        /// Latches a suspected game disconnect/dead state into a stop of every bot task.
+        /// The game/client is intentionally left untouched so it can be relaunched/logged in manually.
+        /// </summary>
+        private void HandleGameConnectionFailure(string reason)
+        {
+            if (Interlocked.Exchange(ref _gameFailureStopHandled, 1) != 0)
+                return;
+
+            AppendBotLog($"[ConnectionWatchdog] {reason} Bot inputs are being released and all bot tasks are stopping. Restart/relog the game, then manually start the bot again.");
+            StopAllActions(reason);
+            ScreenshotService.CaptureFullScreen(
+                ScreenshotService.ConnectionStatesFolder,
+                AppendBotLog,
+                "[ConnectionWatchdog]");
+        }
+
         /// <summary>
         /// Stops every bot action: the route workflow plus the movement/heal/loot
         /// bots, and clears the run-duration timer. Used for manual "stop all" and
@@ -3382,8 +3491,9 @@ namespace DriverScanTester.ViewModels
         public void StopAllActions(string reason)
         {
             CancelAutoStopTimer();
+            StopGameConnectionMonitor();
             PauseController.Resume();
-            AppendBotLog($"[AutoStop] Stopping every bot action ({reason}).");
+            AppendBotLog($"[BotStop] Stopping every bot action ({reason}).");
             try
             {
                 if (_workflowCoordinator != null)
@@ -3813,6 +3923,7 @@ namespace DriverScanTester.ViewModels
                     ToggleMovementBot(false);
                     ToggleHealManaBot(false);
                     ToggleLootBot(false);
+                    StopGameConnectionMonitorIfIdle();
                     AppendLog("All bots stopped.");
                 }
 
@@ -3849,9 +3960,11 @@ namespace DriverScanTester.ViewModels
                             baseAddr = FindModuleInScanner("Ares.exe", true);
                         }
                         var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
+                        Interlocked.Exchange(ref _gameFailureStopHandled, 0);
                         _movementSystem = new MovementSystem(memoryService, AppendBotLog, tx, ty, SelectedPrecision, null, SelectedBotMode)
                         {
-                            MobGroupingPausePredicate = () => PauseController.IsPaused
+                            MobGroupingPausePredicate = () => PauseController.IsPaused,
+                            OnGameUnresponsiveDetected = HandleGameConnectionFailure
                         };
         
                         _movementBotCts = new CancellationTokenSource();
@@ -3871,6 +3984,8 @@ namespace DriverScanTester.ViewModels
                         {
                             ToggleLootBot(true);
                         }
+                        if (_isMovementBotRunning || _isLootBotRunning)
+                            StartGameConnectionMonitor();
                     }
                 }
 
@@ -3899,12 +4014,19 @@ namespace DriverScanTester.ViewModels
                         }
 
                         var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
-                        _healManaSystem = new HealManaSystem(memoryService, AppendBotLog, usePlayerBasedThresholds: false);
+                        if (!_isMovementBotRunning && !_isHealManaBotRunning && !_isLootBotRunning &&
+                            _workflowCoordinator?.IsRunning != true)
+                            Interlocked.Exchange(ref _gameFailureStopHandled, 0);
+                        _healManaSystem = new HealManaSystem(memoryService, AppendBotLog, usePlayerBasedThresholds: false)
+                        {
+                            PlayerDeathDetected = () => HandleGameConnectionFailure("Player death confirmed (HP is zero).")
+                        };
                         _healManaBotCts = new CancellationTokenSource();
                         _isHealManaBotRunning = true;
                         var healManaToken = _healManaBotCts.Token;
                         Task.Run(() => HealManaBotLoop(healManaToken), healManaToken);
                         AppendBotLog("Heal/Mana Bot started.");
+                        StartGameConnectionMonitor();
                     }
                 }
 
@@ -3932,6 +4054,9 @@ namespace DriverScanTester.ViewModels
 
                         var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
                         var profile = _workflowCoordinator?.ActiveProfile ?? new BotProfile();
+                        if (!_isMovementBotRunning && !_isHealManaBotRunning && !_isLootBotRunning &&
+                            _workflowCoordinator?.IsRunning != true)
+                            Interlocked.Exchange(ref _gameFailureStopHandled, 0);
                         _lootSystem = new LootSystem(memoryService, AppendBotLog);
                         Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 0);
                         _lootSystem.OtherPlayerMarkerDetected =
@@ -3943,6 +4068,8 @@ namespace DriverScanTester.ViewModels
                         var lootToken = _lootBotCts.Token;
                         Task.Run(() => LootBotLoop(lootToken), lootToken);
                         AppendBotLog("Loot Bot started.");
+                        if (!_isMovementBotRunning)
+                            StartGameConnectionMonitor();
                     }
                 }
         
@@ -4017,6 +4144,7 @@ namespace DriverScanTester.ViewModels
                         movementForTask.ReleaseCombatKeys();
                         movementForTask.StopMoving();
                         movementForTask.DisposeMobGroupingDetector();
+                        StopGameConnectionMonitorIfIdle();
                     }
                 }
         
@@ -4048,6 +4176,7 @@ namespace DriverScanTester.ViewModels
                             _isHealManaBotRunning = false;
                             AppendBotLog("Heal/Mana Bot loop ended.");
                         });
+                        StopGameConnectionMonitorIfIdle();
                     }
                 }
 
@@ -4107,6 +4236,7 @@ namespace DriverScanTester.ViewModels
                             _isLootBotRunning = false;
                             AppendBotLog("Loot Bot loop ended.");
                         });
+                        StopGameConnectionMonitorIfIdle();
                     }
                 }
         

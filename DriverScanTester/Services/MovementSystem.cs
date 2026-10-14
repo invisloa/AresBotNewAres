@@ -861,6 +861,12 @@ namespace DriverScanTester.Services
 
         private readonly ReverseDiagonalRecovery _reverseDiagonalRecovery;
         private readonly StuckDetector _stuckDetector;
+        private readonly GameConnectionWatchdog _connectionWatchdog = new();
+        private bool _gameUnresponsiveDetected;
+        private DateTime _positionReadFailureSince = DateTime.MinValue;
+
+        /// <summary>Called once when active movement makes no position progress for the connection watchdog timeout.</summary>
+        public Action<string>? OnGameUnresponsiveDetected { get; set; }
 
         // Healthy movement tracking
         private float _lastHealthyMoveBearingDeg = UnsetBearing;
@@ -1028,8 +1034,24 @@ namespace DriverScanTester.Services
             }
         }
 
+        private void StopForUnresponsiveGame(string reason)
+        {
+            if (_gameUnresponsiveDetected)
+                return;
+
+            _gameUnresponsiveDetected = true;
+            _log($"[ConnectionWatchdog] {reason} Stopping movement and requesting a full bot stop.");
+            CancelMobGrouping("game connection watchdog");
+            StopMoving();
+            ReleaseCombatKeys();
+            OnGameUnresponsiveDetected?.Invoke(reason);
+        }
+
         public async Task Update(CancellationToken token)
         {
+            if (_gameUnresponsiveDetected)
+                return;
+
             _tickCount++;
 
             if (!_isInitialized)
@@ -1330,6 +1352,7 @@ namespace DriverScanTester.Services
             int currentMapId = _memoryService.GetMapNumber();
             if (currentMapId != _currentMapId)
             {
+                _connectionWatchdog.Reset();
                 CancelMobGrouping("map/teleport transition");
                 int oldMapId = _currentMapId;
                 _log($"[Tick {_tickCount}] Map: {oldMapId} → {currentMapId}");
@@ -1380,7 +1403,29 @@ namespace DriverScanTester.Services
             var (currX, currY, success) = _memoryService.GetPlayerPosition();
             if (!success)
             {
-                _log($"[Tick {_tickCount}] [Pos] Read failed");
+                _connectionWatchdog.Reset();
+                if (_positionReadFailureSince == DateTime.MinValue)
+                {
+                    _positionReadFailureSince = DateTime.UtcNow;
+                    _log($"[Tick {_tickCount}] [Pos] Read failed; starting connection-safety timeout.");
+                }
+                else if ((DateTime.UtcNow - _positionReadFailureSince).TotalMilliseconds >=
+                         BotConstants.Connection.PositionReadFailureTimeoutMs)
+                {
+                    StopForUnresponsiveGame($"Player position memory reads have failed for {BotConstants.Connection.PositionReadFailureTimeoutMs / 1000.0:F0} seconds; the game may be disconnected or no longer in a playable state.");
+                }
+                return;
+            }
+            _positionReadFailureSince = DateTime.MinValue;
+
+            // If movement/recovery input has been active but the server-side position
+            // has not changed for a sustained period, the client may be disconnected.
+            // Stop before running another combat, loot, or recovery action.
+            bool movementExpected = _isMovingForward || _isUnstuckRoutineActive || _reverseDiagonalRecovery.IsActive;
+            if (_connectionWatchdog.Observe(movementExpected, currX, currY, DateTime.UtcNow))
+            {
+                string reason = $"Player position did not advance for {BotConstants.Connection.NoMovementTimeoutMs / 1000.0:F0} seconds while movement was being requested; the game may be disconnected or unresponsive.";
+                StopForUnresponsiveGame(reason);
                 return;
             }
 

@@ -754,6 +754,25 @@ namespace DriverScanTester
         }
 
         // ════════════════════════════════════════════════════════════════
+        //  CONNECTION SAFETY WATCHDOG
+        // ════════════════════════════════════════════════════════════════
+        public static class Connection
+        {
+            /// <summary>Stop bot actions if movement is continuously requested but the
+            /// player position does not advance for this long. This is deliberately much
+            /// longer than obstacle recovery thresholds to avoid treating a brief bump as a disconnect.</summary>
+            public const int NoMovementTimeoutMs = 30_000;
+
+            /// <summary>Position displacement which counts as real movement progress.</summary>
+            public const float MinimumMovementProgress = 1.0f;
+
+            /// <summary>How long player-position memory reads may fail before all bot actions stop.
+            /// This exceeds the map-transition settle timeout so a normal loading transition is not
+            /// mistaken for a disconnect.</summary>
+            public const int PositionReadFailureTimeoutMs = 7_000;
+        }
+
+        // ════════════════════════════════════════════════════════════════
         //  DELAYS / TIMEOUTS — all sleep and delay values in ms
         // ════════════════════════════════════════════════════════════════
         public static class Delays

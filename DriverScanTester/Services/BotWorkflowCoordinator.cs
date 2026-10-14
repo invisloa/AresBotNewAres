@@ -158,6 +158,9 @@ namespace DriverScanTester.Services
         /// <summary>Fires when the workflow stops.</summary>
         public Action? OnStopped { get; set; }
 
+        /// <summary>Called when the heal monitor confirms that the player has died.</summary>
+        public Action? OnPlayerDeathDetected { get; set; }
+
         /// <summary>Whether the coordinator is running.</summary>
         public bool IsRunning => _isRunning;
 
@@ -302,7 +305,10 @@ namespace DriverScanTester.Services
             // ── Auto potion drinking ──
             // The workflow uses the profile's explicit thresholds, so the player-based
             // auto detection (60% max HP / 20% max mana) is disabled for this instance.
-            var healSystem = new HealManaSystem(_memoryService, _log, usePlayerBasedThresholds: false);
+            var healSystem = new HealManaSystem(_memoryService, _log, usePlayerBasedThresholds: false)
+            {
+                PlayerDeathDetected = OnPlayerDeathDetected
+            };
             HealManaSystem.Threshold1 = (short)Math.Clamp(_profile.MinHp, 0, short.MaxValue);
             HealManaSystem.Threshold2 = (short)Math.Clamp(_profile.MinMana, 0, short.MaxValue);
             _log($"[HealMana] Auto-drink enabled: HP < {HealManaSystem.Threshold1} → key 1, Mana < {HealManaSystem.Threshold2} → key 2.");

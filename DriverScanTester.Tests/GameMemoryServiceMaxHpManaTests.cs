@@ -13,6 +13,22 @@ namespace DriverScanTester.Tests
         private const ulong PlayerBase = 0x12345000;
 
         [Fact]
+        public void GetPlayerPositionReportsMemoryReadFailuresInsteadOfReturningZeroCoordinates()
+        {
+            var memory = new MemoryFixture();
+            memory.Set(ModuleBase + BotConstants.MemoryOffsets.PlayerPtr, BitConverter.GetBytes(PlayerBase));
+            memory.Set(PlayerBase + BotConstants.MemoryOffsets.X, BitConverter.GetBytes((short)140));
+            memory.Set(PlayerBase + BotConstants.MemoryOffsets.Y, BitConverter.GetBytes((short)250));
+            memory.FailRead(PlayerBase + BotConstants.MemoryOffsets.Y);
+
+            var (x, y, success) = memory.CreateService().GetPlayerPosition();
+
+            Assert.False(success);
+            Assert.Equal(0, x);
+            Assert.Equal(0, y);
+        }
+
+        [Fact]
         public void GetMaxHpMana_ResolvesAuthoritativeAddressesAndReadsInt16Values()
         {
             var memory = new MemoryFixture();
@@ -78,6 +94,35 @@ namespace DriverScanTester.Tests
             Assert.False(result.MaxManaReadSucceeded);
             Assert.Single(memory.ReadRequests);
             Assert.Equal((playerPointerAddress, PointerSize), memory.ReadRequests[0]);
+        }
+
+        [Fact]
+        public void GetHealManaValues_PreservesAConfirmedZeroHpValue()
+        {
+            var memory = new MemoryFixture();
+            memory.Set(ModuleBase + BotConstants.MemoryOffsets.PlayerPtr, BitConverter.GetBytes(PlayerBase));
+            memory.Set(PlayerBase + BotConstants.MemoryOffsets.Hp, BitConverter.GetBytes((short)0));
+            memory.Set(PlayerBase + BotConstants.MemoryOffsets.Mana, BitConverter.GetBytes((short)120));
+
+            var (hp, mana) = memory.CreateService().GetHealManaValues();
+
+            Assert.Equal((short)0, hp);
+            Assert.Equal((short)120, mana);
+        }
+
+        [Fact]
+        public void GetHealManaValuesReturnsNullForAFailedStatReadInsteadOfFalseZero()
+        {
+            var memory = new MemoryFixture();
+            memory.Set(ModuleBase + BotConstants.MemoryOffsets.PlayerPtr, BitConverter.GetBytes(PlayerBase));
+            memory.Set(PlayerBase + BotConstants.MemoryOffsets.Hp, BitConverter.GetBytes((short)0));
+            memory.Set(PlayerBase + BotConstants.MemoryOffsets.Mana, BitConverter.GetBytes((short)120));
+            memory.FailRead(PlayerBase + BotConstants.MemoryOffsets.Hp);
+
+            var (hp, mana) = memory.CreateService().GetHealManaValues();
+
+            Assert.Null(hp);
+            Assert.Equal((short)120, mana);
         }
 
         [Fact]

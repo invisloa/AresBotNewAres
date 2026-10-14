@@ -42,6 +42,7 @@ namespace DriverScanTester.Services
 
         public MovementSystem? CurrentMovement => _movementSystem;
         public WaypointRecoveryExecutor? WaypointRecoveryExecutor { get; set; }
+        public Action<string>? OnGameUnresponsiveDetected { get; set; }
         public PathRunStopReason LastStopReason { get; private set; } = PathRunStopReason.None;
 
         public PathRunnerService(
@@ -94,7 +95,8 @@ namespace DriverScanTester.Services
             {
                 InternalRepotEnabled = false, // External coordinator handles repot
                 WaypointRecoveryExecutor = WaypointRecoveryExecutor,
-                MobGroupingPausePredicate = () => PauseController?.IsPaused == true
+                MobGroupingPausePredicate = () => PauseController?.IsPaused == true,
+                OnGameUnresponsiveDetected = reason => OnGameUnresponsiveDetected?.Invoke(reason)
             };
 
             _log($"[PathRunner] Started path with {waypoints.Count} points, loop={loop}.");

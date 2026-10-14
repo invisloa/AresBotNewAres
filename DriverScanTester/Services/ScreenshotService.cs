@@ -45,6 +45,9 @@ namespace DriverScanTester.Services
         /// <summary>Folder for screenshots captured when another player's marker is detected.</summary>
         public const string PlayerPixelsFolder = "PlayerPixels";
 
+        /// <summary>Folder for screenshots captured by the game-connection watchdog.</summary>
+        public const string ConnectionStatesFolder = "ConnectionStates";
+
         /// <summary>
         /// Master switch for loot-scan diagnostics. When false,
         /// <see cref="CloneLootScanFrame"/> returns null and nothing is written to

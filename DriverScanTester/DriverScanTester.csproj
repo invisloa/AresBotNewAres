@@ -12,6 +12,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="Resources\DisconnectedDialogTextMask.png" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Folder Include="Screenshots\TownPortals\" />
     <Folder Include="LootSSFolder\" />
     <Folder Include="Services\" />
