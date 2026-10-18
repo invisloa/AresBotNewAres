@@ -161,6 +161,9 @@ namespace DriverScanTester.Services
         /// <summary>Called when the heal monitor confirms that the player has died.</summary>
         public Action? OnPlayerDeathDetected { get; set; }
 
+        /// <summary>Reads the live UI setting for stopping on a confirmed other-player marker.</summary>
+        public Func<bool>? ShouldStopOnOtherPlayerDetected { get; set; }
+
         /// <summary>Whether the coordinator is running.</summary>
         public bool IsRunning => _isRunning;
 
@@ -811,6 +814,7 @@ namespace DriverScanTester.Services
                 {
                     LootPriorityMode = _profile.LootPriority,
                     PinkLootOnlyMode = !hasAttackLootRoute && hasAttackOnlyRoute,
+                    ShouldStopOnOtherPlayerMarker = () => ShouldStopOnOtherPlayerDetected?.Invoke() ?? true,
                     OtherPlayerMarkerDetected = () =>
                     {
                         if (Interlocked.Exchange(ref otherPlayerMarkerDetected, 1) == 0)

@@ -123,7 +123,7 @@ namespace DriverScanTester
         public static class SpeedPotion
         {
             /// <summary>Attack speed value at which bot drinks speed potions (key 7 + key 8).</summary>
-            public const short AttackSpeedThreshold = 16341; //16341 +2 speed //16384 +3 speed
+            public const short AttackSpeedThreshold = 16384; //16341 +2 speed //16384 +3 speed (archer bos+giko)
 
             /// <summary>Interval in seconds between attack-speed checks.</summary>
             public const double CheckIntervalSeconds = 5.0;

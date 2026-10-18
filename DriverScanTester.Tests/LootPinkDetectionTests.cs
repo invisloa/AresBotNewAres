@@ -11,8 +11,9 @@ namespace DriverScanTester.Tests
     /// Regression tests for the SOD/SOP pink-pixel detection used by the
     /// MoveAndAttack loot mode.
     ///
-    /// Normal loot is detected by pure-white pixels; SOD/SOP ground drops use a
-    /// custom hot-pink scroll texture whose shading/anti-aliasing produces MANY
+    /// Normal loot keeps compact white sparkles and adds shaded, low-chroma
+    /// near-white large components; SOD/SOP drops use a custom
+    /// hot-pink scroll texture whose shading/anti-aliasing produces MANY
     /// pink shades (observed roughly R 239..255, G 21..109, B 148..255), so
     /// <see cref="LootSystem"/> classifies the hot-pink COLOR FAMILY — strong
     /// red, significant blue, substantially weaker green and clear magenta
@@ -319,8 +320,8 @@ namespace DriverScanTester.Tests
                 (1, 0, 255, 255, 255),  // white loot
                 (2, 0, 255, 0, 255),    // pure magenta — artificial marker, excluded
                 (0, 1, 239, 21, 148),   // dark hot pink — loot family
-                (1, 1, 0, 0, 0),        // black
-                (2, 1, 128, 128, 128)); // gray floor
+                (1, 1, 180, 174, 169),  // shaded neutral white — normal loot family
+                (2, 1, 128, 128, 128)); // too dark for shaded-white detection
 
             var pinkPoints = new List<Point>();
             LootSystem.CollectTargetPointsFromBuffer(
@@ -335,6 +336,13 @@ namespace DriverScanTester.Tests
                 applyExcludeZone: false, 0, 0, 0, 0,
                 pinkOnly: false, whitePoints);
             Assert.Equal(new[] { new Point(1, 0) }, whitePoints);
+
+            var shadedWhitePoints = new List<Point>();
+            LootSystem.CollectTargetPointsFromBuffer(
+                buffer, stride, height, 0, width, 0, height,
+                applyExcludeZone: false, 0, 0, 0, 0,
+                pinkOnly: false, targetPoints: shadedWhitePoints, shadedWhiteOnly: true);
+            Assert.Equal(new[] { new Point(1, 0), new Point(1, 1) }, shadedWhitePoints);
         }
 
         [Fact]

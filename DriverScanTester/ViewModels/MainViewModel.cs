@@ -45,6 +45,7 @@ namespace DriverScanTester.ViewModels
         private string _subScan2Text = "";
         private MovementPrecision _selectedPrecision = MovementPrecision.Medium;
         private BotMode _selectedBotMode = BotMode.OnlyMove;
+        private bool _stopOnOtherPlayerDetected = true;
 
         public MovementPrecision SelectedPrecision
         {
@@ -56,6 +57,13 @@ namespace DriverScanTester.ViewModels
         {
             get => _selectedBotMode;
             set => SetProperty(ref _selectedBotMode, value);
+        }
+
+        /// <summary>When enabled, a confirmed other-player marker stops the bot and returns it to the city.</summary>
+        public bool StopOnOtherPlayerDetected
+        {
+            get => _stopOnOtherPlayerDetected;
+            set => SetProperty(ref _stopOnOtherPlayerDetected, value);
         }
 
         public bool IsByte
@@ -676,6 +684,7 @@ namespace DriverScanTester.ViewModels
             else if (!_isLootBotRunning)
             {
                 _lootSystem = new LootSystem(memoryService, AppendBotLog);
+                _lootSystem.ShouldStopOnOtherPlayerMarker = () => StopOnOtherPlayerDetected;
                 Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 0);
                 _lootSystem.OtherPlayerMarkerDetected =
                     () => HandleStandalonePlayerMarkerDetected(memoryService, profile);
@@ -3239,7 +3248,8 @@ namespace DriverScanTester.ViewModels
                 profile, AppendBotLog, FocusGameWindow)
             {
                 PauseController = PauseController,
-                OnPlayerDeathDetected = () => HandleGameConnectionFailure("Player death confirmed (HP is zero).")
+                OnPlayerDeathDetected = () => HandleGameConnectionFailure("Player death confirmed (HP is zero)."),
+                ShouldStopOnOtherPlayerDetected = () => StopOnOtherPlayerDetected
             };
             pathRunner.PauseController = PauseController;
             operationRunner.PauseController = PauseController;
@@ -4058,6 +4068,7 @@ namespace DriverScanTester.ViewModels
                             _workflowCoordinator?.IsRunning != true)
                             Interlocked.Exchange(ref _gameFailureStopHandled, 0);
                         _lootSystem = new LootSystem(memoryService, AppendBotLog);
+                        _lootSystem.ShouldStopOnOtherPlayerMarker = () => StopOnOtherPlayerDetected;
                         Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 0);
                         _lootSystem.OtherPlayerMarkerDetected =
                             () => HandleStandalonePlayerMarkerDetected(memoryService, profile);

@@ -85,8 +85,8 @@ namespace DriverScanTester.Services
         //   AreaLoot    → press spacebar x3, snapshot inventory, check after 100ms
         //   AreaLootWait→ compare inventory snapshot; if changed → keep spacebar-looting;
         //                  if no change after several tries → switch to Scan
-        //   Scan        → pixel-scan: label white blobs, filter ring/name/line shapes,
-        //                  probe only loot-like blobs (small compact sparkles)
+        //   Scan        → pixel-scan: label shaded-white blobs and probe only
+        //                  sufficiently large, concentrated loot-like components
         //   PinkScan   → SOD/SOP-only mode (MoveAndAttack waypoints): after the close-mob
         //                  check, sweep the WHOLE captured client bitmap for PINK pixels
         //                  in ONE continuous mouse pass over every candidate pixel,
@@ -224,8 +224,14 @@ namespace DriverScanTester.Services
             }
         }
 
-        /// <summary>Called once when another player marker first appears in a scan episode.</summary>
+        /// <summary>Called when a confirmed other-player marker should trigger bot safety behavior.</summary>
         public Action? OtherPlayerMarkerDetected { get; set; }
+
+        /// <summary>
+        /// Optional live setting for whether a confirmed marker should trigger bot safety
+        /// behavior. Null preserves the default behavior (stop/return to city).
+        /// </summary>
+        public Func<bool>? ShouldStopOnOtherPlayerMarker { get; set; }
 
         /// <summary>
         /// Requests the immediate post-kill SOD/SOP pink scan after MovementSystem has
@@ -1370,6 +1376,22 @@ namespace DriverScanTester.Services
         internal static bool IsPinkLootMaskPixel(int r, int g, int b)
             => IsSodSopPinkPixel(r, g, b) && !MobMarkerDetector.IsMagentaMarkerPixel(r, g, b);
 
+        // White ground textures are modulated by scene lighting and distance fog.
+        // Accept bright, low-chroma grays as shaded white while rejecting strongly
+        // tinted pixels. Component size/density filtering below rejects isolated noise.
+        private const int WhiteLootMinChannel = 145;
+        private const int WhiteLootMaxChannelSpread = 36;
+
+        internal static bool IsShadedWhiteLootPixel(Color pixelColor)
+            => IsShadedWhiteLootPixel(pixelColor.R, pixelColor.G, pixelColor.B);
+
+        internal static bool IsShadedWhiteLootPixel(int r, int g, int b)
+        {
+            int min = Math.Min(r, Math.Min(g, b));
+            int max = Math.Max(r, Math.Max(g, b));
+            return min >= WhiteLootMinChannel && max - min <= WhiteLootMaxChannelSpread;
+        }
+
         /// <summary>
         /// Analyzes a supplied frame with the exact Phase A reader, pink mask, connected
         /// component labeler and production candidate filters. It performs no game input.
@@ -1582,16 +1604,14 @@ namespace DriverScanTester.Services
                     return LootScanPassResult.Cancelled;
                 }
 
-                // ── Phase A: collect every target pixel in the region — no input.
-                //    Normal loot = pure-white pixels; SOD/SOP pink mode = saturated
-                //    pink pixels, with the narrow artificial mob-marker magenta removed
-                //    BEFORE connected components are built (IsPinkLootMaskPixel). The old
-                //    scan probed each pixel immediately, so mob names, target rings and
-                //    sprite highlights produced hundreds of useless mouse probes and even
-                //    aborted whole region passes. Now the candidates are gathered first
-                //    and only filtered survivors are probed. The frame is read in one
-                //    bulk LockBits copy (CollectScanTargetPoints), not GetPixel per px. ──
+                // ── Phase A: collect pixels without moving the cursor. Normal loot
+                //    keeps its exact-white sparkle mask and adds a separate shaded-white
+                //    mask; SOD/SOP keeps the existing pink-family mask with artificial
+                //    marker magenta removed before labeling. Both normal masks are read
+                //    from this captured frame; only concentrated shade components become
+                //    new candidates. ──
                 var targetPoints = new List<Point>();
+                List<Point>? shadedWhitePoints = pinkOnly ? null : new List<Point>();
                 pixelStats = CollectScanTargetPoints(
                     xStart, xEnd, yStart, yEnd,
                     applyExcludeZone, exclXMin, exclXMax, exclYMin, exclYMax,
@@ -1599,10 +1619,19 @@ namespace DriverScanTester.Services
                     out diagnosticPixelFormat,
                     out diagnosticStride);
                 diagnosticWhiteCount = targetPoints.Count;
+                if (!pinkOnly)
+                {
+                    CollectScanTargetPoints(
+                        xStart, xEnd, yStart, yEnd,
+                        applyExcludeZone, exclXMin, exclXMax, exclYMin, exclYMax,
+                        false, shadedWhitePoints!,
+                        out _, out _, shadedWhiteOnly: true);
+                    diagnosticWhiteCount = shadedWhitePoints!.Count;
+                }
 
-                // ── Phase B: label 8-connected components and keep only loot-shaped
-                //    blobs. Pink mode uses the same helper as AnalyzePinkFrame, so its
-                //    tests and live Phase A/B filtering share the exact production path. ──
+                // ── Phase B: label 8-connected components and keep loot-shaped
+                //    blobs. White mode preserves compact sparkles and adds dense large
+                //    candidates; pink mode shares the AnalyzePinkFrame production path. ──
                 List<WhiteComponent> components;
                 var candidates = new List<WhiteComponent>();
                 int filteredComponents;
@@ -1633,13 +1662,22 @@ namespace DriverScanTester.Services
                 }
                 else
                 {
-                    components = LabelWhiteComponents(targetPoints);
+                    List<WhiteComponent> exactWhiteComponents = LabelWhiteComponents(targetPoints);
+                    List<WhiteComponent> shadedWhiteComponents = LabelWhiteComponents(shadedWhitePoints!);
+                    components = exactWhiteComponents.Concat(shadedWhiteComponents).ToList();
                     filteredComponents = 0;
                     tinyPinkComponents = 0;
                     mobMarkerComponents = 0;
-                    foreach (WhiteComponent component in components)
+                    foreach (WhiteComponent component in exactWhiteComponents)
                     {
-                        if (IsLootCandidate(component))
+                        if (IsLegacyWhiteSparkleCandidate(component))
+                            candidates.Add(component);
+                        else
+                            filteredComponents++;
+                    }
+                    foreach (WhiteComponent component in shadedWhiteComponents)
+                    {
+                        if (IsShadedWhiteLootCandidate(component))
                             candidates.Add(component);
                         else
                             filteredComponents++;
@@ -1737,7 +1775,7 @@ namespace DriverScanTester.Services
                         if (!pinkOnly && probesUsed >= MaxLootProbesPerRegion)
                         {
                             _log($"[Loot] {regionName}: probe budget ({MaxLootProbesPerRegion}) exhausted — " +
-                                 $"{diagnosticWhiteHits.Count} probed px of {targetPoints.Count} {pixelNoun} px in {components.Count} components; " +
+                                 $"{diagnosticWhiteHits.Count} probed px of {diagnosticWhiteCount} {pixelNoun} px in {components.Count} components; " +
                                  $"aborting region (likely UI/effect clutter).");
                             diagnosticOutcome = "too-many-white";
                             return LootScanPassResult.NoItem;
@@ -1745,12 +1783,12 @@ namespace DriverScanTester.Services
                     }
                 }
 
-                if (targetPoints.Count > 0)
+                if (diagnosticWhiteCount > 0)
                 {
                     string tinyPinkNote = pinkOnly
                         ? $", {tinyPinkComponents} below {BotConstants.Loot.PinkMinCandidateWidth}x{BotConstants.Loot.PinkMinCandidateHeight} px skipped"
                         : "";
-                    _log($"[Loot] {regionName}: scanned {scanPixels} px, {targetPoints.Count} {pixelNoun} px in {components.Count} components — " +
+                    _log($"[Loot] {regionName}: scanned {scanPixels} px, {diagnosticWhiteCount} {pixelNoun} px in {components.Count} components — " +
                          $"{filteredComponents} filtered (shape/size; mob-marker rings={mobMarkerComponents}){tinyPinkNote}, {textGlyphs.Count} text glyphs skipped, " +
                          $"{candidates.Count} loot candidates probed ({probesUsed} probes), no item collected{KillElapsed()}.");
                 }
@@ -1911,7 +1949,14 @@ namespace DriverScanTester.Services
                     characterExclusionArea,
                     PlayerMarkerPixelDetector.GetHudExclusionAreas(_bitmap.Width, _bitmap.Height),
                     _log);
-                OtherPlayerMarkerDetected?.Invoke();
+                if (ShouldStopOnOtherPlayerMarker?.Invoke() ?? true)
+                {
+                    OtherPlayerMarkerDetected?.Invoke();
+                }
+                else
+                {
+                    _log("[PlayerPixels] Stop/return-to-city behavior is disabled; screenshot saved and continuing normally.");
+                }
                 return true;
             }
             catch (Exception ex)
@@ -2113,8 +2158,8 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Phase A of a region pass: collects every target pixel of the clamped scan
-        /// region — pure white for normal loot, the hot-pink family for SOD/SOP.
+        /// Phase A of a region pass: collects exact-white legacy pixels, an optional
+        /// shaded near-white candidate mask, or the hot-pink family for SOD/SOP.
         /// The bitmap is bulk-read row by row so positive and negative GDI+ strides map
         /// to the same logical top-down client coordinates as GetPixel.
         /// </summary>
@@ -2123,21 +2168,23 @@ namespace DriverScanTester.Services
             bool applyExcludeZone, int exclXMin, int exclXMax, int exclYMin, int exclYMax,
             bool pinkOnly, List<Point> targetPoints,
             out PixelFormat sourcePixelFormat,
-            out int sourceStride)
+            out int sourceStride,
+            bool shadedWhiteOnly = false)
             => CollectBitmapTargetPoints(
                 _bitmap, xStart, xEnd, yStart, yEnd,
                 applyExcludeZone, exclXMin, exclXMax, exclYMin, exclYMax,
                 pinkOnly, targetPoints, ref _scanBuffer,
-                out sourcePixelFormat, out sourceStride);
+                out sourcePixelFormat, out sourceStride, shadedWhiteOnly);
 
         internal static PixelCollectionStats CollectTargetPointsFromBitmap(
-            Bitmap bitmap, bool pinkOnly, List<Point> targetPoints)
+            Bitmap bitmap, bool pinkOnly, List<Point> targetPoints,
+            bool shadedWhiteOnly = false)
         {
             byte[] reusableBuffer = Array.Empty<byte>();
             return CollectBitmapTargetPoints(
                 bitmap, 0, bitmap.Width, 0, bitmap.Height,
                 applyExcludeZone: false, 0, 0, 0, 0,
-                pinkOnly, targetPoints, ref reusableBuffer, out _, out _);
+                pinkOnly, targetPoints, ref reusableBuffer, out _, out _, shadedWhiteOnly);
         }
 
         private static PixelCollectionStats CollectBitmapTargetPoints(
@@ -2147,7 +2194,8 @@ namespace DriverScanTester.Services
             bool pinkOnly, List<Point> targetPoints,
             ref byte[] reusableBuffer,
             out PixelFormat sourcePixelFormat,
-            out int sourceStride)
+            out int sourceStride,
+            bool shadedWhiteOnly)
         {
             ArgumentNullException.ThrowIfNull(bitmap);
             ArgumentNullException.ThrowIfNull(targetPoints);
@@ -2192,7 +2240,7 @@ namespace DriverScanTester.Services
                     reusableBuffer, rowBytes, scanBitmap.Height,
                     xStart, xEnd, yStart, yEnd,
                     applyExcludeZone, exclXMin, exclXMax, exclYMin, exclYMax,
-                    pinkOnly, targetPoints);
+                    pinkOnly, targetPoints, shadedWhiteOnly);
             }
             catch
             {
@@ -2215,7 +2263,7 @@ namespace DriverScanTester.Services
                 return CollectTargetPointsFromBitmapReference(
                     bitmap, xStart, xEnd, yStart, yEnd,
                     applyExcludeZone, exclXMin, exclXMax, exclYMin, exclYMax,
-                    pinkOnly, targetPoints);
+                    pinkOnly, targetPoints, shadedWhiteOnly);
             }
 
             return default;
@@ -2229,7 +2277,7 @@ namespace DriverScanTester.Services
             Bitmap bitmap,
             int xStart, int xEnd, int yStart, int yEnd,
             bool applyExcludeZone, int exclXMin, int exclXMax, int exclYMin, int exclYMax,
-            bool pinkOnly, List<Point> targetPoints)
+            bool pinkOnly, List<Point> targetPoints, bool shadedWhiteOnly = false)
         {
             ArgumentNullException.ThrowIfNull(bitmap);
             ArgumentNullException.ThrowIfNull(targetPoints);
@@ -2255,6 +2303,10 @@ namespace DriverScanTester.Services
                         isTarget = IsPinkLootMaskPixel(color);
                         if (raw && !isTarget) markerRejected++;
                     }
+                    else if (shadedWhiteOnly)
+                    {
+                        isTarget = IsShadedWhiteLootPixel(color);
+                    }
                     else
                     {
                         isTarget = color.R == 255 && color.G == 255 && color.B == 255;
@@ -2277,7 +2329,7 @@ namespace DriverScanTester.Services
             byte[] buffer, int stride, int bitmapHeight,
             int xStart, int xEnd, int yStart, int yEnd,
             bool applyExcludeZone, int exclXMin, int exclXMax, int exclYMin, int exclYMax,
-            bool pinkOnly, List<Point> targetPoints)
+            bool pinkOnly, List<Point> targetPoints, bool shadedWhiteOnly = false)
         {
             ArgumentNullException.ThrowIfNull(buffer);
             ArgumentNullException.ThrowIfNull(targetPoints);
@@ -2320,6 +2372,10 @@ namespace DriverScanTester.Services
                         isTarget = IsPinkLootMaskPixel(r, g, b);
                         if (raw && !isTarget) markerRejected++;
                     }
+                    else if (shadedWhiteOnly)
+                    {
+                        isTarget = IsShadedWhiteLootPixel(r, g, b);
+                    }
                     else
                     {
                         isTarget = r == 255 && g == 255 && b == 255;
@@ -2335,25 +2391,22 @@ namespace DriverScanTester.Services
 
         // ════════════════════════════════════════════════════════════════
         //  WHITE-PIXEL SHAPE FILTER (loot candidate detection)
-        //  Mob names, target rings, weapon lines and sprite highlights are
-        //  white too (see LootSSFolder diagnostics). They are removed by
-        //  connected-component shape so only small compact blobs — the actual
-        //  loot sparkles — are probed with the IsLootMouseOver() check.
+        //  Keep the legacy compact white-sparkle candidates and also accept larger,
+        //  concentrated shaded-white components like the SOD/SOP ground squares.
+        //  The mouseover check remains authoritative for pickup in both paths.
         // ════════════════════════════════════════════════════════════════
 
-        /// <summary>Largest area (px) a white blob may have to be a loot candidate.</summary>
         private const int MaxLootCandidateArea = 60;
-
-        /// <summary>Largest width/height (px) a white blob may have to be a loot candidate.</summary>
         private const int MaxLootCandidateDimension = 24;
-
-        /// <summary>Blobs at most this thick but at least <see cref="ThinLineMinLength"/> long are weapon/UI lines, not loot.</summary>
         private const int ThinLineMaxThickness = 2;
         private const int ThinLineMinLength = 12;
-
-        /// <summary>Components at least this wide AND tall are ring arcs / name bands, never loot.</summary>
         private const int WideBandMinWidth = 18;
         private const int WideBandMinHeight = 12;
+
+        private const int WhiteLootMinCandidateWidth = 10;
+        private const int WhiteLootMinCandidateHeight = 10;
+        private const int WhiteLootMinCandidatePixels = 30;
+        private const float WhiteLootMinFillRatio = 0.20f;
 
         /// <summary>Components up to this area are probed at every pixel.</summary>
         private const int DenseProbeMaxArea = 12;
@@ -2375,7 +2428,7 @@ namespace DriverScanTester.Services
         private const int TextClusterMaxGapPx = 4;
         private const int TextClusterMaxBaselineDriftPx = 5;
 
-        /// <summary>A connected group of pure-white pixels found during a region scan.</summary>
+        /// <summary>A connected group of loot-color pixels found during a region scan.</summary>
         internal sealed class WhiteComponent
         {
             public readonly List<Point> Points = new List<Point>();
@@ -2442,15 +2495,30 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// True when a white component looks like a loot drop (small compact blob).
-        /// Large blobs (ring arcs, name bands, dialogs), thin long lines (weapon glow,
-        /// UI separators) and wide low-fill bands are rejected.
+        /// True when a shaded-white component is a large, concentrated potential
+        /// ground drop. There is no upper-size cap, so distance/zoom does not make a
+        /// real drop disappear. This only selects probe locations: TryCollectAt still
+        /// requires the normal lootable mouseover before the unchanged collection action.
         /// </summary>
-        private static bool IsLootCandidate(WhiteComponent component)
+        internal static bool IsShadedWhiteLootCandidate(WhiteComponent component)
+        {
+            if (component.Width < WhiteLootMinCandidateWidth ||
+                component.Height < WhiteLootMinCandidateHeight ||
+                component.Area < WhiteLootMinCandidatePixels)
+                return false;
+
+            float fillRatio = component.Area /
+                (float)Math.Max(component.Width * component.Height, 1);
+            return fillRatio >= WhiteLootMinFillRatio;
+        }
+
+        /// <summary>Original compact exact-white sparkle filter; retained for legacy loot.</summary>
+        internal static bool IsLegacyWhiteSparkleCandidate(WhiteComponent component)
         {
             if (component.Area > MaxLootCandidateArea)
                 return false;
-            if (component.Width > MaxLootCandidateDimension || component.Height > MaxLootCandidateDimension)
+            if (component.Width > MaxLootCandidateDimension ||
+                component.Height > MaxLootCandidateDimension)
                 return false;
             if (Math.Min(component.Width, component.Height) <= ThinLineMaxThickness &&
                 Math.Max(component.Width, component.Height) >= ThinLineMinLength)

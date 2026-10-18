@@ -282,15 +282,21 @@
                         </GroupBox>
 
                         <GroupBox Header="Combat Assistance" Margin="0,0,0,10" Padding="7">
-                            <DockPanel LastChildFill="False">
-                                <CheckBox Content="Enable Mob Grouping"
-                                          IsChecked="{Binding MobGroupingEnabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                            <StackPanel>
+                                <CheckBox Content="Stop and teleport to city when another player is detected"
+                                          IsChecked="{Binding StopOnOtherPlayerDetected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                           VerticalAlignment="Center" Margin="4,2"
-                                          ToolTip="Global runtime option. Runs only on MoveAndAttack waypoints and cancels for recovery, loot holds, pause, or Repot."/>
-                                <Border DockPanel.Dock="Right" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="6,0,2,0">
-                                    <TextBlock Text="{Binding MobGroupingStatus}" FontWeight="SemiBold"/>
-                                </Border>
-                            </DockPanel>
+                                          ToolTip="Checked by default: after saving the other-player screenshot, stop the bot and return to the city. Uncheck to save screenshots but keep working normally."/>
+                                <DockPanel LastChildFill="False" Margin="0,3,0,0">
+                                    <CheckBox Content="Enable Mob Grouping"
+                                              IsChecked="{Binding MobGroupingEnabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                              VerticalAlignment="Center" Margin="4,2"
+                                              ToolTip="Global runtime option. Runs only on MoveAndAttack waypoints and cancels for recovery, loot holds, pause, or Repot."/>
+                                    <Border DockPanel.Dock="Right" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="6,0,2,0">
+                                        <TextBlock Text="{Binding MobGroupingStatus}" FontWeight="SemiBold"/>
+                                    </Border>
+                                </DockPanel>
+                            </StackPanel>
                         </GroupBox>
 
                         <GroupBox Header="Manual Controls" Margin="0,0,0,10" Padding="7">
