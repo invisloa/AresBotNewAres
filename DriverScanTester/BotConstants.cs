@@ -33,6 +33,12 @@ namespace DriverScanTester
             /// <summary>Camera distance used by the other-player marker detector.</summary>
             public const short OtherPlayerMarkerScanDistance = 16950;
 
+            /// <summary>
+            /// Settle time (ms) after applying the marker-scan camera before the
+            /// attack-start player-pixel check captures its frame.
+            /// </summary>
+            public const int PlayerMarkerCheckCameraSettleMs = 250;
+
             /// <summary>Camera distance used only during SOD/SOP pink-pixel loot scans.</summary>
             public const short SodSopLootScanDistance = 17050;
 

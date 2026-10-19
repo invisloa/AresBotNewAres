@@ -299,6 +299,12 @@ namespace DriverScanTester.Services
         public LootSystem? LootSystemRef { get; set; }
 
         /// <summary>
+        /// Detector instance for the attack-start player-pixel check. Separate from the
+        /// loot system's instance because each detector owns reusable scan buffers.
+        /// </summary>
+        private readonly PlayerMarkerPixelDetector _attackStartPlayerMarkerDetector = new();
+
+        /// <summary>
         /// Loot-priority mode (profile flag "Loot Priority"): looting outranks combat
         /// and waypoint movement. While the loot system is in its pixel-scan state
         /// (scanning for, clicking and walking to ground items), ALL attack actions and
@@ -1784,6 +1790,12 @@ namespace DriverScanTester.Services
 
                 case CombatAction.Attack:
                     _resumeCombatSkillAfterGrouping = false;
+                    // Extra safety check on every newly selected attack target: verify that
+                    // no other-player marker (player pixels) is visible on screen with the
+                    // camera zoomed out BEFORE the first attack swing is held.
+                    await RunAttackStartPlayerMarkerCheck(token);
+                    if (token.IsCancellationRequested)
+                        return;
                     HoldSkillThree();
                     if (_isMovingForward)
                     {
@@ -2881,6 +2893,69 @@ namespace DriverScanTester.Services
                 return true;
             }
             return loot.TryRunMovementCameraAction(Apply);
+        }
+
+        /// <summary>
+        /// Extra player-pixel safety check performed once per newly selected attack target
+        /// (right after TAB picked a target and the bot is about to start attacking):
+        /// briefly zooms the camera out to the marker-scan distance, captures a fresh game
+        /// client frame and runs the faction-marker (player pixels) detector. When a marker
+        /// is found the loot system runs the same stop/return-to-city behavior as a
+        /// confirmed periodic detection. The camera is always restored afterwards.
+        /// </summary>
+        private async Task RunAttackStartPlayerMarkerCheck(CancellationToken token)
+        {
+            LootSystem? loot = LootSystemRef;
+            if (loot == null || _memoryService.GetIsInCity())
+                return;
+
+            short normalCameraDistance = _finalStandbyActive
+                ? _finalStandbyWaypoint.CameraDistanceLock
+                : _waypoints.Count > 0
+                    ? _waypoints.Peek().CameraDistanceLock
+                    : Waypoint.DefaultCameraDistanceLock;
+
+            // If the loot system currently owns the camera, do not interfere — the normal
+            // attack proceeds and the periodic marker scan stays responsible.
+            if (!TryApplyMovementCameraDistance(BotConstants.Camera.OtherPlayerMarkerScanDistance))
+                return;
+
+            try
+            {
+                // Give the client a moment to render the zoomed-out view.
+                await Task.Delay(BotConstants.Camera.PlayerMarkerCheckCameraSettleMs, token);
+
+                using Bitmap? frame = ScreenshotService.CaptureGameClientFrame(out Point referenceClientOrigin);
+                if (frame == null)
+                {
+                    _log("[PlayerPixels] Attack-start player-pixel check: could not capture the game client frame.");
+                    return;
+                }
+
+                Rectangle characterExclusionArea = PlayerMarkerPixelDetector.GetLootCharacterExclusionArea(
+                    frame.Width, frame.Height, referenceClientOrigin.X, referenceClientOrigin.Y);
+
+                if (!_attackStartPlayerMarkerDetector.TryFindOtherPlayerMarker(
+                        frame, characterExclusionArea, out PlayerMarkerCandidate candidate))
+                {
+                    return;
+                }
+
+                ScreenshotService.SavePlayerMarkerDiagnosticScreenshot(frame, candidate, characterExclusionArea);
+                loot.ReportImmediateOtherPlayerMarker(candidate, "Attack-start player-pixel check");
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _log($"[PlayerPixels] Attack-start player-pixel check failed: {ex.Message}");
+            }
+            finally
+            {
+                TryApplyMovementCameraDistance(normalCameraDistance);
+            }
         }
 
         private bool TryRunMovementCursorAction(Action action)

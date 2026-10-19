@@ -234,6 +234,26 @@ namespace DriverScanTester.Services
         public Func<bool>? ShouldStopOnOtherPlayerMarker { get; set; }
 
         /// <summary>
+        /// Runs the confirmed-marker safety behavior for a marker detected outside the
+        /// periodic loot scan — the MovementSystem attack-start player-pixel check. The
+        /// caller has already saved the annotated diagnostic screenshot.
+        /// </summary>
+        internal void ReportImmediateOtherPlayerMarker(PlayerMarkerCandidate candidate, string source)
+        {
+            _log($"[PlayerPixels] {source}: other-player marker detected — " +
+                 $"{candidate.Faction} bounds={FormatRectangle(candidate.Bounds)} " +
+                 $"pixels={candidate.PixelCount} fill={candidate.FillRatio:P0} aspect={candidate.AspectRatio:F2}.");
+            if (ShouldStopOnOtherPlayerMarker?.Invoke() ?? true)
+            {
+                OtherPlayerMarkerDetected?.Invoke();
+            }
+            else
+            {
+                _log("[PlayerPixels] Stop/return-to-city behavior is disabled; continuing normally.");
+            }
+        }
+
+        /// <summary>
         /// Requests the immediate post-kill SOD/SOP pink scan after MovementSystem has
         /// tried a close-camera TAB and found no nearby mob. No-op unless
         /// <see cref="PinkLootOnlyMode"/> is enabled. The request is consumed by
