@@ -4325,6 +4325,18 @@ namespace DriverScanTester.ViewModels
                             // OnlyMove is mandatory above all movement-option actions:
                             // never try to loot while the current waypoint is OnlyMove.
                             // Heal stays always on (separate HealMana task).
+                            // ── Recovery ownership guard ──
+                            // ReverseDiagonal / waypoint special recovery / map-transition
+                            // hold owns movement and camera exclusively; MovementSystem has
+                            // already quiesced any in-flight scan when it took ownership.
+                            if (_movementSystem?.IsRecoveryInputOwnershipActive == true)
+                            {
+                                _lootSystem.PinkLootOnlyMode = false;
+                                _lootSystem.MoveAndAttackAndLootMode = false;
+                                _lootSystem.PlayerMarkerScanEnabled = false;
+                                await PauseController.PausableDelayAsync(10, token);
+                                continue;
+                            }
                             if (_movementSystem?.IsWaypointSpecialRecoveryActive == true)
                             {
                                 _lootSystem.PinkLootOnlyMode = false;

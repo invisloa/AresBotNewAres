@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -10,10 +12,10 @@ using Xunit;
 namespace DriverScanTester.Tests
 {
     /// <summary>
-    /// Regression coverage for the mandatory MoveAndAttackAndLoot navigation barrier:
-    /// ordinary waypoint movement may be released only by a camera-verified Completed
-    /// request for the exact armed generation. Capture failures, cancellations,
-    /// deferred combat and stopped loot never count as an empty scan.
+    /// Regression coverage for the corrected MoveAndAttackAndLoot behavior:
+    /// ordinary waypoint movement never arms a stationary loot scan; the passive
+    /// moving pre-scan only observes the current view; a confirmed post-kill request
+    /// is the only mandatory full loot cycle.
     /// </summary>
     public sealed class LootBarrierRegressionTests
     {
@@ -42,19 +44,21 @@ namespace DriverScanTester.Tests
         private static MovementSystem CreateMovement(
             Action<string> log,
             BotMode mode = BotMode.MoveAndAttackAndLoot,
-            LootSystem? loot = null)
+            LootSystem? loot = null,
+            int waypointCount = 1,
+            bool loopPath = false)
         {
-            var path = new List<Waypoint>
-            {
-                new Waypoint(5000, 5000, MovementPrecision.Medium, mode)
-            };
+            var path = new List<Waypoint>();
+            for (int i = 0; i < waypointCount; i++)
+                path.Add(new Waypoint(1000 * (i + 1), 1000 * (i + 1), MovementPrecision.Medium, mode));
+
             var movement = new MovementSystem(
                 CreateStubMemory(log),
                 log,
-                5000,
-                5000,
+                1000,
+                1000,
                 customPath: path,
-                loopPath: true)
+                loopPath: loopPath)
             {
                 InternalRepotEnabled = false,
                 LootSystemRef = loot
@@ -64,11 +68,12 @@ namespace DriverScanTester.Tests
 
         private static LootRequestStatus Snapshot(
             long requestId,
+            LootBarrierReason reason,
             LootRequestState state,
             bool cameraVerified = true,
             int itemsCollected = 0,
             string detail = "test")
-            => new(requestId, LootBarrierReason.PostKill, state, cameraVerified,
+            => new(requestId, reason, state, cameraVerified,
                 itemsCollected, detail, DateTime.UtcNow);
 
         private static int QueueCount(MovementSystem movement)
@@ -87,11 +92,25 @@ namespace DriverScanTester.Tests
             return (bool)field!.GetValue(movement)!;
         }
 
-        private static void InvokePrivate(MovementSystem movement, string method, params object[] args)
+        private static void SetMovingForward(MovementSystem movement, bool value)
         {
-            var info = typeof(MovementSystem).GetMethod(method, PrivateInstance);
+            var field = typeof(MovementSystem).GetField("_isMovingForward", PrivateInstance);
+            Assert.NotNull(field);
+            field!.SetValue(movement, value);
+        }
+
+        private static bool BarrierHoldsInput(MovementSystem movement)
+        {
+            var field = typeof(MovementSystem).GetField("_lootNavigationBarrierHoldsInput", PrivateInstance);
+            Assert.NotNull(field);
+            return (bool)field!.GetValue(movement)!;
+        }
+
+        private static void InvokePrivate(object target, string method, params object[] args)
+        {
+            var info = target.GetType().GetMethod(method, PrivateInstance);
             Assert.NotNull(info);
-            info!.Invoke(movement, args);
+            info!.Invoke(target, args);
         }
 
         private static async Task<bool> InvokeAdvanceAsync(
@@ -107,124 +126,299 @@ namespace DriverScanTester.Tests
             return await task!;
         }
 
-        private static bool InvokeEnsureWaypointBarrier(
-            MovementSystem movement,
-            Waypoint target,
-            float x,
-            float y)
+        private static LootScanPassOutcome ValidEmptyOutcome()
+            => new(LootScanPassResult.NoItem, LootScanPassResult.NoItem,
+                LootScanPassResult.NoItem, CameraVerified: true, "test empty pass");
+
+        private static bool IsLootStateIdle(LootSystem loot)
         {
-            var info = typeof(MovementSystem).GetMethod(
-                "EnsureLootBarrierBeforeWaypointAdvance", PrivateInstance);
-            Assert.NotNull(info);
-            return (bool)info!.Invoke(movement, new object[] { target, x, y })!;
+            var field = typeof(LootSystem).GetField("_lootState", PrivateInstance);
+            Assert.NotNull(field);
+            return field!.GetValue(loot)!.ToString() == "Idle";
         }
 
-        // ── Test 1 — movement after kill ────────────────────────────────────────
+        private static void RunMandatoryService(LootSystem loot, bool mobSelected = false)
+            => InvokePrivate(loot, "ServiceMandatoryLootRequest", mobSelected);
+
+        private static void CompleteMandatory(
+            LootSystem loot, long requestId, LootScanPassOutcome outcome)
+            => InvokePrivate(loot, "CompleteMandatoryLootRequest", requestId, outcome);
+
+        // ── Test 1 — continuous walking without loot ───────────────────────────
 
         [Fact]
-        public void PostKillPendingRunningAndDeferred_AllBlockNavigation()
+        public async Task MultipleLootWaypointsAdvanceWithoutAnyLootScanOrStop()
         {
-            var barrier = new LootNavigationBarrier();
-            barrier.Arm(42, LootBarrierReason.PostKill);
+            var lines = new List<string>();
+            using var loot = CreateLoot(lines.Add);
+            var movement = CreateMovement(lines.Add, loot: loot, waypointCount: 3);
+            SetMovingForward(movement, true);
 
-            Assert.True(barrier.IsBlockingNavigation);
-
-            foreach (LootRequestState state in new[]
-                     {
-                         LootRequestState.Pending,
-                         LootRequestState.Running,
-                         LootRequestState.Deferred
-                     })
+            int index = 0;
+            foreach (int coord in new[] { 1000, 2000, 3000 })
             {
-                barrier.ApplyStatus(Snapshot(42, state), 100f, 100f);
-                Assert.True(barrier.IsBlockingNavigation);
-                Assert.True(barrier.IsActive);
+                bool advanced = await InvokeAdvanceAsync(movement, coord, coord);
+                Assert.True(advanced, $"Waypoint {coord} should advance normally.");
+                Assert.False(movement.IsLootNavigationBlocked);
+                // The final waypoint legitimately enters standby (existing behavior),
+                // but no intermediate transition may stop navigation for loot.
+                if (index++ < 2)
+                    Assert.True(IsMovingForward(movement), "Ordinary advancement must not release W.");
             }
 
-            // Only an explicitly camera-verified Completed status releases navigation.
-            barrier.ApplyStatus(Snapshot(42, LootRequestState.Completed, cameraVerified: true), 100f, 100f);
-            Assert.False(barrier.IsBlockingNavigation);
-            Assert.True(barrier.CanReuseCompletedScan(100f, 100f, out long completedId));
-            Assert.Equal(42, completedId);
+            Assert.Equal(0, QueueCount(movement));
+            Assert.DoesNotContain(lines, line => line.Contains("LootBarrier] Armed", StringComparison.Ordinal));
+            Assert.DoesNotContain(lines, line => line.Contains("LootVerify]", StringComparison.Ordinal));
+            Assert.DoesNotContain(lines, line => line.Contains("LootCamera]", StringComparison.Ordinal));
+            Assert.DoesNotContain(lines, line => line.Contains("StartMoving", StringComparison.Ordinal));
+        }
+
+        // ── Test 2 — long journey without loot ─────────────────────────────────
+
+        [Fact]
+        public void RepeatedTicksInLootModeNeverStartACycleWithoutARequest()
+        {
+            var lines = new List<string>();
+            using var loot = CreateLoot(lines.Add);
+            loot.MoveAndAttackAndLootMode = true;
+
+            for (int i = 0; i < 100; i++)
+            {
+                RunMandatoryService(loot);
+                Assert.False(loot.IsLootCycleActive,
+                    "Idle MoveAndAttackAndLoot must not start the legacy timer-driven collector.");
+                Assert.False(loot.HasActiveMandatoryLootRequest);
+            }
+
+            Assert.DoesNotContain(lines, line => line.Contains("Spacebar", StringComparison.Ordinal));
+            Assert.DoesNotContain(lines, line => line.Contains("PixelScan started", StringComparison.Ordinal));
+        }
+
+        // ── Test 3 — passive candidate scan ────────────────────────────────────
+
+        [Fact]
+        public void PassiveAnalysisFindsPlausibleWhiteLootWithoutMovingAnything()
+        {
+            using var bitmap = new Bitmap(200, 200);
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+            {
+                graphics.Clear(Color.Black);
+                graphics.FillRectangle(Brushes.White, 50, 50, 14, 14);
+            }
+
+            LootPreScanResult result = LootSystem.AnalyzeWhiteLootCandidates(
+                bitmap, new Rectangle(0, 0, 200, 200), null,
+                BotConstants.Loot.PassivePreScanMaxCandidateComponents);
+
+            Assert.Equal(LootPreScanOutcome.PotentialCandidate, result.Outcome);
+            Assert.True(result.CandidateComponents >= 1);
+            Assert.True(result.WhitePixels > 0);
+            Assert.False(result.CandidateBounds.IsEmpty);
+            Assert.Equal((short)17000, BotConstants.Camera.LootScanDistance);
+            Assert.Equal(BotConstants.Camera.LootScanDistance, LootSystem.NormalLootScanDistance);
         }
 
         [Fact]
-        public void StartMoving_IsSuppressedWhileMandatoryLootBarrierIsArmed()
+        public void TravelCandidateRequestStopsNavigationAndStartsVerificationOnce()
         {
             var lines = new List<string>();
             using var loot = CreateLoot(lines.Add);
             var movement = CreateMovement(lines.Add, loot: loot);
+            SetMovingForward(movement, true);
 
-            InvokePrivate(movement, "ArmMandatoryLootBarrier", LootBarrierReason.PostKill);
+            long requestId = loot.BeginMandatoryLootRequest(LootBarrierReason.TravelCandidateVerification);
+            Assert.True(requestId > 0);
+
+            InvokePrivate(movement, "RefreshLootBarrier");
             Assert.True(movement.IsLootNavigationBlocked);
+            Assert.Equal(LootBarrierReason.TravelCandidateVerification, movement.LootBarrier.Reason);
+            Assert.True(BarrierHoldsInput(movement));
 
             InvokePrivate(movement, "StartMoving");
-
             Assert.False(IsMovingForward(movement));
-            Assert.Contains(lines, line => line.Contains("StartMoving suppressed", StringComparison.Ordinal));
+
+            loot.NotifyNavigationHeld(requestId);
+            RunMandatoryService(loot);
+            Assert.True(loot.IsLootCycleActive);
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus status));
+            Assert.Equal(LootRequestState.Running, status.State);
         }
 
-        // ── Test 2 — waypoint transition ───────────────────────────────────────
+        // ── Test 4 — false-positive candidate ──────────────────────────────────
 
         [Fact]
-        public async Task ReachingLootWaypoint_DoesNotAdvanceUntilBarrierCompletes()
+        public void FailedCandidateSuppressionIsRegionBoundedAndExpires()
+        {
+            var tracker = new LootSystem.CandidateSuppressionTracker();
+            var bounds = new Rectangle(100, 100, 20, 20);
+            DateTime now = DateTime.UtcNow;
+
+            Assert.False(tracker.IsSuppressed(bounds, now));
+            (int firstCount, int firstMs) = tracker.RecordFailure(bounds, now);
+            Assert.Equal(1, firstCount);
+            Assert.True(tracker.IsSuppressed(bounds, now.AddMilliseconds(10)));
+
+            // Same artifact, same region: bounded backoff grows.
+            (int secondCount, int secondMs) = tracker.RecordFailure(bounds, now.AddMilliseconds(10));
+            Assert.Equal(2, secondCount);
+            Assert.True(secondMs > firstMs);
+
+            // Meaningful visual change (region moved) is new evidence.
+            var moved = new Rectangle(180, 100, 20, 20);
+            Assert.False(tracker.IsSuppressed(moved, now.AddMilliseconds(20)));
+
+            // Expiry is bounded too: suppression never blacklists the location.
+            tracker.RecordFailure(bounds, now);
+            Assert.False(tracker.IsSuppressed(
+                bounds, now.AddMilliseconds(BotConstants.Loot.PassivePreScanSuppressionMaxMs + 1)));
+        }
+
+        [Fact]
+        public void UnavailableTravelVerificationReleasesNavigationWithoutClaimingEmpty()
         {
             var lines = new List<string>();
             using var loot = CreateLoot(lines.Add);
             var movement = CreateMovement(lines.Add, loot: loot);
-            var target = new Waypoint(5000, 5000, MovementPrecision.Medium, BotMode.MoveAndAttackAndLoot);
 
-            // Arrival check arms exactly one WaypointTransition obligation and the queue
-            // entry stays in place.
-            bool advanced = await InvokeAdvanceAsync(movement, 5000, 5000);
-            Assert.False(advanced);
-            Assert.Equal(1, QueueCount(movement));
+            long requestId = loot.BeginMandatoryLootRequest(LootBarrierReason.TravelCandidateVerification);
+            loot.NotifyNavigationHeld(requestId);
+            InvokePrivate(movement, "RefreshLootBarrier");
+            RunMandatoryService(loot);
             Assert.True(movement.IsLootNavigationBlocked);
-            Assert.Equal(LootBarrierReason.WaypointTransition, movement.LootBarrier.Reason);
 
-            // Another tick must not create a new obligation.
-            long requestId = movement.LootBarrier.RequestId;
-            bool advancedAgain = await InvokeAdvanceAsync(movement, 5000, 5000);
-            Assert.False(advancedAgain);
-            Assert.Equal(requestId, movement.LootBarrier.RequestId);
-            Assert.Equal(1, QueueCount(movement));
+            InvokePrivate(loot, "MarkTravelVerificationUnavailable", requestId, "capture failed");
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus status));
+            Assert.Equal(LootRequestState.Unavailable, status.State);
+            Assert.False(status.CameraVerified);
 
-            // A verified completion for the exact generation releases the transition.
-            movement.LootBarrier.ApplyStatus(
-                new LootRequestStatus(
-                    requestId, LootBarrierReason.WaypointTransition,
-                    LootRequestState.Completed, CameraVerified: true,
-                    ItemsCollected: 0, Detail: "verified empty pass", DateTime.UtcNow),
-                5000f, 5000f);
-
-            bool advancedAfterCompletion = await InvokeAdvanceAsync(movement, 5000, 5000);
-            Assert.True(advancedAfterCompletion);
-            Assert.Equal(0, QueueCount(movement));
+            InvokePrivate(movement, "RefreshLootBarrier");
             Assert.False(movement.IsLootNavigationBlocked);
+            Assert.False(BarrierHoldsInput(movement));
+            Assert.Contains(lines, line => line.Contains("not treated as an empty result", StringComparison.Ordinal));
         }
 
+        // ── Test 5 — confirmed item ─────────────────────────────────────────────
+
         [Fact]
-        public void ValidPostKillScanCanSatisfyWaypointBoundaryOnlyWithoutMovement()
+        public void ConfirmedItemCompletesTheVerificationAndOnlyThenReleasesNavigation()
         {
             var lines = new List<string>();
             using var loot = CreateLoot(lines.Add);
             var movement = CreateMovement(lines.Add, loot: loot);
-            var target = new Waypoint(5000, 5000, MovementPrecision.Medium, BotMode.MoveAndAttackAndLoot);
+
+            long requestId = loot.BeginMandatoryLootRequest(LootBarrierReason.TravelCandidateVerification);
+            loot.NotifyNavigationHeld(requestId);
+            InvokePrivate(movement, "RefreshLootBarrier");
+            RunMandatoryService(loot);
+
+            InvokePrivate(loot, "RecordMandatoryItemCollected", requestId);
+            Assert.True(movement.IsLootNavigationBlocked);
+
+            CompleteMandatory(loot, requestId, ValidEmptyOutcome());
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus status));
+            Assert.Equal(LootRequestState.Completed, status.State);
+            Assert.True(status.CameraVerified);
+            Assert.Equal(1, status.ItemsCollected);
+            Assert.True(IsLootStateIdle(loot));
+
+            InvokePrivate(movement, "RefreshLootBarrier");
+            Assert.False(movement.IsLootNavigationBlocked);
+            Assert.False(BarrierHoldsInput(movement));
+            Assert.False(loot.IsLootCycleActive);
+        }
+
+        // ── Test 6 — last mob killed ────────────────────────────────────────────
+
+        [Fact]
+        public void PostKillSignalArmsMandatoryScanAndBlocksNavigationUntilVerified()
+        {
+            var lines = new List<string>();
+            using var loot = CreateLoot(lines.Add);
+            var movement = CreateMovement(lines.Add, loot: loot);
+            SetMovingForward(movement, true);
 
             InvokePrivate(movement, "ArmMandatoryLootBarrier", LootBarrierReason.PostKill);
-            long id = movement.LootBarrier.RequestId;
-            movement.LootBarrier.ApplyStatus(
-                Snapshot(id, LootRequestState.Completed, cameraVerified: true), 5000f, 5000f);
-
-            Assert.True(InvokeEnsureWaypointBarrier(movement, target, 5000f, 5000f));
-
-            // Real navigation invalidates the completed scan; the boundary must check again.
-            movement.LootBarrier.NotifyNavigationStarted();
-            Assert.False(InvokeEnsureWaypointBarrier(movement, target, 5000f, 5000f));
             Assert.True(movement.IsLootNavigationBlocked);
+            Assert.True(BarrierHoldsInput(movement));
+            Assert.Equal(LootBarrierReason.PostKill, movement.LootBarrier.Reason);
+            long requestId = movement.LootBarrier.RequestId;
+            Assert.True(requestId > 0);
+
+            InvokePrivate(movement, "StartMoving");
+            Assert.False(IsMovingForward(movement), "No waypoint movement may resume before the post-kill scan completes.");
+
+            loot.NotifyNavigationHeld(requestId);
+            RunMandatoryService(loot);
+            Assert.True(loot.IsLootCycleActive);
+
+            CompleteMandatory(loot, requestId, ValidEmptyOutcome());
+            InvokePrivate(movement, "RefreshLootBarrier");
+            Assert.False(movement.IsLootNavigationBlocked);
+            Assert.False(BarrierHoldsInput(movement));
+            Assert.Contains(lines, line => line.Contains("PostKill", StringComparison.Ordinal));
         }
 
-        // ── Test 3 — camera verification ───────────────────────────────────────
+        [Fact]
+        public void PostKillUnavailableIsNeverAValidEmptyScan()
+        {
+            var barrier = new LootNavigationBarrier();
+            barrier.Arm(77, LootBarrierReason.PostKill);
+
+            barrier.ApplyStatus(Snapshot(
+                77, LootBarrierReason.PostKill, LootRequestState.Unavailable,
+                cameraVerified: false, detail: "capture failed"));
+
+            Assert.True(barrier.IsBlockingNavigation);
+            Assert.True(barrier.HasTerminalFailure);
+            Assert.NotEqual(LootBarrierPhase.Unavailable, barrier.Phase);
+            Assert.Contains("unavailable", barrier.Detail, StringComparison.Ordinal);
+        }
+
+        // ── Test 7 — waypoint reached ───────────────────────────────────────────
+
+        [Fact]
+        public async Task ReachingLootWaypointDoesNotArmAnyMandatoryScan()
+        {
+            var lines = new List<string>();
+            using var loot = CreateLoot(lines.Add);
+            var movement = CreateMovement(lines.Add, loot: loot);
+            SetMovingForward(movement, true);
+
+            bool advanced = await InvokeAdvanceAsync(movement, 1000, 1000);
+
+            Assert.True(advanced);
+            Assert.Equal(0, QueueCount(movement));
+            Assert.False(movement.IsLootNavigationBlocked);
+            Assert.False(BarrierHoldsInput(movement));
+            Assert.False(loot.HasActiveMandatoryLootRequest);
+            Assert.DoesNotContain(lines, line => line.Contains("LootBarrier] Armed", StringComparison.Ordinal));
+        }
+
+        // ── Test 8 — route resync ───────────────────────────────────────────────
+
+        [Fact]
+        public void RouteResyncWaitsForPostKillButIsNotAscanTrigger()
+        {
+            var barrier = new LootNavigationBarrier();
+            barrier.Arm(88, LootBarrierReason.PostKill);
+
+            Assert.False(MovementSystem.CanRunRouteResyncAfterCombat(
+                pending: true, lootBarrierBlocked: barrier.IsBlockingNavigation));
+
+            barrier.ApplyStatus(Snapshot(
+                88, LootBarrierReason.PostKill, LootRequestState.Completed,
+                cameraVerified: true));
+
+            Assert.True(MovementSystem.CanRunRouteResyncAfterCombat(
+                pending: true, lootBarrierBlocked: barrier.IsBlockingNavigation));
+
+            // Resync bookkeeping by itself never creates a request; only the real kill
+            // signal (TabAfterKill) or a pre-scan candidate can.
+            using var loot = CreateLoot(_ => { });
+            Assert.False(loot.HasActiveMandatoryLootRequest);
+        }
+
+        // ── Test 9 — camera separation ──────────────────────────────────────────
 
         [Fact]
         public void LootCaptureRequiresExactDistanceLockSettlementAndOwnership()
@@ -253,8 +447,6 @@ namespace DriverScanTester.Tests
                 stabilizationElapsed: true, ownershipHeld: false));
         }
 
-        // ── Test 4 — camera write conflict ─────────────────────────────────────
-
         [Fact]
         public void MovementCameraWriteCannotOverrideLootScanCameraOwnership()
         {
@@ -272,7 +464,19 @@ namespace DriverScanTester.Tests
             Assert.Equal(1, writes);
         }
 
-        // ── Test 5 — failed capture ─────────────────────────────────────────────
+        // ── Test 10 — capture failure ───────────────────────────────────────────
+
+        [Fact]
+        public void InvalidPreScanGeometryIsCaptureUnavailableNotACandidate()
+        {
+            using var bitmap = new Bitmap(80, 80);
+            LootPreScanResult result = LootSystem.AnalyzeWhiteLootCandidates(
+                bitmap, new Rectangle(-10, -10, 5, 5), null,
+                BotConstants.Loot.PassivePreScanMaxCandidateComponents);
+
+            Assert.Equal(LootPreScanOutcome.CaptureUnavailable, result.Outcome);
+            Assert.Equal(Rectangle.Empty, result.CandidateBounds);
+        }
 
         [Fact]
         public void CaptureFailureIsNeverAValidEmptyScanOrSuccessfulBarrier()
@@ -284,92 +488,11 @@ namespace DriverScanTester.Tests
 
             var barrier = new LootNavigationBarrier();
             barrier.Arm(5, LootBarrierReason.PostKill);
-            barrier.ApplyStatus(Snapshot(5, LootRequestState.Failed, cameraVerified: false), 10f, 10f);
+            barrier.ApplyStatus(Snapshot(5, LootBarrierReason.PostKill, LootRequestState.Failed, cameraVerified: false));
             Assert.True(barrier.IsBlockingNavigation);
-            Assert.False(barrier.CanReuseCompletedScan(10f, 10f, out _));
         }
 
-        // ── Test 6 — scan cancellation ─────────────────────────────────────────
-
-        [Fact]
-        public void CancelledLootRequestNeverReleasesNavigation()
-        {
-            var lines = new List<string>();
-            using var loot = CreateLoot(lines.Add);
-            long id = loot.BeginMandatoryLootRequest(LootBarrierReason.WaypointTransition);
-            loot.Stop();
-
-            Assert.True(loot.TryGetMandatoryLootRequestStatus(id, out LootRequestStatus status));
-            Assert.Equal(LootRequestState.Cancelled, status.State);
-
-            var barrier = new LootNavigationBarrier();
-            barrier.Arm(id, LootBarrierReason.WaypointTransition);
-            barrier.ApplyStatus(status, 25f, 25f);
-
-            Assert.True(barrier.IsBlockingNavigation);
-            Assert.True(barrier.HasTerminalFailure);
-            Assert.False(barrier.CanReuseCompletedScan(25f, 25f, out _));
-        }
-
-        // ── Test 7 — item collected ────────────────────────────────────────────
-
-        [Fact]
-        public void CollectedItemKeepsTheMandatoryObligationOpen()
-        {
-            Assert.Equal(
-                LootScanPassResult.Collected,
-                LootSystem.CombineNormalLootScanResults(
-                    LootScanPassResult.Collected, null, cameraVerified: true));
-
-            var barrier = new LootNavigationBarrier();
-            barrier.Arm(7, LootBarrierReason.PostKill);
-            barrier.ApplyStatus(
-                Snapshot(7, LootRequestState.Running, cameraVerified: false, itemsCollected: 1),
-                0f, 0f);
-
-            Assert.True(barrier.IsBlockingNavigation);
-            Assert.False(barrier.CanReuseCompletedScan(0f, 0f, out _));
-        }
-
-        // ── Test 8 — consecutive combat ────────────────────────────────────────
-
-        [Fact]
-        public void ConsecutiveKillsPreserveTheObligationAndKeepTheSameGeneration()
-        {
-            using var loot = CreateLoot(_ => { });
-            long first = loot.BeginMandatoryLootRequest(LootBarrierReason.PostKill);
-            long second = loot.BeginMandatoryLootRequest(LootBarrierReason.PostKill);
-
-            Assert.Equal(first, second);
-            Assert.True(loot.TryGetMandatoryLootRequestStatus(first, out LootRequestStatus status));
-            Assert.Equal(LootRequestState.Pending, status.State);
-
-            var barrier = new LootNavigationBarrier();
-            barrier.Arm(first, LootBarrierReason.PostKill);
-            barrier.ApplyStatus(Snapshot(first, LootRequestState.Deferred, cameraVerified: false), 0f, 0f);
-            Assert.True(barrier.IsBlockingNavigation);
-
-            barrier.ApplyStatus(Snapshot(first, LootRequestState.Completed, cameraVerified: true), 0f, 0f);
-            Assert.False(barrier.IsBlockingNavigation);
-
-            // Resolve the LootSystem generation explicitly; a resolved obligation must
-            // produce a new request id for a later kill.
-            loot.CancelMandatoryLootRequest(first, "test generation resolved");
-            long third = loot.BeginMandatoryLootRequest(LootBarrierReason.PostKill);
-            Assert.True(third > second, "A resolved obligation must produce a new generation.");
-        }
-
-        // ── Test 9 — route resync ──────────────────────────────────────────────
-
-        [Fact]
-        public void RouteResyncCannotRunWhileLootBarrierBlocksNavigation()
-        {
-            Assert.False(MovementSystem.CanRunRouteResyncAfterCombat(pending: true, lootBarrierBlocked: true));
-            Assert.True(MovementSystem.CanRunRouteResyncAfterCombat(pending: false, lootBarrierBlocked: false));
-            Assert.True(MovementSystem.CanRunRouteResyncAfterCombat(pending: true, lootBarrierBlocked: false));
-        }
-
-        // ── Test 10 — mode compatibility ───────────────────────────────────────
+        // ── Test 11 — other movement modes ──────────────────────────────────────
 
         [Fact]
         public void OnlyMoveAndMoveAndAttackDoNotUseTheMandatoryBarrier()
@@ -378,62 +501,37 @@ namespace DriverScanTester.Tests
             Assert.False(MovementSystem.RequiresMandatoryLootBarrier(BotMode.MoveAndAttack));
             Assert.True(MovementSystem.RequiresMandatoryLootBarrier(BotMode.MoveAndAttackAndLoot));
 
-            // SOD/SOP-only mode keeps its existing flag; the mandatory white-loot
-            // barrier is never armed for it by the MovementSystem.
             using var loot = CreateLoot(_ => { });
             loot.PinkLootOnlyMode = true;
             Assert.True(loot.PinkLootOnlyMode);
+            Assert.False(loot.MoveAndAttackAndLootMode);
         }
 
-        // ── Test 11 — repeated ticks ───────────────────────────────────────────
+        // ── Test 12 — no duplicate operations ───────────────────────────────────
 
         [Fact]
-        public void RepeatedArmingDoesNotCreateDuplicateRequestsOrResetRunningState()
+        public void RepeatedRequestsAndServicesDoNotCreateDuplicateObligations()
         {
             using var loot = CreateLoot(_ => { });
-            long first = loot.BeginMandatoryLootRequest(LootBarrierReason.WaypointTransition);
-            long second = loot.BeginMandatoryLootRequest(LootBarrierReason.WaypointTransition);
+            long first = loot.BeginMandatoryLootRequest(LootBarrierReason.TravelCandidateVerification);
+            long second = loot.BeginMandatoryLootRequest(LootBarrierReason.TravelCandidateVerification);
             Assert.Equal(first, second);
 
-            var barrier = new LootNavigationBarrier();
-            barrier.Arm(first, LootBarrierReason.WaypointTransition);
-            barrier.ApplyStatus(Snapshot(first, LootRequestState.Running, cameraVerified: false), 0f, 0f);
-            barrier.Arm(first, LootBarrierReason.WaypointTransition);
+            loot.NotifyNavigationHeld(first);
+            RunMandatoryService(loot);
+            RunMandatoryService(loot);
 
-            Assert.Equal(LootBarrierPhase.Running, barrier.Phase);
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(first, out LootRequestStatus status));
+            Assert.Equal(LootRequestState.Running, status.State);
+
+            var barrier = new LootNavigationBarrier();
+            barrier.Arm(first, LootBarrierReason.TravelCandidateVerification);
+            barrier.Arm(first, LootBarrierReason.TravelCandidateVerification);
             Assert.Equal(first, barrier.RequestId);
+            Assert.True(barrier.IsActive);
         }
 
-        // ── Test 12 — failure and shutdown ─────────────────────────────────────
-
-        [Fact]
-        public void FocusLossDefersButNeverCompletesAStoppedLootTask()
-        {
-            using var loot = CreateLoot(_ => { });
-            long id = loot.BeginMandatoryLootRequest(LootBarrierReason.PostKill);
-
-            var cancelAll = typeof(LootSystem).GetMethod("CancelAllLootWork", PrivateInstance);
-            Assert.NotNull(cancelAll);
-            cancelAll!.Invoke(loot, new object[] { "game window is not foreground", true });
-
-            Assert.True(loot.TryGetMandatoryLootRequestStatus(id, out LootRequestStatus deferred));
-            Assert.Equal(LootRequestState.Deferred, deferred.State);
-            Assert.False(deferred.CameraVerified);
-
-            var barrier = new LootNavigationBarrier();
-            barrier.Arm(id, LootBarrierReason.PostKill);
-            barrier.ApplyStatus(deferred, 0f, 0f);
-            Assert.True(barrier.IsBlockingNavigation);
-
-            // A stopped loot task is a cancellation, never an empty result.
-            loot.Stop();
-            Assert.True(loot.TryGetMandatoryLootRequestStatus(id, out LootRequestStatus cancelled));
-            Assert.Equal(LootRequestState.Cancelled, cancelled.State);
-            barrier.ApplyStatus(cancelled, 0f, 0f);
-            Assert.True(barrier.IsBlockingNavigation);
-        }
-
-        // ── Scan-region completeness / result preservation ─────────────────────
+        // ── Scan-pass result preservation ───────────────────────────────────────
 
         [Theory]
         [InlineData((int)LootScanPassResult.NoItem, (int)LootScanPassResult.NoItem, (int)LootScanPassResult.NoItem)]
@@ -470,7 +568,7 @@ namespace DriverScanTester.Tests
         {
             var barrier = new LootNavigationBarrier();
             barrier.Arm(99, LootBarrierReason.PostKill);
-            barrier.ApplyStatus(Snapshot(99, LootRequestState.Completed, cameraVerified: false), 0f, 0f);
+            barrier.ApplyStatus(Snapshot(99, LootBarrierReason.PostKill, LootRequestState.Completed, cameraVerified: false));
 
             Assert.True(barrier.IsBlockingNavigation);
             Assert.True(barrier.HasTerminalFailure);
@@ -482,10 +580,102 @@ namespace DriverScanTester.Tests
         {
             var barrier = new LootNavigationBarrier();
             barrier.Arm(100, LootBarrierReason.PostKill);
-            barrier.ApplyStatus(Snapshot(101, LootRequestState.Completed, cameraVerified: true), 0f, 0f);
+            barrier.ApplyStatus(Snapshot(101, LootBarrierReason.PostKill, LootRequestState.Completed, cameraVerified: true));
 
             Assert.True(barrier.IsBlockingNavigation);
-            Assert.False(barrier.CanReuseCompletedScan(0f, 0f, out _));
+        }
+
+        // ── Candidate-shape / text-glyph filtering ──────────────────────────────
+
+        [Fact]
+        public void TextGlyphRowsAreNotPlausibleLootCandidates()
+        {
+            using var bitmap = new Bitmap(200, 100);
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+            {
+                graphics.Clear(Color.Black);
+                for (int i = 0; i < 7; i++)
+                    graphics.FillRectangle(Brushes.White, 20 + i * 6, 30, 4, 4);
+            }
+
+            LootPreScanResult result = LootSystem.AnalyzeWhiteLootCandidates(
+                bitmap, new Rectangle(0, 0, 200, 100), null,
+                BotConstants.Loot.PassivePreScanMaxCandidateComponents);
+
+            Assert.Equal(LootPreScanOutcome.NoCandidate, result.Outcome);
+            Assert.Equal(0, result.CandidateComponents);
+        }
+
+        [Fact]
+        public void CharacterExclusionZoneIsNotScannedByThePreScan()
+        {
+            using var bitmap = new Bitmap(200, 200);
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+            {
+                graphics.Clear(Color.Black);
+                graphics.FillRectangle(Brushes.White, 90, 90, 14, 14);
+            }
+
+            LootPreScanResult result = LootSystem.AnalyzeWhiteLootCandidates(
+                bitmap,
+                new Rectangle(0, 0, 200, 200),
+                new Rectangle(70, 70, 60, 60),
+                BotConstants.Loot.PassivePreScanMaxCandidateComponents);
+
+            Assert.Equal(LootPreScanOutcome.NoCandidate, result.Outcome);
+        }
+
+        [Fact]
+        public void TooManyCandidateComponentsAreTreatedAsUiClutter()
+        {
+            using var bitmap = new Bitmap(300, 300);
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+            {
+                graphics.Clear(Color.Black);
+                for (int i = 0; i < 6; i++)
+                {
+                    for (int j = 0; j < 6; j++)
+                    {
+                        if (i == j) continue;
+                        graphics.FillRectangle(Brushes.White, 20 + i * 40, 20 + j * 40, 12, 12);
+                    }
+                }
+            }
+
+            LootPreScanResult result = LootSystem.AnalyzeWhiteLootCandidates(
+                bitmap, new Rectangle(0, 0, 300, 300), null,
+                maxCandidateComponents: 8);
+
+            Assert.Equal(LootPreScanOutcome.NoCandidate, result.Outcome);
+            Assert.True(result.CandidateComponents > 8);
+        }
+
+        // ── Cancellation / focus loss ───────────────────────────────────────────
+
+        [Fact]
+        public void FocusLossDefersButNeverCompletesAStoppedLootTask()
+        {
+            using var loot = CreateLoot(_ => { });
+            long id = loot.BeginMandatoryLootRequest(LootBarrierReason.PostKill);
+
+            var cancelAll = typeof(LootSystem).GetMethod("CancelAllLootWork", PrivateInstance);
+            Assert.NotNull(cancelAll);
+            cancelAll!.Invoke(loot, new object[] { "game window is not foreground", true });
+
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(id, out LootRequestStatus deferred));
+            Assert.Equal(LootRequestState.Deferred, deferred.State);
+            Assert.False(deferred.CameraVerified);
+
+            var barrier = new LootNavigationBarrier();
+            barrier.Arm(id, LootBarrierReason.PostKill);
+            barrier.ApplyStatus(deferred);
+            Assert.True(barrier.IsBlockingNavigation);
+
+            loot.Stop();
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(id, out LootRequestStatus cancelled));
+            Assert.Equal(LootRequestState.Cancelled, cancelled.State);
+            barrier.ApplyStatus(cancelled);
+            Assert.True(barrier.IsBlockingNavigation);
         }
     }
 }

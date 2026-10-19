@@ -212,6 +212,7 @@ namespace DriverScanTester.Services
                 if (_requestId <= 0 || status.RequestId != _requestId)
                     return _phase;
 
+                _reason = status.Reason;
                 _cameraVerified = status.CameraVerified;
                 _itemsCollected = status.ItemsCollected;
                 _detail = status.Detail ?? string.Empty;
@@ -244,7 +245,7 @@ namespace DriverScanTester.Services
                         }
                         break;
                     case LootRequestState.Unavailable:
-                        if (_reason == LootBarrierReason.PostKill)
+                        if (status.Reason == LootBarrierReason.PostKill)
                         {
                             // Capture/camera failure is not an empty post-kill result.
                             _phase = LootBarrierPhase.Failed;

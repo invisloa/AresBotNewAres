@@ -14,6 +14,13 @@ namespace DriverScanTester.Services
         CityStuck,
         WaypointRepotRequested,
         ReportAndGoBack,
+
+        /// <summary>
+        /// A confirmed unexpected map change invalidated the route's map invariant.
+        /// The route is permanently dead for this execution; the coordinator must
+        /// synchronize the post-transition position before any new action.
+        /// </summary>
+        MapTransition,
         Error
     }
 
@@ -64,11 +71,16 @@ namespace DriverScanTester.Services
         /// <param name="waypoints">The list of waypoints to follow.</param>
         /// <param name="loop">If true, the path loops continuously (for exp hunting).</param>
         /// <param name="token">Cancellation token to stop execution.</param>
+        /// <param name="expectedMap">Route map invariant (route ProtectionMapNumber).
+        /// 0 = no restriction (multi-map travel compatibility).</param>
+        /// <param name="routeLabel">Optional route name used in [ExpMapGuard] diagnostics.</param>
         /// <returns>True if the path completed normally (non-loop); false if cancelled.</returns>
         public async Task<bool> RunPathAsync(
             List<Waypoint> waypoints,
             bool loop,
-            CancellationToken token)
+            CancellationToken token,
+            int expectedMap = 0,
+            string routeLabel = "")
         {
             LastStopReason = PathRunStopReason.None;
             if (waypoints == null || waypoints.Count == 0)
@@ -96,7 +108,11 @@ namespace DriverScanTester.Services
                 InternalRepotEnabled = false, // External coordinator handles repot
                 WaypointRecoveryExecutor = WaypointRecoveryExecutor,
                 MobGroupingPausePredicate = () => PauseController?.IsPaused == true,
-                OnGameUnresponsiveDetected = reason => OnGameUnresponsiveDetected?.Invoke(reason)
+                OnGameUnresponsiveDetected = reason => OnGameUnresponsiveDetected?.Invoke(reason),
+                // Route map invariant: a route with an expected map must never keep
+                // navigating old-map waypoints after the player leaves that map.
+                ExpectedMap = expectedMap,
+                RouteLabel = routeLabel
             };
 
             _log($"[PathRunner] Started path with {waypoints.Count} points, loop={loop}.");
@@ -127,6 +143,19 @@ namespace DriverScanTester.Services
                     }
 
                     await _movementSystem.Update(token);
+
+                    // A confirmed unexpected map change permanently invalidates the route.
+                    // Abort before any recovery/combat/loot logic can act on old-map
+                    // waypoints; the coordinator synchronizes the new position and runs
+                    // the existing recovery workflow.
+                    if (_movementSystem.IsMapRouteInvalidated)
+                    {
+                        LastStopReason = PathRunStopReason.MapTransition;
+                        _log($"[PathRunner] Route '{routeLabel}' invalidated — unexpected map " +
+                             $"change confirmed (expected={_movementSystem.ExpectedMap}, " +
+                             $"observed={_movementSystem.ConfirmedTransitionMap}); aborting path.");
+                        return false;
+                    }
 
                     // ReportAndGoBack teleport: the old route is dead. Abort immediately
                     // (no 10s ZoneBlock wait, no city-poll delay) so the coordinator can
@@ -220,6 +249,7 @@ namespace DriverScanTester.Services
                 _movementSystem?.ReleaseCombatKeys();
                 _movementSystem?.StopMoving();
                 _movementSystem?.DisposeMobGroupingDetector();
+                _log($"[PathRunner] final stop reason={LastStopReason}.");
                 _log("[PathRunner] Path stopped.");
             }
 

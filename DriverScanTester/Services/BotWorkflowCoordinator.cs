@@ -877,7 +877,12 @@ namespace DriverScanTester.Services
             var expToken = expCts.Token;
             int otherPlayerMarkerDetected = 0;
 
-            var pathTask = _pathRunner.RunPathAsync(waypoints, loop: true, expToken);
+            var pathTask = _pathRunner.RunPathAsync(
+                waypoints,
+                loop: true,
+                token: expToken,
+                expectedMap: route.ProtectionMapNumber,
+                routeLabel: route.PathFile);
 
             // The EXP route is a hunting route: run the loot system in parallel so drops
             // are collected while walking and after kills. MoveAndAttackAndLoot routes use
@@ -929,6 +934,18 @@ namespace DriverScanTester.Services
                                 await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
                                 continue;
                             }
+                            if (_pathRunner.CurrentMovement?.IsRecoveryInputOwnershipActive == true)
+                            {
+                                // Recovery (reverse diagonal, waypoint special recovery,
+                                // map-transition hold) owns movement and camera exclusively:
+                                // no new scan may start, and the MovementSystem has already
+                                // quiesced any in-flight scan when it took ownership.
+                                lootSystem.PinkLootOnlyMode = false;
+                                lootSystem.MoveAndAttackAndLootMode = false;
+                                lootSystem.PlayerMarkerScanEnabled = false;
+                                await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
+                                continue;
+                            }
                             if (_pathRunner.CurrentMovement?.IsWaypointSpecialRecoveryActive == true)
                             {
                                 lootSystem.PinkLootOnlyMode = false;
@@ -973,6 +990,7 @@ namespace DriverScanTester.Services
             bool cityDetected = false;
             bool waypointRepotRequested = false;
             bool reportAndGoBackDetected = false;
+            bool mapTransitionDetected = false;
             int inCityConsecutiveReads = 0;
             DateTime lastRepotCheckAt = DateTime.MinValue;
             try
@@ -1002,6 +1020,17 @@ namespace DriverScanTester.Services
                         break;
                     }
 
+                    // A confirmed unexpected map change terminates the obsolete path task.
+                    // Detect it immediately so the old route can never keep polling and so
+                    // loot work is cancelled before the post-transition recovery decision.
+                    if (CheckExpPathMapTransition(pathTask))
+                    {
+                        mapTransitionDetected = true;
+                        _log("[ExpLoop] Confirmed unexpected map change — terminating the obsolete EXP route.");
+                        expCts.Cancel();
+                        break;
+                    }
+
                     await PausableDelayAsync(500, expToken);
 
                     if (CheckExpPathTeleportAbort(pathTask, out bool isWaypointRepotAfter))
@@ -1016,6 +1045,14 @@ namespace DriverScanTester.Services
                             reportAndGoBackDetected = true;
                             _log("[ExpLoop] ReportAndGoBack teleport detected — stopping exp loop, going to Repot from scratch.");
                         }
+                        expCts.Cancel();
+                        break;
+                    }
+
+                    if (CheckExpPathMapTransition(pathTask))
+                    {
+                        mapTransitionDetected = true;
+                        _log("[ExpLoop] Confirmed unexpected map change — terminating the obsolete EXP route.");
                         expCts.Cancel();
                         break;
                     }
@@ -1092,6 +1129,29 @@ namespace DriverScanTester.Services
 
             if (token.IsCancellationRequested)
                 return false;
+
+            // ── Confirmed unexpected map transition (highest workflow priority) ──
+            // The obsolete route is already dead. The position is synchronized through
+            // the existing PositionSync lifecycle before ANY new position-dependent
+            // action; a failed synchronization stops the workflow instead of guessing.
+            if (mapTransitionDetected ||
+                _pathRunner.LastStopReason == PathRunStopReason.MapTransition ||
+                _pathRunner.CurrentMovement?.IsMapRouteInvalidated == true ||
+                _pathRunner.CurrentMovement?.IsMapTransitionPending == true)
+            {
+                AdvanceRoute(step, pool);
+                if (!await SynchronizeAfterExpMapTransitionAsync(route, token))
+                    return false;
+
+                bool arrivedInCity = _memoryService.GetIsInCity();
+                _log(arrivedInCity
+                    ? "[ExpLoop] Workflow decision: confirmed city arrival — routing to the Repot step."
+                    : "[ExpLoop] Workflow decision: confirmed unexpected non-city map — routing to the Repot step for validated recovery.");
+                RedirectToRepotStep(arrivedInCity
+                    ? "ExpLoop map transition to city"
+                    : "ExpLoop map transition to another map");
+                return false;
+            }
 
             if (Volatile.Read(ref otherPlayerMarkerDetected) != 0)
             {
@@ -1219,6 +1279,58 @@ namespace DriverScanTester.Services
             if (_pathRunner.LastStopReason == PathRunStopReason.ReportAndGoBack)
                 return true;
             return false;
+        }
+
+        /// <summary>
+        /// True when the Exp path task terminated because a confirmed unexpected map
+        /// change invalidated the route's map invariant. Also catches the case where
+        /// the MovementSystem already marked the route invalid but the path task has not
+        /// yet unwound, so the coordinator never keeps polling forever after the path
+        /// task has finished.
+        /// </summary>
+        private bool CheckExpPathMapTransition(System.Threading.Tasks.Task pathTask)
+        {
+            if (_pathRunner.CurrentMovement?.IsMapRouteInvalidated == true)
+                return true;
+            if (pathTask == null || !pathTask.IsCompleted)
+                return false;
+            return _pathRunner.LastStopReason == PathRunStopReason.MapTransition;
+        }
+
+        /// <summary>
+        /// Records and resolves the post-transition position through the existing
+        /// <see cref="PositionSyncService"/> lifecycle. The last coherent snapshot from
+        /// the original map is preserved when available; a failed synchronization blocks
+        /// all movement and teleport decisions and surfaces the actual failure reason.
+        /// </summary>
+        private async Task<bool> SynchronizeAfterExpMapTransitionAsync(
+            BotRouteStep route,
+            CancellationToken token)
+        {
+            PlayerStateSnapshot? source = _pathRunner.CurrentMovement?.LastCoherentSnapshotBeforeMapChange;
+            if (!_positionSync.HasPendingTransition)
+            {
+                _positionSync.BeginTransition(
+                    $"ExpLoop unexpected map change (route '{route.PathFile}', expected map {route.ProtectionMapNumber})",
+                    source);
+            }
+
+            PositionSyncResult sync = await _positionSync.SynchronizeAsync(expectedMap: 0, token);
+            _log($"[PositionSync] ExpLoop transition outcome={sync.Kind} TransitionId={sync.TransitionId} {sync.State.Describe()}.");
+
+            if (token.IsCancellationRequested)
+                return false;
+
+            if (!sync.IsReady)
+            {
+                _log($"[ExpLoop] Post-transition position not ready ({sync.Kind}: {sync.Message}) — " +
+                     "stopping without movement or town teleport.");
+                CurrentPhase = BotPhase.Failed;
+                return false;
+            }
+
+            _log($"[ExpLoop] Post-transition position ready (TransitionId={sync.TransitionId}, map={sync.State.Map}, position=({sync.State.X},{sync.State.Y})).");
+            return true;
         }
 
         private bool RedirectToRepotStep(string reason)

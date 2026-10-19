@@ -7,6 +7,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using DriverScanTester.Models;
 using DriverScanTester.Utils;
 
 namespace DriverScanTester.Services
@@ -858,6 +859,37 @@ namespace DriverScanTester.Services
         private readonly LocalNavigationMap _localNavigationMap;
         private int _currentMapId = -1;
 
+        // ── EXP route map invariant ──
+        // A route that declares an expected map (route ProtectionMapNumber) must never
+        // keep navigating old-map waypoints after the player leaves that map. The guard
+        // uses one coherent player-state snapshot per tick (never independent reads),
+        // holds all input while a change is unconfirmed, and permanently invalidates the
+        // route once a different valid map is confirmed. ExpectedMap = 0 disables the
+        // invariant so multi-map travel paths keep their existing behavior.
+        private bool _mapTransitionGuardActive;
+        private bool _mapTransitionConfirmed;
+        private int _mapTransitionObservedMap;
+        private int _mapTransitionConsecutiveReads;
+        private PlayerStateSnapshot? _lastCoherentSnapshot;
+
+        /// <summary>Expected map number for this route; 0 = no map restriction.</summary>
+        public int ExpectedMap { get; set; }
+
+        /// <summary>Route label used by [ExpMapGuard] diagnostics (path file name).</summary>
+        public string RouteLabel { get; set; } = "";
+
+        /// <summary>True while a suspected map change is holding navigation but is not confirmed yet.</summary>
+        public bool IsMapTransitionPending => _mapTransitionGuardActive && !_mapTransitionConfirmed;
+
+        /// <summary>True when a confirmed unexpected map change permanently invalidated this route.</summary>
+        public bool IsMapRouteInvalidated => _mapTransitionConfirmed;
+
+        /// <summary>Map number observed when the unexpected change was confirmed.</summary>
+        public int ConfirmedTransitionMap { get; private set; }
+
+        /// <summary>Last coherent snapshot taken while still on the expected map (post-transition sync source).</summary>
+        public PlayerStateSnapshot? LastCoherentSnapshotBeforeMapChange => _lastCoherentSnapshot;
+
         private bool _isUnstuckRoutineActive = false;
         private const double FORCE_START_MIN_INTERVAL_MS = BotConstants.Movement.ForceStartMinIntervalMs;
         private DateTime _lastForceStartMovingAt = DateTime.MinValue;
@@ -1265,6 +1297,11 @@ namespace DriverScanTester.Services
             StopMoving();
             ReleaseSkillThree();
 
+            // The loot system only applies its stationary camera after this explicit
+            // acknowledgement that W/steering are released (or its bounded grace fallback).
+            if (_lootBarrier.TryGetRequestId(out long heldRequestId))
+                LootSystemRef?.NotifyNavigationHeld(heldRequestId);
+
             if (_lootBarrier.HasTerminalFailure && !_lootBarrierFailureLogged)
             {
                 _lootBarrierFailureLogged = true;
@@ -1357,6 +1394,13 @@ namespace DriverScanTester.Services
 
 
             token.ThrowIfCancellationRequested();
+
+            // ── EXP route map invariant (highest movement priority) ──
+            // A confirmed unexpected map change must stop navigation, combat and
+            // recovery before any loot/combat/recovery routine below can delay it.
+            // ExpectedMap = 0 keeps the legacy multi-map travel behavior untouched.
+            if (ExpectedMap > 0 && !EvaluateRouteMapGuard())
+                return;
 
             if (_isWaypointSpecialRecoveryActive || _waypointMobRecovery?.IsActive == true)
                 CancelMobGrouping("waypoint special recovery owns control");
@@ -2365,6 +2409,7 @@ namespace DriverScanTester.Services
                             return;
                         case RecoveryResult.Recovered:
                             _isUnstuckRoutineActive = false;
+                            ReleaseRecoveryOwnership("ReverseDiagonal recovered");
                             _log($"[ReverseDiagonal] recovered.");
                             // Physical success only means the escape maneuver worked. The
                             // navigation failure against the current waypoint is still
@@ -2379,6 +2424,7 @@ namespace DriverScanTester.Services
                             return;
                         case RecoveryResult.Failed:
                             _isUnstuckRoutineActive = false;
+                            ReleaseRecoveryOwnership("ReverseDiagonal failed");
                             _log($"[ReverseDiagonal] failed - all attempts exhausted.");
                             _log($"[ActionStuck] Action={currentAction} while moving. Stuck confirmed by action.");
                             bool failedInCity = _memoryService.GetIsInCity();
@@ -4057,6 +4103,168 @@ namespace DriverScanTester.Services
             _stuckDetector.ResetTracking();
         }
 
+        // ── Recovery input ownership (Phase D) ──
+        // Recovery routines (reverse diagonal, waypoint special recovery, map-transition
+        // hold) own movement and camera exclusively. The parallel loot task must not
+        // start new pixel scans while this is true, and recovery start cancels any
+        // in-flight loot scan before it takes the input.
+        private bool _recoveryOwnershipHeld;
+        private DateTime _recoveryOwnershipDeferLogAt = DateTime.MinValue;
+
+        /// <summary>
+        /// True while a recovery routine or a map-transition hold owns movement/camera.
+        /// The host's loot loop checks this and must not start new scans while it is true.
+        /// </summary>
+        public bool IsRecoveryInputOwnershipActive =>
+            _recoveryOwnershipHeld ||
+            _isUnstuckRoutineActive ||
+            _reverseDiagonalRecovery.IsActive ||
+            _isWaypointSpecialRecoveryActive ||
+            _waypointMobRecovery?.IsActive == true ||
+            _mapTransitionGuardActive ||
+            _mapTransitionConfirmed;
+
+        /// <summary>
+        /// Takes exclusive input ownership for a recovery/map-transition hold and
+        /// synchronously quiesces any in-flight loot scan (pending obligations are
+        /// deferred, never completed). Idempotent.
+        /// </summary>
+        private void AcquireRecoveryOwnership(string reason)
+        {
+            // Cancel/quiesce the scan first: the loot task may be mid-capture or
+            // mid-collection and must not race the recovery input.
+            LootSystemRef?.SuspendForRecovery(reason);
+            if (_recoveryOwnershipHeld)
+                return;
+
+            _recoveryOwnershipHeld = true;
+            _log($"[LootOwnership] Recovery ownership acquired — {reason}.");
+        }
+
+        private void ReleaseRecoveryOwnership(string reason)
+        {
+            if (!_recoveryOwnershipHeld)
+                return;
+
+            _recoveryOwnershipHeld = false;
+            _log($"[LootOwnership] Recovery ownership released — {reason}.");
+        }
+
+        /// <summary>
+        /// True while an in-flight loot collection (mouse left-click, character walking
+        /// to the item) still owns movement/cursor. Recovery input must wait for it.
+        /// </summary>
+        private bool LootCollectionStillOwnsInput() => LootSystemRef?.IsCollecting == true;
+
+        private void LogRecoveryDeferredForLoot()
+        {
+            DateTime now = DateTime.UtcNow;
+            if ((now - _recoveryOwnershipDeferLogAt).TotalSeconds < 1.0)
+                return;
+            _recoveryOwnershipDeferLogAt = now;
+            _log("[LootOwnership] Recovery deferred — an in-flight loot collection still owns movement/cursor.");
+        }
+
+        /// <summary>
+        /// Authoritative map invariant for a route that declares an expected map. Uses one
+        /// coherent player-state snapshot per tick (never independent map/position reads).
+        ///
+        /// Returns false while navigation must stay held: either a different valid map was
+        /// confirmed (route permanently invalidated) or a suspected change is still being
+        /// confirmed. Unreadable / zero map reads are ignored as destination evidence and
+        /// only keep an already-suspended route suspended.
+        ///
+        /// When the expected map is confirmed again before a different map is confirmed,
+        /// the old navigation baselines are discarded and the route resumes safely.
+        /// </summary>
+        private bool EvaluateRouteMapGuard()
+        {
+            if (_mapTransitionConfirmed)
+                return false;
+
+            PlayerStateSnapshot snapshot = _memoryService.GetPlayerStateSnapshot();
+
+            if (!snapshot.HasCoherentState)
+            {
+                // Transient invalid/zero map or position read — never evidence of a
+                // destination. A suspended route stays suspended until a coherent read.
+                return !_mapTransitionGuardActive;
+            }
+
+            if (snapshot.Map == ExpectedMap)
+            {
+                _lastCoherentSnapshot = snapshot;
+
+                if (_currentMapId != ExpectedMap)
+                {
+                    _connectionWatchdog.Reset();
+                    _localNavigationMap.ChangeMap(ExpectedMap);
+                    _currentMapId = ExpectedMap;
+                }
+
+                if (_mapTransitionGuardActive)
+                {
+                    _mapTransitionGuardActive = false;
+                    _mapTransitionObservedMap = 0;
+                    _mapTransitionConsecutiveReads = 0;
+                    // Back on the expected map: discard every baseline tied to the
+                    // aborted transition before resuming. Never carry a stuck count or
+                    // a recovery state across the map boundary.
+                    CancelWaypointSpecialRecovery();
+                    ResetStuckAndUnstuckState($"exp map restored {ExpectedMap}");
+                    ReleaseRecoveryOwnership($"expected map {ExpectedMap} re-confirmed");
+                    _log($"[ExpMapGuard] expected={ExpectedMap} observed={snapshot.Map} route='{RouteLabel}' confirmation=restored — baselines reset, resuming.");
+                }
+
+                return true;
+            }
+
+            // A coherent, nonzero map different from the expected one.
+            if (!_mapTransitionGuardActive)
+            {
+                _mapTransitionGuardActive = true;
+                _mapTransitionObservedMap = snapshot.Map;
+                _mapTransitionConsecutiveReads = 1;
+                HoldRouteForMapTransition(snapshot);
+            }
+            else if (snapshot.Map == _mapTransitionObservedMap)
+            {
+                _mapTransitionConsecutiveReads++;
+            }
+            else
+            {
+                // The destination changed again — restart confirmation on the new map.
+                _mapTransitionObservedMap = snapshot.Map;
+                _mapTransitionConsecutiveReads = 1;
+            }
+
+            if (_mapTransitionConsecutiveReads >= BotConstants.Delays.MapTransitionStableReadCount)
+            {
+                _mapTransitionConfirmed = true;
+                ConfirmedTransitionMap = snapshot.Map;
+                _log($"[ExpMapGuard] expected={ExpectedMap} observed={snapshot.Map} route='{RouteLabel}' confirmation=confirmed.");
+                _log($"[ExpMapGuard] Route invalidation reason: player left expected map {ExpectedMap} for map {snapshot.Map} (route '{RouteLabel}').");
+                return false;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Suspends every input at the first valid read of a different map. No attack,
+        /// navigation or recovery may start while the change is unconfirmed, and no
+        /// ReverseDiagonal is started merely because the coordinates changed.
+        /// </summary>
+        private void HoldRouteForMapTransition(PlayerStateSnapshot observed)
+        {
+            AcquireRecoveryOwnership($"map transition hold (expected={ExpectedMap} observed={observed.Map})");
+            CancelWaypointSpecialRecovery();
+            CancelMobGrouping("map transition hold");
+            StopMoving();
+            ReleaseCombatKeys();
+            _log($"[ExpMapGuard] expected={ExpectedMap} observed={observed.Map} route='{RouteLabel}' confirmation=pending — navigation held.");
+        }
+
         /// <summary>
         /// Full reset of everything tied to the previous route/position: reverse-diagonal
         /// recovery, consecutive-stuck counter, stuck/progress baselines, reposition
@@ -4068,6 +4276,7 @@ namespace DriverScanTester.Services
         {
             CancelMobGrouping($"unstuck state reset: {reason}");
             _reverseDiagonalRecovery.Stop();
+            ReleaseRecoveryOwnership($"unstuck reset: {reason}");
             _isUnstuckRoutineActive = false;
             _consecutiveStuckAttempts = 0;
             _lastStuckAttemptPos = null;
@@ -4143,6 +4352,7 @@ namespace DriverScanTester.Services
             _activeSpecialRecoveryTarget = null;
             _isWaypointSpecialRecoveryActive = false;
             _isUnstuckRoutineActive = false;
+            ReleaseRecoveryOwnership($"special recovery finished ({target.X:F0},{target.Y:F0})");
         }
 
         private async Task HandleConfirmedNavigationStuckAsync(
@@ -4152,6 +4362,16 @@ namespace DriverScanTester.Services
             CancellationToken token,
             string source)
         {
+            // Recovery owns movement/camera exclusively: quiesce any in-flight loot
+            // scan first, and wait out a loot collection that is already walking the
+            // character to an item. The stuck dispatch is retried next tick.
+            AcquireRecoveryOwnership($"stuck dispatch ({source}) at ({currX:F0},{currY:F0})");
+            if (LootCollectionStillOwnsInput())
+            {
+                LogRecoveryDeferredForLoot();
+                return;
+            }
+
             // This branch deliberately remains the direct legacy path. Do not put
             // special-recovery preparation before it: Default must have the same
             // escalation/counter/reverse-diagonal behavior as current master.
@@ -4297,6 +4517,16 @@ namespace DriverScanTester.Services
                 _isUnstuckRoutineActive = false;
                 StopMoving();
                 ReleaseCombatKeys();
+                return;
+            }
+
+            // Recovery owns movement/camera exclusively. Quiesce any in-flight loot
+            // scan and wait out a collection that is already walking the character to
+            // an item; the stuck detection re-dispatches next tick.
+            AcquireRecoveryOwnership($"ReverseDiagonal at ({currX:F0},{currY:F0})");
+            if (LootCollectionStillOwnsInput())
+            {
+                LogRecoveryDeferredForLoot();
                 return;
             }
 

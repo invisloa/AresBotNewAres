@@ -296,8 +296,8 @@ namespace DriverScanTester.Services
         /// <summary>Evidence from the travel-candidate request that is currently executing.</summary>
         private TravelCandidateContext? _activeTravelCandidate;
 
-        /// <summary>Last travel candidate whose stationary verification did not confirm loot.</summary>
-        private CandidateSuppression? _candidateSuppression;
+        /// <summary>Bounded duplicate suppression for travel candidates that failed verification.</summary>
+        private readonly CandidateSuppressionTracker _candidateSuppression = new();
 
         private sealed class TravelCandidateContext
         {
@@ -310,12 +310,75 @@ namespace DriverScanTester.Services
             public bool ItemCollected { get; set; }
         }
 
-        private sealed class CandidateSuppression
+        /// <summary>
+        /// Evidence-based duplicate suppression for pre-scan candidates. A candidate is
+        /// suppressed only while the same screen region keeps failing verification; a
+        /// candidate whose bounds move is new evidence and is allowed to stop navigation.
+        /// Repeated failures grow a bounded backoff, so a static UI artifact cannot
+        /// produce a stop/start loop, but no location is blacklisted permanently.
+        /// </summary>
+        internal sealed class CandidateSuppressionTracker
         {
-            public Rectangle Bounds { get; set; }
-            public DateTime SuppressedUntilUtc { get; set; }
-            public DateTime LastFailedAtUtc { get; set; }
-            public int FailureCount { get; set; }
+            private readonly object _gate = new();
+            private Rectangle _bounds;
+            private DateTime _suppressedUntilUtc = DateTime.MinValue;
+            private int _failureCount;
+
+            public int FailureCount
+            {
+                get { lock (_gate) return _failureCount; }
+            }
+
+            public bool IsSuppressed(Rectangle bounds, DateTime now)
+            {
+                lock (_gate)
+                {
+                    if (_failureCount <= 0)
+                        return false;
+                    if (now >= _suppressedUntilUtc)
+                    {
+                        _failureCount = 0;
+                        return false;
+                    }
+                    if (!IsSameRegion(_bounds, bounds))
+                    {
+                        // The visual evidence moved: this may be a different drop.
+                        _failureCount = 0;
+                        return false;
+                    }
+                    return true;
+                }
+            }
+
+            public (int FailureCount, int DurationMs) RecordFailure(Rectangle bounds, DateTime now)
+            {
+                lock (_gate)
+                {
+                    bool sameRegion = _failureCount > 0 &&
+                                      now < _suppressedUntilUtc &&
+                                      IsSameRegion(_bounds, bounds);
+                    _failureCount = sameRegion ? _failureCount + 1 : 1;
+                    _bounds = bounds;
+                    int shift = Math.Min(_failureCount - 1, 5);
+                    int durationMs = Math.Min(
+                        BotConstants.Loot.PassivePreScanSuppressionBaseMs * (1 << shift),
+                        BotConstants.Loot.PassivePreScanSuppressionMaxMs);
+                    _suppressedUntilUtc = now.AddMilliseconds(durationMs);
+                    return (_failureCount, durationMs);
+                }
+            }
+
+            public void Clear()
+            {
+                lock (_gate)
+                {
+                    _failureCount = 0;
+                    _suppressedUntilUtc = DateTime.MinValue;
+                }
+            }
+
+            private static bool IsSameRegion(Rectangle a, Rectangle b)
+                => LootSystem.IsSameCandidateRegion(a, b);
         }
 
         /// <summary>
@@ -432,6 +495,8 @@ namespace DriverScanTester.Services
                     if (reason == LootBarrierReason.PostKill ||
                         _activeMandatoryLootRequest.Reason != LootBarrierReason.PostKill)
                         _activeMandatoryLootRequest.Reason = reason;
+                    if (reason == LootBarrierReason.PostKill)
+                        _activeTravelCandidate = null;
                     _activeMandatoryLootRequest.UpdatedAtUtc = DateTime.UtcNow;
                     _log($"[LootBarrier] obligation preserved request={_activeMandatoryLootRequest.Id} " +
                          $"state={_activeMandatoryLootRequest.State} reason={_activeMandatoryLootRequest.Reason}.");
@@ -490,6 +555,8 @@ namespace DriverScanTester.Services
                 request.Detail = reason ?? "cancelled";
                 request.UpdatedAtUtc = DateTime.UtcNow;
                 _activeMandatoryLootRequest = null;
+                if (_activeTravelCandidate?.RequestId == requestId)
+                    _activeTravelCandidate = null;
                 ReleaseLootScanCameraLocked($"request {requestId} cancelled");
                 _log($"[LootBarrier] Cancelled request={requestId} reason={request.Detail}");
             }
@@ -1048,6 +1115,20 @@ namespace DriverScanTester.Services
         {
             StopScanSpacebarSpam();
             CancelAllLootWork("loot loop stopped");
+        }
+
+        /// <summary>
+        /// Quiesces in-flight pixel scanning before recovery movement/camera takes
+        /// exclusive ownership (ReverseDiagonal, waypoint special recovery, map-transition
+        /// hold). Any active scan pass, pink rescan or camera/cursor lock is released
+        /// synchronously under the ownership gate. A pending mandatory post-kill
+        /// obligation is only Deferred — it is never marked Completed or silently lost,
+        /// and the ownership remains blocked until the recovery releases it.
+        /// </summary>
+        public void SuspendForRecovery(string reason)
+        {
+            StopScanSpacebarSpam();
+            CancelAllLootWork(reason, deferMandatoryRequest: true);
         }
 
         /// <summary>
@@ -2161,26 +2242,7 @@ namespace DriverScanTester.Services
         }
 
         private bool IsCandidateSuppressed(Rectangle bounds, DateTime now)
-        {
-            CandidateSuppression? suppression = _candidateSuppression;
-            if (suppression == null)
-                return false;
-
-            if (now >= suppression.SuppressedUntilUtc)
-            {
-                _candidateSuppression = null;
-                return false;
-            }
-
-            if (!IsSameCandidateRegion(suppression.Bounds, bounds))
-            {
-                // The visual evidence moved: this may be a different drop, so allow it.
-                _candidateSuppression = null;
-                return false;
-            }
-
-            return true;
-        }
+            => _candidateSuppression.IsSuppressed(bounds, now);
 
         private static bool IsSameCandidateRegion(Rectangle a, Rectangle b)
         {
@@ -2210,40 +2272,12 @@ namespace DriverScanTester.Services
 
             if (context.ItemCollected)
             {
-                lock (_cameraCursorOwnershipGate)
-                    _candidateSuppression = null;
+                _candidateSuppression.Clear();
                 return;
             }
 
-            DateTime now = DateTime.UtcNow;
-            int failureCount;
-            int durationMs;
-            lock (_cameraCursorOwnershipGate)
-            {
-                CandidateSuppression? suppression = _candidateSuppression;
-                bool sameRegion = suppression != null &&
-                                  now < suppression.SuppressedUntilUtc &&
-                                  IsSameCandidateRegion(suppression.Bounds, context.Bounds);
-                if (!sameRegion)
-                {
-                    suppression = new CandidateSuppression
-                    {
-                        Bounds = context.Bounds,
-                        FailureCount = 0
-                    };
-                    _candidateSuppression = suppression;
-                }
-
-                suppression.FailureCount++;
-                suppression.Bounds = context.Bounds;
-                suppression.LastFailedAtUtc = now;
-                failureCount = suppression.FailureCount;
-                int shift = Math.Min(failureCount - 1, 5);
-                durationMs = Math.Min(
-                    BotConstants.Loot.PassivePreScanSuppressionBaseMs * (1 << shift),
-                    BotConstants.Loot.PassivePreScanSuppressionMaxMs);
-                suppression.SuppressedUntilUtc = now.AddMilliseconds(durationMs);
-            }
+            (int failureCount, int durationMs) = _candidateSuppression.RecordFailure(
+                context.Bounds, DateTime.UtcNow);
 
             _log($"[LootVerify] Candidate not confirmed request={requestId} " +
                  $"unavailable={unavailable} — suppressing the same screen region for {durationMs}ms " +
@@ -2390,7 +2424,7 @@ namespace DriverScanTester.Services
                     if (_activeTravelCandidate != null &&
                         _activeTravelCandidate.RequestId == requestId)
                         _activeTravelCandidate.ItemCollected = true;
-                    _candidateSuppression = null;
+                    _candidateSuppression.Clear();
                 }
             }
         }
@@ -3680,6 +3714,8 @@ namespace DriverScanTester.Services
                         mandatoryRequest.State = LootRequestState.Cancelled;
                         mandatoryRequest.Detail = reason ?? "loot cancelled";
                         mandatoryRequest.UpdatedAtUtc = DateTime.UtcNow;
+                        if (_activeTravelCandidate?.RequestId == mandatoryRequest.Id)
+                            _activeTravelCandidate = null;
                         _activeMandatoryLootRequest = null;
                     }
                 }
