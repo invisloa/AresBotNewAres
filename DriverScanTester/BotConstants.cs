@@ -991,12 +991,13 @@ namespace DriverScanTester
             /// How long the W key is held during the post-transition "position refresh"
             /// tap. The game only refreshes the player position memory after the player
             /// actually moves, so after a teleport the read stays stale until the player
-            /// takes a step. A very short W tap (like a real player's step) asks the game
-            /// for a refresh; <see cref="PositionSyncService"/> then polls a bounded
-            /// window for a real coordinate change — the tap alone is never treated as
-            /// proof that the position was refreshed.
+            /// takes a step. The client processes movement on its own input ticks, so a
+            /// very short tap can be swallowed entirely and never produce a step; the tap
+            /// is therefore long enough for one real step but still strictly bounded
+            /// (and <see cref="PositionSyncService"/> re-reads the position afterwards —
+            /// the tap alone is never treated as proof that the position was refreshed).
             /// </summary>
-            public const int StartProtectionNudgeKeyDownMs = 50;
+            public const int StartProtectionNudgeKeyDownMs = 150;
 
             /// <summary>
             /// How many times the whole start protection is retried after a full failure.
@@ -1071,6 +1072,40 @@ namespace DriverScanTester
 
             /// <summary>Maximum number of bounded W refresh presses per position synchronization.</summary>
             public const int PositionSyncMaxWRefreshAttempts = 3;
+
+            /// <summary>
+            /// Fixed acceptance radius (tiles) around a destination expectation (e.g. the
+            /// route start the workflow is about to use). Deliberately independent of the
+            /// user's StartProtection tolerance: a destination match inside this radius is
+            /// usable evidence that the game published the new location, while a bare
+            /// coordinate difference from the pre-transition snapshot is not.
+            /// </summary>
+            public const int PositionSyncDestinationValidationRadiusTiles = 5;
+
+            /// <summary>
+            /// Chebyshev radius around the pre-transition snapshot that is treated as the
+            /// "previous location" neighbourhood. After a portal the game can expose the
+            /// new map while X/Y still sit a few tiles from where the player entered —
+            /// such a shift is never accepted as proof of destination freshness.
+            /// </summary>
+            public const int PositionSyncStaleSourceRadiusTiles = 5;
+
+            /// <summary>
+            /// How many consecutive bounded W refreshes must show a live (changing)
+            /// position clearly away from both the pre-transition neighbourhood and the
+            /// destination expectation before a genuine destination mismatch may be
+            /// confirmed. Prevents a lingering stale read from being routed into
+            /// destructive recovery on the first update.
+            /// </summary>
+            public const int PositionSyncLiveMismatchConfirmations = 2;
+
+            /// <summary>
+            /// Largest coordinate delta (tiles) produced by one bounded W refresh that is
+            /// still interpreted as a real movement step. A stale post-portal read is
+            /// replaced by a location JUMP when the game refreshes, which is far larger
+            /// than a step and must not be treated as proof of a live position by itself.
+            /// </summary>
+            public const int PositionSyncMaxPlausibleStepTiles = 10;
 
             /// <summary>Delay in ms between bounded W refresh attempts.</summary>
             public const int PositionSyncWRefreshRetryDelayMs = 250;

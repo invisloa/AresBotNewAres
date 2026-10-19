@@ -108,6 +108,14 @@ namespace DriverScanTester.Services
         private int _postRepotVerifyRetryCount;
 
         /// <summary>
+        /// True when the last start-protection run ended by performing its configured
+        /// recovery town teleport and validating the town destination on its own. The
+        /// flow must then return through the existing Repot path instead of comparing
+        /// town coordinates with the route start.
+        /// </summary>
+        private bool _startProtectionRecoveredToTown;
+
+        /// <summary>
         /// Player-marker detections since the last complete EXP loop. First incident gets
         /// the shorter cooldown; repeated incidents before natural repot get 30 minutes.
         /// </summary>
@@ -179,6 +187,15 @@ namespace DriverScanTester.Services
         /// resume continues with the same step. Null = never paused.
         /// </summary>
         public BotPauseController? PauseController { get; set; }
+
+        /// <summary>
+        /// Test/extensibility seam for the town teleport. Production leaves this null and
+        /// the real key injection + arrival wait runs. When set, it replaces ONLY the
+        /// input/arrival phase of <see cref="TeleportToCity"/>; the post-teleport
+        /// position synchronization still runs through
+        /// <see cref="PositionSyncService"/>. Returns true when the town was reached.
+        /// </summary>
+        public Func<CancellationToken, Task<bool>>? TownTeleportOverride { get; set; }
 
         private bool _pauseLogged;
 
@@ -526,8 +543,7 @@ namespace DriverScanTester.Services
 
             if (!await RunRouteStartProtectionAsync(route, token))
             {
-                _log("[StartProtection] Route start check failed — resetting the flow from the beginning.");
-                _flowIndex = 0;
+                HandleRouteStartProtectionFailure("Path step");
                 return false;
             }
 
@@ -641,8 +657,7 @@ namespace DriverScanTester.Services
 
             if (!await RunRouteStartProtectionAsync(repotPath, token))
             {
-                _log("[StartProtection] Route start check failed — resetting the flow from the beginning.");
-                _flowIndex = 0;
+                HandleRouteStartProtectionFailure("Repot path");
                 return false;
             }
 
@@ -855,8 +870,17 @@ namespace DriverScanTester.Services
 
             if (!await RunRouteStartProtectionAsync(route, token))
             {
-                _log("[StartProtection] Route start check failed — resetting the flow from the beginning.");
-                _flowIndex = 0;
+                HandleRouteStartProtectionFailure("ExpLoop");
+                return false;
+            }
+
+            // Destination gate: the EXP path runner (including its initial RouteResync)
+            // must not initialize until the post-transition position was validated for
+            // this route's destination. A failed gate stops the step safely instead of
+            // selecting waypoints from coordinates that may belong to the previous map.
+            if (!await EnsureRouteEntryValidatedAsync(route, "ExpLoop", token))
+            {
+                CurrentPhase = BotPhase.Failed;
                 return false;
             }
 
@@ -1829,6 +1853,77 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// Routes control after a failed route start check. When the failure ended with
+        /// the configured recovery town teleport (validated against the town destination
+        /// on its own), the flow is redirected to the existing Repot step instead of
+        /// resetting to step 0 / comparing town coordinates with the route start. Every
+        /// other failure keeps the existing "restart the flow from the beginning" path.
+        /// </summary>
+        private void HandleRouteStartProtectionFailure(string context)
+        {
+            if (_startProtectionRecoveredToTown)
+            {
+                _startProtectionRecoveredToTown = false;
+                _log($"[StartProtection] {context}: recovery town teleport completed and validated — routing the flow to the Repot step for the normal return sequence.");
+                if (RedirectToRepotStep($"{context} start protection town recovery"))
+                    return;
+
+                // No Repot step exists — fall back to the ordinary restart.
+                _flowIndex = 0;
+                return;
+            }
+
+            _log("[StartProtection] Route start check failed — resetting the flow from the beginning.");
+            _flowIndex = 0;
+        }
+
+        /// <summary>
+        /// Movement gate for a route that is about to start its path (the EXP path runner
+        /// and its initial RouteResync in particular). The route is only allowed to start
+        /// when the current position is validated for the route's destination context:
+        /// its start position when the start check is enabled, otherwise its map
+        /// invariant. A pending/unconfirmed transition keeps navigation stopped.
+        /// </summary>
+        private async Task<bool> EnsureRouteEntryValidatedAsync(
+            BotRouteStep route,
+            string stageName,
+            CancellationToken token)
+        {
+            if (route == null)
+                return false;
+
+            int expectedMap = route.ProtectionMapNumber;
+
+            DestinationValidationContext? destination = route.StartCheckEnabled
+                ? DestinationValidationContext.ForStartPosition(
+                    expectedMap,
+                    route.StartPositionX,
+                    route.StartPositionY,
+                    $"{stageName} route '{route.PathFile}' start")
+                : expectedMap > 0
+                    ? DestinationValidationContext.ForMap(expectedMap, $"{stageName} route '{route.PathFile}' map")
+                    : null;
+
+            PositionSyncResult sync = await _positionSync.EnsurePositionReadyAsync(
+                $"{stageName} route entry '{route.PathFile}'",
+                expectedMap,
+                destination,
+                token);
+
+            if (token.IsCancellationRequested)
+                return false;
+
+            if (sync.Kind == PositionSyncResultKind.Ready)
+            {
+                _log($"[{stageName}] Route entry position validated for '{route.PathFile}': {sync.State.Describe()} DestinationStatus={sync.DestinationStatus}.");
+                return true;
+            }
+
+            _log($"[{stageName}] Route entry position NOT validated ({sync.Kind}: {sync.Message}; DestinationStatus={sync.DestinationStatus}) — the path runner and initial RouteResync stay blocked so no waypoint is selected from unvalidated coordinates.");
+            return false;
+        }
+
+        /// <summary>
         /// Profile-level start-position protection gate, run once when the workflow
         /// starts. When the profile has <see cref="BotProfile.EnableStartPositionCheck"/>
         /// disabled this returns immediately and the flow starts normally; otherwise the
@@ -1839,12 +1934,20 @@ namespace DriverScanTester.Services
             if (!_profile.EnableStartPositionCheck)
                 return true;
 
-            return await RunStartProtectionCoreAsync(
+            bool passed = await RunStartProtectionCoreAsync(
                 _profile.StartPositionX,
                 _profile.StartPositionY,
                 _profile.ProtectionMapNumber,
                 Math.Max(0, _profile.StartPositionTolerance),
                 token);
+
+            if (!passed && _startProtectionRecoveredToTown)
+            {
+                _startProtectionRecoveredToTown = false;
+                _log("[StartProtection] Recovery town teleport completed and validated against the town destination, but the profile start position is on a different map — the bot will not start until the profile start can be reached again.");
+            }
+
+            return passed;
         }
 
         /// <summary>
@@ -1875,21 +1978,25 @@ namespace DriverScanTester.Services
         ///
         /// Before ANY position comparison the check waits for
         /// <see cref="PositionSyncService"/> to prove that the coordinates belong to the
-        /// current location. A map read alone is not enough: immediately after a portal
-        /// or teleport the game can expose the new map while X/Y still belong to the
-        /// previous location.
+        /// current location AND satisfy the destination expectation of this start check
+        /// (map + start position, validated with the fixed synchronization radius).
+        /// A map read alone is not enough and neither is a small coordinate shift from
+        /// the pre-transition snapshot: immediately after a portal the game can expose
+        /// the new map while X/Y still belong to the previous location. In that case a
+        /// bounded mini-W refresh runs and the position is only accepted when it matches
+        /// the destination expectation or is proven live while genuinely different.
         ///
-        /// Only a coherent, validated snapshot may produce a genuine mismatch. When
-        /// synchronization is unconfirmed/timed out the check is postponed and the town
-        /// teleport is BLOCKED — a stale position must never trigger destructive
-        /// recovery. Genuine mismatches keep the existing recovery flow.
+        /// Only a validated position may produce a genuine mismatch. When validation is
+        /// unconfirmed/timed out the check is postponed and the town teleport is BLOCKED
+        /// — a stale position must never trigger destructive recovery.
         ///
         /// When the attempt ultimately fails, the check is retried up to
         /// <see cref="BotConstants.Delays.StartProtectionMaxRetries"/> times: each retry
         /// waits (15 s, then x10 per retry: 15s → 150s → 1500s), performs a repot and
         /// starts the whole protection over from scratch. Synchronization failures do
-        /// not enter this repot/teleport retry chain. Only when every retry fails does
-        /// the check return false.
+        /// not enter this repot/teleport retry chain. A recovery town teleport ends the
+        /// check immediately and hands control back to the flow's normal return path.
+        /// Only when every retry fails does the check return false.
         /// </summary>
         private async Task<bool> RunStartProtectionCoreAsync(
             int startX,
@@ -1898,6 +2005,14 @@ namespace DriverScanTester.Services
             int tolerance,
             CancellationToken token)
         {
+            _startProtectionRecoveredToTown = false;
+
+            DestinationValidationContext destination = DestinationValidationContext.ForStartPosition(
+                mapNumber,
+                startX,
+                startY,
+                $"start check map {(mapNumber > 0 ? mapNumber.ToString() : "any")} ({startX},{startY})");
+
             // Attempt 0 is the initial pass; retries 1..MaxRetries add the wait + repot.
             for (int retry = 0; retry <= BotConstants.Delays.StartProtectionMaxRetries; retry++)
             {
@@ -1915,18 +2030,19 @@ namespace DriverScanTester.Services
                     if (token.IsCancellationRequested) return false;
                 }
 
-                _log("[StartProtection] Waiting for PositionSync...");
+                _log($"[StartProtection] Waiting for PositionSync (destination validation: {destination.Describe()})...");
                 PositionSyncResult sync = await _positionSync.EnsurePositionReadyAsync(
                     $"StartProtection (retry {retry})",
                     mapNumber,
+                    destination,
                     token);
 
                 if (token.IsCancellationRequested) return false;
 
-                if (!sync.IsReady)
+                if (!sync.IsValidated)
                 {
                     _log($"[StartProtection] PositionSync {sync.Kind.ToString().ToUpperInvariant()} — {sync.Message}");
-                    _log($"[StartProtection] Start check postponed — {sync.State.Describe()}.");
+                    _log($"[StartProtection] Destination validation UNCONFIRMED (DestinationStatus={sync.DestinationStatus}, Destination={destination.Describe()}, Candidate={sync.State.Describe()}) — Start check postponed.");
                     if (sync.Kind == PositionSyncResultKind.MapNotReached)
                         _log("[StartProtection] Destination map not confirmed — Town teleport BLOCKED (map transition failure, not a position mismatch).");
                     else
@@ -1935,7 +2051,14 @@ namespace DriverScanTester.Services
                     return false;
                 }
 
-                _log($"[StartProtection] PositionSync READY — {sync.State.Describe()}.");
+                if (sync.Kind == PositionSyncResultKind.DestinationMismatch)
+                {
+                    _log($"[StartProtection] Position VALIDATED but genuinely outside the expected start — recovery ALLOWED (DestinationStatus={sync.DestinationStatus}, Candidate={sync.State.Describe()}, Destination={destination.Describe()}, OffsetX={destination.OffsetX(sync.State)}, OffsetY={destination.OffsetY(sync.State)}).");
+                }
+                else
+                {
+                    _log($"[StartProtection] PositionSync READY — {sync.State.Describe()}.");
+                }
 
                 StartProtectionAttemptOutcome outcome = await RunStartProtectionAttemptAsync(
                     startX, startY, mapNumber, tolerance, sync.State, token);
@@ -1953,6 +2076,17 @@ namespace DriverScanTester.Services
                     CurrentPhase = BotPhase.Failed;
                     return false;
                 }
+
+                // The configured recovery teleported the player to town, and that town
+                // destination was validated on its own. The original route start cannot
+                // be judged from town — hand control back to the flow's normal return
+                // sequence instead of comparing town coordinates with the route start.
+                if (outcome == StartProtectionAttemptOutcome.RecoveryTeleported)
+                {
+                    _startProtectionRecoveredToTown = true;
+                    _log("[StartProtection] Recovery teleport validated against the town destination — the start check is not re-evaluated from town and no repeated repot is scheduled here. Returning to the flow's normal recovery sequence.");
+                    return false;
+                }
             }
 
             _log("[StartProtection] PROTECTION FAILED — the current map/position do not match the expected start position/protected map after all retries. Stopping.");
@@ -1963,17 +2097,25 @@ namespace DriverScanTester.Services
         {
             Passed,
             GenuineMismatch,
-            PositionNotReady
+            PositionNotReady,
+
+            /// <summary>
+            /// The configured recovery town teleport completed and its own destination
+            /// was validated. The original route start is NOT checked from town.
+            /// </summary>
+            RecoveryTeleported
         }
 
         /// <summary>
         /// One start-protection pass using a snapshot whose post-transition freshness has
-        /// already been validated by <see cref="PositionSyncService"/>.
+        /// already been validated by <see cref="PositionSyncService"/> (either against the
+        /// start-check destination or as a live, genuinely different position).
         ///
         /// - Map and coordinates match the configured start (and protected map) → PASS.
         /// - Validated coordinates genuinely differ → the existing town-teleport recovery
-        ///   is eligible. The position is re-validated after that teleport before the
-        ///   final CHECK BAD decision.
+        ///   is eligible. The teleport is then validated against the TOWN destination
+        ///   (in-city flag + synchronized position), never against the original route
+        ///   start coordinates of a different map.
         /// - Validation fails after the teleport → POSITION_NOT_READY: no route, no
         ///   further recovery, and no mismatch counter based on untrustworthy data.
         /// </summary>
@@ -2008,7 +2150,7 @@ namespace DriverScanTester.Services
 
             // The snapshot was validated before the comparison, so this is a genuine
             // mismatch — not a stale post-transition read.
-            _log("[StartProtection] Genuine mismatch confirmed");
+            _log("[StartProtection] Genuine mismatch confirmed (validated position, not a stale read)");
             _log($"[StartProtection] Starting configured recovery (mapConfig={mapConfigured}, mapMatches={mapMatches}, positionMatches={posMatches}, tolerance={tolerance}).");
             bool teleportPositionReady = await TeleportToCity(token);
             if (token.IsCancellationRequested)
@@ -2017,10 +2159,14 @@ namespace DriverScanTester.Services
             if (!teleportPositionReady)
                 _log("[StartProtection] Town teleport position is not ready yet — waiting for PositionSync before the final decision.");
 
-            _log("[StartProtection] Waiting for PositionSync after town teleport...");
+            // After a town teleport the destination is the TOWN, not the route start.
+            // Never demand the route's map here (that made the check compare town
+            // coordinates with COT coordinates and schedule endless repots).
+            _log("[StartProtection] Waiting for PositionSync after town teleport (town destination validation, map and position of the route are NOT demanded)...");
             PositionSyncResult sync = await _positionSync.EnsurePositionReadyAsync(
                 "StartProtection after town teleport",
-                mapNumber,
+                expectedMap: 0,
+                destination: null,
                 token);
 
             if (token.IsCancellationRequested)
@@ -2030,17 +2176,18 @@ namespace DriverScanTester.Services
             {
                 _log($"[StartProtection] PositionSync {sync.Kind.ToString().ToUpperInvariant()} after town teleport — {sync.Message}");
                 _log($"[StartProtection] Start check postponed — {sync.State.Describe()}.");
-                _log("[StartProtection] Further recovery BLOCKED: position validity not established.");
+                _log("[StartProtection] Further recovery BLOCKED: town destination position validity not established.");
                 return StartProtectionAttemptOutcome.PositionNotReady;
             }
 
             PlayerStateSnapshot actual = sync.State;
+            bool inCity = _memoryService.GetIsInCity();
             bool actualMapMatches;
             bool actualPosMatches;
             bool actualMatches = StartPositionMatches(
                 actual, startX, startY, mapNumber, tolerance, out actualMapMatches, out actualPosMatches);
 
-            _log($"[StartProtection] Actual after teleport=({actual.X},{actual.Y}) Map={actual.Map}");
+            _log($"[StartProtection] Actual after teleport=({actual.X},{actual.Y}) Map={actual.Map} InCity={inCity}");
             _log($"[StartProtection] Expected=({startX},{startY}) Map={(mapConfigured ? mapNumber.ToString() : "any")}");
 
             if (actualMatches)
@@ -2049,7 +2196,23 @@ namespace DriverScanTester.Services
                 return StartProtectionAttemptOutcome.Passed;
             }
 
-            // Report the LATEST validated snapshot — never the pre-teleport locals.
+            if (mapConfigured && actual.MapReadSucceeded && actual.Map != mapNumber)
+            {
+                // The town teleport landed on a DIFFERENT map than the expected start.
+                // Comparing its coordinates with the route start is logically invalid.
+                // Validate the teleport against its OWN destination (the town) instead.
+                if (!inCity)
+                {
+                    _log($"[StartProtection] Town teleport NOT validated: InCity=False Map={actual.Map} Position=({actual.X},{actual.Y}) — recovery BLOCKED, no further teleport. Route start check postponed.");
+                    return StartProtectionAttemptOutcome.PositionNotReady;
+                }
+
+                _log($"[StartProtection] Town teleport validated against the town destination: InCity=True Map={actual.Map} Position=({actual.X},{actual.Y}) (COT/route start ({startX},{startY}) map {mapNumber} is NOT compared with town coordinates).");
+                return StartProtectionAttemptOutcome.RecoveryTeleported;
+            }
+
+            // The recovery teleport stayed on (or returned to) the expected map: the
+            // existing comparison remains legitimate and keeps its retry behavior.
             _log($"[StartProtection] CHECK BAD — HERE ({actual.X}, {actual.Y}) map {actual.Map} | EXPECTED ({startX}, {startY}) map {mapNumber} | off {Math.Abs((int)actual.X - startX):F0}/{Math.Abs((int)actual.Y - startY):F0} tiles (tol {tolerance}) even after the town teleport. Not proceeding to the next step.");
             return StartProtectionAttemptOutcome.GenuineMismatch;
         }
@@ -2245,50 +2408,62 @@ namespace DriverScanTester.Services
             byte vk = (byte)_profile.TeleportKey;
             byte scan = (byte)_profile.TeleportScanCode;
 
-            // Make sure the game window is focused before injecting the teleport key,
-            // otherwise keybd_event may deliver the keypress to another window.
-            _focusGameWindow();
-
             _positionSync.MarkTransitionImminent("TeleportToCity");
 
-            _log($"[Teleport] Pressing key (vk={vk}) for town teleport...");
-            keybd_event(vk, scan, 0, 0);
-            await PausableDelayAsync(BotConstants.Delays.TeleportKeyDownMs, token);
-            keybd_event(vk, scan, KEYEVENTF_KEYUP, 0);
-
-            // Screenshot immediately after the teleport scroll is triggered — before the
-            // town starts loading — so the image shows the state at the moment of teleport.
-            ScreenshotService.CaptureFullScreen(ScreenshotService.TownPortalsFolder, _log, "[Teleport]");
-
-            bool arrived = false;
-            for (int i = 0; i < BotConstants.Delays.TeleportWaitIterations; i++)
+            bool arrived;
+            if (TownTeleportOverride is { } townTeleport)
             {
-                await PausableDelayAsync(BotConstants.Delays.TeleportWaitIterationMs, token);
-                if (_memoryService.GetIsInCity())
+                _log("[Teleport] Town teleport input/arrival provided by the override; the post-teleport position validation still runs.");
+                arrived = await townTeleport(token);
+            }
+            else
+            {
+                // Make sure the game window is focused before injecting the teleport
+                // key, otherwise keybd_event may deliver the keypress to another window.
+                _focusGameWindow();
+
+                _log($"[Teleport] Pressing key (vk={vk}) for town teleport...");
+                keybd_event(vk, scan, 0, 0);
+                await PausableDelayAsync(BotConstants.Delays.TeleportKeyDownMs, token);
+                keybd_event(vk, scan, KEYEVENTF_KEYUP, 0);
+
+                // Screenshot immediately after the teleport scroll is triggered — before the
+                // town starts loading — so the image shows the state at the moment of teleport.
+                ScreenshotService.CaptureFullScreen(ScreenshotService.TownPortalsFolder, _log, "[Teleport]");
+
+                arrived = false;
+                for (int i = 0; i < BotConstants.Delays.TeleportWaitIterations; i++)
                 {
-                    _log("[Teleport] Arrived in city.");
-                    arrived = true;
-                    break;
+                    await PausableDelayAsync(BotConstants.Delays.TeleportWaitIterationMs, token);
+                    if (_memoryService.GetIsInCity())
+                    {
+                        _log("[Teleport] Arrived in city.");
+                        arrived = true;
+                        break;
+                    }
                 }
+
+                if (!arrived)
+                    _log("[Teleport] Teleport wait timeout — proceeding anyway.");
+
+                // The game UI (loading screen → world render) needs time to finish after the
+                // in-city flag becomes readable. Starting to move immediately makes the client
+                // ignore input and the bot misreads the still-loading state as stuck (action=1).
+                _log($"[Teleport] Waiting {BotConstants.Delays.PostTeleportUiLoadMs} ms for the game UI to load...");
+                await PausableDelayAsync(BotConstants.Delays.PostTeleportUiLoadMs, token);
             }
 
-            if (!arrived)
-                _log("[Teleport] Teleport wait timeout — proceeding anyway.");
-
-            // The game UI (loading screen → world render) needs time to finish after the
-            // in-city flag becomes readable. Starting to move immediately makes the client
-            // ignore input and the bot misreads the still-loading state as stuck (action=1).
-            _log($"[Teleport] Waiting {BotConstants.Delays.PostTeleportUiLoadMs} ms for the game UI to load...");
-            await PausableDelayAsync(BotConstants.Delays.PostTeleportUiLoadMs, token);
-
-            _log("[Teleport] Waiting for PositionSync after town teleport...");
+            // The town teleport is validated against its OWN destination: the arrival flag
+            // plus a coherent, fresh position on whatever map the town is. The route start
+            // of the location we teleported AWAY from is never used here.
+            _log($"[Teleport] Waiting for PositionSync after town teleport... InCity={_memoryService.GetIsInCity()}");
             PositionSyncResult sync = await _positionSync.SynchronizeAsync(expectedMap: 0, token);
             if (token.IsCancellationRequested)
                 return false;
 
             if (sync.IsReady)
             {
-                _log($"[Teleport] PositionSync READY — {sync.State.Describe()}.");
+                _log($"[Teleport] Town destination validated: {sync.State.Describe()} InCity={_memoryService.GetIsInCity()}.");
                 return true;
             }
 

@@ -2137,11 +2137,12 @@ namespace DriverScanTester.Services
 
             try
             {
-                return AnalyzeWhiteLootCandidates(
+                return AnalyzeWhiteLootCandidatesCore(
                     _bitmap,
                     scanRegion,
                     excludeZone,
-                    BotConstants.Loot.PassivePreScanMaxCandidateComponents);
+                    BotConstants.Loot.PassivePreScanMaxCandidateComponents,
+                    ref _scanBuffer);
             }
             catch (Exception ex)
             {
@@ -2162,6 +2163,18 @@ namespace DriverScanTester.Services
             Rectangle? excludeZone,
             int maxCandidateComponents)
         {
+            byte[] reusableBuffer = Array.Empty<byte>();
+            return AnalyzeWhiteLootCandidatesCore(
+                bitmap, scanRegion, excludeZone, maxCandidateComponents, ref reusableBuffer);
+        }
+
+        private static LootPreScanResult AnalyzeWhiteLootCandidatesCore(
+            Bitmap bitmap,
+            Rectangle scanRegion,
+            Rectangle? excludeZone,
+            int maxCandidateComponents,
+            ref byte[] reusableBuffer)
+        {
             ArgumentNullException.ThrowIfNull(bitmap);
 
             int xStart = Math.Clamp(scanRegion.Left, 0, bitmap.Width - 1);
@@ -2178,7 +2191,6 @@ namespace DriverScanTester.Services
             bool applyExcludeZone = excludeZone.HasValue && excludeZone.Value.Width > 0 &&
                                     excludeZone.Value.Height > 0;
             Rectangle exclude = excludeZone ?? Rectangle.Empty;
-            var reusableBuffer = Array.Empty<byte>();
             var exactWhitePoints = new List<Point>();
             var shadedWhitePoints = new List<Point>();
 
