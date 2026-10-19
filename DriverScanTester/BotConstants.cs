@@ -1280,9 +1280,47 @@ namespace DriverScanTester
             /// interpreted as an empty scan.</summary>
             public const int BarrierCaptureAttempts = 3;
 
-            /// <summary>Stationary tolerance (game units) for reusing a completed scan at a
-            /// waypoint boundary. Any larger movement invalidates the scan.</summary>
-            public const float BarrierStationaryTolerance = 0.5f;
+            /// <summary>
+            /// Cadence (ms) of the passive moving pre-scan that looks for plausible loot
+            /// pixels in the CURRENT game view. It never changes the camera, cursor or
+            /// navigation inputs; it only decides whether a stationary verification is
+            /// worth starting. The cadence is deliberately independent of the mandatory
+            /// post-kill wait.
+            /// </summary>
+            public const int PassivePreScanIntervalMs = 500;
+
+            /// <summary>
+            /// Time (ms) to wait after a travel-candidate request is armed before the
+            /// stationary cycle starts when navigation has not acknowledged the stop yet.
+            /// This is a bounded fallback only; the normal path is the explicit
+            /// "navigation held" acknowledgement from MovementSystem.
+            /// </summary>
+            public const int PassivePreScanNavigationStopGraceMs = 250;
+
+            /// <summary>
+            /// A candidate that failed stationary verification is suppressed while the
+            /// same visual evidence stays in the same screen region. The first retry is
+            /// allowed after this base backoff; repeated failures grow the backoff up to
+            /// <see cref="PassivePreScanSuppressionMaxMs"/>.
+            /// </summary>
+            public const int PassivePreScanSuppressionBaseMs = 2000;
+
+            /// <summary>Upper bound (ms) for one failed-candidate suppression window.</summary>
+            public const int PassivePreScanSuppressionMaxMs = 30000;
+
+            /// <summary>
+            /// Screen-space tolerance (px) for treating a pre-scan candidate as the same
+            /// visual artifact that already failed verification. A candidate whose bounds
+            /// move beyond this distance is new evidence and is allowed to stop the bot.
+            /// </summary>
+            public const int PassivePreScanSuppressionRegionTolerancePx = 48;
+
+            /// <summary>
+            /// Upper plausibility bound on candidate components in one pre-scan frame.
+            /// More than this is treated as UI/effect clutter (NoCandidate), never as a
+            /// reason to stop navigation. Real drops are few in one view.
+            /// </summary>
+            public const int PassivePreScanMaxCandidateComponents = 24;
 
             /// <summary>Minimum height (px) a connected pink blob must have to be probed as a
             /// SOD/SOP drop. See <see cref="PinkMinCandidateWidth"/>.</summary>

@@ -2,19 +2,24 @@ using System;
 
 namespace DriverScanTester.Services
 {
-    /// <summary>Why movement armed a mandatory loot obligation.</summary>
+    /// <summary>Why movement armed a loot obligation.</summary>
     public enum LootBarrierReason
     {
-        /// <summary>A real combat target was lost / killed; drops must be checked.</summary>
+        /// <summary>A real combat target was killed; drops must be checked before walking on.</summary>
         PostKill,
 
-        /// <summary>A MoveAndAttackAndLoot waypoint was reached and needs its final loot check.</summary>
-        WaypointTransition
+        /// <summary>
+        /// The passive moving pre-scan found plausible loot pixels. Movement stops only
+        /// long enough to verify/collect those candidates with the proper loot camera.
+        /// </summary>
+        TravelCandidateVerification
     }
 
     /// <summary>
-    /// Lifecycle of one mandatory loot request. Only <see cref="Completed"/> releases
-    /// waypoint navigation; every other state keeps the navigation barrier closed.
+    /// Lifecycle of one mandatory loot request. Only <see cref="Completed"/> (a verified
+    /// empty pass) or, for a travel candidate, <see cref="Unavailable"/> (verification
+    /// could not run) releases waypoint navigation. A mandatory post-kill obligation
+    /// never treats <see cref="Unavailable"/> as success.
     /// </summary>
     public enum LootRequestState
     {
@@ -29,6 +34,13 @@ namespace DriverScanTester.Services
 
         /// <summary>A complete verified scan pass finished with no items.</summary>
         Completed,
+
+        /// <summary>
+        /// A travel-candidate verification could not run (capture/camera unavailable).
+        /// This is NOT an empty result; navigation may resume, but the candidate is not
+        /// reported as absent. Mandatory post-kill requests never use this state.
+        /// </summary>
+        Unavailable,
 
         /// <summary>Bounded recovery failed; navigation must stay blocked.</summary>
         Failed,
@@ -57,6 +69,7 @@ namespace DriverScanTester.Services
         Running,
         Deferred,
         Completed,
+        Unavailable,
         Failed,
         Cancelled
     }
@@ -67,8 +80,10 @@ namespace DriverScanTester.Services
     /// The barrier stores the single request generation movement is waiting for and
     /// applies authoritative status snapshots supplied by <see cref="LootSystem"/>.
     /// "Loot is inactive" is never interpreted as success: only an explicit
-    /// <see cref="LootRequestState.Completed"/> with camera verification releases
-    /// navigation, and only for the exact request id that was armed.
+    /// <see cref="LootRequestState.Completed"/> with camera verification releases a
+    /// post-kill obligation, and only for the exact request id that was armed. A travel
+    /// candidate may also be released as <see cref="LootRequestState.Unavailable"/> when
+    /// verification cannot run; that state is never reported as an empty scan.
     ///
     /// All fields are guarded by one short-held lock; no lock is held across a wait.
     /// </summary>
@@ -83,15 +98,6 @@ namespace DriverScanTester.Services
         private int _itemsCollected;
         private string _detail = string.Empty;
         private DateTime _updatedAtUtc = DateTime.MinValue;
-
-        // Validity token for reusing a completed scan at a waypoint boundary. Any
-        // ordinary navigation start or real position change invalidates it.
-        private bool _hasReusableCompletion;
-        private long _lastCompletedRequestId;
-        private float _completedX;
-        private float _completedY;
-        private int _completedMovementEpoch;
-        private int _movementEpoch;
 
         public long RequestId
         {
@@ -177,7 +183,10 @@ namespace DriverScanTester.Services
             {
                 if (_requestId == requestId && IsActiveLocked())
                 {
-                    _reason = reason;
+                    // A real post-kill obligation is the stronger reason; never let a
+                    // travel-candidate pass downgrade it.
+                    if (reason == LootBarrierReason.PostKill)
+                        _reason = reason;
                     _updatedAtUtc = DateTime.UtcNow;
                     return;
                 }
@@ -189,7 +198,6 @@ namespace DriverScanTester.Services
                 _itemsCollected = 0;
                 _detail = "request armed";
                 _updatedAtUtc = DateTime.UtcNow;
-                _hasReusableCompletion = false;
             }
         }
 
@@ -197,7 +205,7 @@ namespace DriverScanTester.Services
         /// Applies a status only when it belongs to the armed request. Stale completion
         /// from an older generation is ignored.
         /// </summary>
-        public LootBarrierPhase ApplyStatus(in LootRequestStatus status, float currentX, float currentY)
+        public LootBarrierPhase ApplyStatus(in LootRequestStatus status)
         {
             lock (_gate)
             {
@@ -215,15 +223,12 @@ namespace DriverScanTester.Services
                 {
                     case LootRequestState.Pending:
                         _phase = LootBarrierPhase.Pending;
-                        _hasReusableCompletion = false;
                         break;
                     case LootRequestState.Running:
                         _phase = LootBarrierPhase.Running;
-                        _hasReusableCompletion = false;
                         break;
                     case LootRequestState.Deferred:
                         _phase = LootBarrierPhase.Deferred;
-                        _hasReusableCompletion = false;
                         break;
                     case LootRequestState.Completed:
                         if (!status.CameraVerified)
@@ -232,81 +237,33 @@ namespace DriverScanTester.Services
                             // contract violation, never a navigable success.
                             _phase = LootBarrierPhase.Failed;
                             _detail = $"completed request {status.RequestId} without verified loot camera";
-                            _hasReusableCompletion = false;
                         }
                         else
                         {
                             _phase = LootBarrierPhase.Completed;
-                            _lastCompletedRequestId = status.RequestId;
-                            _completedX = currentX;
-                            _completedY = currentY;
-                            _completedMovementEpoch = _movementEpoch;
-                            _hasReusableCompletion = true;
+                        }
+                        break;
+                    case LootRequestState.Unavailable:
+                        if (_reason == LootBarrierReason.PostKill)
+                        {
+                            // Capture/camera failure is not an empty post-kill result.
+                            _phase = LootBarrierPhase.Failed;
+                            _detail = $"post-kill request {status.RequestId} unavailable: {_detail}";
+                        }
+                        else
+                        {
+                            _phase = LootBarrierPhase.Unavailable;
                         }
                         break;
                     case LootRequestState.Failed:
                         _phase = LootBarrierPhase.Failed;
-                        _hasReusableCompletion = false;
                         break;
                     case LootRequestState.Cancelled:
                         _phase = LootBarrierPhase.Cancelled;
-                        _hasReusableCompletion = false;
                         break;
                 }
 
                 return _phase;
-            }
-        }
-
-        /// <summary>
-        /// True when a completed post-kill scan is still valid for a waypoint boundary:
-        /// same request completed successfully, the character has not started ordinary
-        /// navigation since, and it is still at the scanned stationary location.
-        /// </summary>
-        public bool CanReuseCompletedScan(float currentX, float currentY, out long requestId)
-        {
-            lock (_gate)
-            {
-                requestId = _lastCompletedRequestId;
-                if (!_hasReusableCompletion || _phase != LootBarrierPhase.Completed)
-                    return false;
-                if (_movementEpoch != _completedMovementEpoch)
-                    return false;
-
-                float dx = currentX - _completedX;
-                float dy = currentY - _completedY;
-                float distanceSquared = dx * dx + dy * dy;
-                float tolerance = BotConstants.Loot.BarrierStationaryTolerance;
-                return distanceSquared <= tolerance * tolerance;
-            }
-        }
-
-        /// <summary>Invalidates reuse after any real position change.</summary>
-        public void InvalidateReuseIfMoved(float currentX, float currentY)
-        {
-            lock (_gate)
-            {
-                if (!_hasReusableCompletion)
-                    return;
-
-                float dx = currentX - _completedX;
-                float dy = currentY - _completedY;
-                float tolerance = BotConstants.Loot.BarrierStationaryTolerance;
-                if (dx * dx + dy * dy > tolerance * tolerance)
-                {
-                    _hasReusableCompletion = false;
-                    _detail = "completed scan invalidated by movement";
-                }
-            }
-        }
-
-        /// <summary>Marks the start of ordinary navigation and invalidates scan reuse.</summary>
-        public void NotifyNavigationStarted()
-        {
-            lock (_gate)
-            {
-                _movementEpoch++;
-                _hasReusableCompletion = false;
             }
         }
 
@@ -316,7 +273,6 @@ namespace DriverScanTester.Services
             lock (_gate)
             {
                 _phase = LootBarrierPhase.Idle;
-                _hasReusableCompletion = false;
                 _detail = detail ?? string.Empty;
                 _updatedAtUtc = DateTime.UtcNow;
             }
@@ -328,7 +284,6 @@ namespace DriverScanTester.Services
             lock (_gate)
             {
                 _phase = LootBarrierPhase.Failed;
-                _hasReusableCompletion = false;
                 _detail = detail ?? "loot barrier failure";
                 _updatedAtUtc = DateTime.UtcNow;
             }

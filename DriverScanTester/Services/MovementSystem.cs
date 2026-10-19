@@ -290,8 +290,6 @@ namespace DriverScanTester.Services
         private bool _lootBarrierFailureLogged;
         private bool _lootTargetCycleSuppressedLogged;
         private bool _lootMoveSuppressedLogged;
-        /// <summary>True after a real mob target was seen; used to arm post-kill loot on loss.</summary>
-        private bool _realCombatTargetSeen;
 
         // ── Post-kill SOD/SOP pink-scan hold (MoveAndAttack) ──
         // After a kill, first TAB at the closest camera distance. A nearby mob takes
@@ -1146,6 +1144,7 @@ namespace DriverScanTester.Services
             _lootNavigationBarrierHoldsInput = true;
             StopMoving();
             ReleaseSkillThree();
+            loot.NotifyNavigationHeld(requestId);
 
             if (!_lootBarrierBlockedLogged)
             {
@@ -1160,13 +1159,15 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Applies the authoritative LootSystem snapshot to the navigation barrier and
-        /// performs the only navigation release path: a camera-verified Completed status
-        /// for the exact request generation armed by this MovementSystem.
+        /// performs the only navigation release paths: a camera-verified Completed status
+        /// for the exact request generation armed by this MovementSystem, or an explicit
+        /// Unavailable travel verification (never reported as an empty scan).
+        ///
+        /// It also adopts a travel-candidate request created by the passive pre-scan:
+        /// LootSystem is the single writer of the obligation, movement only mirrors it.
         /// </summary>
-        private void RefreshLootBarrier(float currentX, float currentY)
+        private void RefreshLootBarrier()
         {
-            _lootBarrier.InvalidateReuseIfMoved(currentX, currentY);
-
             if (!RequiresMandatoryLootBarrier(CurrentMode))
             {
                 if (_lootBarrier.IsActive || _lootBarrier.HasTerminalFailure)
@@ -1180,13 +1181,28 @@ namespace DriverScanTester.Services
                 return;
             }
 
+            LootSystem? loot = LootSystemRef;
+
             if (!_lootBarrier.IsActive)
+            {
+                if (loot != null &&
+                    loot.TryGetActiveMandatoryLootRequest(out long pendingId, out LootBarrierReason pendingReason))
+                {
+                    _lootBarrier.Arm(pendingId, pendingReason);
+                    _lootNavigationBarrierHoldsInput = true;
+                    _lootBarrierBlockedLogged = false;
+                    _lootBarrierFailureLogged = false;
+                    StopMoving();
+                    ReleaseSkillThree();
+                    loot.NotifyNavigationHeld(pendingId);
+                    _log($"[LootBarrier] Adopted request={pendingId} reason={pendingReason}; navigation held.");
+                }
                 return;
+            }
 
             if (!_lootBarrier.TryGetRequestId(out long requestId))
                 return;
 
-            LootSystem? loot = LootSystemRef;
             if (loot == null)
             {
                 _lootNavigationBarrierHoldsInput = true;
@@ -1202,13 +1218,20 @@ namespace DriverScanTester.Services
             }
 
             LootBarrierPhase previousPhase = _lootBarrier.Phase;
-            LootBarrierPhase phase = _lootBarrier.ApplyStatus(status, currentX, currentY);
+            LootBarrierPhase phase = _lootBarrier.ApplyStatus(status);
             if (phase == LootBarrierPhase.Completed)
             {
                 _lootNavigationBarrierHoldsInput = false;
                 _lootBarrierBlockedLogged = false;
                 _log($"[LootBarrier] Completed request={requestId} items={status.ItemsCollected}; " +
                      $"Navigation released — resuming waypoint {DescribeCurrentWaypoint()}.");
+            }
+            else if (phase == LootBarrierPhase.Unavailable)
+            {
+                _lootNavigationBarrierHoldsInput = false;
+                _lootBarrierBlockedLogged = false;
+                _log($"[LootBarrier] Travel verification unavailable request={requestId}; " +
+                     $"navigation released — resuming waypoint {DescribeCurrentWaypoint()}.");
             }
             else if (phase == LootBarrierPhase.Failed || phase == LootBarrierPhase.Cancelled)
             {
@@ -1251,31 +1274,6 @@ namespace DriverScanTester.Services
 
             await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
             return true;
-        }
-
-        /// <summary>
-        /// Waypoint-boundary check. A still-valid completed post-kill scan at the same
-        /// stationary location satisfies the check; otherwise one new WaypointTransition
-        /// request is armed. The queue is never advanced while this returns false.
-        /// </summary>
-        private bool EnsureLootBarrierBeforeWaypointAdvance(
-            Waypoint target, float currentX, float currentY)
-        {
-            if (!RequiresMandatoryLootBarrier(target.Mode))
-                return true;
-
-            if (_lootBarrier.CanReuseCompletedScan(currentX, currentY, out long completedRequestId))
-            {
-                _log($"[LootBarrier] Reusing completed scan request={completedRequestId} for the " +
-                     $"waypoint transition at ({target.X:F1},{target.Y:F1}); no movement since completion.");
-                return true;
-            }
-
-            if (_lootBarrier.IsBlockingNavigation)
-                return false;
-
-            ArmMandatoryLootBarrier(LootBarrierReason.WaypointTransition);
-            return false;
         }
 
         private string DescribeCurrentWaypoint()
@@ -1997,9 +1995,10 @@ namespace DriverScanTester.Services
             }
 
             // Combat tracking happens BEFORE the switch because Attack/CombatWait/
-            // TabTarget/PotionsUsed return early. This fixes the old post-combat wait
-            // bookkeeping hole, while the mandatory loot barrier below remains the
-            // authoritative completion contract (timestamps never release navigation).
+            // TabTarget/PotionsUsed return early. A post-kill loot obligation is armed
+            // only by the explicit CombatAction.TabAfterKill kill signal below — a
+            // normal TAB or waypoint transition must never create one. The barrier is
+            // the authoritative completion contract (timestamps never release it).
             bool combatActionActive = combatAction == CombatAction.Attack ||
                                       combatAction == CombatAction.CombatWait ||
                                       combatAction == CombatAction.TabAfterKill ||
@@ -2008,7 +2007,6 @@ namespace DriverScanTester.Services
                                       combatAction == CombatAction.Unstuck;
             if (mobSelected)
             {
-                _realCombatTargetSeen = true;
                 _lastCombatSeenAt = DateTime.UtcNow;
             }
             else if (combatActionActive || combatAction == CombatAction.TabTarget)
@@ -2016,16 +2014,7 @@ namespace DriverScanTester.Services
                 _lastCombatSeenAt = DateTime.UtcNow;
             }
 
-            bool combatEncounterEnded = _realCombatTargetSeen && !mobSelected;
-            if (combatEncounterEnded)
-            {
-                // TabTarget while ordinary travelling never sets this flag: it requires
-                // a real mob target to have been seen first.
-                _realCombatTargetSeen = false;
-                ArmMandatoryLootBarrier(LootBarrierReason.PostKill);
-            }
-
-            RefreshLootBarrier(currX, currY);
+            RefreshLootBarrier();
 
             if (ShouldSuppressPeriodicTargetCycle(combatAction))
                 combatAction = CombatAction.None;
@@ -2167,7 +2156,7 @@ namespace DriverScanTester.Services
             // based heuristic below is retained only for legacy MoveAndAttack (SOD/SOP)
             // behavior; it is never used as proof that a MoveAndAttackAndLoot loot pass
             // completed. Only a camera-verified Completed request releases movement.
-            RefreshLootBarrier(currX, currY);
+            RefreshLootBarrier();
             if (await HoldNavigationForMandatoryLootAsync(token))
                 return;
 
@@ -2324,15 +2313,6 @@ namespace DriverScanTester.Services
                 }
 
                 await AdvanceReachedWaypoints(currX, currY, token);
-
-                if (_lootBarrier.IsBlockingNavigation)
-                {
-                    // The arrival check armed a mandatory request. Navigation must not
-                    // resume toward any waypoint until it completes.
-                    RefreshLootBarrier(currX, currY);
-                    if (await HoldNavigationForMandatoryLootAsync(token))
-                        return;
-                }
 
                 if (_goalReached)
                 {
@@ -2598,15 +2578,6 @@ namespace DriverScanTester.Services
                     {
                         break;
                     }
-                }
-
-                // Mandatory waypoint-boundary loot check. The queue entry is not
-                // dequeued until the obligation is genuinely satisfied (or a still-valid
-                // completed scan at this stationary location is reused).
-                if (!target.IsOperationStep &&
-                    !EnsureLootBarrierBeforeWaypointAdvance(target, currX, currY))
-                {
-                    return advanced;
                 }
 
                 _waypoints.Dequeue();
@@ -4567,7 +4538,6 @@ namespace DriverScanTester.Services
                 _startMoveCount++;
                 _lootMoveSuppressedLogged = false;
                 _ignoreStuckUntil = DateTime.Now.AddSeconds(STUCK_GRACE_AFTER_START_SECONDS);
-                _lootBarrier.NotifyNavigationStarted();
 
                 _log($"[Input] W down (StartMoving) — call #{_startMoveCount}. Tick:{_tickCount}");
 
@@ -4606,7 +4576,6 @@ namespace DriverScanTester.Services
                 _startMoveCount++;
                 _lootMoveSuppressedLogged = false;
                 _ignoreStuckUntil = DateTime.Now.AddSeconds(STUCK_GRACE_AFTER_START_SECONDS);
-                _lootBarrier.NotifyNavigationStarted();
 
                 _log($"[Input] W down (ForceStartMoving) — call #{_startMoveCount}. Tick:{_tickCount}");
 

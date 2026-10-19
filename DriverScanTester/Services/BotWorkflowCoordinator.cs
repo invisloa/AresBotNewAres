@@ -924,6 +924,7 @@ namespace DriverScanTester.Services
                             if (_pathRunner.CurrentMovement?.IsMoveOnlyActive == true)
                             {
                                 lootSystem.PinkLootOnlyMode = false;
+                                lootSystem.MoveAndAttackAndLootMode = false;
                                 lootSystem.PlayerMarkerScanEnabled = false;
                                 await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
                                 continue;
@@ -931,16 +932,19 @@ namespace DriverScanTester.Services
                             if (_pathRunner.CurrentMovement?.IsWaypointSpecialRecoveryActive == true)
                             {
                                 lootSystem.PinkLootOnlyMode = false;
+                                lootSystem.MoveAndAttackAndLootMode = false;
                                 lootSystem.PlayerMarkerScanEnabled = false;
                                 await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
                                 continue;
                             }
 
                             // Track the current waypoint mode: MoveAndAttack waypoints use
-                            // the SOD/SOP pink-only scan; MoveAndAttackAndLoot keeps the
-                            // normal white-pixel loot cycle.
+                            // the SOD/SOP pink-only scan; MoveAndAttackAndLoot is
+                            // request-driven (passive moving pre-scan + post-kill scans).
                             BotMode? currentMode = _pathRunner.CurrentMovement?.CurrentMode;
                             lootSystem.PinkLootOnlyMode = currentMode == BotMode.MoveAndAttack;
+                            lootSystem.MoveAndAttackAndLootMode =
+                                currentMode == BotMode.MoveAndAttackAndLoot;
                             lootSystem.PlayerMarkerScanEnabled =
                                 currentMode == BotMode.MoveAndAttack || currentMode == BotMode.MoveAndAttackAndLoot;
 

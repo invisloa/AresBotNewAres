@@ -4328,6 +4328,7 @@ namespace DriverScanTester.ViewModels
                             if (_movementSystem?.IsWaypointSpecialRecoveryActive == true)
                             {
                                 _lootSystem.PinkLootOnlyMode = false;
+                                _lootSystem.MoveAndAttackAndLootMode = false;
                                 _lootSystem.PlayerMarkerScanEnabled = false;
                                 await PauseController.PausableDelayAsync(10, token);
                                 continue;
@@ -4335,16 +4336,19 @@ namespace DriverScanTester.ViewModels
                             if (_movementSystem?.IsMoveOnlyActive == true)
                             {
                                 _lootSystem.PinkLootOnlyMode = false;
+                                _lootSystem.MoveAndAttackAndLootMode = false;
                                 _lootSystem.PlayerMarkerScanEnabled = false;
                                 await PauseController.PausableDelayAsync(10, token);
                                 continue;
                             }
 
                             // Track the current waypoint mode: MoveAndAttack waypoints use
-                            // the SOD/SOP pink-only scan; MoveAndAttackAndLoot keeps the
-                            // normal white-pixel loot cycle.
+                            // the SOD/SOP pink-only scan; MoveAndAttackAndLoot is
+                            // request-driven (passive moving pre-scan + post-kill scans).
                             Services.BotMode? currentMode = _movementSystem?.CurrentMode;
                             _lootSystem.PinkLootOnlyMode = currentMode == Services.BotMode.MoveAndAttack;
+                            _lootSystem.MoveAndAttackAndLootMode =
+                                currentMode == Services.BotMode.MoveAndAttackAndLoot;
                             _lootSystem.PlayerMarkerScanEnabled =
                                 currentMode == Services.BotMode.MoveAndAttack ||
                                 currentMode == Services.BotMode.MoveAndAttackAndLoot;

@@ -53,15 +53,48 @@ namespace DriverScanTester.Services
             public bool CameraVerified { get; set; }
             public int ItemsCollected { get; set; }
             public string Detail { get; set; } = string.Empty;
+            public DateTime CreatedAtUtc { get; init; } = DateTime.UtcNow;
             public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
             public bool NeedsFreshCycle { get; set; } = true;
             public int CaptureAttempts { get; set; }
             public int CameraAttempts { get; set; }
 
+            /// <summary>
+            /// True once MovementSystem has released W/steering for this request. The
+            /// stationary cycle must never move the camera before this acknowledgement
+            /// (or the bounded grace fallback) to avoid zooming while the player walks.
+            /// </summary>
+            public bool NavigationHeld { get; set; }
+
             public LootRequestStatus Snapshot() => new(
                 Id, Reason, State, CameraVerified, ItemsCollected,
                 Detail ?? string.Empty, UpdatedAtUtc);
         }
+
+        /// <summary>Result of one lightweight passive pre-scan of the current game view.</summary>
+        internal enum LootPreScanOutcome
+        {
+            /// <summary>Nothing loot-like was visible; navigation must continue.</summary>
+            NoCandidate,
+
+            /// <summary>Plausible white-loot pixels were found; verify with the loot camera.</summary>
+            PotentialCandidate,
+
+            /// <summary>The frame could not be captured/analyzed; never treated as a candidate.</summary>
+            CaptureUnavailable
+        }
+
+        /// <summary>
+        /// Candidate evidence from the passive pre-scan. Bounds are bitmap-local screen
+        /// coordinates and are used only for duplicate suppression of repeated false
+        /// positives; they are not a definitive loot result.
+        /// </summary>
+        internal readonly record struct LootPreScanResult(
+            LootPreScanOutcome Outcome,
+            int CandidateComponents,
+            int WhitePixels,
+            Rectangle CandidateBounds,
+            string Detail);
 
         /// <summary>Loot operation exercised by the Tools tab diagnostics.</summary>
         public enum LootDiagnosticMode { SodSopPink, NormalWhite }
@@ -250,6 +283,41 @@ namespace DriverScanTester.Services
         private bool _lootCameraReady;
         private DateTime _lootCameraSettledAtUtc = DateTime.MinValue;
 
+        // ── Passive moving pre-scan (MoveAndAttackAndLoot travel) ──
+        // This is a lightweight candidate detector, never a collection operation. It
+        // captures the current view without touching the camera/cursor/navigation and
+        // only decides whether a stationary verification is worth starting.
+        private volatile bool _moveAndAttackAndLootMode;
+        private DateTime _nextPassivePreScanAt = DateTime.MinValue;
+        private DateTime _lastPassivePreScanLogAt = DateTime.MinValue;
+        private DateTime _lastPassivePreScanFailureLogAt = DateTime.MinValue;
+        private string _lastPassivePreScanFailure = string.Empty;
+
+        /// <summary>Evidence from the travel-candidate request that is currently executing.</summary>
+        private TravelCandidateContext? _activeTravelCandidate;
+
+        /// <summary>Last travel candidate whose stationary verification did not confirm loot.</summary>
+        private CandidateSuppression? _candidateSuppression;
+
+        private sealed class TravelCandidateContext
+        {
+            public long RequestId { get; init; }
+            public Rectangle Bounds { get; init; }
+            public int CandidateComponents { get; init; }
+            public float PlayerX { get; init; }
+            public float PlayerY { get; init; }
+            public DateTime ObservedAtUtc { get; init; }
+            public bool ItemCollected { get; set; }
+        }
+
+        private sealed class CandidateSuppression
+        {
+            public Rectangle Bounds { get; set; }
+            public DateTime SuppressedUntilUtc { get; set; }
+            public DateTime LastFailedAtUtc { get; set; }
+            public int FailureCount { get; set; }
+        }
+
         /// <summary>
         /// Time since the last item was collected. Used by the movement system to extend
         /// its post-combat loot wait while the loot system is still making progress
@@ -274,10 +342,85 @@ namespace DriverScanTester.Services
             _lootState == LootMachineState.PinkScan;
 
         /// <summary>
-        /// Creates (or coalesces into) the mandatory loot request for a post-kill or
-        /// waypoint-transition obligation. Consecutive kills while the request is still
-        /// pending/running/deferred reuse the same generation so the obligation cannot
-        /// be lost; a request resolved as Completed/Failed/Cancelled yields a new id.
+        /// True while the effective waypoint mode is MoveAndAttackAndLoot. In this mode
+        /// the normal white-loot collector is request-driven: it never starts a full
+        /// stationary cycle on a timer. While travelling it runs only the passive
+        /// pre-scan; a mandatory post-kill request or a travel-candidate verification
+        /// explicitly starts the full scan.
+        /// </summary>
+        public bool MoveAndAttackAndLootMode
+        {
+            get => _moveAndAttackAndLootMode;
+            set => _moveAndAttackAndLootMode = value;
+        }
+
+        /// <summary>True when a mandatory request still owns the navigation obligation.</summary>
+        public bool HasActiveMandatoryLootRequest
+        {
+            get
+            {
+                lock (_cameraCursorOwnershipGate)
+                {
+                    return _activeMandatoryLootRequest != null &&
+                           IsMandatoryRequestActiveLocked(_activeMandatoryLootRequest);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Reads the request that currently blocks navigation (if any). Movement uses
+        /// this to adopt a travel-candidate request created by the passive pre-scan;
+        /// it never needs to create a second obligation for the same evidence.
+        /// </summary>
+        public bool TryGetActiveMandatoryLootRequest(
+            out long requestId,
+            out LootBarrierReason reason)
+        {
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (_activeMandatoryLootRequest != null &&
+                    IsMandatoryRequestActiveLocked(_activeMandatoryLootRequest))
+                {
+                    requestId = _activeMandatoryLootRequest.Id;
+                    reason = _activeMandatoryLootRequest.Reason;
+                    return true;
+                }
+            }
+
+            requestId = 0;
+            reason = default;
+            return false;
+        }
+
+        /// <summary>
+        /// MovementSystem confirms that W and ordinary steering were released for this
+        /// request. The stationary camera is only applied after this acknowledgement (or
+        /// the bounded fallback) so the loot zoom can never race a walking character.
+        /// </summary>
+        public void NotifyNavigationHeld(long requestId)
+        {
+            if (requestId <= 0)
+                return;
+
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (_activeMandatoryLootRequest == null ||
+                    _activeMandatoryLootRequest.Id != requestId ||
+                    _activeMandatoryLootRequest.NavigationHeld)
+                    return;
+
+                _activeMandatoryLootRequest.NavigationHeld = true;
+                _activeMandatoryLootRequest.UpdatedAtUtc = DateTime.UtcNow;
+                _log($"[LootVerify] Navigation held request={requestId} reason={_activeMandatoryLootRequest.Reason}.");
+            }
+        }
+
+        /// <summary>
+        /// Creates (or coalesces into) a mandatory loot request. Consecutive kills while
+        /// the request is still pending/running/deferred reuse the same generation so the
+        /// obligation cannot be lost; a request resolved as Completed/Failed/Cancelled/
+        /// Unavailable yields a new id. A post-kill reason always wins over a travel
+        /// candidate so a kill can never be downgraded to a lighter obligation.
         /// </summary>
         public long BeginMandatoryLootRequest(LootBarrierReason reason)
         {
@@ -286,8 +429,8 @@ namespace DriverScanTester.Services
                 if (_activeMandatoryLootRequest != null &&
                     IsMandatoryRequestActiveLocked(_activeMandatoryLootRequest))
                 {
-                    // A post-kill obligation is more specific than a boundary request.
-                    if (_activeMandatoryLootRequest.Reason != LootBarrierReason.PostKill)
+                    if (reason == LootBarrierReason.PostKill ||
+                        _activeMandatoryLootRequest.Reason != LootBarrierReason.PostKill)
                         _activeMandatoryLootRequest.Reason = reason;
                     _activeMandatoryLootRequest.UpdatedAtUtc = DateTime.UtcNow;
                     _log($"[LootBarrier] obligation preserved request={_activeMandatoryLootRequest.Id} " +
@@ -301,6 +444,7 @@ namespace DriverScanTester.Services
                     Reason = reason,
                     State = LootRequestState.Pending,
                     Detail = "request armed",
+                    CreatedAtUtc = DateTime.UtcNow,
                     UpdatedAtUtc = DateTime.UtcNow,
                     NeedsFreshCycle = true
                 };
@@ -1264,6 +1408,17 @@ namespace DriverScanTester.Services
                     SchedulePinkRescanAfterKill();
                     _log("[Loot] Mob killed — immediate SOD/SOP scan deferred until the close-camera mob check finishes.");
                 }
+                else if (MoveAndAttackAndLootMode)
+                {
+                    // The mandatory post-kill request belongs to MovementSystem.
+                    // Never start the legacy timer-driven collector here: that was the
+                    // source of repeated stationary scans during ordinary travel.
+                    _lootState = LootMachineState.Idle;
+                    _nextActionTime = DateTime.UtcNow;
+                    _consecutiveEmptySpacePresses = 0;
+                    IsLootingActive = false;
+                    _log("[Loot] Mob killed — waiting for the mandatory post-kill loot request (reason=PostKillMandatory).");
+                }
                 else if (LootPriorityMode)
                 {
                     _log($"[Loot] Mob killed (loot priority) — waiting {BotConstants.Delays.LootPostKillDelayMs}ms for drops, then looting everything.");
@@ -1357,10 +1512,24 @@ namespace DriverScanTester.Services
                 }
             }
 
-            // ── Mandatory post-kill / waypoint-transition obligation ──
+            // ── Mandatory post-kill / travel-candidate obligation ──
             // The request is serviced only after the combat pause and pink-scan
             // handling above. A selected mob defers it; the obligation stays alive.
             ServiceMandatoryLootRequest(isMobSelected);
+
+            // ── Passive moving pre-scan (MoveAndAttackAndLoot) ──
+            // This is the ONLY loot activity during ordinary travel. It observes the
+            // current view, never changes the camera/cursor/input, and never starts a
+            // full cycle by itself: a PotentialCandidate creates a travel-verification
+            // request that MovementSystem turns into a navigation hold.
+            if (MoveAndAttackAndLootMode &&
+                !isMobSelected &&
+                !PinkLootOnlyMode &&
+                !HasActiveMandatoryLootRequest &&
+                _lootState == LootMachineState.Idle)
+            {
+                RunPassiveLootPreScanIfDue();
+            }
 
             // ── A selected mob pauses loot ──
             // While a mob is targeted (combat in progress) the loot machine does NOT
@@ -1412,6 +1581,14 @@ namespace DriverScanTester.Services
                     {
                         // SOD/SOP-only mode scans solely after a kill. While walking
                         // there is nothing to do — no area-loot, no white-pixel scan.
+                        break;
+                    }
+
+                    if (MoveAndAttackAndLootMode)
+                    {
+                        // Request-driven only: the passive pre-scan runs while walking,
+                        // and a mandatory request starts the full cycle. Idle must never
+                        // start the legacy timer-based collector.
                         break;
                     }
 
@@ -1617,6 +1794,12 @@ namespace DriverScanTester.Services
                                     Math.Max(BotConstants.Delays.LootUpdateMs,
                                              BotConstants.Camera.LootScanCameraSettleMs));
                             }
+                            else if (mandatoryRequest?.Reason == LootBarrierReason.TravelCandidateVerification)
+                            {
+                                MarkTravelVerificationUnavailable(
+                                    mandatoryRequestId,
+                                    $"scan failed status={outcome.Result} after {attempt} attempts ({failureDetail})");
+                            }
                             else
                             {
                                 FailMandatoryLootRequest(
@@ -1773,6 +1956,321 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// One passive pre-scan tick. Captures the CURRENT view, classifies white-loot
+        /// candidates with the production pixel/shape/text filters, and arms at most one
+        /// travel-verification request. It never changes the camera, cursor or navigation
+        /// input and never starts the stationary collector by itself.
+        /// </summary>
+        private void RunPassiveLootPreScanIfDue()
+        {
+            DateTime now = DateTime.UtcNow;
+            if (now < _nextPassivePreScanAt)
+                return;
+            _nextPassivePreScanAt = now.AddMilliseconds(BotConstants.Loot.PassivePreScanIntervalMs);
+
+            if (!HasActiveMandatoryLootRequest && _lootState != LootMachineState.Idle)
+                return;
+
+            LootPreScanResult result = CaptureAndAnalyzePassiveLootFrame();
+            if (result.Outcome == LootPreScanOutcome.CaptureUnavailable)
+            {
+                LogPassivePreScanFailure(result.Detail);
+                return;
+            }
+
+            if (result.Outcome == LootPreScanOutcome.NoCandidate)
+            {
+                LogPassivePreScan($"[LootPreScan] NoCandidate whitePixels={result.WhitePixels} " +
+                                 $"components={result.CandidateComponents} detail={result.Detail}");
+                return;
+            }
+
+            if (IsCandidateSuppressed(result.CandidateBounds, now))
+            {
+                LogPassivePreScan($"[LootPreScan] Candidate suppressed (same region previously failed " +
+                                 $"verification) bounds={FormatRectangle(result.CandidateBounds)}");
+                return;
+            }
+
+            if (HasActiveMandatoryLootRequest)
+                return;
+
+            long requestId = BeginMandatoryLootRequest(LootBarrierReason.TravelCandidateVerification);
+            if (requestId <= 0)
+                return;
+
+            bool isTravelRequest = TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus status) &&
+                                   status.Reason == LootBarrierReason.TravelCandidateVerification;
+            if (isTravelRequest)
+            {
+                var (playerX, playerY) = GetPlayerPositionForSuppression();
+                _activeTravelCandidate = new TravelCandidateContext
+                {
+                    RequestId = requestId,
+                    Bounds = result.CandidateBounds,
+                    CandidateComponents = result.CandidateComponents,
+                    PlayerX = playerX,
+                    PlayerY = playerY,
+                    ObservedAtUtc = now
+                };
+                _log($"[LootPreScan] PotentialCandidate detected components={result.CandidateComponents} " +
+                     $"whitePixels={result.WhitePixels} bounds={FormatRectangle(result.CandidateBounds)}");
+                _log($"[LootVerify] Starting stationary verification request={requestId} " +
+                     "reason=TravelCandidateVerification");
+            }
+        }
+
+        private LootPreScanResult CaptureAndAnalyzePassiveLootFrame()
+        {
+            int xStart = Math.Clamp(bigX[0] - _referenceClientOriginX, 0, Math.Max(_clientWidth - 1, 0));
+            int xEnd = Math.Clamp(bigX[1] - _referenceClientOriginX, 0, _clientWidth);
+            int yStart = Math.Clamp(bigY[0] - _referenceClientOriginY, 0, Math.Max(_clientHeight - 1, 0));
+            int yEnd = Math.Clamp(bigY[1] - _referenceClientOriginY, 0, _clientHeight);
+            if (xStart >= xEnd || yStart >= yEnd)
+            {
+                return new LootPreScanResult(
+                    LootPreScanOutcome.CaptureUnavailable, 0, 0, Rectangle.Empty,
+                    "invalid scan geometry");
+            }
+
+            if (!CaptureScreen())
+            {
+                return new LootPreScanResult(
+                    LootPreScanOutcome.CaptureUnavailable, 0, 0, Rectangle.Empty,
+                    $"capture failed status={_lastCaptureResult.Status}");
+            }
+
+            if (_bitmap == null || _lastStableCaptureGeometry == null)
+            {
+                return new LootPreScanResult(
+                    LootPreScanOutcome.CaptureUnavailable, 0, 0, Rectangle.Empty,
+                    "capture frame unavailable");
+            }
+
+            var scanRegion = new Rectangle(xStart, yStart, xEnd - xStart, yEnd - yStart);
+            var excludeZone = new Rectangle(
+                ExcludeXMin - _referenceClientOriginX,
+                ExcludeYMin - _referenceClientOriginY,
+                ExcludeXMax - ExcludeXMin + 1,
+                ExcludeYMax - ExcludeYMin + 1);
+
+            try
+            {
+                return AnalyzeWhiteLootCandidates(
+                    _bitmap,
+                    scanRegion,
+                    excludeZone,
+                    BotConstants.Loot.PassivePreScanMaxCandidateComponents);
+            }
+            catch (Exception ex)
+            {
+                return new LootPreScanResult(
+                    LootPreScanOutcome.CaptureUnavailable, 0, 0, Rectangle.Empty,
+                    $"analysis failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Pure passive candidate classifier. It reuses the exact full-scan pixel masks,
+        /// connected-component labeling, shape filters, character exclude zone and
+        /// text-glyph filter, but never probes, moves the cursor or validates mouseover.
+        /// </summary>
+        internal static LootPreScanResult AnalyzeWhiteLootCandidates(
+            Bitmap bitmap,
+            Rectangle scanRegion,
+            Rectangle? excludeZone,
+            int maxCandidateComponents)
+        {
+            ArgumentNullException.ThrowIfNull(bitmap);
+
+            int xStart = Math.Clamp(scanRegion.Left, 0, bitmap.Width - 1);
+            int xEnd = Math.Clamp(scanRegion.Right, 0, bitmap.Width);
+            int yStart = Math.Clamp(scanRegion.Top, 0, bitmap.Height - 1);
+            int yEnd = Math.Clamp(scanRegion.Bottom, 0, bitmap.Height);
+            if (xStart >= xEnd || yStart >= yEnd)
+            {
+                return new LootPreScanResult(
+                    LootPreScanOutcome.CaptureUnavailable, 0, 0, Rectangle.Empty,
+                    "invalid scan geometry");
+            }
+
+            bool applyExcludeZone = excludeZone.HasValue && excludeZone.Value.Width > 0 &&
+                                    excludeZone.Value.Height > 0;
+            Rectangle exclude = excludeZone ?? Rectangle.Empty;
+            var reusableBuffer = Array.Empty<byte>();
+            var exactWhitePoints = new List<Point>();
+            var shadedWhitePoints = new List<Point>();
+
+            CollectBitmapTargetPoints(
+                bitmap, xStart, xEnd, yStart, yEnd,
+                applyExcludeZone, exclude.Left, exclude.Right - 1, exclude.Top, exclude.Bottom - 1,
+                pinkOnly: false, exactWhitePoints, ref reusableBuffer, out _, out _,
+                shadedWhiteOnly: false);
+            CollectBitmapTargetPoints(
+                bitmap, xStart, xEnd, yStart, yEnd,
+                applyExcludeZone, exclude.Left, exclude.Right - 1, exclude.Top, exclude.Bottom - 1,
+                pinkOnly: false, shadedWhitePoints, ref reusableBuffer, out _, out _,
+                shadedWhiteOnly: true);
+
+            int whitePixels = exactWhitePoints.Count + shadedWhitePoints.Count;
+            var candidates = new List<WhiteComponent>();
+            foreach (WhiteComponent component in LabelWhiteComponents(exactWhitePoints))
+            {
+                if (IsLegacyWhiteSparkleCandidate(component))
+                    candidates.Add(component);
+            }
+            foreach (WhiteComponent component in LabelWhiteComponents(shadedWhitePoints))
+            {
+                if (IsShadedWhiteLootCandidate(component))
+                    candidates.Add(component);
+            }
+
+            HashSet<WhiteComponent> textGlyphs = FindTextGlyphs(candidates);
+            if (textGlyphs.Count > 0)
+                candidates.RemoveAll(textGlyphs.Contains);
+
+            if (candidates.Count == 0)
+            {
+                return new LootPreScanResult(
+                    LootPreScanOutcome.NoCandidate, 0, whitePixels, Rectangle.Empty,
+                    $"scanRegion={FormatRectangle(scanRegion)}");
+            }
+
+            int left = candidates.Min(c => c.XMin);
+            int top = candidates.Min(c => c.YMin);
+            int right = candidates.Max(c => c.XMax);
+            int bottom = candidates.Max(c => c.YMax);
+            var bounds = Rectangle.FromLTRB(left, top, right + 1, bottom + 1);
+
+            if (candidates.Count > maxCandidateComponents)
+            {
+                return new LootPreScanResult(
+                    LootPreScanOutcome.NoCandidate, candidates.Count, whitePixels, bounds,
+                    "candidate count looks like UI/effect clutter");
+            }
+
+            return new LootPreScanResult(
+                LootPreScanOutcome.PotentialCandidate, candidates.Count, whitePixels, bounds,
+                "plausible white-loot candidates");
+        }
+
+        private (float X, float Y) GetPlayerPositionForSuppression()
+        {
+            var (x, y, success) = _memoryService.GetPlayerPosition();
+            return success ? (x, y) : (0f, 0f);
+        }
+
+        private bool IsCandidateSuppressed(Rectangle bounds, DateTime now)
+        {
+            CandidateSuppression? suppression = _candidateSuppression;
+            if (suppression == null)
+                return false;
+
+            if (now >= suppression.SuppressedUntilUtc)
+            {
+                _candidateSuppression = null;
+                return false;
+            }
+
+            if (!IsSameCandidateRegion(suppression.Bounds, bounds))
+            {
+                // The visual evidence moved: this may be a different drop, so allow it.
+                _candidateSuppression = null;
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool IsSameCandidateRegion(Rectangle a, Rectangle b)
+        {
+            if (a.IsEmpty || b.IsEmpty)
+                return false;
+
+            float ax = a.Left + a.Width / 2f;
+            float ay = a.Top + a.Height / 2f;
+            float bx = b.Left + b.Width / 2f;
+            float by = b.Top + b.Height / 2f;
+            float dx = ax - bx;
+            float dy = ay - by;
+            float tolerance = BotConstants.Loot.PassivePreScanSuppressionRegionTolerancePx;
+            return dx * dx + dy * dy <= tolerance * tolerance;
+        }
+
+        private void RecordTravelCandidateVerificationResult(long requestId, bool unavailable)
+        {
+            TravelCandidateContext? context;
+            lock (_cameraCursorOwnershipGate)
+            {
+                context = _activeTravelCandidate;
+                if (context == null || context.RequestId != requestId)
+                    return;
+                _activeTravelCandidate = null;
+            }
+
+            if (context.ItemCollected)
+            {
+                lock (_cameraCursorOwnershipGate)
+                    _candidateSuppression = null;
+                return;
+            }
+
+            DateTime now = DateTime.UtcNow;
+            int failureCount;
+            int durationMs;
+            lock (_cameraCursorOwnershipGate)
+            {
+                CandidateSuppression? suppression = _candidateSuppression;
+                bool sameRegion = suppression != null &&
+                                  now < suppression.SuppressedUntilUtc &&
+                                  IsSameCandidateRegion(suppression.Bounds, context.Bounds);
+                if (!sameRegion)
+                {
+                    suppression = new CandidateSuppression
+                    {
+                        Bounds = context.Bounds,
+                        FailureCount = 0
+                    };
+                    _candidateSuppression = suppression;
+                }
+
+                suppression.FailureCount++;
+                suppression.Bounds = context.Bounds;
+                suppression.LastFailedAtUtc = now;
+                failureCount = suppression.FailureCount;
+                int shift = Math.Min(failureCount - 1, 5);
+                durationMs = Math.Min(
+                    BotConstants.Loot.PassivePreScanSuppressionBaseMs * (1 << shift),
+                    BotConstants.Loot.PassivePreScanSuppressionMaxMs);
+                suppression.SuppressedUntilUtc = now.AddMilliseconds(durationMs);
+            }
+
+            _log($"[LootVerify] Candidate not confirmed request={requestId} " +
+                 $"unavailable={unavailable} — suppressing the same screen region for {durationMs}ms " +
+                 $"(failure {failureCount}).");
+        }
+
+        private void LogPassivePreScan(string message)
+        {
+            DateTime now = DateTime.UtcNow;
+            if ((now - _lastPassivePreScanLogAt).TotalMilliseconds < 1000)
+                return;
+            _lastPassivePreScanLogAt = now;
+            _log(message);
+        }
+
+        private void LogPassivePreScanFailure(string detail)
+        {
+            DateTime now = DateTime.UtcNow;
+            bool changed = !string.Equals(detail, _lastPassivePreScanFailure, StringComparison.Ordinal);
+            if (!changed && (now - _lastPassivePreScanFailureLogAt).TotalSeconds < 5)
+                return;
+            _lastPassivePreScanFailure = detail;
+            _lastPassivePreScanFailureLogAt = now;
+            _log($"[LootPreScan] CaptureUnavailable detail={detail} — navigation continues.");
+        }
+
+        /// <summary>
         /// Starts the fresh area-loot + verified scan cycle for the active mandatory
         /// request. A request created while a scan/collection is already running is
         /// never satisfied by that older pass: it starts a fresh cycle afterwards.
@@ -1795,6 +2293,14 @@ namespace DriverScanTester.Services
             if (isMobSelected)
             {
                 DeferMandatoryLootRequest(request.Id, "combat target selected");
+                return;
+            }
+
+            if (!request.NavigationHeld &&
+                (DateTime.UtcNow - request.CreatedAtUtc).TotalMilliseconds <
+                BotConstants.Loot.PassivePreScanNavigationStopGraceMs)
+            {
+                // Give MovementSystem one tick to release W before the camera moves.
                 return;
             }
 
@@ -1826,7 +2332,9 @@ namespace DriverScanTester.Services
                 _nextActionTime = DateTime.UtcNow;
                 _consecutiveEmptySpacePresses = 0;
                 _lastKillAt = DateTime.UtcNow;
-                _log($"[LootBarrier] request={request.Id} running — area loot starting (reason={request.Reason}).");
+                _log($"[LootVerify] Starting stationary verification request={request.Id} " +
+                     $"reason={(request.Reason == LootBarrierReason.PostKill ? "PostKillMandatory" : "TravelCandidateVerification")} " +
+                     "— area loot starting.");
             }
         }
 
@@ -1879,6 +2387,10 @@ namespace DriverScanTester.Services
                     _activeMandatoryLootRequest.CaptureAttempts = 0;
                     _activeMandatoryLootRequest.CameraAttempts = 0;
                     _activeMandatoryLootRequest.UpdatedAtUtc = DateTime.UtcNow;
+                    if (_activeTravelCandidate != null &&
+                        _activeTravelCandidate.RequestId == requestId)
+                        _activeTravelCandidate.ItemCollected = true;
+                    _candidateSuppression = null;
                 }
             }
         }
@@ -1918,6 +2430,8 @@ namespace DriverScanTester.Services
         private void CompleteMandatoryLootRequest(long requestId, LootScanPassOutcome outcome)
         {
             bool completed = false;
+            bool travelCandidate = false;
+            int itemsCollected = 0;
             lock (_cameraCursorOwnershipGate)
             {
                 if (_activeMandatoryLootRequest != null &&
@@ -1926,26 +2440,85 @@ namespace DriverScanTester.Services
                     outcome.IsValidComplete)
                 {
                     MandatoryLootRequest request = _activeMandatoryLootRequest;
+                    travelCandidate = request.Reason == LootBarrierReason.TravelCandidateVerification;
+                    itemsCollected = request.ItemsCollected;
                     request.State = LootRequestState.Completed;
                     request.CameraVerified = true;
-                    request.Detail = "verified full scan pass (SmallScan + BigScan)";
+                    request.Detail = travelCandidate
+                        ? "travel candidate verified empty (SmallScan + BigScan)"
+                        : "verified full scan pass (SmallScan + BigScan)";
                     request.UpdatedAtUtc = DateTime.UtcNow;
                     _activeMandatoryLootRequest = null;
                     IsLootingActive = false;
-                    _lastKillAt = DateTime.MinValue;
+                    if (!travelCandidate)
+                        _lastKillAt = DateTime.MinValue;
                     _consecutiveEmptySpacePresses = 0;
-                    _lootState = LootMachineState.ScanComplete;
-                    _scanCompleteUntil = DateTime.UtcNow.AddMilliseconds(
-                        BotConstants.Delays.LootScanCompleteHoldMs);
+
+                    // Only a real post-kill scan keeps the legacy ScanComplete hold.
+                    // A travel verification immediately returns to the passive pre-scan.
+                    _lootState = travelCandidate ? LootMachineState.Idle : LootMachineState.ScanComplete;
+                    _scanCompleteUntil = travelCandidate
+                        ? DateTime.UtcNow
+                        : DateTime.UtcNow.AddMilliseconds(BotConstants.Delays.LootScanCompleteHoldMs);
+                    _nextPassivePreScanAt = DateTime.UtcNow.AddMilliseconds(
+                        BotConstants.Loot.PassivePreScanIntervalMs);
                     ReleaseLootScanCameraLocked($"request {requestId} completed");
                     completed = true;
-                    _log($"[LootBarrier] Completed request={requestId} items={request.ItemsCollected} " +
-                         "cameraVerified=True.");
                 }
             }
 
-            if (completed)
-                _log("[Loot] Full scan completed: valid empty pass");
+            if (!completed)
+                return;
+
+            if (travelCandidate)
+            {
+                RecordTravelCandidateVerificationResult(requestId, unavailable: false);
+                _log($"[LootVerify] No confirmed item request={requestId} — navigation released.");
+                return;
+            }
+
+            _log($"[LootBarrier] PostKill completed request={requestId} items={itemsCollected} " +
+                 "cameraVerified=True.");
+            _log("[Loot] Full scan completed: valid empty pass");
+        }
+
+        /// <summary>
+        /// Travel verification could not run (capture/camera unavailable after bounded
+        /// retries). This is NOT an empty scan: the candidate is suppressed for a
+        /// bounded window and navigation is released. Mandatory post-kill requests
+        /// never use this path — they fail closed instead.
+        /// </summary>
+        private void MarkTravelVerificationUnavailable(long requestId, string reason)
+        {
+            bool marked = false;
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (_activeMandatoryLootRequest != null &&
+                    _activeMandatoryLootRequest.Id == requestId &&
+                    _activeMandatoryLootRequest.Reason == LootBarrierReason.TravelCandidateVerification &&
+                    IsMandatoryRequestActiveLocked(_activeMandatoryLootRequest))
+                {
+                    MandatoryLootRequest request = _activeMandatoryLootRequest;
+                    request.State = LootRequestState.Unavailable;
+                    request.Detail = reason ?? "travel verification unavailable";
+                    request.UpdatedAtUtc = DateTime.UtcNow;
+                    _activeMandatoryLootRequest = null;
+                    _lootState = LootMachineState.Idle;
+                    _consecutiveEmptySpacePresses = 0;
+                    IsLootingActive = false;
+                    _nextPassivePreScanAt = DateTime.UtcNow.AddMilliseconds(
+                        BotConstants.Loot.PassivePreScanIntervalMs);
+                    ReleaseLootScanCameraLocked($"request {requestId} unavailable");
+                    marked = true;
+                }
+            }
+
+            if (!marked)
+                return;
+
+            RecordTravelCandidateVerificationResult(requestId, unavailable: true);
+            _log($"[LootVerify] Verification unavailable request={requestId} reason={reason} — " +
+                 "not treated as an empty result; navigation released.");
         }
 
         private void FailMandatoryLootRequest(long requestId, string reason)
