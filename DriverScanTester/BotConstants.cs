@@ -39,6 +39,13 @@ namespace DriverScanTester
             /// </summary>
             public const int PlayerMarkerCheckCameraSettleMs = 250;
 
+            /// <summary>
+            /// Render settle time (ms) after the mandatory loot camera distance and
+            /// vertical lock were written and verified, before the first loot frame is
+            /// captured. The camera is re-read immediately before every capture.
+            /// </summary>
+            public const int LootScanCameraSettleMs = 250;
+
             /// <summary>Camera distance used only during SOD/SOP pink-pixel loot scans.</summary>
             public const short SodSopLootScanDistance = 17050;
 
@@ -981,12 +988,13 @@ namespace DriverScanTester
             public const int StartProtectionRetryMs = 20;
 
             /// <summary>
-            /// How long the W key is held during the post-teleport "position refresh"
+            /// How long the W key is held during the post-transition "position refresh"
             /// tap. The game only refreshes the player position memory after the player
             /// actually moves, so after a teleport the read stays stale until the player
-            /// takes a step. A very short W tap (like a real player's step) forces the
-            /// refresh without looking bot-like. The check runs immediately after the
-            /// tap — no settle wait.
+            /// takes a step. A very short W tap (like a real player's step) asks the game
+            /// for a refresh; <see cref="PositionSyncService"/> then polls a bounded
+            /// window for a real coordinate change — the tap alone is never treated as
+            /// proof that the position was refreshed.
             /// </summary>
             public const int StartProtectionNudgeKeyDownMs = 50;
 
@@ -1031,6 +1039,48 @@ namespace DriverScanTester
 
             /// <summary>Timeout in ms for reading a valid (nonzero) map number before starting a map route.</summary>
             public const int ValidMapReadTimeoutMs = 5000;
+
+            // ── Post-transition position synchronization ──
+            /// <summary>
+            /// How long the bot waits for the destination map to stay stable after a
+            /// transition before the map is considered confirmed. Map confirmation is
+            /// NOT the same as position readiness — the game can expose the new map
+            /// while X/Y still belong to the previous location.
+            /// </summary>
+            public const int PositionSyncMapConfirmationTimeoutMs = 5000;
+
+            /// <summary>
+            /// How long the bot waits after map confirmation for the game to publish
+            /// fresh X/Y by itself (loading screens, spawn positioning). If the position
+            /// changes within this window no W refresh is needed.
+            /// </summary>
+            public const int PositionSyncSettleTimeoutMs = 2000;
+
+            /// <summary>Poll interval in ms while waiting for map confidence and fresh coordinates.</summary>
+            public const int PositionSyncPollMs = 100;
+
+            /// <summary>
+            /// How long the bot waits for a position change after one bounded W refresh
+            /// press. A blocked W press legitimately produces no coordinate change, so
+            /// this timeout is evidence gathering — not proof of a wrong position.
+            /// </summary>
+            public const int PositionSyncWRefreshSettleTimeoutMs = 1500;
+
+            /// <summary>Poll interval in ms while observing the result of a W refresh.</summary>
+            public const int PositionSyncWRefreshPollMs = 100;
+
+            /// <summary>Maximum number of bounded W refresh presses per position synchronization.</summary>
+            public const int PositionSyncMaxWRefreshAttempts = 3;
+
+            /// <summary>Delay in ms between bounded W refresh attempts.</summary>
+            public const int PositionSyncWRefreshRetryDelayMs = 250;
+
+            /// <summary>
+            /// Maximum number of times a synchronization restarts because a newer map
+            /// transition arrived while it was running. Prevents an old attempt from
+            /// validating a newer transition and keeps the loop bounded.
+            /// </summary>
+            public const int PositionSyncMaxTransitionRestarts = 3;
 
             // ── Misc ──
             /// <summary>Key press gap for heal/mana system.</summary>
@@ -1220,6 +1270,19 @@ namespace DriverScanTester
             /// specks (effects, noise, stray name-label pixels) are skipped and treated
             /// as not-loot without wasting a mouseover probe.</summary>
             public const int PinkMinCandidateWidth = 10;
+
+            /// <summary>Number of bounded attempts to apply and read back the mandatory
+            /// normal-loot camera distance and vertical lock before the request fails.</summary>
+            public const int BarrierCameraVerificationAttempts = 3;
+
+            /// <summary>Number of bounded full-scan attempts after capture/invalid-geometry
+            /// failures before a mandatory loot request fails. A failure is never
+            /// interpreted as an empty scan.</summary>
+            public const int BarrierCaptureAttempts = 3;
+
+            /// <summary>Stationary tolerance (game units) for reusing a completed scan at a
+            /// waypoint boundary. Any larger movement invalidates the scan.</summary>
+            public const float BarrierStationaryTolerance = 0.5f;
 
             /// <summary>Minimum height (px) a connected pink blob must have to be probed as a
             /// SOD/SOP drop. See <see cref="PinkMinCandidateWidth"/>.</summary>

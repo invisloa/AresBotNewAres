@@ -99,7 +99,7 @@
           "StartPositionX": 128,
           "StartPositionY": 145,
           "ProtectionMapNumber": 36,
-          "StartPositionTolerance": 5
+          "StartPositionTolerance": 555
         }
       ],
       "CompletionMode": 0,
@@ -113,8 +113,8 @@
   "MaxWeightRatio": 0.85,
   "MinHp": 500,
   "MinMana": 100,
-  "HpBuyTarget": 120,
-  "ManaBuyTarget": 99,
+  "HpBuyTarget": 55,
+  "ManaBuyTarget": 55,
   "RedBuyTarget": 3,
   "WhiteBuyTarget": 3,
   "DryRunRepot": false,
@@ -122,7 +122,7 @@
   "StartPositionX": 214,
   "StartPositionY": 213,
   "ProtectionMapNumber": 35,
-  "StartPositionTolerance": 5,
+  "StartPositionTolerance": 555,
   "LootPriority": false,
   "TeleportKey": 54,
   "TeleportScanCode": 7,

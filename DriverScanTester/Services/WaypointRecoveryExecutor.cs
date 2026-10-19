@@ -24,7 +24,8 @@ namespace DriverScanTester.Services
             ItemSellerService itemSeller,
             BotProfile profile,
             Action<string> log,
-            Action focusGameWindow)
+            Action focusGameWindow,
+            PositionSyncService? positionSync = null)
         {
             if (memoryService == null) throw new ArgumentNullException(nameof(memoryService));
             _pathLoader = pathLoader ?? throw new ArgumentNullException(nameof(pathLoader));
@@ -42,7 +43,8 @@ namespace DriverScanTester.Services
                 itemSeller ?? throw new ArgumentNullException(nameof(itemSeller)),
                 profile ?? throw new ArgumentNullException(nameof(profile)),
                 log,
-                focusGameWindow ?? throw new ArgumentNullException(nameof(focusGameWindow)));
+                focusGameWindow ?? throw new ArgumentNullException(nameof(focusGameWindow)),
+                positionSync);
             _operationRunner = new OperationRunnerService(context, log);
         }
 

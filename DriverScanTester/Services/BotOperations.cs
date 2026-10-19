@@ -71,6 +71,12 @@ namespace DriverScanTester.Services
         {
             ctx.Log("[Operation] TeleportToCity: pressing teleport key.");
             ctx.FocusGameWindow();
+
+            // Capture the pre-teleport position and mark the transition BEFORE the key
+            // is sent. The destination coordinates can remain stale until the game has
+            // loaded, so the workflow must validate them before comparing positions.
+            ctx.PositionSync?.MarkTransitionImminent("Operation TeleportToCity");
+
             GameInput.PressKey(
                 (byte)ctx.Profile.TeleportKey,
                 (byte)ctx.Profile.TeleportScanCode);
@@ -162,6 +168,9 @@ namespace DriverScanTester.Services
             ctx.Log("[Operation] GoInsideCOT: NPC popup is open.");
 
             // 3. Click the "enter" option twice (calibrated 570, 565), 2 s apart.
+            // Mark the impending map transition first so the pre-entry position is the
+            // freshness baseline — not an older snapshot from before walking to the NPC.
+            ctx.PositionSync?.MarkTransitionImminent("GoInsideCOT");
             ClickAtCalibrated(ctx, CotEnterClickX, CotEnterClickY);
             await Task.Delay(2000, token);
             ClickAtCalibrated(ctx, CotEnterClickX, CotEnterClickY);
@@ -222,6 +231,9 @@ namespace DriverScanTester.Services
             ctx.Log("[Operation] Enter_COT: NPC dialog is open.");
 
             // 3. Move the mouse to the "enter" option (calibrated 570, 565) and left-click it.
+            // Mark the impending map transition first so the pre-entry position is the
+            // freshness baseline for post-transition position validation.
+            ctx.PositionSync?.MarkTransitionImminent("Enter_COT");
             ClickAtCalibrated(ctx, CotEnterClickX, CotEnterClickY, logPrefix: "Enter_COT");
 
             // 4. Wait 50 ms, confirm the dialog is still open, then click again.

@@ -176,6 +176,17 @@ namespace DriverScanTester.Services
             return true;
         }
 
+        private bool TryReadInt(ulong address, out int value)
+        {
+            value = 0;
+            byte[] buf = new byte[sizeof(int)];
+            if (!_read(_pid, address, buf, out uint bytesRead) || bytesRead != sizeof(int))
+                return false;
+
+            value = BitConverter.ToInt32(buf, 0);
+            return true;
+        }
+
         private ulong ReadPointer(ulong address)
         {
             byte[] buf = new byte[_pointerSize];
@@ -270,6 +281,46 @@ namespace DriverScanTester.Services
                 return (0, 0, false);
 
             return ((float)xVal, (float)yVal, true);
+        }
+
+        /// <summary>
+        /// Reads the player pointer ONCE and then reads the map, X and Y from that same
+        /// player base. This is the coherent snapshot used by position synchronization:
+        /// separate <see cref="GetMapNumber"/> / <see cref="GetPlayerPosition"/> calls
+        /// can otherwise pair a new map with coordinates from a different player object
+        /// during a map transition.
+        ///
+        /// Failed reads are reported through the snapshot flags — never as a silent
+        /// position (0, 0) or a fabricated map.
+        /// </summary>
+        public PlayerStateSnapshot GetPlayerStateSnapshot()
+        {
+            ulong pointerAddress = _moduleBase + PlayerPtrOffset;
+            bool pointerRead = TryReadPointer(pointerAddress, out ulong playerBase) && playerBase != 0;
+
+            bool mapRead = false;
+            int map = 0;
+            bool positionRead = false;
+            short x = 0;
+            short y = 0;
+
+            if (pointerRead)
+            {
+                mapRead = TryReadInt(playerBase + CurrentMapOffset, out map);
+                bool xRead = TryReadShort(playerBase + XOffset, out x);
+                bool yRead = TryReadShort(playerBase + YOffset, out y);
+                positionRead = xRead && yRead;
+            }
+
+            return new PlayerStateSnapshot(
+                pointerRead,
+                playerBase,
+                mapRead,
+                map,
+                positionRead,
+                x,
+                y,
+                DateTime.UtcNow);
         }
 
         /// <summary>

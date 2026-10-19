@@ -28,13 +28,23 @@ namespace DriverScanTester.Services
         /// <summary>Brings the game window into focus before injecting input.</summary>
         public Action FocusGameWindow { get; }
 
+        /// <summary>
+        /// Tracks map transitions and post-transition position validation. Operations
+        /// that can change the map should call <see cref="PositionSyncService.MarkTransitionImminent"/>
+        /// immediately before triggering the transition, so stale destination X/Y can
+        /// be detected reliably. Null when the caller did not supply a synchronization
+        /// service (e.g. a standalone operation test).
+        /// </summary>
+        public PositionSyncService? PositionSync { get; }
+
         public OperationContext(
             GameMemoryService memory,
             PathRunnerService pathRunner,
             ItemSellerService itemSeller,
             BotProfile profile,
             Action<string> log,
-            Action focusGameWindow)
+            Action focusGameWindow,
+            PositionSyncService? positionSync = null)
         {
             Memory = memory;
             PathRunner = pathRunner;
@@ -42,6 +52,7 @@ namespace DriverScanTester.Services
             Profile = profile;
             Log = log;
             FocusGameWindow = focusGameWindow;
+            PositionSync = positionSync;
         }
     }
 }

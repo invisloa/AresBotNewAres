@@ -3267,13 +3267,15 @@ namespace DriverScanTester.ViewModels
                 OnGameUnresponsiveDetected = HandleGameConnectionFailure
             };
             var itemSeller = new ItemSellerService(memoryService, AppendBotLog);
+            var positionSync = new PositionSyncService(memoryService, AppendBotLog, FocusGameWindow);
             var waypointRecoveryExecutor = new WaypointRecoveryExecutor(
                 memoryService,
                 pathLoader,
                 itemSeller,
                 profile,
                 AppendBotLog,
-                FocusGameWindow);
+                FocusGameWindow,
+                positionSync);
             pathRunner.WaypointRecoveryExecutor = waypointRecoveryExecutor;
 
             var operationContext = new OperationContext(
@@ -3282,12 +3284,13 @@ namespace DriverScanTester.ViewModels
                 itemSeller,
                 profile,
                 AppendBotLog,
-                FocusGameWindow);
+                FocusGameWindow,
+                positionSync);
             var operationRunner = new OperationRunnerService(operationContext, AppendBotLog);
 
             _workflowCoordinator = new BotWorkflowCoordinator(
                 memoryService, repotSystem, repotDetector, pathLoader, pathRunner, operationRunner,
-                profile, AppendBotLog, FocusGameWindow)
+                profile, AppendBotLog, FocusGameWindow, positionSync)
             {
                 PauseController = PauseController,
                 OnPlayerDeathDetected = () => HandleGameConnectionFailure("Player death confirmed (HP is zero)."),
@@ -3615,13 +3618,15 @@ namespace DriverScanTester.ViewModels
             var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
             var pathRunner = new PathRunnerService(memoryService, AppendBotLog);
             var profile = _workflowCoordinator?.ActiveProfile ?? new BotProfile();
+            var positionSync = new PositionSyncService(memoryService, AppendBotLog, FocusGameWindow);
             var operationContext = new OperationContext(
                 memoryService,
                 pathRunner,
                 new ItemSellerService(memoryService, AppendBotLog),
                 profile,
                 AppendBotLog,
-                FocusGameWindow);
+                FocusGameWindow,
+                positionSync);
             var operationRunner = new OperationRunnerService(operationContext, AppendBotLog);
 
             using var cts = new CancellationTokenSource();

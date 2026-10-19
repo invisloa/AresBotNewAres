@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Linq;
@@ -12,8 +13,55 @@ namespace DriverScanTester.Services
 {
     public class LootSystem : IDisposable
     {
-        internal enum LootScanPassResult { Collected, NoItem, CaptureFailed, Cancelled }
+        internal enum LootScanPassResult
+        {
+            Collected,
+            NoItem,
+            CaptureFailed,
+            CameraVerificationFailed,
+            InvalidGeometry,
+            Incomplete,
+            Cancelled
+        }
         private enum LootProbeResult { Miss, Collected, CaptureInvalid, Cancelled }
+
+        /// <summary>
+        /// Outcome of one normal white-loot pass. The result preserves the distinction
+        /// between a verified empty pass, a collected item, a capture failure and a
+        /// cancelled/invalid scan so failures can never be reported as "no items".
+        /// </summary>
+        internal readonly record struct LootScanPassOutcome(
+            LootScanPassResult Result,
+            LootScanPassResult SmallScan,
+            LootScanPassResult? BigScan,
+            bool CameraVerified,
+            string Detail)
+        {
+            /// <summary>Only this state may complete a mandatory loot request.</summary>
+            public bool IsValidComplete =>
+                Result == LootScanPassResult.NoItem &&
+                SmallScan == LootScanPassResult.NoItem &&
+                BigScan == LootScanPassResult.NoItem &&
+                CameraVerified;
+        }
+
+        private sealed class MandatoryLootRequest
+        {
+            public long Id { get; init; }
+            public LootBarrierReason Reason { get; set; }
+            public LootRequestState State { get; set; }
+            public bool CameraVerified { get; set; }
+            public int ItemsCollected { get; set; }
+            public string Detail { get; set; } = string.Empty;
+            public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
+            public bool NeedsFreshCycle { get; set; } = true;
+            public int CaptureAttempts { get; set; }
+            public int CameraAttempts { get; set; }
+
+            public LootRequestStatus Snapshot() => new(
+                Id, Reason, State, CameraVerified, ItemsCollected,
+                Detail ?? string.Empty, UpdatedAtUtc);
+        }
 
         /// <summary>Loot operation exercised by the Tools tab diagnostics.</summary>
         public enum LootDiagnosticMode { SodSopPink, NormalWhite }
@@ -183,6 +231,25 @@ namespace DriverScanTester.Services
         private volatile bool _pinkRescanActive;
         private volatile bool _pinkLootOnlyMode;
 
+        // ── Mandatory loot requests (MoveAndAttackAndLoot navigation barrier) ──
+        // The movement system owns the navigation obligation; these requests are the
+        // authoritative lifecycle. Only a verified complete empty scan transitions a
+        // request to Completed. "Loot cycle inactive" is never treated as success.
+        private long _nextMandatoryLootRequestId;
+        private MandatoryLootRequest? _activeMandatoryLootRequest;
+        private MandatoryLootRequest? _lastMandatoryLootRequest;
+        private readonly Dictionary<long, MandatoryLootRequest> _mandatoryLootRequestHistory = new();
+        private readonly Queue<long> _mandatoryLootRequestHistoryOrder = new();
+        private const int MaxMandatoryLootRequestHistory = 32;
+
+        // Exclusive camera ownership for normal loot scans. This is set under
+        // _cameraCursorOwnershipGate before camera writes and included in
+        // LootOwnsCameraOrCursorLocked, so no movement/retarget write can interleave
+        // with the verified scan view. The lock is never held across a wait.
+        private volatile bool _lootScanCameraOwned;
+        private bool _lootCameraReady;
+        private DateTime _lootCameraSettledAtUtc = DateTime.MinValue;
+
         /// <summary>
         /// Time since the last item was collected. Used by the movement system to extend
         /// its post-combat loot wait while the loot system is still making progress
@@ -205,6 +272,84 @@ namespace DriverScanTester.Services
             _lootState == LootMachineState.AreaLootWait ||
             _lootState == LootMachineState.Scan ||
             _lootState == LootMachineState.PinkScan;
+
+        /// <summary>
+        /// Creates (or coalesces into) the mandatory loot request for a post-kill or
+        /// waypoint-transition obligation. Consecutive kills while the request is still
+        /// pending/running/deferred reuse the same generation so the obligation cannot
+        /// be lost; a request resolved as Completed/Failed/Cancelled yields a new id.
+        /// </summary>
+        public long BeginMandatoryLootRequest(LootBarrierReason reason)
+        {
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (_activeMandatoryLootRequest != null &&
+                    IsMandatoryRequestActiveLocked(_activeMandatoryLootRequest))
+                {
+                    // A post-kill obligation is more specific than a boundary request.
+                    if (_activeMandatoryLootRequest.Reason != LootBarrierReason.PostKill)
+                        _activeMandatoryLootRequest.Reason = reason;
+                    _activeMandatoryLootRequest.UpdatedAtUtc = DateTime.UtcNow;
+                    _log($"[LootBarrier] obligation preserved request={_activeMandatoryLootRequest.Id} " +
+                         $"state={_activeMandatoryLootRequest.State} reason={_activeMandatoryLootRequest.Reason}.");
+                    return _activeMandatoryLootRequest.Id;
+                }
+
+                var request = new MandatoryLootRequest
+                {
+                    Id = ++_nextMandatoryLootRequestId,
+                    Reason = reason,
+                    State = LootRequestState.Pending,
+                    Detail = "request armed",
+                    UpdatedAtUtc = DateTime.UtcNow,
+                    NeedsFreshCycle = true
+                };
+                _activeMandatoryLootRequest = request;
+                _lastMandatoryLootRequest = request;
+                RememberMandatoryRequestLocked(request);
+                _log($"[LootBarrier] Armed reason={reason} request={request.Id}");
+                return request.Id;
+            }
+        }
+
+        /// <summary>Reads the authoritative lifecycle snapshot for one request id.</summary>
+        public bool TryGetMandatoryLootRequestStatus(long requestId, out LootRequestStatus status)
+        {
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (requestId > 0 && _mandatoryLootRequestHistory.TryGetValue(requestId, out MandatoryLootRequest? request))
+                {
+                    status = request.Snapshot();
+                    return true;
+                }
+            }
+
+            status = default;
+            return false;
+        }
+
+        /// <summary>
+        /// Cancels one request without ever producing a success state. Used for host
+        /// stop/mode changes; movement must keep navigation blocked on this result.
+        /// </summary>
+        public void CancelMandatoryLootRequest(long requestId, string reason)
+        {
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (requestId <= 0 || _activeMandatoryLootRequest == null ||
+                    _activeMandatoryLootRequest.Id != requestId ||
+                    !IsMandatoryRequestActiveLocked(_activeMandatoryLootRequest))
+                    return;
+
+                MandatoryLootRequest request = _activeMandatoryLootRequest;
+                request.State = LootRequestState.Cancelled;
+                request.Detail = reason ?? "cancelled";
+                request.UpdatedAtUtc = DateTime.UtcNow;
+                _activeMandatoryLootRequest = null;
+                ReleaseLootScanCameraLocked($"request {requestId} cancelled");
+                _log($"[LootBarrier] Cancelled request={requestId} reason={request.Detail}");
+            }
+        }
 
         /// <summary>Most recently resolved game window handle.</summary>
         private nint _hwnd;
@@ -401,7 +546,7 @@ namespace DriverScanTester.Services
 
         private bool LootOwnsCameraOrCursorLocked()
             => _pinkScanRequested || _pinkScanOwnsCameraCursor || _pinkRescanActive ||
-               _isCollecting || IsLootCycleActive;
+               _lootScanCameraOwned || _isCollecting || IsLootCycleActive;
 
         private void CancelPinkModeWorkLocked()
         {
@@ -973,12 +1118,21 @@ namespace DriverScanTester.Services
                 LootScanPassResult.CaptureFailed => BuildDiagnosticResult(
                     mode, LootDiagnosticOutcome.CaptureFailed, items, passes,
                     "Game-client capture failed — see the [LootCapture] log lines above."),
+                LootScanPassResult.CameraVerificationFailed => BuildDiagnosticResult(
+                    mode, LootDiagnosticOutcome.CaptureFailed, items, passes,
+                    "Loot scan camera could not be verified — the frame was not analyzed."),
+                LootScanPassResult.InvalidGeometry => BuildDiagnosticResult(
+                    mode, LootDiagnosticOutcome.CaptureFailed, items, passes,
+                    "Loot scan geometry was invalid — the scan was not treated as empty."),
+                LootScanPassResult.Incomplete => BuildDiagnosticResult(
+                    mode, LootDiagnosticOutcome.CaptureFailed, items, passes,
+                    "Loot scan pass was incomplete — the scan was not treated as empty."),
                 LootScanPassResult.Cancelled => BuildDiagnosticResult(
                     mode, LootDiagnosticOutcome.Cancelled, items, passes,
                     "Scan cancelled (timeout, focus loss, or city entry)."),
                 _ => BuildDiagnosticResult(
-                    mode, LootDiagnosticOutcome.NoItem, items, passes,
-                    $"Scan completed ({passes} pass(es)).")
+                    mode, LootDiagnosticOutcome.CaptureFailed, items, passes,
+                    $"Scan ended without a valid empty result ({passes} pass(es)).")
             };
         }
 
@@ -1023,7 +1177,7 @@ namespace DriverScanTester.Services
             {
                 ResetPlayerMarkerConfirmation();
                 StopScanSpacebarSpam();
-                CancelAllLootWork("game window is not foreground");
+                CancelAllLootWork("game window is not foreground", deferMandatoryRequest: true);
                 if (!_focusCaptureSkipLogged)
                 {
                     _focusCaptureSkipLogged = true;
@@ -1203,6 +1357,11 @@ namespace DriverScanTester.Services
                 }
             }
 
+            // ── Mandatory post-kill / waypoint-transition obligation ──
+            // The request is serviced only after the combat pause and pink-scan
+            // handling above. A selected mob defers it; the obligation stays alive.
+            ServiceMandatoryLootRequest(isMobSelected);
+
             // ── A selected mob pauses loot ──
             // While a mob is targeted (combat in progress) the loot machine does NOT
             // scan — it just waits for the fight to end. Looting while fighting looks
@@ -1224,8 +1383,11 @@ namespace DriverScanTester.Services
                     }
 
                     // A mob selected mid-loot interrupts the loot phase — combat takes
-                    // over and the next kill re-arms the phase.
+                    // over and the next kill re-arms the phase. The mandatory request (if
+                    // any) is only Deferred: it is never completed by this interruption.
                     IsLootingActive = false;
+                    lock (_cameraCursorOwnershipGate)
+                        ReleaseLootScanCameraLocked("combat target selected — loot deferred");
 
                     await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
                     return;
@@ -1337,10 +1499,7 @@ namespace DriverScanTester.Services
                     break;
 
                 case LootMachineState.Scan:
-                    // ── Zoom camera in so ground items appear larger and their
-                    //    white highlights / name text become more detectable. ──
-                    _memoryService.SetCameraDistance(BotConstants.Camera.LootScanDistance);
-
+                {
                     // ── Wait 100ms before the pixel scan. During this wait,
                     //    spam spacebar to opportunistically collect items that
                     //    are already under / near the character via area-loot. ──
@@ -1352,19 +1511,45 @@ namespace DriverScanTester.Services
                         break;
                     }
 
+                    // A pass belongs to the mandatory request only when that exact
+                    // request was already Running when the pass started. A request
+                    // created while a pass is in flight must start a fresh cycle.
+                    MandatoryLootRequest? mandatoryRequest = GetRunningMandatoryRequestForScan();
+                    long mandatoryRequestId = mandatoryRequest?.Id ?? 0;
+
                     // ── Pixel scan with spacebar spam on a background thread.
                     //    Each successful scan loots one (or more) items, then we
                     //    rescan to catch any other items that may be visible.
                     //    Items under the character (exclude zone) get collected
                     //    via the background spacebar spam simultaneously. ──
                     StartScanSpacebarSpam();
+                    LootScanPassOutcome outcome;
                     try
                     {
-                        if (PixelScan())
+                        _log($"[Loot] PixelScan starting (request={(mandatoryRequestId > 0 ? mandatoryRequestId.ToString() : "none")}).");
+                        outcome = PixelScan();
+                    }
+                    finally
+                    {
+                        StopScanSpacebarSpam();
+                    }
+
+                    if (outcome.Result == LootScanPassResult.Collected)
+                    {
+                        // Item was found and collected — rescan next tick to drain remaining items.
+                        _lastItemCollectedAt = DateTime.UtcNow;
+                        _nextActionTime = DateTime.UtcNow.AddMilliseconds(50);
+                        if (mandatoryRequestId > 0)
                         {
-                            // Item was found and collected — rescan next tick to drain remaining items.
-                            _lastItemCollectedAt = DateTime.UtcNow;
-                            _nextActionTime = DateTime.UtcNow.AddMilliseconds(50);
+                            RecordMandatoryItemCollected(mandatoryRequestId);
+                            _log($"[Loot] Item collected — mandatory request={mandatoryRequestId} requires another scan.");
+                        }
+                    }
+                    else if (outcome.Result == LootScanPassResult.NoItem && outcome.IsValidComplete)
+                    {
+                        if (mandatoryRequestId > 0)
+                        {
+                            CompleteMandatoryLootRequest(mandatoryRequestId, outcome);
                         }
                         else
                         {
@@ -1378,13 +1563,78 @@ namespace DriverScanTester.Services
                             _scanCompleteUntil = DateTime.UtcNow.AddMilliseconds(
                                 BotConstants.Delays.LootScanCompleteHoldMs);
                             _consecutiveEmptySpacePresses = 0;
+                            lock (_cameraCursorOwnershipGate)
+                                ReleaseLootScanCameraLocked("normal scan complete");
                         }
                     }
-                    finally
+                    else if (outcome.Result == LootScanPassResult.Cancelled)
                     {
-                        StopScanSpacebarSpam();
+                        if (mandatoryRequestId > 0)
+                        {
+                            DeferMandatoryLootRequest(mandatoryRequestId, outcome.Detail ?? "scan cancelled");
+                        }
+                        else
+                        {
+                            _log("[Loot] Scan cancelled — not treated as an empty result.");
+                            _lootState = LootMachineState.Idle;
+                            _nextActionTime = DateTime.UtcNow;
+                            _consecutiveEmptySpacePresses = 0;
+                            lock (_cameraCursorOwnershipGate)
+                                ReleaseLootScanCameraLocked("scan cancelled");
+                        }
+                    }
+                    else
+                    {
+                        // Capture failures, camera verification failures, invalid
+                        // geometry and incomplete passes are never empty results.
+                        string failureDetail = $"SmallScan={outcome.SmallScan}, BigScan={outcome.BigScan?.ToString() ?? "not-run"}, detail={outcome.Detail}";
+                        _log($"[Loot] Scan pass invalid status={outcome.Result} ({failureDetail}) — not treating as no items.");
+
+                        if (mandatoryRequestId > 0)
+                        {
+                            bool retry;
+                            int attempt;
+                            if (outcome.Result == LootScanPassResult.CameraVerificationFailed)
+                            {
+                                retry = IncrementMandatoryCameraAttempt(
+                                    mandatoryRequestId,
+                                    BotConstants.Loot.BarrierCameraVerificationAttempts,
+                                    out attempt);
+                            }
+                            else
+                            {
+                                retry = IncrementMandatoryCaptureAttempt(
+                                    mandatoryRequestId,
+                                    BotConstants.Loot.BarrierCaptureAttempts,
+                                    out attempt);
+                            }
+
+                            if (retry)
+                            {
+                                _log($"[Loot] Mandatory request={mandatoryRequestId} retrying after invalid pass " +
+                                     $"({attempt}/{BotConstants.Loot.BarrierCaptureAttempts}).");
+                                _nextActionTime = DateTime.UtcNow.AddMilliseconds(
+                                    Math.Max(BotConstants.Delays.LootUpdateMs,
+                                             BotConstants.Camera.LootScanCameraSettleMs));
+                            }
+                            else
+                            {
+                                FailMandatoryLootRequest(
+                                    mandatoryRequestId,
+                                    $"scan failed status={outcome.Result} after {attempt} attempts ({failureDetail})");
+                            }
+                        }
+                        else
+                        {
+                            _lootState = LootMachineState.Idle;
+                            _nextActionTime = DateTime.UtcNow.AddMilliseconds(100);
+                            _consecutiveEmptySpacePresses = 0;
+                            lock (_cameraCursorOwnershipGate)
+                                ReleaseLootScanCameraLocked($"scan failed status={outcome.Result}");
+                        }
                     }
                     break;
+                }
 
                 case LootMachineState.PinkScan:
                     // ── SOD/SOP-only post-kill scan (MoveAndAttack waypoints) ──
@@ -1506,16 +1756,446 @@ namespace DriverScanTester.Services
         /// </summary>
         private bool ShouldAbortLoot() => _memoryService.GetIsInCity();
 
-        private bool PixelScan()
-        {
-            // Zoom camera in during the pixel scan so ground items appear larger
-            // and their white highlights / name text become more detectable.
-            // The movement/combat system restores its own distance on the next tick.
-            _memoryService.SetCameraDistance(BotConstants.Camera.LootScanDistance);
+        private static bool IsMandatoryRequestActiveLocked(MandatoryLootRequest request)
+            => request.State == LootRequestState.Pending ||
+               request.State == LootRequestState.Running ||
+               request.State == LootRequestState.Deferred;
 
-            if (ScanRegion(smallX, smallY, "SmallScan") == LootScanPassResult.Collected)
-                return true;
-            return ScanRegion(bigX, bigY, "BigScan") == LootScanPassResult.Collected;
+        private void RememberMandatoryRequestLocked(MandatoryLootRequest request)
+        {
+            _mandatoryLootRequestHistory[request.Id] = request;
+            _mandatoryLootRequestHistoryOrder.Enqueue(request.Id);
+            while (_mandatoryLootRequestHistoryOrder.Count > MaxMandatoryLootRequestHistory)
+            {
+                long evicted = _mandatoryLootRequestHistoryOrder.Dequeue();
+                _mandatoryLootRequestHistory.Remove(evicted);
+            }
+        }
+
+        /// <summary>
+        /// Starts the fresh area-loot + verified scan cycle for the active mandatory
+        /// request. A request created while a scan/collection is already running is
+        /// never satisfied by that older pass: it starts a fresh cycle afterwards.
+        /// </summary>
+        private void ServiceMandatoryLootRequest(bool isMobSelected)
+        {
+            MandatoryLootRequest? request;
+            lock (_cameraCursorOwnershipGate)
+                request = _activeMandatoryLootRequest;
+
+            if (request == null || !IsMandatoryRequestActiveLocked(request))
+                return;
+
+            if (PinkLootOnlyMode)
+            {
+                CancelMandatoryLootRequest(request.Id, "mode changed to MoveAndAttack (SOD/SOP only)");
+                return;
+            }
+
+            if (isMobSelected)
+            {
+                DeferMandatoryLootRequest(request.Id, "combat target selected");
+                return;
+            }
+
+            // Never interrupt an in-flight capture/collection: the current pass is
+            // simply not tagged with this request, so it cannot satisfy the obligation.
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (_isCollecting || _lootState == LootMachineState.Scan ||
+                    _lootState == LootMachineState.PinkScan)
+                    return;
+
+                request = _activeMandatoryLootRequest;
+                if (request == null || !IsMandatoryRequestActiveLocked(request))
+                    return;
+
+                bool needsFreshStart = request.NeedsFreshCycle ||
+                                       request.State != LootRequestState.Running ||
+                                       _lootState == LootMachineState.Idle ||
+                                       _lootState == LootMachineState.ScanComplete ||
+                                       _lootState == LootMachineState.PostMobTab;
+                if (!needsFreshStart)
+                    return;
+
+                request.State = LootRequestState.Running;
+                request.NeedsFreshCycle = false;
+                request.Detail = "fresh mandatory loot cycle running";
+                request.UpdatedAtUtc = DateTime.UtcNow;
+                _lootState = LootMachineState.AreaLoot;
+                _nextActionTime = DateTime.UtcNow;
+                _consecutiveEmptySpacePresses = 0;
+                _lastKillAt = DateTime.UtcNow;
+                _log($"[LootBarrier] request={request.Id} running — area loot starting (reason={request.Reason}).");
+            }
+        }
+
+        private MandatoryLootRequest? GetRunningMandatoryRequestForScan()
+        {
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (_activeMandatoryLootRequest != null &&
+                    _activeMandatoryLootRequest.State == LootRequestState.Running &&
+                    !_activeMandatoryLootRequest.NeedsFreshCycle)
+                    return _activeMandatoryLootRequest;
+            }
+            return null;
+        }
+
+        private void DeferMandatoryLootRequest(long requestId, string reason)
+        {
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (_activeMandatoryLootRequest == null ||
+                    _activeMandatoryLootRequest.Id != requestId ||
+                    !IsMandatoryRequestActiveLocked(_activeMandatoryLootRequest))
+                    return;
+
+                MandatoryLootRequest request = _activeMandatoryLootRequest;
+                bool changed = request.State != LootRequestState.Deferred;
+                request.State = LootRequestState.Deferred;
+                request.NeedsFreshCycle = true;
+                request.Detail = reason ?? "loot deferred";
+                request.UpdatedAtUtc = DateTime.UtcNow;
+                ReleaseLootScanCameraLocked($"request {requestId} deferred");
+                if (_lootState != LootMachineState.PinkScan)
+                    _lootState = LootMachineState.Idle;
+                _consecutiveEmptySpacePresses = 0;
+                IsLootingActive = false;
+                if (changed)
+                    _log($"[LootBarrier] Deferred request={requestId} reason={request.Detail} — obligation preserved.");
+            }
+        }
+
+        private void RecordMandatoryItemCollected(long requestId)
+        {
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (_activeMandatoryLootRequest != null &&
+                    _activeMandatoryLootRequest.Id == requestId &&
+                    _activeMandatoryLootRequest.State == LootRequestState.Running)
+                {
+                    _activeMandatoryLootRequest.ItemsCollected++;
+                    _activeMandatoryLootRequest.CaptureAttempts = 0;
+                    _activeMandatoryLootRequest.CameraAttempts = 0;
+                    _activeMandatoryLootRequest.UpdatedAtUtc = DateTime.UtcNow;
+                }
+            }
+        }
+
+        private bool IncrementMandatoryCaptureAttempt(long requestId, int maxAttempts, out int attempt)
+        {
+            lock (_cameraCursorOwnershipGate)
+            {
+                attempt = 0;
+                if (_activeMandatoryLootRequest == null ||
+                    _activeMandatoryLootRequest.Id != requestId ||
+                    _activeMandatoryLootRequest.State != LootRequestState.Running)
+                    return false;
+
+                attempt = ++_activeMandatoryLootRequest.CaptureAttempts;
+                _activeMandatoryLootRequest.UpdatedAtUtc = DateTime.UtcNow;
+                return attempt < maxAttempts;
+            }
+        }
+
+        private bool IncrementMandatoryCameraAttempt(long requestId, int maxAttempts, out int attempt)
+        {
+            lock (_cameraCursorOwnershipGate)
+            {
+                attempt = 0;
+                if (_activeMandatoryLootRequest == null ||
+                    _activeMandatoryLootRequest.Id != requestId ||
+                    _activeMandatoryLootRequest.State != LootRequestState.Running)
+                    return false;
+
+                attempt = ++_activeMandatoryLootRequest.CameraAttempts;
+                _activeMandatoryLootRequest.UpdatedAtUtc = DateTime.UtcNow;
+                return attempt < maxAttempts;
+            }
+        }
+
+        private void CompleteMandatoryLootRequest(long requestId, LootScanPassOutcome outcome)
+        {
+            bool completed = false;
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (_activeMandatoryLootRequest != null &&
+                    _activeMandatoryLootRequest.Id == requestId &&
+                    _activeMandatoryLootRequest.State == LootRequestState.Running &&
+                    outcome.IsValidComplete)
+                {
+                    MandatoryLootRequest request = _activeMandatoryLootRequest;
+                    request.State = LootRequestState.Completed;
+                    request.CameraVerified = true;
+                    request.Detail = "verified full scan pass (SmallScan + BigScan)";
+                    request.UpdatedAtUtc = DateTime.UtcNow;
+                    _activeMandatoryLootRequest = null;
+                    IsLootingActive = false;
+                    _lastKillAt = DateTime.MinValue;
+                    _consecutiveEmptySpacePresses = 0;
+                    _lootState = LootMachineState.ScanComplete;
+                    _scanCompleteUntil = DateTime.UtcNow.AddMilliseconds(
+                        BotConstants.Delays.LootScanCompleteHoldMs);
+                    ReleaseLootScanCameraLocked($"request {requestId} completed");
+                    completed = true;
+                    _log($"[LootBarrier] Completed request={requestId} items={request.ItemsCollected} " +
+                         "cameraVerified=True.");
+                }
+            }
+
+            if (completed)
+                _log("[Loot] Full scan completed: valid empty pass");
+        }
+
+        private void FailMandatoryLootRequest(long requestId, string reason)
+        {
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (_activeMandatoryLootRequest == null ||
+                    _activeMandatoryLootRequest.Id != requestId)
+                    return;
+
+                MandatoryLootRequest request = _activeMandatoryLootRequest;
+                request.State = LootRequestState.Failed;
+                request.Detail = reason ?? "loot operation failed";
+                request.UpdatedAtUtc = DateTime.UtcNow;
+                _activeMandatoryLootRequest = null;
+                _lootState = LootMachineState.Idle;
+                _consecutiveEmptySpacePresses = 0;
+                IsLootingActive = false;
+                ReleaseLootScanCameraLocked($"request {requestId} failed");
+                _log($"[LootBarrier] Failed request={requestId} reason={request.Detail} — " +
+                     "no empty result was recorded; navigation stays blocked.");
+            }
+        }
+
+        private void LogMandatoryCameraFailure(long requestId, string detail)
+        {
+            if (requestId > 0)
+                _log($"[LootCamera] Verification failed request={requestId}: {detail}");
+            else
+                _log($"[LootCamera] Verification failed: {detail}");
+        }
+
+        /// <summary>The normal white-loot scan always uses the configured constant.</summary>
+        internal static short NormalLootScanDistance => BotConstants.Camera.LootScanDistance;
+
+        /// <summary>
+        /// Pure capture-authorization rule: the requested and actual camera values must
+        /// match, stabilization must have elapsed and loot must still own the camera.
+        /// </summary>
+        internal static bool IsLootCaptureAuthorized(
+            short requestedDistance,
+            short actualDistance,
+            short requestedVerticalLock,
+            short actualVerticalLock,
+            bool stabilizationElapsed,
+            bool ownershipHeld)
+            => ownershipHeld &&
+               stabilizationElapsed &&
+               actualDistance == requestedDistance &&
+               actualVerticalLock == requestedVerticalLock;
+
+        /// <summary>
+        /// Combines the two normal scan regions into one pass result. An empty small
+        /// region alone is never a complete pass, and any invalid big-region result
+        /// cannot be ignored because the small region was empty.
+        /// </summary>
+        internal static LootScanPassResult CombineNormalLootScanResults(
+            LootScanPassResult small,
+            LootScanPassResult? big,
+            bool cameraVerified)
+        {
+            if (!cameraVerified)
+                return LootScanPassResult.CameraVerificationFailed;
+            if (small == LootScanPassResult.Collected)
+                return LootScanPassResult.Collected;
+            if (small != LootScanPassResult.NoItem)
+                return small;
+            if (!big.HasValue)
+                return LootScanPassResult.Incomplete;
+            if (big.Value == LootScanPassResult.Collected)
+                return LootScanPassResult.Collected;
+            if (big.Value != LootScanPassResult.NoItem)
+                return big.Value;
+            return LootScanPassResult.NoItem;
+        }
+
+        /// <summary>
+        /// Acquires exclusive ownership of the loot camera and applies + verifies the
+        /// configured scan distance and vertical lock. Retries are bounded; a failure
+        /// never authorizes a scan.
+        /// </summary>
+        private bool EnsureLootScanCamera(out string detail)
+        {
+            short requestedDistance = NormalLootScanDistance;
+            short requestedVerticalLock = BotConstants.Camera.DefaultVerticalLock;
+            detail = string.Empty;
+
+            long requestId = _activeMandatoryLootRequest?.Id ?? 0;
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (!_lootScanCameraOwned)
+                    _log($"[LootCamera] Acquiring camera for loot scan (request={requestId}).");
+                _lootScanCameraOwned = true;
+                _lootCameraReady = false;
+                _lootCameraSettledAtUtc = DateTime.MinValue;
+            }
+
+            const int maxAttempts = BotConstants.Loot.BarrierCameraVerificationAttempts;
+            short actualDistance = 0;
+            short actualVerticalLock = 0;
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                lock (_cameraCursorOwnershipGate)
+                {
+                    _memoryService.SetCameraDistance(requestedDistance);
+                    _memoryService.SetCameraVerticalLock(requestedVerticalLock);
+                }
+
+                bool distanceRead = _memoryService.TryGetCameraDistance(out actualDistance);
+                bool lockRead = _memoryService.TryGetCameraVerticalLock(out actualVerticalLock);
+                bool matches = distanceRead && lockRead &&
+                    actualDistance == requestedDistance &&
+                    actualVerticalLock == requestedVerticalLock;
+
+                _log($"[LootCamera] Requested distance={requestedDistance} actual={(distanceRead ? actualDistance.ToString() : "unreadable")}; " +
+                     $"requested verticalLock={requestedVerticalLock} actual={(lockRead ? actualVerticalLock.ToString() : "unreadable")} " +
+                     $"(attempt {attempt}/{maxAttempts}, request={requestId}).");
+
+                if (matches)
+                    break;
+
+                if (attempt >= maxAttempts)
+                {
+                    detail = $"camera readback mismatch after {maxAttempts} attempts " +
+                             $"(distance requested={requestedDistance} actual={(distanceRead ? actualDistance.ToString() : "unreadable")}, " +
+                             $"verticalLock requested={requestedVerticalLock} actual={(lockRead ? actualVerticalLock.ToString() : "unreadable")})";
+                    LogMandatoryCameraFailure(requestId, detail);
+                    return false;
+                }
+
+                _log($"[LootCamera] Readback mismatch — reapplying scan camera (attempt {attempt}/{maxAttempts}, request={requestId}).");
+                if (_scanToken.WaitHandle.WaitOne(BotConstants.Camera.LootScanCameraSettleMs))
+                {
+                    detail = "cancelled while retrying the loot camera";
+                    return false;
+                }
+            }
+
+            // Let the client render the verified view. The capture path re-reads the
+            // camera immediately before the frame is taken.
+            if (_scanToken.WaitHandle.WaitOne(BotConstants.Camera.LootScanCameraSettleMs))
+            {
+                detail = "cancelled during loot-camera stabilization";
+                return false;
+            }
+
+            lock (_cameraCursorOwnershipGate)
+            {
+                _lootCameraReady = true;
+                _lootCameraSettledAtUtc = DateTime.UtcNow;
+            }
+
+            if (!VerifyLootScanCamera(out actualDistance, out actualVerticalLock, out string verifyDetail))
+            {
+                detail = verifyDetail;
+                LogMandatoryCameraFailure(requestId, detail);
+                return false;
+            }
+
+            _log($"[LootCamera] Camera settled — distance={actualDistance}, verticalLock={actualVerticalLock}, request={requestId}.");
+            return true;
+        }
+
+        /// <summary>Reads the live camera and applies the mandatory capture gate.</summary>
+        private bool VerifyLootScanCamera(
+            out short actualDistance,
+            out short actualVerticalLock,
+            out string detail)
+        {
+            short requestedDistance = NormalLootScanDistance;
+            short requestedVerticalLock = BotConstants.Camera.DefaultVerticalLock;
+
+            bool distanceRead = _memoryService.TryGetCameraDistance(out actualDistance);
+            bool lockRead = _memoryService.TryGetCameraVerticalLock(out actualVerticalLock);
+
+            bool ownershipHeld;
+            bool stabilizationElapsed;
+            lock (_cameraCursorOwnershipGate)
+            {
+                ownershipHeld = _lootScanCameraOwned;
+                stabilizationElapsed = _lootCameraReady &&
+                                       DateTime.UtcNow >= _lootCameraSettledAtUtc;
+            }
+
+            bool authorized = distanceRead && lockRead &&
+                IsLootCaptureAuthorized(
+                    requestedDistance, actualDistance,
+                    requestedVerticalLock, actualVerticalLock,
+                    stabilizationElapsed, ownershipHeld);
+
+            detail = authorized
+                ? string.Empty
+                : $"requested distance={requestedDistance} actual={(distanceRead ? actualDistance.ToString() : "unreadable")}; " +
+                  $"requested verticalLock={requestedVerticalLock} actual={(lockRead ? actualVerticalLock.ToString() : "unreadable")}; " +
+                  $"stabilized={stabilizationElapsed}; owned={ownershipHeld}";
+            return authorized;
+        }
+
+        private void ReleaseLootScanCameraLocked(string reason)
+        {
+            if (!_lootScanCameraOwned && !_lootCameraReady)
+                return;
+
+            _lootScanCameraOwned = false;
+            _lootCameraReady = false;
+            _lootCameraSettledAtUtc = DateTime.MinValue;
+            _log($"[LootCamera] Camera ownership released — {reason}.");
+        }
+
+        private LootScanPassOutcome PixelScan()
+        {
+            if (!EnsureLootScanCamera(out string cameraDetail))
+            {
+                return new LootScanPassOutcome(
+                    LootScanPassResult.CameraVerificationFailed,
+                    LootScanPassResult.CameraVerificationFailed,
+                    null,
+                    CameraVerified: false,
+                    cameraDetail);
+            }
+
+            _log("[Loot] SmallScan started");
+            LootScanPassResult small = ScanRegion(
+                smallX, smallY, "SmallScan", verifyLootCamera: true);
+            _log($"[Loot] SmallScan completed status={small}");
+            if (small == LootScanPassResult.Collected)
+            {
+                return new LootScanPassOutcome(
+                    LootScanPassResult.Collected, small, null, CameraVerified: true, "small-region item collected");
+            }
+            if (small != LootScanPassResult.NoItem)
+            {
+                return new LootScanPassOutcome(
+                    small, small, null,
+                    CameraVerified: small != LootScanPassResult.CameraVerificationFailed,
+                    $"SmallScan status={small}");
+            }
+
+            _log("[Loot] BigScan started");
+            LootScanPassResult big = ScanRegion(
+                bigX, bigY, "BigScan", verifyLootCamera: true);
+            _log($"[Loot] BigScan completed status={big}");
+
+            bool cameraVerified = big != LootScanPassResult.CameraVerificationFailed &&
+                                  small != LootScanPassResult.CameraVerificationFailed;
+            LootScanPassResult result = CombineNormalLootScanResults(small, big, cameraVerified);
+            return new LootScanPassOutcome(
+                result, small, big, cameraVerified,
+                $"SmallScan={small}, BigScan={big}");
         }
 
         /// <summary>
@@ -1773,9 +2453,56 @@ namespace DriverScanTester.Services
             };
         }
 
+        /// <summary>
+        /// Captures the frame used by one scan region. When <paramref name="verifyLootCamera"/>"
+        /// is set, the camera is re-read under the ownership gate immediately before the
+        /// capture so no movement/retarget writer can replace the verified view between
+        /// the check and the frame grab.
+        /// </summary>
+        private bool CaptureScanFrame(
+            bool verifyLootCamera,
+            string regionName,
+            out LootScanPassResult failureResult)
+        {
+            failureResult = LootScanPassResult.CaptureFailed;
+
+            if (verifyLootCamera)
+            {
+                lock (_cameraCursorOwnershipGate)
+                {
+                    if (!VerifyLootScanCamera(out short actualDistance, out short actualVerticalLock, out string detail))
+                    {
+                        _log($"[LootCamera] {regionName}: capture refused — camera not verified ({detail}).");
+                        failureResult = LootScanPassResult.CameraVerificationFailed;
+                        return false;
+                    }
+
+                    _log($"[LootCamera] {regionName}: capture authorized — distance={actualDistance}, " +
+                         $"verticalLock={actualVerticalLock}.");
+
+                    if (!CaptureScreen())
+                    {
+                        failureResult = LootScanPassResult.CaptureFailed;
+                        return false;
+                    }
+
+                    return true;
+                }
+            }
+
+            if (!CaptureScreen())
+            {
+                failureResult = LootScanPassResult.CaptureFailed;
+                return false;
+            }
+
+            return true;
+        }
+
         private LootScanPassResult ScanRegion(
             int[] xRange, int[] yRange, string regionName,
-            bool pinkOnly = false, string scanReason = "white-loot")
+            bool pinkOnly = false, string scanReason = "white-loot",
+            bool verifyLootCamera = false)
         {
             string pixelNoun = pinkOnly ? "pink" : "white";
 
@@ -1801,12 +2528,14 @@ namespace DriverScanTester.Services
 
             try
             {
-                if (!CaptureScreen())
+                if (!CaptureScanFrame(verifyLootCamera, regionName, out LootScanPassResult captureFailure))
                 {
-                    diagnosticOutcome = "capture-failed";
+                    diagnosticOutcome = captureFailure == LootScanPassResult.CameraVerificationFailed
+                        ? "camera-verification-failed"
+                        : "capture-failed";
                     if (pinkOnly && ScreenshotService.LootScanCaptureEnabled)
                         LogPinkCaptureFailureDiagnostics(scanStartedUtc, scanReason, _lastCaptureResult);
-                    return LootScanPassResult.CaptureFailed;
+                    return captureFailure;
                 }
                 if (_bitmap == null || _clientWidth <= 0 || _clientHeight <= 0 ||
                     _lastStableCaptureGeometry == null)
@@ -1871,9 +2600,9 @@ namespace DriverScanTester.Services
 
                 if (xStart >= xEnd || yStart >= yEnd)
                 {
-                    _log($"[Loot] {regionName}: clamped range is empty (out of client area).");
-                    diagnosticOutcome = "empty-range";
-                    return LootScanPassResult.NoItem;
+                    _log($"[Loot] {regionName}: clamped range is empty (out of client area); scan is invalid, not empty.");
+                    diagnosticOutcome = "invalid-geometry";
+                    return LootScanPassResult.InvalidGeometry;
                 }
 
                 // diagnosticFrame was cloned immediately after this successful capture,
@@ -2071,9 +2800,9 @@ namespace DriverScanTester.Services
                         {
                             _log($"[Loot] {regionName}: probe budget ({MaxLootProbesPerRegion}) exhausted — " +
                                  $"{diagnosticWhiteHits.Count} probed px of {diagnosticWhiteCount} {pixelNoun} px in {components.Count} components; " +
-                                 $"aborting region (likely UI/effect clutter).");
-                            diagnosticOutcome = "too-many-white";
-                            return LootScanPassResult.NoItem;
+                                 $"region incomplete (likely UI/effect clutter), not treated as empty.");
+                            diagnosticOutcome = "probe-budget-exhausted";
+                            return LootScanPassResult.Incomplete;
                         }
                     }
                 }
@@ -2098,7 +2827,7 @@ namespace DriverScanTester.Services
             {
                 _log($"PixelScan error: {ex.Message}");
                 diagnosticOutcome = "scan-error";
-                return pinkOnly ? LootScanPassResult.CaptureFailed : LootScanPassResult.NoItem;
+                return LootScanPassResult.CaptureFailed;
             }
             finally
             {
@@ -2352,15 +3081,36 @@ namespace DriverScanTester.Services
             _playerMarkerCandidateDetectedAt = DateTime.MinValue;
         }
 
-        private void CancelAllLootWork(string reason)
+        private void CancelAllLootWork(string reason, bool deferMandatoryRequest = false)
         {
             bool hadWork;
             lock (_cameraCursorOwnershipGate)
             {
                 PinkRescanSnapshot pendingRescan = _pinkRescanScheduler.Snapshot;
+                MandatoryLootRequest? mandatoryRequest = _activeMandatoryLootRequest;
                 hadWork = _pinkScanRequested || _pinkScanOwnsCameraCursor || _pinkRescanActive ||
                           _lootState != LootMachineState.Idle || IsLootingActive ||
-                          pendingRescan.Pending || pendingRescan.Active;
+                          pendingRescan.Pending || pendingRescan.Active ||
+                          (mandatoryRequest != null && IsMandatoryRequestActiveLocked(mandatoryRequest));
+
+                if (mandatoryRequest != null && IsMandatoryRequestActiveLocked(mandatoryRequest))
+                {
+                    if (deferMandatoryRequest)
+                    {
+                        mandatoryRequest.State = LootRequestState.Deferred;
+                        mandatoryRequest.NeedsFreshCycle = true;
+                        mandatoryRequest.Detail = reason ?? "loot temporarily cancelled";
+                        mandatoryRequest.UpdatedAtUtc = DateTime.UtcNow;
+                    }
+                    else
+                    {
+                        mandatoryRequest.State = LootRequestState.Cancelled;
+                        mandatoryRequest.Detail = reason ?? "loot cancelled";
+                        mandatoryRequest.UpdatedAtUtc = DateTime.UtcNow;
+                        _activeMandatoryLootRequest = null;
+                    }
+                }
+
                 _pinkScanRequested = false;
                 _pinkScanRequestedAt = DateTime.MinValue;
                 _pinkRescanScheduler.Cancel();
@@ -2373,6 +3123,7 @@ namespace DriverScanTester.Services
                 _lastKillAt = DateTime.MinValue;
                 _wasMobSelectedPrev = false;
                 IsLootingActive = false;
+                ReleaseLootScanCameraLocked($"all loot work cleared: {reason}");
             }
             if (hadWork)
                 _log($"[Loot] Pink/loot work cleared: {reason}.");

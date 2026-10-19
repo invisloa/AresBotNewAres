@@ -28,6 +28,7 @@ namespace DriverScanTester.Services
         private readonly Action _stopMoving;
         private readonly Action _holdSkillThree;
         private readonly Action _releaseSkillThree;
+        private readonly Func<bool>? _cameraControlBlocked;
 
         private RecoveryStage _stage;
         private DateTime _startedAt;
@@ -43,13 +44,15 @@ namespace DriverScanTester.Services
             Action<string> log,
             Action stopMoving,
             Action holdSkillThree,
-            Action releaseSkillThree)
+            Action releaseSkillThree,
+            Func<bool>? cameraControlBlocked = null)
         {
             _memoryService = memoryService ?? throw new ArgumentNullException(nameof(memoryService));
             _log = log ?? throw new ArgumentNullException(nameof(log));
             _stopMoving = stopMoving ?? throw new ArgumentNullException(nameof(stopMoving));
             _holdSkillThree = holdSkillThree ?? throw new ArgumentNullException(nameof(holdSkillThree));
             _releaseSkillThree = releaseSkillThree ?? throw new ArgumentNullException(nameof(releaseSkillThree));
+            _cameraControlBlocked = cameraControlBlocked;
         }
 
         public void Start(float currX, float currY, short cameraDistance)
@@ -63,8 +66,15 @@ namespace DriverScanTester.Services
 
             _stopMoving();
             _releaseSkillThree();
-            _memoryService.SetCameraDistance(cameraDistance);
-            _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+            if (_cameraControlBlocked?.Invoke() == true)
+            {
+                _log("[WaypointRecovery] AttackMob camera setup skipped — mandatory loot owns the camera.");
+            }
+            else
+            {
+                _memoryService.SetCameraDistance(cameraDistance);
+                _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+            }
             _log($"[WaypointRecovery] AttackMob started. CameraDistance={cameraDistance}.");
         }
 
