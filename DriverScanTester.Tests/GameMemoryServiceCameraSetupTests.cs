@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using DriverScanTester.Services;
 using Xunit;
@@ -41,6 +41,22 @@ namespace DriverScanTester.Tests
 
             GameMemoryService noCamera = new MemoryFixture().CreateService();
             Assert.False(noCamera.TryGetCameraDistance(out _));
+        }
+
+        [Fact]
+        public void TryGetCameraVerticalLockReadsTheCurrentValueAndFailsOnMissingPointer()
+        {
+            var memory = new MemoryFixture();
+            memory.Set(ModuleBase + BotConstants.MemoryOffsets.CameraPtr, BitConverter.GetBytes(CameraBase));
+            memory.Set(CameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset,
+                BitConverter.GetBytes((short)16310));
+            GameMemoryService service = memory.CreateService();
+
+            Assert.True(service.TryGetCameraVerticalLock(out short verticalLock));
+            Assert.Equal((short)16310, verticalLock);
+
+            GameMemoryService noCamera = new MemoryFixture().CreateService();
+            Assert.False(noCamera.TryGetCameraVerticalLock(out _));
         }
 
         [Fact]

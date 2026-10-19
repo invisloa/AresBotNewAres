@@ -527,6 +527,7 @@ namespace DriverScanTester.ViewModels
             IsLootScanTestRunning = true;
             LootScanTestStatus = "Running...";
             AppendBotLog($"[Loot Test] Starting {label} loot scan...");
+            AppendBotLog($"[Loot Test] Screenshots will be saved to: {ScreenshotService.GetDiagnosticLootScanOutputDirectory()}");
             try
             {
                 LootSystem.LootDiagnosticResult result = await _main.RunLootDiagnosticScanAsync(mode);

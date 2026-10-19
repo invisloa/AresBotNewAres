@@ -42,6 +42,13 @@ namespace DriverScanTester.Services
         /// <summary>Project-root folder for loot pixel-scan diagnostics (LootSSFolder).</summary>
         public const string LootScanFolder = "LootSSFolder";
 
+        /// <summary>
+        /// Project folder for manual test-loot screenshots. Unlike LootSSFolder this
+        /// folder is explicitly un-ignored in .gitignore, so screenshots from the
+        /// Tools-tab loot tests appear in Git Changes.
+        /// </summary>
+        public const string DiagnosticLootScreenshotsFolder = "LootTest";
+
         /// <summary>Folder for screenshots captured when another player's marker is detected.</summary>
         public const string PlayerPixelsFolder = "PlayerPixels";
 
@@ -55,6 +62,13 @@ namespace DriverScanTester.Services
         /// diagnostics off; flip to true to debug loot detection again.
         /// </summary>
         public static bool LootScanCaptureEnabled { get; set; } = false;
+
+        /// <summary>
+        /// While true, loot diagnostic frames are written to the project's un-ignored
+        /// Screenshots/LootTest folder instead of the normal (ignored) LootSSFolder.
+        /// Set only for the manual Tools-tab loot tests.
+        /// </summary>
+        public static bool LootScanCaptureToProjectScreenshots { get; set; } = false;
         private const int MaximumPinkDiagnosticFramesPerProcess = 8;
         private const int MaximumOtherLootDiagnosticFramesPerProcess = 4;
         private static int _pinkDiagnosticFramesCloned;
@@ -222,17 +236,28 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Dev run → project-root LootSSFolder (next to Screenshots); published run →
-        /// LootSSFolder next to the exe. Same layout convention as the Logs folder.
+        /// LootSSFolder next to the exe. The project folder is located by walking up from
+        /// the EXE/current directory and looking for DriverScanTester.csproj, so launching
+        /// from bin/, BuildTestOutput/ or any other nested build folder still writes the
+        /// manual-loot diagnostic screenshots into the real project folder.
         /// </summary>
         private static string ResolveLootScanDir()
         {
+            if (LootScanCaptureToProjectScreenshots)
+                return GetDiagnosticLootScanOutputDirectory();
+
+            string? projectDir = TryFindProjectDirectory(AppDomain.CurrentDomain.BaseDirectory)
+                ?? TryFindProjectDirectory(Directory.GetCurrentDirectory());
+            if (projectDir != null)
+                return Path.Combine(projectDir, LootScanFolder);
+
             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
             try
             {
                 string devDir = Path.GetFullPath(Path.Combine(baseDir, "..", "..", "..", LootScanFolder));
-                string projectDir = Path.GetDirectoryName(devDir) ?? "";
-                if (Directory.Exists(Path.Combine(projectDir, "SavedPaths")) ||
-                    File.Exists(Path.Combine(projectDir, "DriverScanTester.csproj")))
+                string projectCandidate = Path.GetDirectoryName(devDir) ?? "";
+                if (Directory.Exists(Path.Combine(projectCandidate, "SavedPaths")) ||
+                    File.Exists(Path.Combine(projectCandidate, "DriverScanTester.csproj")))
                     return devDir;
             }
             catch
@@ -240,6 +265,55 @@ namespace DriverScanTester.Services
                 // Fall through to exe-local LootSSFolder.
             }
             return Path.Combine(baseDir, LootScanFolder);
+        }
+
+        /// <summary>
+        /// Returns the folder where manual diagnostic loot screenshots are written.
+        /// Exposed so the Tools tab can log the exact path before/after a test run.
+        /// </summary>
+        internal static string GetLootScanOutputDirectory() => ResolveLootScanDir();
+
+        /// <summary>
+        /// Folder for manual test-loot screenshots: Screenshots/LootTest in the project.
+        /// This path is un-ignored so the generated PNGs are visible in Git Changes.
+        /// </summary>
+        internal static string GetDiagnosticLootScanOutputDirectory()
+        {
+            string? projectDir = TryFindProjectDirectory(AppDomain.CurrentDomain.BaseDirectory)
+                ?? TryFindProjectDirectory(Directory.GetCurrentDirectory());
+            if (projectDir != null)
+                return Path.Combine(projectDir, "Screenshots", DiagnosticLootScreenshotsFolder);
+
+            return ResolveScreenshotsDir(DiagnosticLootScreenshotsFolder);
+        }
+
+        /// <summary>
+        /// Walks up from <paramref name="startDirectory"/> looking for the project file.
+        /// Supports both the project-folder layout (.../DriverScanTester/DriverScanTester.csproj)
+        /// and the repository-root layout (.../repo/DriverScanTester/DriverScanTester.csproj).
+        /// Returns null when no source project can be found (published build).
+        /// </summary>
+        internal static string? TryFindProjectDirectory(string startDirectory)
+        {
+            try
+            {
+                DirectoryInfo? directory = new DirectoryInfo(startDirectory);
+                for (int depth = 0; depth < 8 && directory != null; depth++, directory = directory.Parent)
+                {
+                    if (File.Exists(Path.Combine(directory.FullName, "DriverScanTester.csproj")))
+                        return directory.FullName;
+
+                    string nestedProject = Path.Combine(directory.FullName, "DriverScanTester");
+                    if (File.Exists(Path.Combine(nestedProject, "DriverScanTester.csproj")))
+                        return nestedProject;
+                }
+            }
+            catch
+            {
+                // Invalid start path / permissions — treat as a published run.
+            }
+
+            return null;
         }
 
         /// <summary>

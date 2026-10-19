@@ -513,6 +513,20 @@ namespace DriverScanTester.Services
             => TrySetCameraShort(CameraDistanceOffset, distance);
 
         /// <summary>
+        /// Reads the current camera vertical lock (16-bit, +0x1BE). Used by the manual
+        /// loot diagnostic so it can restore the user's view after applying the same
+        /// vertical lock the movement system uses during normal bot operation.
+        /// </summary>
+        public bool TryGetCameraVerticalLock(out short verticalLock)
+        {
+            verticalLock = 0;
+            if (!TryReadPointer(_moduleBase + CameraPtrOffset, out ulong cameraBase) || cameraBase == 0)
+                return false;
+
+            return TryReadShort(cameraBase + (ulong)BotConstants.MemoryOffsets.CameraVerticalLockOffset, out verticalLock);
+        }
+
+        /// <summary>
         /// Writes the camera vertical "lock" (16-bit) value used by the sell view,
         /// e.g. 16310. The address is +0x1BE relative to the camera base, which
         /// is distinct from the float vertical angle at +0x1B0 (CameraVerticalAngle).

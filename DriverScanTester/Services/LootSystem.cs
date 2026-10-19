@@ -795,15 +795,24 @@ namespace DriverScanTester.Services
 
             bool previousPinkMode = _pinkLootOnlyMode;
             bool previousCaptureEnabled = ScreenshotService.LootScanCaptureEnabled;
+            bool previousProjectScreenshotCapture = ScreenshotService.LootScanCaptureToProjectScreenshots;
             short previousCamera = BotConstants.Camera.DefaultDistanceLock;
             if (_memoryService.TryGetCameraDistance(out short readDistance))
                 previousCamera = readDistance;
             else
                 _log("[LootTest] Previous camera distance unreadable; the default lock will be restored after the test.");
 
+            short previousVerticalLock = BotConstants.Camera.DefaultVerticalLock;
+            bool havePreviousVerticalLock = _memoryService.TryGetCameraVerticalLock(out short readVerticalLock);
+            if (havePreviousVerticalLock)
+                previousVerticalLock = readVerticalLock;
+            else
+                _log($"[LootTest] Previous camera vertical lock unreadable; normal loot view {BotConstants.Camera.DefaultVerticalLock} will be left in place.");
+
             short scanCamera = pinkOnly
                 ? BotConstants.Camera.SodSopLootScanDistance
                 : BotConstants.Camera.LootScanDistance;
+            short scanVerticalLock = BotConstants.Camera.DefaultVerticalLock;
             bool cameraSet = false;
             bool cursorSaved = MouseOperations.TryGetCursorPosition(out int cursorX, out int cursorY);
             int items = 0;
@@ -816,6 +825,7 @@ namespace DriverScanTester.Services
                 // pickup can be inspected in LootSSFolder afterwards.
                 ScreenshotService.ResetLootScanDiagnosticBudgets();
                 ScreenshotService.LootScanCaptureEnabled = true;
+                ScreenshotService.LootScanCaptureToProjectScreenshots = true;
 
                 if (!IsGameWindowFocused())
                     return BuildDiagnosticResult(mode, LootDiagnosticOutcome.NotFocused, 0, 0,
@@ -831,14 +841,31 @@ namespace DriverScanTester.Services
 
                 int mouseOverCalibration = BotConstants.GameMagicValues.LootMouseOverValue;
                 _log($"[LootTest] {DiagnosticModeName(mode)}: manual scan starting " +
-                     $"(client {_clientWidth}x{_clientHeight}, camera {scanCamera}, mode={(pinkOnly ? "pink-only" : "white-loot")}, " +
+                     $"(client {_clientWidth}x{_clientHeight}, camera {scanCamera}, verticalLock {scanVerticalLock}, " +
+                     $"mode={(pinkOnly ? "pink-only" : "white-loot")}, " +
                      $"item mouseover calibration={mouseOverCalibration} (0x{(uint)mouseOverCalibration:X8})" +
                      (mouseOverCalibration == 0
                          ? " — CAPTURE IT with 'Capture Item Mouseover' or no probe can ever confirm a pickup)."
                          : ")."));
+                _log($"[LootTest] Diagnostic screenshots will be saved to: {ScreenshotService.GetDiagnosticLootScanOutputDirectory()}");
 
+                // Match normal bot loot conditions exactly: the movement system always
+                // applies the waypoint camera distance together with this vertical lock.
+                // The old diagnostic only changed the distance, so the captured view
+                // could differ from what the running loot machine actually sees.
                 _memoryService.SetCameraDistance(scanCamera);
+                _memoryService.SetCameraVerticalLock(scanVerticalLock);
                 cameraSet = true;
+                if (!_memoryService.TryGetCameraDistance(out short appliedDistance) ||
+                    appliedDistance != scanCamera)
+                {
+                    _log($"[LootTest] WARNING: camera distance {scanCamera} could not be verified; the scan view may differ from normal loot.");
+                }
+                if (!_memoryService.TryGetCameraVerticalLock(out short appliedVerticalLock) ||
+                    appliedVerticalLock != scanVerticalLock)
+                {
+                    _log($"[LootTest] WARNING: camera vertical lock {scanVerticalLock} could not be verified; the scan view may differ from normal loot.");
+                }
                 await Task.Delay(DiagnosticCameraSettleMs, token).ConfigureAwait(false);
 
                 if (pinkOnly)
@@ -908,6 +935,18 @@ namespace DriverScanTester.Services
                     {
                         RestoreCameraDistance(previousCamera);
                     }
+
+                    // Restore the vertical lock only if the diagnostic still owns the
+                    // value it set; a human/movement camera change is left untouched.
+                    if (cameraSet &&
+                        havePreviousVerticalLock &&
+                        (!_memoryService.TryGetCameraVerticalLock(out short currentVerticalLock) ||
+                         currentVerticalLock == scanVerticalLock))
+                    {
+                        if (!_memoryService.TrySetCameraVerticalLock(previousVerticalLock))
+                            _memoryService.SetCameraVerticalLock(previousVerticalLock);
+                    }
+
                     if (cursorSaved)
                         MouseOperations.SetCursorPositionAbsolute(cursorX, cursorY);
                 }
@@ -917,6 +956,7 @@ namespace DriverScanTester.Services
                 }
                 _pinkLootOnlyMode = previousPinkMode;
                 ScreenshotService.LootScanCaptureEnabled = previousCaptureEnabled;
+                ScreenshotService.LootScanCaptureToProjectScreenshots = previousProjectScreenshotCapture;
                 _scanToken = default;
                 Interlocked.Exchange(ref _diagnosticScanActive, 0);
             }

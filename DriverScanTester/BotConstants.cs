@@ -28,7 +28,7 @@ namespace DriverScanTester
             public const short DefaultDistanceLock = 17020;
 
             /// <summary>Camera distance used during normal white-loot pixel scans.</summary>
-            public const short LootScanDistance = 16800;
+            public const short LootScanDistance = 17000;
 
             /// <summary>Camera distance used by the other-player marker detector.</summary>
             public const short OtherPlayerMarkerScanDistance = 16950;

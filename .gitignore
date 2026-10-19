@@ -39,6 +39,9 @@ Screenshots/
 DriverScanTester/Screenshots/*
 !DriverScanTester/Screenshots/Dead/
 !DriverScanTester/Screenshots/PlayerPixels/
+# Manual Tools-tab loot-test screenshots are intentionally tracked in Git Changes.
+!DriverScanTester/Screenshots/LootTest/
+!DriverScanTester/Screenshots/LootTest/**
 
 # Visual Studio 2015/2017 cache/options directory
 .vs/

@@ -1,4 +1,4 @@
-<Window x:Class="DriverScanTester.Views.BotWindow"
+﻿<Window x:Class="DriverScanTester.Views.BotWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
@@ -465,7 +465,7 @@
                                         <TextBlock Text="{Binding LootScanTestStatus}" FontWeight="SemiBold"/>
                                     </Border>
                                 </WrapPanel>
-                                <TextBlock Text="Runs the real loot pickup logic once: zooms the loot camera, captures the game client, scans pixels, probes the mouseover calibration and clicks the matching item. Stop the movement/loot bot and workflow first. Diagnostic frames are saved to LootSSFolder; details go to the Log tab."
+                                <TextBlock Text="Runs the real loot pickup logic once: zooms the loot camera, captures the game client, scans pixels, probes the mouseover calibration and clicks the matching item. Stop the movement/loot bot and workflow first. Test-loot screenshots are saved to Screenshots/LootTest in the project (visible in Git Changes); details go to the Log tab."
                                            FontSize="10" Foreground="Gray" TextWrapping="Wrap" Margin="4,7,4,0"/>
                             </StackPanel>
                         </GroupBox>
