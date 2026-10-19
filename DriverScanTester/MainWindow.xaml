@@ -112,9 +112,11 @@
                 <StackPanel VerticalAlignment="Center">
                     <StackPanel Orientation="Horizontal">
                         <Button Content="Bot Control Panel" Command="{Binding OpenBotWindowCommand}"
-                                Style="{StaticResource PrimaryActionButtonStyle}"/>
+                                Style="{StaticResource PrimaryActionButtonStyle}"
+                                ToolTip="Opens without Attach: edit profiles/paths, validate them and read the bot log offline. Start/capture actions unlock after Attach."/>
                         <Button Content="Path / Profile Editor" Command="{Binding OpenPathEditorCommand}"
-                                Style="{StaticResource SecondaryActionButtonStyle}"/>
+                                Style="{StaticResource SecondaryActionButtonStyle}"
+                                ToolTip="Works offline. Capture position and running a path need an attached game."/>
                     </StackPanel>
                     <StackPanel Margin="4,5,0,0">
                         <StackPanel Orientation="Horizontal">

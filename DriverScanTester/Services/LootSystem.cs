@@ -10,10 +10,44 @@ using DriverScanTester.Utils;
 
 namespace DriverScanTester.Services
 {
-    public class LootSystem
+    public class LootSystem : IDisposable
     {
         internal enum LootScanPassResult { Collected, NoItem, CaptureFailed, Cancelled }
         private enum LootProbeResult { Miss, Collected, CaptureInvalid, Cancelled }
+
+        /// <summary>Loot operation exercised by the Tools tab diagnostics.</summary>
+        public enum LootDiagnosticMode { SodSopPink, NormalWhite }
+
+        /// <summary>Outcome of one manual diagnostic loot run.</summary>
+        public enum LootDiagnosticOutcome
+        {
+            Collected,
+            NoItem,
+            CaptureFailed,
+            Cancelled,
+            NotAttached,
+            NotFocused,
+            InCity,
+            Busy,
+            Error
+        }
+
+        /// <summary>
+        /// Result of a manual diagnostic loot run started from the Tools tab.
+        /// <see cref="ItemsCollected"/> is the number of mouseover-confirmed pickups;
+        /// <see cref="Passes"/> is the number of scan passes performed.
+        /// </summary>
+        public readonly record struct LootDiagnosticResult(
+            LootDiagnosticMode Mode,
+            LootDiagnosticOutcome Outcome,
+            int ItemsCollected,
+            int Passes,
+            string Detail)
+        {
+            /// <summary>True when the scan itself completed (even if no item was found).</summary>
+            public bool ScanCompleted =>
+                Outcome is LootDiagnosticOutcome.Collected or LootDiagnosticOutcome.NoItem;
+        }
 
         internal readonly record struct PixelCollectionStats(
             int PixelsExamined,
@@ -116,6 +150,15 @@ namespace DriverScanTester.Services
         // TAB check finds no nearby mob. The independent generation scheduler still arms
         // delayed background work for every kill, including kills followed by a close retarget.
         private CancellationToken _scanToken;
+
+        /// <summary>0 = idle, 1 = a manual diagnostic scan owns the capture and cursor.</summary>
+        private int _diagnosticScanActive;
+
+        /// <summary>Maximum number of pickup passes in one manual diagnostic run.</summary>
+        private const int MaxDiagnosticPickupPasses = 10;
+
+        /// <summary>Delay after the diagnostic camera zoom before the first capture.</summary>
+        private const int DiagnosticCameraSettleMs = 250;
 
         /// <summary>
         /// Reusable raw-pixel buffer for the bulk LockBits region scan (Phase A).
@@ -717,6 +760,198 @@ namespace DriverScanTester.Services
             StopScanSpacebarSpam();
             CancelAllLootWork("loot loop stopped");
         }
+
+        /// <summary>
+        /// Releases the capture bitmap/graphics used by a short-lived diagnostic
+        /// <see cref="LootSystem"/>. Long-running loot systems live for the whole bot session.
+        /// </summary>
+        public void Dispose()
+        {
+            try { Stop(); }
+            catch (Exception ex) { _log($"[LootTest] Dispose stop failed: {ex.Message}"); }
+
+            lock (_captureGate)
+            {
+                _graphics?.Dispose();
+                _graphics = null!;
+                _bitmap?.Dispose();
+                _bitmap = null!;
+            }
+        }
+
+        /// <summary>
+        /// Runs one manual loot diagnostic from the Tools tab: zooms the loot camera,
+        /// captures the game client, scans for SOD/SOP pink pixels or normal white-loot
+        /// pixels, probes the candidates and performs the same mouseover-confirmed click
+        /// as the running bot. This does not start or alter the loot state machine.
+        /// </summary>
+        public async Task<LootDiagnosticResult> RunDiagnosticScanAsync(
+            LootDiagnosticMode mode, CancellationToken token)
+        {
+            bool pinkOnly = mode == LootDiagnosticMode.SodSopPink;
+            if (Interlocked.CompareExchange(ref _diagnosticScanActive, 1, 0) != 0)
+                return BuildDiagnosticResult(mode, LootDiagnosticOutcome.Busy, 0, 0,
+                    "Another diagnostic loot scan is already running.");
+
+            bool previousPinkMode = _pinkLootOnlyMode;
+            bool previousCaptureEnabled = ScreenshotService.LootScanCaptureEnabled;
+            short previousCamera = BotConstants.Camera.DefaultDistanceLock;
+            if (_memoryService.TryGetCameraDistance(out short readDistance))
+                previousCamera = readDistance;
+            else
+                _log("[LootTest] Previous camera distance unreadable; the default lock will be restored after the test.");
+
+            short scanCamera = pinkOnly
+                ? BotConstants.Camera.SodSopLootScanDistance
+                : BotConstants.Camera.LootScanDistance;
+            bool cameraSet = false;
+            bool cursorSaved = MouseOperations.TryGetCursorPosition(out int cursorX, out int cursorY);
+            int items = 0;
+            int passes = 0;
+
+            _scanToken = token;
+            try
+            {
+                // Manual diagnostics always keep the analyzed frame(s) so a failed
+                // pickup can be inspected in LootSSFolder afterwards.
+                ScreenshotService.ResetLootScanDiagnosticBudgets();
+                ScreenshotService.LootScanCaptureEnabled = true;
+
+                if (!IsGameWindowFocused())
+                    return BuildDiagnosticResult(mode, LootDiagnosticOutcome.NotFocused, 0, 0,
+                        "Game window is not in the foreground — focus the game and retry.");
+
+                if (_memoryService.GetIsInCity())
+                    return BuildDiagnosticResult(mode, LootDiagnosticOutcome.InCity, 0, 0,
+                        "Player is in the city — loot scans are disabled there.");
+
+                if (RefreshClientOrigin() is null)
+                    return BuildDiagnosticResult(mode, LootDiagnosticOutcome.CaptureFailed, 0, 0,
+                        "Game window/client geometry could not be resolved.");
+
+                int mouseOverCalibration = BotConstants.GameMagicValues.LootMouseOverValue;
+                _log($"[LootTest] {DiagnosticModeName(mode)}: manual scan starting " +
+                     $"(client {_clientWidth}x{_clientHeight}, camera {scanCamera}, mode={(pinkOnly ? "pink-only" : "white-loot")}, " +
+                     $"item mouseover calibration={mouseOverCalibration} (0x{(uint)mouseOverCalibration:X8})" +
+                     (mouseOverCalibration == 0
+                         ? " — CAPTURE IT with 'Capture Item Mouseover' or no probe can ever confirm a pickup)."
+                         : ")."));
+
+                _memoryService.SetCameraDistance(scanCamera);
+                cameraSet = true;
+                await Task.Delay(DiagnosticCameraSettleMs, token).ConfigureAwait(false);
+
+                if (pinkOnly)
+                {
+                    // The pink scan accepts probes only while the host reports SOD/SOP mode.
+                    _pinkLootOnlyMode = true;
+
+                    while (passes < MaxDiagnosticPickupPasses)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        passes++;
+                        LootScanPassResult pass = PinkPixelScan("manual-diagnostic");
+                        if (pass == LootScanPassResult.Collected)
+                        {
+                            items++;
+                            continue;
+                        }
+                        return CompleteDiagnosticPass(mode, pass, items, passes);
+                    }
+                }
+                else
+                {
+                    while (passes < MaxDiagnosticPickupPasses)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        passes++;
+
+                        LootScanPassResult small = ScanRegion(smallX, smallY, "SmallScan-Diag");
+                        if (small == LootScanPassResult.Collected)
+                        {
+                            items++;
+                            continue;
+                        }
+                        if (small != LootScanPassResult.NoItem)
+                            return CompleteDiagnosticPass(mode, small, items, passes);
+
+                        LootScanPassResult big = ScanRegion(bigX, bigY, "BigScan-Diag");
+                        if (big == LootScanPassResult.Collected)
+                        {
+                            items++;
+                            continue;
+                        }
+                        return CompleteDiagnosticPass(mode, big, items, passes);
+                    }
+                }
+
+                return BuildDiagnosticResult(mode, LootDiagnosticOutcome.Collected, items, passes,
+                    $"Collected {items} item(s) in {passes} pass(es); manual pickup pass limit reached.");
+            }
+            catch (OperationCanceledException)
+            {
+                return BuildDiagnosticResult(mode, LootDiagnosticOutcome.Cancelled, items, passes,
+                    "Scan cancelled (timeout or stop request).");
+            }
+            catch (Exception ex)
+            {
+                return BuildDiagnosticResult(mode, LootDiagnosticOutcome.Error, items, passes,
+                    $"Scan error: {ex.Message}");
+            }
+            finally
+            {
+                try
+                {
+                    if (cameraSet &&
+                        (!_memoryService.TryGetCameraDistance(out short currentDistance) ||
+                         currentDistance == scanCamera))
+                    {
+                        RestoreCameraDistance(previousCamera);
+                    }
+                    if (cursorSaved)
+                        MouseOperations.SetCursorPositionAbsolute(cursorX, cursorY);
+                }
+                catch (Exception ex)
+                {
+                    _log($"[LootTest] Cleanup failed (camera/cursor restore): {ex.Message}");
+                }
+                _pinkLootOnlyMode = previousPinkMode;
+                ScreenshotService.LootScanCaptureEnabled = previousCaptureEnabled;
+                _scanToken = default;
+                Interlocked.Exchange(ref _diagnosticScanActive, 0);
+            }
+        }
+
+        private LootDiagnosticResult CompleteDiagnosticPass(
+            LootDiagnosticMode mode, LootScanPassResult pass, int items, int passes)
+        {
+            return pass switch
+            {
+                LootScanPassResult.NoItem => BuildDiagnosticResult(
+                    mode, LootDiagnosticOutcome.NoItem, items, passes,
+                    $"Scan completed with no matching item collected ({passes} pass(es), {items} item(s) already collected)."),
+                LootScanPassResult.CaptureFailed => BuildDiagnosticResult(
+                    mode, LootDiagnosticOutcome.CaptureFailed, items, passes,
+                    "Game-client capture failed — see the [LootCapture] log lines above."),
+                LootScanPassResult.Cancelled => BuildDiagnosticResult(
+                    mode, LootDiagnosticOutcome.Cancelled, items, passes,
+                    "Scan cancelled (timeout, focus loss, or city entry)."),
+                _ => BuildDiagnosticResult(
+                    mode, LootDiagnosticOutcome.NoItem, items, passes,
+                    $"Scan completed ({passes} pass(es)).")
+            };
+        }
+
+        private LootDiagnosticResult BuildDiagnosticResult(
+            LootDiagnosticMode mode, LootDiagnosticOutcome outcome,
+            int items, int passes, string detail)
+        {
+            _log($"[LootTest] {DiagnosticModeName(mode)}: {detail}");
+            return new LootDiagnosticResult(mode, outcome, items, passes, detail);
+        }
+
+        private static string DiagnosticModeName(LootDiagnosticMode mode) =>
+            mode == LootDiagnosticMode.SodSopPink ? "SOD/SOP" : "White";
 
         public async Task Update(CancellationToken token)
         {

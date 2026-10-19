@@ -10,6 +10,7 @@
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
@@ -183,7 +184,32 @@
             </Grid>
         </Border>
 
-        <TabControl Grid.Row="1">
+        <!-- Offline (not attached) notice: everything except game actions still works. -->
+        <Border Grid.Row="1" BorderBrush="#FFE5CF82" BorderThickness="1" CornerRadius="5"
+                Background="#FFFFF7E0" Padding="8,5" Margin="0,0,0,8">
+            <Border.Style>
+                <Style TargetType="Border">
+                    <Setter Property="Visibility" Value="Collapsed"/>
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding IsGameAttached}" Value="False">
+                            <Setter Property="Visibility" Value="Visible"/>
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Border.Style>
+            <DockPanel LastChildFill="True">
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center" Margin="8,0,0,0">
+                    <TextBlock Text="PID:" VerticalAlignment="Center" Margin="0,0,4,0" Foreground="#FF6C5416" FontWeight="SemiBold"/>
+                    <TextBox Text="{Binding PidText, UpdateSourceTrigger=PropertyChanged}" Width="70" VerticalAlignment="Center"/>
+                    <Button Content="Attach" Command="{Binding AttachCommand}" Style="{StaticResource SecondaryActionButtonStyle}" Margin="6,0,0,0"
+                            ToolTip="Attach to the game process using the PID above. It is the same Attach as on the main window."/>
+                </StackPanel>
+                <TextBlock DockPanel.Dock="Left" Text="⚠" FontSize="14" FontWeight="Bold" Foreground="#FF6C5416" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <TextBlock Text="{Binding AttachmentStatusText}" TextWrapping="Wrap" Foreground="#FF6C5416" FontWeight="SemiBold" VerticalAlignment="Center"/>
+            </DockPanel>
+        </Border>
+
+        <TabControl Grid.Row="2">
             <TabItem Header="Run">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                     <StackPanel Margin="8">
@@ -309,7 +335,8 @@
                                     <StackPanel>
                                         <WrapPanel>
                                             <Button Content="Start Manual Bot" Command="{Binding RunBotCommand}"
-                                                    Style="{StaticResource StartActionButtonStyle}"/>
+                                                    Style="{StaticResource StartActionButtonStyle}"
+                                                    ToolTip="Requires an attached game (Attach on the main window). Profile editing and the log work offline."/>
                                             <Button Content="Path / Profile Editor" Command="{Binding OpenPathEditorCommand}"
                                                     Style="{StaticResource SecondaryActionButtonStyle}"/>
                                         </WrapPanel>
@@ -422,6 +449,24 @@
                             </Grid>
                             <TextBlock Text="Runs the selected bot operation once (for example Enter_COT) with the same services as the workflow."
                                        FontSize="10" Foreground="Gray" TextWrapping="Wrap" Margin="4,7,4,0"/>
+                            </StackPanel>
+                        </GroupBox>
+
+                        <GroupBox Header="Loot Pickup Test — diagnostic" Margin="0,0,0,10" Padding="7">
+                            <StackPanel>
+                                <WrapPanel>
+                                    <Button Content="Test SOD/SOP Loot" Command="{Binding TestLootSodSopCommand}"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"
+                                            ToolTip="Uruchamia prawdziwy loot SOD/SOP: zoom kamery, zrzut okna gry, skan rozowych pikseli, najechanie na kandydatow i klikniecie zbiorki. Szczegoly w zakladce Log."/>
+                                    <Button Content="Test White Pixel Loot" Command="{Binding TestLootWhiteCommand}"
+                                            Style="{StaticResource SecondaryActionButtonStyle}"
+                                            ToolTip="Uruchamia prawdziwy loot zwyklych przedmiotow: zoom kamery, zrzut okna gry, skan bialych pikseli w malym i duzym regionie, najechanie i klikniecie zbiorki. Szczegoly w zakladce Log."/>
+                                    <Border Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="6,4,4,4" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding LootScanTestStatus}" FontWeight="SemiBold"/>
+                                    </Border>
+                                </WrapPanel>
+                                <TextBlock Text="Runs the real loot pickup logic once: zooms the loot camera, captures the game client, scans pixels, probes the mouseover calibration and clicks the matching item. Stop the movement/loot bot and workflow first. Diagnostic frames are saved to LootSSFolder; details go to the Log tab."
+                                           FontSize="10" Foreground="Gray" TextWrapping="Wrap" Margin="4,7,4,0"/>
                             </StackPanel>
                         </GroupBox>
 

@@ -34,12 +34,21 @@ namespace DriverScanTester.ViewModels
         /// </summary>
         private readonly Func<(float X, float Y, int Map, bool Success)>? _capturePosition;
 
+        /// <summary>
+        /// Live attachment check. When supplied (and false), capture controls report
+        /// "attach first" instead of failing with a low-level read error. The editor
+        /// itself keeps working offline.
+        /// </summary>
+        private readonly Func<bool>? _isGameAttached;
+
         public ProfileEditorViewModel(
             Action<string>? log = null,
-            Func<(float X, float Y, int Map, bool Success)>? capturePosition = null)
+            Func<(float X, float Y, int Map, bool Success)>? capturePosition = null,
+            Func<bool>? isGameAttached = null)
         {
             _log = log ?? (_ => { });
             _capturePosition = capturePosition;
+            _isGameAttached = isGameAttached;
             _profileLoader = new BotProfileLoader(_log);
 
             if (!Directory.Exists(PATH_DIR))
@@ -308,7 +317,10 @@ namespace DriverScanTester.ViewModels
             set { if (CurrentProfile != null) { CurrentProfile.StartPositionTolerance = value; OnPropertyChanged(); } }
         }
 
-        private bool CanCaptureStartPosition => CurrentProfile != null && _capturePosition != null;
+        private bool CanCaptureStartPosition =>
+            CurrentProfile != null &&
+            _capturePosition != null &&
+            (_isGameAttached?.Invoke() ?? true);
 
         /// <summary>
         /// Fills the start-position / protection values from the player's CURRENT
@@ -328,6 +340,12 @@ namespace DriverScanTester.ViewModels
             if (_capturePosition == null)
             {
                 StatusText = "Game capture is not available — attach to the game first.";
+                return;
+            }
+
+            if (_isGameAttached != null && !_isGameAttached())
+            {
+                StatusText = "Not attached — attach to the game to capture the start position.";
                 return;
             }
 

@@ -127,10 +127,11 @@ namespace DriverScanTester.ViewModels
         }
 
         // --- Dependencies ---
-        private readonly Func<uint, ulong, byte[], uint, bool> _readFunc;
-        private readonly Func<int> _pointerSizeFunc;
-        private readonly Func<ulong> _moduleBaseFunc;
-        private readonly uint _pid;
+        // Late-bound game access: every capture reads the CURRENT attachment state, so
+        // the editor can be opened offline and starts capturing the moment the user
+        // attaches. Plain editing/saving of paths never touches the game at all.
+        private readonly BotGameAccess _gameAccess;
+        private readonly Action<string> _log;
 
         // --- Commands ---
         // Editor
@@ -162,12 +163,10 @@ namespace DriverScanTester.ViewModels
         // Map number (int at +0x5F8) — same read as GameMemoryService.GetMapNumber().
         private const ulong MapOffset = 0x5F8;
 
-        public PathEditorViewModel(Func<uint, ulong, byte[], uint, bool> readFunc, Func<int> ptrSizeFunc, Func<ulong> modBaseFunc, uint pid)
+        public PathEditorViewModel(BotGameAccess gameAccess, Action<string>? log = null)
         {
-            _readFunc = readFunc;
-            _pointerSizeFunc = ptrSizeFunc;
-            _moduleBaseFunc = modBaseFunc;
-            _pid = pid;
+            _gameAccess = gameAccess ?? throw new ArgumentNullException(nameof(gameAccess));
+            _log = log ?? (_ => { });
 
             // Editor Commands
             AddPointCommand = new RelayCommand(_ => AddPoint());
@@ -192,7 +191,10 @@ namespace DriverScanTester.ViewModels
             RefreshLibrary();
 
             // Profile Editor (no game process dependencies)
-            _profileEditor = new ProfileEditorViewModel(capturePosition: CaptureGameState);
+            _profileEditor = new ProfileEditorViewModel(
+                log: _log,
+                capturePosition: CaptureGameState,
+                isGameAttached: () => _gameAccess.IsAttached());
         }
 
         /// <summary>
@@ -202,14 +204,18 @@ namespace DriverScanTester.ViewModels
         /// </summary>
         private (float X, float Y, int Map, bool Success) CaptureGameState()
         {
-            ulong moduleBase = _moduleBaseFunc();
-            int ptrSize = _pointerSizeFunc();
-            if (moduleBase == 0 || ptrSize == 0) return (0, 0, 0, false);
+            if (!_gameAccess.IsAttached())
+                return (0, 0, 0, false);
+
+            ulong moduleBase = _gameAccess.GetModuleBase();
+            int ptrSize = _gameAccess.GetPointerSize();
+            uint pid = _gameAccess.GetPid();
+            if (moduleBase == 0 || ptrSize == 0 || pid == 0) return (0, 0, 0, false);
 
             // 1. Read Player Ptr
             ulong ptrAddr = moduleBase + PlayerPtrOffset;
             byte[] buf = new byte[ptrSize];
-            if (!_readFunc(_pid, ptrAddr, buf, 0)) return (0, 0, 0, false);
+            if (!_gameAccess.ReadMemory(pid, ptrAddr, buf, 0)) return (0, 0, 0, false);
 
             ulong playerBase = (ptrSize == 4) ? BitConverter.ToUInt32(buf, 0) : BitConverter.ToUInt64(buf, 0);
             if (playerBase == 0) return (0, 0, 0, false);
@@ -219,9 +225,9 @@ namespace DriverScanTester.ViewModels
             byte[] yBuf = new byte[2];
             byte[] mapBuf = new byte[4];
 
-            if (!_readFunc(_pid, playerBase + XOffset, xBuf, 0)) return (0, 0, 0, false);
-            if (!_readFunc(_pid, playerBase + YOffset, yBuf, 0)) return (0, 0, 0, false);
-            if (!_readFunc(_pid, playerBase + MapOffset, mapBuf, 0)) return (0, 0, 0, false);
+            if (!_gameAccess.ReadMemory(pid, playerBase + XOffset, xBuf, 0)) return (0, 0, 0, false);
+            if (!_gameAccess.ReadMemory(pid, playerBase + YOffset, yBuf, 0)) return (0, 0, 0, false);
+            if (!_gameAccess.ReadMemory(pid, playerBase + MapOffset, mapBuf, 0)) return (0, 0, 0, false);
 
             float x = (float)BitConverter.ToInt16(xBuf, 0);
             float y = (float)BitConverter.ToInt16(yBuf, 0);
@@ -291,10 +297,17 @@ namespace DriverScanTester.ViewModels
 
         private void CapturePosition()
         {
-            ulong moduleBase = _moduleBaseFunc();
-            int ptrSize = _pointerSizeFunc();
+            if (!_gameAccess.IsAttached())
+            {
+                StatusText = "Not attached — attach to the game to capture the player position.";
+                return;
+            }
 
-            if (moduleBase == 0 || ptrSize == 0)
+            ulong moduleBase = _gameAccess.GetModuleBase();
+            int ptrSize = _gameAccess.GetPointerSize();
+            uint pid = _gameAccess.GetPid();
+
+            if (moduleBase == 0 || ptrSize == 0 || pid == 0)
             {
                 StatusText = "Error: Invalid module base or pointer size.";
                 return;
@@ -303,7 +316,7 @@ namespace DriverScanTester.ViewModels
             // 1. Read Player Ptr
             ulong ptrAddr = moduleBase + PlayerPtrOffset;
             byte[] buf = new byte[ptrSize];
-            if (!_readFunc(_pid, ptrAddr, buf, 0)) 
+            if (!_gameAccess.ReadMemory(pid, ptrAddr, buf, 0)) 
             {
                 StatusText = "Error: Failed to read player pointer address.";
                 return;
@@ -321,7 +334,7 @@ namespace DriverScanTester.ViewModels
             byte[] yBuf = new byte[2];
 
             // Helper wrapper for read
-            bool Read(ulong addr, byte[] b) => _readFunc(_pid, addr, b, 0);
+            bool Read(ulong addr, byte[] b) => _gameAccess.ReadMemory(pid, addr, b, 0);
 
             if (Read(playerBase + XOffset, xBuf) && Read(playerBase + YOffset, yBuf))
             {
@@ -466,6 +479,12 @@ namespace DriverScanTester.ViewModels
 
         private void RunEditorPath()
         {
+            if (!_gameAccess.IsAttached())
+            {
+                StatusText = "Not attached — attach to the game before running a path.";
+                return;
+            }
+
             var list = Points.Select(p => new DriverScanTester.Services.Waypoint(
                 p.X,
                 p.Y,

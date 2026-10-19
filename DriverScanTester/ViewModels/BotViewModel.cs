@@ -19,13 +19,13 @@ namespace DriverScanTester.ViewModels
         private string _manaPotCount = "--";
         private string _botLogText = "";
         private readonly Queue<string> _botLogLines = new();
-        private const int MaxBotLogLines = 500;
         private readonly object _botLogLock = new();
         private bool _isMovementBotRunning;
         private bool _isHealManaBotRunning;
         private bool _isLootBotRunning;
         private bool _isWorkflowRunning;
         private bool _isBotPaused;
+        private bool _isGameAttached;
         private string _workflowPhaseText = "Idle";
         private System.Threading.Timer? _statsTimer;
         private int _isDisposed;
@@ -35,6 +35,10 @@ namespace DriverScanTester.ViewModels
         private string? _selectedOperationName;
         private string _operationTestStatus = "Idle";
         private bool _isOperationTestRunning;
+
+        // Loot diagnostic test (Tools tab)
+        private string _lootScanTestStatus = "Idle";
+        private bool _isLootScanTestRunning;
 
         // Profile selection
         private System.Collections.ObjectModel.ObservableCollection<string> _profileNames = new();
@@ -51,24 +55,38 @@ namespace DriverScanTester.ViewModels
             _hpThresholdText = _main.HealManaThreshold1.ToString();
             _manaThresholdText = _main.HealManaThreshold2.ToString();
 
+            // Game-dependent commands stay gated by attachment; everything that is just
+            // configuration/logging keeps working while detached (the whole point of the
+            // offline mode). Stop/Pause/Resume deliberately never require attachment so a
+            // running bot can always be stopped.
             RunBotCommand = new RelayCommand(_ => RunBot(), _ => _main.IsAttached);
-            StopBotCommand = new RelayCommand(_ => StopAllBots(), _ => _main.IsAttached && IsAnyRuntimeActive);
-            PauseBotCommand = new RelayCommand(_ => PauseBots(), _ => _main.IsAttached && !IsBotPaused && IsAnyRuntimeActive);
-            ResumeBotCommand = new RelayCommand(_ => ResumeBots(), _ => _main.IsAttached && IsBotPaused);
-            ToggleHealManaBotCommand = new RelayCommand(_ => ToggleHealManaBot(), _ => _main.IsAttached);
-            OpenPathEditorCommand = new RelayCommand(_ => _main.OpenPathEditorInternal(), _ => _main.IsAttached);
+            StopBotCommand = new RelayCommand(_ => StopAllBots(), _ => IsAnyRuntimeActive);
+            PauseBotCommand = new RelayCommand(_ => PauseBots(), _ => !IsBotPaused && IsAnyRuntimeActive);
+            ResumeBotCommand = new RelayCommand(_ => ResumeBots(), _ => IsBotPaused);
+            ToggleHealManaBotCommand = new RelayCommand(_ => ToggleHealManaBot(), _ => _main.IsAttached || IsHealManaBotRunning);
+            OpenPathEditorCommand = new RelayCommand(_ => _main.OpenPathEditorInternal());
             CaptureNpcMouseOverCommand = new RelayCommand(_ => _main.CaptureNpcMouseOver(), _ => _main.IsAttached);
             CaptureItemMouseOverCommand = new RelayCommand(_ => _main.CaptureItemMouseOver(), _ => _main.IsAttached);
             TestOperationCommand = new RelayCommand(_ => RunOperationTest(), _ => _main.IsAttached && !IsOperationTestRunning);
+            // Movement/loot/workflow own the camera and cursor, so they must be stopped.
+            // The heal bot is independent (potions/HP only) and may keep running.
+            TestLootSodSopCommand = new RelayCommand(
+                _ => RunLootScanTest(LootSystem.LootDiagnosticMode.SodSopPink),
+                _ => _main.IsAttached && !IsLootScanTestRunning &&
+                     !IsMovementBotRunning && !IsLootBotRunning && !IsWorkflowRunning);
+            TestLootWhiteCommand = new RelayCommand(
+                _ => RunLootScanTest(LootSystem.LootDiagnosticMode.NormalWhite),
+                _ => _main.IsAttached && !IsLootScanTestRunning &&
+                     !IsMovementBotRunning && !IsLootBotRunning && !IsWorkflowRunning);
             ClearBotLogCommand = new RelayCommand(_ => ClearBotLog());
 
             // Route Workflow commands
             StartWorkflowCommand = new RelayCommand(_ => StartWorkflowWithProfile(), _ => _main.IsAttached && CanStartWorkflow && !IsBotPaused);
-            StopWorkflowCommand = new RelayCommand(_ => _main.StopWorkflow(), _ => _main.IsAttached && IsWorkflowRunning);
-            PauseWorkflowCommand = new RelayCommand(_ => PauseBots(), _ => _main.IsAttached && !IsBotPaused && IsWorkflowRunning);
-            ResumeWorkflowCommand = new RelayCommand(_ => ResumeBots(), _ => _main.IsAttached && IsBotPaused && IsWorkflowRunning);
-            RefreshProfilesCommand = new RelayCommand(_ => RefreshProfiles(), _ => _main.IsAttached);
-            ValidateProfileCommand = new RelayCommand(_ => ValidateSelectedProfile(), _ => _main.IsAttached);
+            StopWorkflowCommand = new RelayCommand(_ => _main.StopWorkflow(), _ => IsWorkflowRunning);
+            PauseWorkflowCommand = new RelayCommand(_ => PauseBots(), _ => !IsBotPaused && IsWorkflowRunning);
+            ResumeWorkflowCommand = new RelayCommand(_ => ResumeBots(), _ => IsBotPaused && IsWorkflowRunning);
+            RefreshProfilesCommand = new RelayCommand(_ => RefreshProfiles());
+            ValidateProfileCommand = new RelayCommand(_ => ValidateSelectedProfile(), _ => !string.IsNullOrWhiteSpace(SelectedProfileName));
 
             BuildAvailableOperationNames();
 
@@ -76,6 +94,15 @@ namespace DriverScanTester.ViewModels
             // window opens — no manual Refresh click needed (Refresh still exists for
             // picking up profiles added while the window is open).
             RefreshProfiles();
+
+            // The bot log lives in the shared service so it survives closing/reopening
+            // the panel and is recorded even while detached.
+            SeedBotLogFromService();
+            BotLogService.Instance.LineAppended += OnBotLogLine;
+
+            IsGameAttached = _main.IsAttached;
+            _main.AttachmentChanged += OnMainAttachmentChanged;
+            _main.PropertyChanged += OnMainPropertyChanged;
 
             _statsTimer = new System.Threading.Timer(_ => RefreshStats(), null, 0, 1000);
         }
@@ -232,6 +259,71 @@ namespace DriverScanTester.ViewModels
             set => SetProperty(ref _workflowPhaseText, value);
         }
 
+        /// <summary>Completed repot-&gt;exp cycles of the running workflow (0 while idle).</summary>
+        public int WorkflowCycleCount => _main.WorkflowCycleCount;
+
+        /// <summary>
+        /// Pass-through for the "stop and teleport to city when another player is detected"
+        /// option. Kept editable while detached so profiles can be prepared offline.
+        /// </summary>
+        public bool StopOnOtherPlayerDetected
+        {
+            get => _main.StopOnOtherPlayerDetected;
+            set
+            {
+                if (_main.StopOnOtherPlayerDetected == value) return;
+                _main.StopOnOtherPlayerDetected = value;
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>
+        /// True while a game process is attached. False means "configuration mode":
+        /// profile/path editing, validation and the bot log work; start/capture actions
+        /// unlock after Attach.
+        /// </summary>
+        public bool IsGameAttached
+        {
+            get => _isGameAttached;
+            private set
+            {
+                if (SetProperty(ref _isGameAttached, value))
+                {
+                    OnPropertyChanged(nameof(AttachmentStatusText));
+                    System.Windows.Input.CommandManager.InvalidateRequerySuggested();
+                }
+            }
+        }
+
+        /// <summary>Human-readable attachment state shown in the Bot panel banner.</summary>
+        public string AttachmentStatusText => IsGameAttached
+            ? "Game attached — all bot actions are available."
+            : "Game not attached — you can still edit paths/profiles, validate them and read the bot log. Start/capture actions unlock after Attach.";
+
+        /// <summary>Attach button of the main window, exposed so the Bot panel can attach the game itself.</summary>
+        public ICommand AttachCommand => _main.AttachCommand;
+
+        /// <summary>
+        /// PID shared with the main window. The Bot panel can be used standalone: type the
+        /// game PID and press Attach without touching the main window.
+        /// </summary>
+        public string PidText
+        {
+            get => _main.PidText;
+            set
+            {
+                if (_main.PidText == value) return;
+                _main.PidText = value;
+                OnPropertyChanged();
+            }
+        }
+
+        private void OnMainPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+        {
+            if (e.PropertyName == nameof(MainViewModel.PidText))
+                OnPropertyChanged(nameof(PidText));
+        }
+
         public ICommand RunBotCommand { get; }
         public ICommand StopBotCommand { get; }
         public ICommand PauseBotCommand { get; }
@@ -241,6 +333,8 @@ namespace DriverScanTester.ViewModels
         public ICommand CaptureNpcMouseOverCommand { get; }
         public ICommand CaptureItemMouseOverCommand { get; }
         public ICommand TestOperationCommand { get; }
+        public ICommand TestLootSodSopCommand { get; }
+        public ICommand TestLootWhiteCommand { get; }
         public ICommand ClearBotLogCommand { get; }
 
         // Route Workflow commands
@@ -347,6 +441,23 @@ namespace DriverScanTester.ViewModels
             }
         }
 
+        /// <summary>Result text of the last manual loot scan test (Tools tab).</summary>
+        public string LootScanTestStatus
+        {
+            get => _lootScanTestStatus;
+            set => SetProperty(ref _lootScanTestStatus, value);
+        }
+
+        public bool IsLootScanTestRunning
+        {
+            get => _isLootScanTestRunning;
+            set
+            {
+                if (SetProperty(ref _isLootScanTestRunning, value))
+                    System.Windows.Input.CommandManager.InvalidateRequerySuggested();
+            }
+        }
+
         private void BuildAvailableOperationNames()
         {
             _availableOperationNames.Clear();
@@ -364,6 +475,13 @@ namespace DriverScanTester.ViewModels
         /// </summary>
         private async void RunOperationTest()
         {
+            if (!_main.IsAttached)
+            {
+                AppendBotLog("[Operation Test] Attach to the game first — running an operation needs live memory.");
+                OperationTestStatus = "Not attached";
+                return;
+            }
+
             if (string.IsNullOrWhiteSpace(SelectedOperationName))
             {
                 AppendBotLog("[Operation Test] No operation selected.");
@@ -390,8 +508,66 @@ namespace DriverScanTester.ViewModels
             }
         }
 
+        /// <summary>
+        /// Runs the real loot logic once (camera zoom, client capture, pixel scan,
+        /// mouseover probe and pickup) so the operation can be diagnosed from the
+        /// Tools tab. The returned status reports whether an item was collected or
+        /// the scan simply completed without a match.
+        /// </summary>
+        private async void RunLootScanTest(LootSystem.LootDiagnosticMode mode)
+        {
+            if (!_main.IsAttached)
+            {
+                AppendBotLog("[Loot Test] Attach to the game first — loot diagnostics need live memory.");
+                LootScanTestStatus = "Not attached";
+                return;
+            }
+
+            string label = mode == LootSystem.LootDiagnosticMode.SodSopPink ? "SOD/SOP" : "white";
+            IsLootScanTestRunning = true;
+            LootScanTestStatus = "Running...";
+            AppendBotLog($"[Loot Test] Starting {label} loot scan...");
+            try
+            {
+                LootSystem.LootDiagnosticResult result = await _main.RunLootDiagnosticScanAsync(mode);
+                LootScanTestStatus = DescribeLootScanResult(result);
+            }
+            catch (Exception ex)
+            {
+                LootScanTestStatus = "Error";
+                AppendBotLog($"[Loot Test] Error: {ex.Message}");
+            }
+            finally
+            {
+                IsLootScanTestRunning = false;
+            }
+        }
+
+        private static string DescribeLootScanResult(LootSystem.LootDiagnosticResult result)
+        {
+            string label = result.Mode == LootSystem.LootDiagnosticMode.SodSopPink ? "SOD/SOP" : "White";
+            return result.Outcome switch
+            {
+                LootSystem.LootDiagnosticOutcome.Collected => $"{label}: collected {result.ItemsCollected}",
+                LootSystem.LootDiagnosticOutcome.NoItem => $"{label}: no item found",
+                LootSystem.LootDiagnosticOutcome.CaptureFailed => $"{label}: capture failed",
+                LootSystem.LootDiagnosticOutcome.Cancelled => $"{label}: cancelled",
+                LootSystem.LootDiagnosticOutcome.NotAttached => $"{label}: not attached",
+                LootSystem.LootDiagnosticOutcome.NotFocused => $"{label}: game not focused",
+                LootSystem.LootDiagnosticOutcome.InCity => $"{label}: in city",
+                LootSystem.LootDiagnosticOutcome.Busy => $"{label}: busy",
+                _ => $"{label}: error"
+            };
+        }
+
         private void RunBot()
         {
+            if (!_main.IsAttached)
+            {
+                AppendBotLog("Attach to the game before starting the manual bot.");
+                return;
+            }
+
             _main.RunBot();
             double minutes = ParseRunDurationMinutes();
             if (minutes > 0)
@@ -405,6 +581,12 @@ namespace DriverScanTester.ViewModels
 
         private void ToggleHealManaBot()
         {
+            if (!_main.IsAttached && !IsHealManaBotRunning)
+            {
+                AppendBotLog("Attach to the game before starting the heal/mana bot.");
+                return;
+            }
+
             _main.ToggleHealManaBotInternal();
         }
 
@@ -457,6 +639,13 @@ namespace DriverScanTester.ViewModels
         /// </summary>
         private void StartWorkflowWithProfile()
         {
+            if (!_main.IsAttached)
+            {
+                AppendBotLog("Attach to the game before starting the workflow.");
+                ValidationText = "Not attached to the game — attach first, then start the workflow. Profile editing and validation still work offline.";
+                return;
+            }
+
             if (string.IsNullOrWhiteSpace(SelectedProfileName))
             {
                 AppendBotLog("No profile selected. Workflow cannot start.");
@@ -543,6 +732,7 @@ namespace DriverScanTester.ViewModels
             IsHealManaBotRunning = _main.IsHealManaBotRunningInternal;
             IsLootBotRunning = _main.IsLootBotRunningInternal;
             IsBotPaused = _main.IsBotPaused;
+            IsGameAttached = _main.IsAttached;
         }
 
         private void RefreshStats()
@@ -550,26 +740,43 @@ namespace DriverScanTester.ViewModels
             if (System.Threading.Volatile.Read(ref _isDisposed) != 0)
                 return;
 
-            if (!_main.IsAttached)
-            {
-                System.Windows.Application.Current?.Dispatcher?.Invoke(() =>
-                {
-                    if (System.Threading.Volatile.Read(ref _isDisposed) != 0)
-                        return;
-
-                    CurrentHp = "--";
-                    CurrentMana = "--";
-                    HpPotCount = "--";
-                    ManaPotCount = "--";
-                    OnPropertyChanged(nameof(MobGroupingStatus));
-                });
-                return;
-            }
-
             System.Windows.Application.Current?.Dispatcher?.Invoke(() =>
             {
                 if (System.Threading.Volatile.Read(ref _isDisposed) != 0)
                     return;
+
+                // Attachment / workflow / pause state is synced regardless of attachment
+                // so stopping or pausing a bot always works, even if the game went away.
+                IsGameAttached = _main.IsAttached;
+                IsMovementBotRunning = _main.IsMovementBotRunningInternal;
+                IsHealManaBotRunning = _main.IsHealManaBotRunningInternal;
+                IsLootBotRunning = _main.IsLootBotRunningInternal;
+                IsBotPaused = _main.IsBotPaused;
+
+                OnPropertyChanged(nameof(MobGroupingStatus));
+
+                // Sync workflow state from MainViewModel
+                IsWorkflowRunning = _main.IsWorkflowRunning;
+                WorkflowPhaseText = _main.WorkflowPhaseText;
+                OnPropertyChanged(nameof(WorkflowCycleCount));
+
+                // Run-duration countdown (updated every second with the stats poll).
+                var remaining = _main.GetAutoStopRemaining();
+                RunTimeRemainingText = remaining == null
+                    ? "unlimited"
+                    : remaining.Value.TotalHours >= 1
+                        ? $"{(int)remaining.Value.TotalHours}:{remaining.Value.Minutes:D2}:{remaining.Value.Seconds:D2} left"
+                        : $"{remaining.Value.Minutes:D2}:{remaining.Value.Seconds:D2} left";
+
+                // Live player stats need the game; everything above does not.
+                if (!_main.IsAttached)
+                {
+                    CurrentHp = "--";
+                    CurrentMana = "--";
+                    HpPotCount = "--";
+                    ManaPotCount = "--";
+                    return;
+                }
 
                 // Thresholds are user-owned configuration and are intentionally not
                 // synchronized by this periodic runtime-stats refresh.
@@ -581,41 +788,69 @@ namespace DriverScanTester.ViewModels
                 }
                 HpPotCount = _main.GetHpPotionCount().ToString();
                 ManaPotCount = _main.GetManaPotionCount().ToString();
-
-                IsMovementBotRunning = _main.IsMovementBotRunningInternal;
-                IsHealManaBotRunning = _main.IsHealManaBotRunningInternal;
-                IsLootBotRunning = _main.IsLootBotRunningInternal;
-                IsBotPaused = _main.IsBotPaused;
-
-                OnPropertyChanged(nameof(MobGroupingStatus));
-
-                // Sync workflow state from MainViewModel
-                IsWorkflowRunning = _main.IsWorkflowRunning;
-                WorkflowPhaseText = _main.WorkflowPhaseText;
-
-                // Run-duration countdown (updated every second with the stats poll).
-                var remaining = _main.GetAutoStopRemaining();
-                RunTimeRemainingText = remaining == null
-                    ? "unlimited"
-                    : remaining.Value.TotalHours >= 1
-                        ? $"{(int)remaining.Value.TotalHours}:{remaining.Value.Minutes:D2}:{remaining.Value.Seconds:D2} left"
-                        : $"{remaining.Value.Minutes:D2}:{remaining.Value.Seconds:D2} left";
             });
         }
 
-        public void AppendBotLog(string line)
+        /// <summary>
+        /// Seeds the UI log with the shared history so opening the Bot panel later still
+        /// shows the lines produced while it was closed (or while detached).
+        /// </summary>
+        private void SeedBotLogFromService()
         {
-            if (string.IsNullOrEmpty(line)) return;
-            var stamp = DateTime.Now.ToString("HH:mm:ss.fff");
-            var stamped = $"[{stamp}] {line}";
+            lock (_botLogLock)
+            {
+                _botLogLines.Clear();
+                foreach (var line in BotLogService.Instance.Snapshot())
+                    _botLogLines.Enqueue(line);
+                BotLogText = _botLogLines.Count == 0 ? "" : string.Join("\r\n", _botLogLines) + "\r\n";
+            }
+        }
+
+        private void OnBotLogLine(string stamped)
+        {
+            var dispatcher = System.Windows.Application.Current?.Dispatcher;
+            if (dispatcher != null && !dispatcher.CheckAccess())
+            {
+                dispatcher.BeginInvoke(new Action(() => AppendBotLogLineToUi(stamped)));
+                return;
+            }
+
+            AppendBotLogLineToUi(stamped);
+        }
+
+        private void AppendBotLogLineToUi(string stamped)
+        {
+            if (System.Threading.Volatile.Read(ref _isDisposed) != 0)
+                return;
+
             lock (_botLogLock)
             {
                 _botLogLines.Enqueue(stamped);
-                while (_botLogLines.Count > MaxBotLogLines) _botLogLines.Dequeue();
+                while (_botLogLines.Count > BotLogService.MaxLines)
+                    _botLogLines.Dequeue();
                 BotLogText = string.Join("\r\n", _botLogLines) + "\r\n";
             }
-            // Unlimited file log (UI keeps only the last 500 lines).
-            BotFileLogger.AppendLine(stamped);
+        }
+
+        private void OnMainAttachmentChanged(bool attached)
+        {
+            var dispatcher = System.Windows.Application.Current?.Dispatcher;
+            if (dispatcher != null && !dispatcher.CheckAccess())
+            {
+                dispatcher.BeginInvoke(new Action(() => OnMainAttachmentChanged(attached)));
+                return;
+            }
+
+            IsGameAttached = attached;
+        }
+
+        /// <summary>
+        /// Appends a line to the shared bot log (UI history + unlimited file log). Safe to
+        /// call from any thread; the Bot window subscribes and marshals to the UI thread.
+        /// </summary>
+        public void AppendBotLog(string line)
+        {
+            BotLogService.Instance.Append(line);
         }
 
         public void Dispose()
@@ -623,11 +858,16 @@ namespace DriverScanTester.ViewModels
             if (System.Threading.Interlocked.Exchange(ref _isDisposed, 1) != 0)
                 return;
 
+            BotLogService.Instance.LineAppended -= OnBotLogLine;
+            _main.AttachmentChanged -= OnMainAttachmentChanged;
+            _main.PropertyChanged -= OnMainPropertyChanged;
+
             System.Threading.Interlocked.Exchange(ref _statsTimer, null)?.Dispose();
         }
 
         private void ClearBotLog()
         {
+            BotLogService.Instance.Clear();
             lock (_botLogLock)
             {
                 _botLogLines.Clear();

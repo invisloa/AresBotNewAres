@@ -226,6 +226,21 @@ namespace DriverScanTester.ViewModels
         private uint _attachedPid;
         private bool _isAttached;
         public bool IsAttached => _isAttached;
+
+        /// <summary>
+        /// Raised after every attach/detach transition with the new state. Lets windows
+        /// opened while detached (Bot panel, Path/editor) refresh their command states and
+        /// "not attached" banners without polling.
+        /// </summary>
+        public event Action<bool>? AttachmentChanged;
+
+        /// <summary>
+        /// Late-bound game access handed to windows that must keep working while the game
+        /// is not attached (Bot Control Panel, Path/Profile editor). Every member reads the
+        /// CURRENT attachment state, so a window opened offline starts working the moment
+        /// the user attaches — no reopen and no stale PID.
+        /// </summary>
+        public BotGameAccess GameAccess { get; }
         public string HpPotionUseThresholdText => IsAttached ? HealManaThreshold1.ToString() : "--";
         public string ManaPotionUseThresholdText => IsAttached ? HealManaThreshold2.ToString() : "--";
         private int _cachedPointerSize; // 0 => unknown (lazy init)
@@ -272,6 +287,13 @@ namespace DriverScanTester.ViewModels
 
         public MainViewModel()
         {
+            GameAccess = new BotGameAccess(
+                isAttached: () => _isAttached,
+                getPid: () => _attachedPid,
+                getPointerSize: GetPointerSize,
+                getModuleBase: ResolveAresModuleBase,
+                readMemory: (pid, address, buffer, _) => DriverRead(pid, address, buffer, out _));
+
             AttachCommand = new RelayCommand(_ => Attach(), _ => true);
 
             // IMPORTANT: this command now does a compare vs ORIGINAL, then returns to "last-scan" mode.
@@ -297,8 +319,11 @@ namespace DriverScanTester.ViewModels
             ShowHexWindowCommand = new RelayCommand(_ => ShowHexWindow(), _ => _isAttached);
             PointerScanCommand = new RelayCommand(_ => OpenPointerScanFromMain(), _ => _isAttached && _pointerScanner != null);
             RunBotCommand = new RelayCommand(_ => ToggleMovementBot(), _ => _isAttached);
-            OpenPathEditorCommand = new RelayCommand(_ => OpenPathEditor(), _ => _isAttached);
-            OpenBotWindowCommand = new RelayCommand(_ => OpenBotWindow(), _ => _isAttached);
+            // The bot panel and the path/profile editor are offline tools: paths and
+            // profiles are plain JSON files, so they can be viewed and edited without a
+            // game session. Game-dependent buttons inside them stay disabled until Attach.
+            OpenPathEditorCommand = new RelayCommand(_ => OpenPathEditor(), _ => true);
+            OpenBotWindowCommand = new RelayCommand(_ => OpenBotWindow(), _ => true);
             OpenPixelDetectionTestingCommand = new RelayCommand(_ => OpenPixelDetectionTestingWindow(), _ => _isAttached);
             ClearLogCommand = new RelayCommand(_ => ClearLog(), _ => true);
             CaptureNpcMouseOverCommand = new RelayCommand(_ => CaptureNpcMouseOver(), _ => _isAttached);
@@ -510,14 +535,12 @@ namespace DriverScanTester.ViewModels
                 };
 
                 _botWindow = win;
-                _botLogSink = botVm.AppendBotLog;
+                // The Bot window no longer owns the log: BotLogService keeps the history
+                // and the file log alive while the panel is closed (and while detached).
                 win.Closed += (_, _) =>
                 {
                     if (ReferenceEquals(_botWindow, win))
-                    {
                         _botWindow = null;
-                        _botLogSink = null;
-                    }
                     botVm.Dispose();
                 };
                 win.Show();
@@ -525,10 +548,7 @@ namespace DriverScanTester.ViewModels
             catch (Exception ex)
             {
                 if (win != null && ReferenceEquals(_botWindow, win))
-                {
                     _botWindow = null;
-                    _botLogSink = null;
-                }
                 botVm?.Dispose();
                 AppendLog("OpenBotWindow error: " + ex.Message);
             }
@@ -543,31 +563,18 @@ namespace DriverScanTester.ViewModels
         {
             try
             {
-                if (!_isAttached)
+                // Paths/profiles are plain JSON files: the editor opens without a game
+                // session. Its live reads (capture position, camera test) are late-bound
+                // through GameAccess and simply report "attach first" while detached.
+                var vm = new PathEditorViewModel(GameAccess, AppendBotLog);
+                vm.OnRunPath += (path, loop) =>
                 {
-                    AppendLog("Attach first.");
-                    return;
-                }
-
-                Func<uint, ulong, byte[], uint, bool> readFunc = (pid, addr, buf, _) => 
-                {
-                    return DriverRead(pid, addr, buf, out _);
-                };
-
-                Func<ulong> modBaseFunc = () => 
-                {
-                    ulong b = FindModuleInScanner("Ares.exe", false);
-                    if (b == 0 && _pointerScanner != null)
+                    if (!_isAttached)
                     {
-                        _pointerScanner.RefreshModules();
-                        b = FindModuleInScanner("Ares.exe", true);
+                        AppendBotLog("[Path Editor] Attach to the game before running a path.");
+                        return;
                     }
-                    return b;
-                };
 
-                var vm = new PathEditorViewModel(readFunc, GetPointerSize, modBaseFunc, _attachedPid);
-                vm.OnRunPath += (path, loop) => 
-                {
                     // Start bot with this path
                     StartBotWithPath(path, loop);
                 };
@@ -588,6 +595,12 @@ namespace DriverScanTester.ViewModels
 
         private void StartBotWithPath(List<DriverScanTester.Services.Waypoint> path, bool loop)
         {
+            if (!_isAttached)
+            {
+                AppendBotLog("[Path Editor] Attach to the game before running a path.");
+                return;
+            }
+
             // A previous run may have been stopped while paused — always start unpaused.
             PauseController.Resume();
 
@@ -891,6 +904,9 @@ namespace DriverScanTester.ViewModels
         private bool DriverWrite(uint pid, ulong remoteAddr, byte[] src, out uint wrote)
         {
             wrote = 0;
+            if (!_isAttached || _hDevice == null || _hDevice.IsInvalid || pid == 0)
+                return false;
+
             nint data = Marshal.AllocHGlobal(src.Length);
             try
             {
@@ -1207,6 +1223,7 @@ namespace DriverScanTester.ViewModels
                 OnPropertyChanged(nameof(IsAttached));
                 OnPropertyChanged(nameof(HpPotionUseThresholdText));
                 OnPropertyChanged(nameof(ManaPotionUseThresholdText));
+                AttachmentChanged?.Invoke(false);
                 DisposePointerScanner();
                 InvalidateCommands();
 
@@ -1255,6 +1272,7 @@ namespace DriverScanTester.ViewModels
                 OnPropertyChanged(nameof(IsAttached));
                 OnPropertyChanged(nameof(HpPotionUseThresholdText));
                 OnPropertyChanged(nameof(ManaPotionUseThresholdText));
+                AttachmentChanged?.Invoke(true);
                 AppendLog($"Attached to device. PID={_attachedPid}");
                 InitializePointerScanner();
                 InvalidateCommands();
@@ -2065,7 +2083,9 @@ namespace DriverScanTester.ViewModels
             return committed && privateMem && writable && !executable && !writeCombine && mbi.RegionSize != 0;
         }
 
-        private void AppendLog(string line)
+        private void AppendLog(string line) => AppendLog(line, persistToFile: true);
+
+        private void AppendLog(string line, bool persistToFile)
         {
             if (string.IsNullOrEmpty(line)) return;
             var stamp = DateTime.Now.ToString("HH:mm:ss.fff");
@@ -2076,8 +2096,10 @@ namespace DriverScanTester.ViewModels
                 while (_logLines.Count > MaxLogLines) _logLines.Dequeue();
                 LogText = string.Join("\r\n", _logLines) + "\r\n";
             }
-            // Unlimited file log (UI keeps only the last 500 lines).
-            BotFileLogger.AppendLine(stamped);
+            // Unlimited file log (UI keeps only the last 500 lines). Bot lines already
+            // reached BotLogService/file logging through AppendBotLog, so skip here.
+            if (persistToFile)
+                BotFileLogger.AppendLine(stamped);
         }
 
         private void ClearLog()
@@ -2089,20 +2111,35 @@ namespace DriverScanTester.ViewModels
             }
         }
 
-        /// <summary>Optional sink for bot log lines (the Bot window's log). Null when the Bot window is not open.</summary>
-        private Action<string>? _botLogSink;
+        /// <summary>Single Bot Control Panel instance (null while closed).</summary>
         private Views.BotWindow? _botWindow;
 
         /// <summary>
-        /// Routes a bot log line to the bot log (Bot window) when it is open; falls back
-        /// to the main window log when the Bot window is closed so no bot message is lost.
+        /// Routes a bot log line to the process-wide <see cref="BotLogService"/> (UI history +
+        /// unlimited file log). The Bot Control Panel subscribes to that service, so the bot
+        /// log is recorded even while the panel is closed and while the game is not attached.
+        /// Lines still go to the main window log so they stay visible there.
         /// </summary>
         public void AppendBotLog(string line)
         {
-            if (_botLogSink != null)
-                _botLogSink(line);
-            else
-                AppendLog(line);
+            if (string.IsNullOrEmpty(line)) return;
+            BotLogService.Instance.Append(line);
+            AppendLog(line, persistToFile: false);
+        }
+
+        /// <summary>
+        /// Resolves the Ares.exe module base, refreshing the module list once when the
+        /// cached list does not contain it. Returns 0 while detached/unresolved.
+        /// </summary>
+        public ulong ResolveAresModuleBase()
+        {
+            ulong b = FindModuleInScanner("Ares.exe", false);
+            if (b == 0 && _pointerScanner != null)
+            {
+                _pointerScanner.RefreshModules();
+                b = FindModuleInScanner("Ares.exe", true);
+            }
+            return b;
         }
 
         private void LogUnsupported(string what) =>
@@ -2840,6 +2877,11 @@ namespace DriverScanTester.ViewModels
         private bool DriverRead(uint pid, ulong remoteAddr, byte[] dst, out uint got)
         {
             got = 0;
+            // Offline guard: windows opened while detached (Path/Profile editor, pixel
+            // tests) must fail cleanly instead of sending IOCTLs on a null device handle.
+            if (!_isAttached || _hDevice == null || _hDevice.IsInvalid || pid == 0)
+                return false;
+
             nint data = Marshal.AllocHGlobal(dst.Length);
             try
             {
@@ -3590,6 +3632,78 @@ namespace DriverScanTester.ViewModels
             return ok;
         }
 
+        /// <summary>
+        /// Runs one manual diagnostic loot scan (SOD/SOP pink pixels or normal
+        /// white-pixel loot) for the Tools tab. Uses a fresh <see cref="LootSystem"/>,
+        /// zooms the loot camera, captures the game client and exercises the same
+        /// mouseover-probe/pickup path as the running loot bot. The loot state machine
+        /// and waypoint modes are not touched.
+        /// </summary>
+        public async Task<LootSystem.LootDiagnosticResult> RunLootDiagnosticScanAsync(
+            LootSystem.LootDiagnosticMode mode)
+        {
+            string label = mode == LootSystem.LootDiagnosticMode.SodSopPink ? "SOD/SOP" : "white";
+            if (!_isAttached)
+            {
+                AppendBotLog($"[LootTest] {label}: attach to the game first.");
+                return new(mode, LootSystem.LootDiagnosticOutcome.NotAttached, 0, 0,
+                    "Attach to the game first.");
+            }
+
+            if (_isMovementBotRunning || _isLootBotRunning || IsWorkflowRunning)
+            {
+                string detail = "Stop the movement bot, loot bot and workflow first — the diagnostic needs exclusive camera/mouse control.";
+                AppendBotLog($"[LootTest] {label}: {detail}");
+                return new(mode, LootSystem.LootDiagnosticOutcome.Busy, 0, 0, detail);
+            }
+
+            FocusGameWindow();
+            // Give Windows a moment to actually move the foreground to the game window;
+            // the loot capture refuses to read a background window.
+            await Task.Delay(500);
+
+            // Re-check after the delay: a bot/workflow could have been started while
+            // the diagnostic was waiting for the game window to become foreground.
+            if (_isMovementBotRunning || _isLootBotRunning || IsWorkflowRunning)
+            {
+                string detail = "A bot/workflow was started during the focus delay — diagnostic cancelled. Stop it and retry.";
+                AppendBotLog($"[LootTest] {label}: {detail}");
+                return new(mode, LootSystem.LootDiagnosticOutcome.Busy, 0, 0, detail);
+            }
+
+            ulong baseAddr = FindModuleInScanner("Ares.exe", false);
+            if (baseAddr == 0)
+            {
+                _pointerScanner?.RefreshModules();
+                baseAddr = FindModuleInScanner("Ares.exe", true);
+            }
+            if (baseAddr == 0)
+            {
+                AppendBotLog($"[LootTest] {label}: failed to resolve the module base.");
+                return new(mode, LootSystem.LootDiagnosticOutcome.NotAttached, 0, 0,
+                    "Failed to resolve the Ares.exe module base.");
+            }
+
+            var memoryService = new GameMemoryService(
+                _attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
+            using var lootSystem = new LootSystem(memoryService, AppendBotLog);
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+
+            // The loot scan moves the cursor once per probe. MouseOperations.Log writes a
+            // main-log + file line for every move, which would flood the log and slow the
+            // diagnostic down; the scanner logs its own candidate/probe summary instead.
+            Action<string>? previousMouseLog = MouseOperations.Log;
+            MouseOperations.Log = null;
+            try
+            {
+                return await Task.Run(() => lootSystem.RunDiagnosticScanAsync(mode, cts.Token));
+            }
+            finally
+            {
+                MouseOperations.Log = previousMouseLog;
+            }
+        }
+
         public List<string> ListProfiles()
         {
             _profileLoader ??= new BotProfileLoader(AppendBotLog);
@@ -4253,7 +4367,9 @@ namespace DriverScanTester.ViewModels
         
                 public (int hp, int mana, bool success) GetHpMana()
                 {
-                    if (!_isAttached || _movementSystem == null)
+                    // Live stats only need the attached game, not a running movement bot:
+                    // the Bot panel shows HP/mana/potions even while it is idle.
+                    if (!_isAttached)
                         return (0, 0, false);
 
                     ulong baseAddr = FindModuleInScanner("Ares.exe", false);

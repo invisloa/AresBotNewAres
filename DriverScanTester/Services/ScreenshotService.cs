@@ -61,6 +61,16 @@ namespace DriverScanTester.Services
         private static int _otherLootDiagnosticFramesCloned;
 
         /// <summary>
+        /// Resets the per-process diagnostic frame budgets. Manual Tools-tab loot tests
+        /// call this before each run so repeated diagnostics keep saving frames.
+        /// </summary>
+        internal static void ResetLootScanDiagnosticBudgets()
+        {
+            Interlocked.Exchange(ref _pinkDiagnosticFramesCloned, 0);
+            Interlocked.Exchange(ref _otherLootDiagnosticFramesCloned, 0);
+        }
+
+        /// <summary>
         /// Clones the current loot-scan frame. The loot scanner reuses one bitmap for
         /// every capture, so a clone must be taken at capture time to preserve the
         /// exact pixels that were analyzed (the next capture — e.g. the post-click
