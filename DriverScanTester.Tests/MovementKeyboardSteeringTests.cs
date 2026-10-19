@@ -80,6 +80,35 @@ namespace DriverScanTester.Tests
             Assert.Equal(expected, method.Invoke(null, new object[] { signedError })!.ToString());
         }
 
+        [Theory]
+        [InlineData(350f, 0f, true)] // exactly +10° across North — inclusive tolerance
+        [InlineData(350f, 0.1f, false)] // just outside the tolerance
+        [InlineData(10f, 0f, true)] // exactly -10° across North
+        [InlineData(10f, 359.9f, false)]
+        [InlineData(350f, 10f, false)] // a 20° error is not aligned
+        [InlineData(5f, 355f, true)]
+        [InlineData(5f, 354.9f, false)]
+        [InlineData(0f, 180f, false)]
+        [InlineData(123f, 123f, true)]
+        public void FirstStepHeadingAlignmentUsesTheKeyboardToleranceAcrossNorth(
+            float currentBearingDeg,
+            float desiredBearingDeg,
+            bool expected)
+        {
+            Assert.Equal(
+                expected,
+                MovementSystem.IsInitialHeadingAligned(currentBearingDeg, desiredBearingDeg));
+        }
+
+        [Fact]
+        public void FirstStepHeadingAlignmentSharesTheKeyboardSteeringTolerance()
+        {
+            Assert.Equal(
+                BotConstants.Movement.KeyboardTurnToleranceDegrees,
+                BotConstants.Movement.InitialHeadingAlignmentToleranceDegrees);
+            Assert.InRange(BotConstants.Movement.InitialHeadingAlignmentTimeoutMs, 1000, 5000);
+        }
+
         [Fact]
         public void SevenDegreeWrapErrorsStillReleaseWithinTheInclusiveTolerance()
         {

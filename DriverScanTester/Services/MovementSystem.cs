@@ -752,6 +752,17 @@ namespace DriverScanTester.Services
         private float _lastSetBearingDeg = UnsetBearing;
         private float? _keyboardFrozenBearingDeg;
 
+        // ── First-step heading alignment ──
+        // A newly started path must not move forward from a bad camera angle: the very
+        // first route step turns in place (A/D + fast-turn mouse, no W) until the camera
+        // is within the steering tolerance. Cleared after that first step and re-armed
+        // only by a map change / teleport, so later waypoints keep the normal
+        // move-and-turn steering.
+        private bool _initialHeadingAlignmentPending = true;
+        private bool _initialHeadingAlignmentInProgress;
+        private int _initialHeadingAlignmentLastTick;
+        private DateTime _initialHeadingAlignmentDeadlineUtc = DateTime.MinValue;
+
         private enum TurnKeyState
         {
             None,
@@ -826,14 +837,18 @@ namespace DriverScanTester.Services
         private const double FORCE_START_MIN_INTERVAL_MS = BotConstants.Movement.ForceStartMinIntervalMs;
         private DateTime _lastForceStartMovingAt = DateTime.MinValue;
 
-        // Consecutive stuck attempts counters — after this many stuck detections without
-        // reaching a waypoint, the bot triggers a repot (teleport to town).
+        // Consecutive navigation failures for the current unresolved waypoint.
+        // This is deliberately NOT a "did the character physically move?" counter:
+        // ReverseDiagonalRecovery may successfully walk away from an obstacle and the
+        // bot can still be unable to reach the same waypoint. The counter is reset only
+        // when the waypoint is consumed, a genuinely different route target is activated
+        // or a map/teleport invalidates the navigation context.
         private const int STUCK_MAX_ATTEMPTS_OUTSIDE = 15;
         private const int STUCK_MAX_ATTEMPTS_IN_CITY = 3;
         private int _consecutiveStuckAttempts = 0;
 
         /// <summary>Player position when the last reverse-diagonal recovery started.
-        /// Used to decide whether the consecutive-stuck counter should reset (real progress).</summary>
+        /// Diagnostic only — physical displacement must never decide navigation success.</summary>
         private (float X, float Y)? _lastStuckAttemptPos = null;
 
         // Position-based no-progress stuck detection (ghost-walk stuck spots): the walk
@@ -1058,7 +1073,29 @@ namespace DriverScanTester.Services
             if (_gameUnresponsiveDetected)
                 return;
 
+            // Once the workflow city-stuck escalation fires, this MovementSystem must
+            // never move or start another recovery again. PathRunner observes the flag
+            // immediately after this Update and aborts the route.
+            if (_isCityStuckFatal)
+            {
+                StopMoving();
+                ReleaseCombatKeys();
+                return;
+            }
+
             _tickCount++;
+
+            // The first-step turn holds A/D across ticks while W stays released. If the
+            // previous tick did not reach the movement section (combat, loot, recovery,
+            // pause, ...), release the turn keys here so they can never leak into that
+            // action. The next movement tick re-acquires them and continues the turn.
+            if (_initialHeadingAlignmentPending &&
+                _heldTurnKey != TurnKeyState.None &&
+                _tickCount - _initialHeadingAlignmentLastTick > 1)
+            {
+                ReleaseTurnKey("first-step alignment interrupted");
+                _initialHeadingAlignmentInProgress = false;
+            }
 
             if (!_isInitialized)
             {
@@ -2028,20 +2065,12 @@ namespace DriverScanTester.Services
                     ResetSpecialRecoveryAttempt();
                 }
 
-                // Reset stuck counter only when the player has actually moved away from the
-                // position where the last stuck attempt began (real progress). Proximity to
-                // the target alone must NOT reset it — otherwise a bot stuck right next to its
-                // waypoint loops the reverse-diagonal recovery forever without escalating.
-                if (_consecutiveStuckAttempts > 0 && _lastStuckAttemptPos.HasValue)
-                {
-                    float movedSinceStuck = GeometryUtils.Distance(currX, currY, _lastStuckAttemptPos.Value.X, _lastStuckAttemptPos.Value.Y);
-                    if (movedSinceStuck > BotConstants.Movement.StuckProgressResetDistance)
-                    {
-                        _consecutiveStuckAttempts = 0;
-                        _lastStuckAttemptPos = null;
-                        _log($"[Unstuck] Reset counter — moved {movedSinceStuck:F1} units since last stuck attempt.");
-                    }
-                }
+                // Navigation failure accounting is intentionally NOT tied to physical
+                // displacement. ReverseDiagonalRecovery can legitimately move the player
+                // 3+ units away from an obstacle and still be unable to reach the same
+                // waypoint; resetting here caused the confirmed infinite city loop.
+                // The counter is preserved until the waypoint is consumed or the route
+                // context genuinely changes (see AdvanceReachedWaypoints / resync / map).
 
                 // ── Active ReverseDiagonalRecovery ──
                 if (_reverseDiagonalRecovery.IsActive)
@@ -2056,12 +2085,24 @@ namespace DriverScanTester.Services
                         case RecoveryResult.Recovered:
                             _isUnstuckRoutineActive = false;
                             _log($"[ReverseDiagonal] recovered.");
+                            // Physical success only means the escape maneuver worked. The
+                            // navigation failure against the current waypoint is still
+                            // unresolved until that waypoint is consumed.
+                            bool recoveredInCity = _memoryService.GetIsInCity();
+                            int recoveredLimit = recoveredInCity ? STUCK_MAX_ATTEMPTS_IN_CITY : STUCK_MAX_ATTEMPTS_OUTSIDE;
+                            float recoveredDisplacement = _lastStuckAttemptPos.HasValue
+                                ? GeometryUtils.Distance(currX, currY, _lastStuckAttemptPos.Value.X, _lastStuckAttemptPos.Value.Y)
+                                : 0f;
+                            _log($"[Unstuck] Physical recovery succeeded (moved {recoveredDisplacement:F1} units). Navigation failure count preserved: {_consecutiveStuckAttempts}/{recoveredLimit}.");
                             ResetActionStuckTracking();
                             return;
                         case RecoveryResult.Failed:
                             _isUnstuckRoutineActive = false;
                             _log($"[ReverseDiagonal] failed - all attempts exhausted.");
                             _log($"[ActionStuck] Action={currentAction} while moving. Stuck confirmed by action.");
+                            bool failedInCity = _memoryService.GetIsInCity();
+                            int failedLimit = failedInCity ? STUCK_MAX_ATTEMPTS_IN_CITY : STUCK_MAX_ATTEMPTS_OUTSIDE;
+                            _log($"[Unstuck] Physical recovery failed. Navigation failure count preserved: {_consecutiveStuckAttempts}/{failedLimit}.");
                             MarkObstacleFromActionStuck(currX, currY, target);
                             _localNavigationMap.SaveIfDirty();
                             return;
@@ -2276,7 +2317,14 @@ namespace DriverScanTester.Services
                 }
 
                 ResetSpecialRecoveryAttempt();
-                _consecutiveStuckAttempts = 0; // reset stuck counter — we made progress
+                // Reset the navigation failure counter only when the waypoint is
+                // actually consumed. Physical movement / recovery displacement does NOT
+                // prove that the navigation problem is solved, so it must never reset it.
+                if (_consecutiveStuckAttempts > 0)
+                {
+                    _log($"[Unstuck] Navigation failure count reset — waypoint ({target.X:F1},{target.Y:F1}) reached.");
+                }
+                _consecutiveStuckAttempts = 0;
                 _lastStuckAttemptPos = null;
                 ResetBearingState();
                 ResetActionStuckTracking();
@@ -2487,23 +2535,25 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Applies a desired bearing using the supplied steering mode.
+        /// When <paramref name="moveForward"/> is false the turn is performed in place:
+        /// A/D and the fast-turn mouse may be used, but W is never held.
         /// </summary>
-        private void ApplySteeringBearing(float bearingDeg, MovementSteeringMode steeringMode)
+        private void ApplySteeringBearing(float bearingDeg, MovementSteeringMode steeringMode, bool moveForward = true)
         {
             if (steeringMode == MovementSteeringMode.DirectCamera)
             {
-                ApplyDirectSteeringBearing(bearingDeg);
+                ApplyDirectSteeringBearing(bearingDeg, moveForward);
                 return;
             }
 
-            ApplyKeyboardSteeringBearing(bearingDeg);
+            ApplyKeyboardSteeringBearing(bearingDeg, moveForward);
         }
 
         /// <summary>
         /// Legacy direct-camera steering. Its filtering and write state intentionally
         /// remain separate from the feedback-controlled keyboard steering state.
         /// </summary>
-        private void ApplyDirectSteeringBearing(float bearingDeg)
+        private void ApplyDirectSteeringBearing(float bearingDeg, bool moveForward = true)
         {
             ReleaseTurnKey("direct camera steering");
 
@@ -2527,7 +2577,10 @@ namespace DriverScanTester.Services
                 _hasCameraHysteresisCandidate = false;
             }
 
-            StartMoving();
+            if (moveForward)
+                StartMoving();
+            else if (_isMovingForward)
+                StopMoving();
         }
 
         /// <summary>
@@ -2538,14 +2591,17 @@ namespace DriverScanTester.Services
         /// branch; the mouse assistance is released again as soon as the error drops back to
         /// the normal A/D range.
         /// </summary>
-        private void ApplyKeyboardSteeringBearing(float bearingDeg)
+        private void ApplyKeyboardSteeringBearing(float bearingDeg, bool moveForward = true)
         {
             float desiredBearingDeg = GeometryUtils.NormalizeBearingDeg(bearingDeg);
 
             // Keep the complete W + turn-key + mouse-edge ownership transition atomic with StopMoving.
             lock (_inputLock)
             {
-                StartMoving();
+                if (moveForward)
+                    StartMoving();
+                else if (_isMovingForward)
+                    StopMoving();
 
                 float currentRadians = _memoryService.GetCameraAngle();
                 float currentBearingDeg = GeometryUtils.ConvertRadiansToBearingDeg(currentRadians);
@@ -3550,16 +3606,16 @@ namespace DriverScanTester.Services
         private void MoveTowards(float currX, float currY, float targetX, float targetY, MovementSteeringMode steeringMode)
         {
             float targetBearingDeg = ComputeMoveTowardsBearingDeg(currX, currY, targetX, targetY);
+            float dist = GeometryUtils.Distance(currX, currY, targetX, targetY);
+            float reachBase = GeometryUtils.GetWaypointReachThreshold(MovementPrecision.Medium);
+            float freezeThreshold = Math.Max(reachBase * 2.0f, HeadingFreezeDistanceBase);
+            bool nearWaypointHeadingFrozen = dist <= freezeThreshold;
 
             if (steeringMode == MovementSteeringMode.KeyboardTurn)
             {
-                float dist = GeometryUtils.Distance(currX, currY, targetX, targetY);
                 // Keep the existing freeze distance calculation; freeze the desired
                 // waypoint bearing instead of the last directly-written camera angle.
-                float reachBase = GeometryUtils.GetWaypointReachThreshold(MovementPrecision.Medium);
-                float freezeThreshold = Math.Max(reachBase * 2.0f, HeadingFreezeDistanceBase);
-
-                if (dist <= freezeThreshold)
+                if (nearWaypointHeadingFrozen)
                 {
                     if (!_keyboardFrozenBearingDeg.HasValue)
                     {
@@ -3573,7 +3629,18 @@ namespace DriverScanTester.Services
                 {
                     _keyboardFrozenBearingDeg = null;
                 }
+            }
 
+            // First step of a new path: finish the turn in place before W is pressed.
+            // Later waypoints keep the normal move-and-turn steering.
+            if (_initialHeadingAlignmentPending &&
+                TryAlignInitialHeading(targetBearingDeg, steeringMode))
+            {
+                return;
+            }
+
+            if (steeringMode == MovementSteeringMode.KeyboardTurn)
+            {
                 // Continue feedback steering against the frozen target so an unfinished
                 // turn is never left held indefinitely when entering the freeze region.
                 ApplySteeringBearing(targetBearingDeg, steeringMode);
@@ -3583,20 +3650,67 @@ namespace DriverScanTester.Services
             // Preserve the legacy direct-camera near-waypoint behavior: once a camera
             // heading exists, keep W held and stop changing that heading inside the
             // original freeze distance.
-            if (_hasLastGameAngle)
+            if (_hasLastGameAngle && nearWaypointHeadingFrozen)
             {
-                float dist = GeometryUtils.Distance(currX, currY, targetX, targetY);
-                float reachBase = GeometryUtils.GetWaypointReachThreshold(MovementPrecision.Medium);
-                float freezeThreshold = Math.Max(reachBase * 2.0f, HeadingFreezeDistanceBase);
-
-                if (dist <= freezeThreshold)
-                {
-                    StartMoving();
-                    return;
-                }
+                StartMoving();
+                return;
             }
 
             ApplySteeringBearing(targetBearingDeg, steeringMode);
+        }
+
+        /// <summary>
+        /// True when the current camera bearing is close enough to the first waypoint's
+        /// desired bearing that forward movement can safely start.
+        /// </summary>
+        internal static bool IsInitialHeadingAligned(float currentBearingDeg, float desiredBearingDeg)
+            => Math.Abs(GeometryUtils.GetShortestBearingDiffDeg(currentBearingDeg, desiredBearingDeg)) <=
+               BotConstants.Movement.InitialHeadingAlignmentToleranceDegrees;
+
+        /// <summary>
+        /// Handles the first route step's heading alignment. Returns true while the bot is
+        /// still turning in place (the caller must not start moving); false once the turn
+        /// has finished or the safety timeout expired, so the normal steering/movement
+        /// path can run. Only the very first step of a freshly started path calls this.
+        /// </summary>
+        private bool TryAlignInitialHeading(float desiredBearingDeg, MovementSteeringMode steeringMode)
+        {
+            DateTime now = DateTime.UtcNow;
+            float currentBearingDeg = GeometryUtils.ConvertRadiansToBearingDeg(_memoryService.GetCameraAngle());
+            float error = GeometryUtils.GetShortestBearingDiffDeg(currentBearingDeg, desiredBearingDeg);
+
+            if (IsInitialHeadingAligned(currentBearingDeg, desiredBearingDeg))
+            {
+                _initialHeadingAlignmentPending = false;
+                _initialHeadingAlignmentInProgress = false;
+                _log($"[InitialAlign] Heading aligned at {currentBearingDeg:F1}° (target {desiredBearingDeg:F1}°, error {error:+0.0;-0.0;0.0}°) — starting forward movement.");
+                return false;
+            }
+
+            if (_initialHeadingAlignmentInProgress && now >= _initialHeadingAlignmentDeadlineUtc)
+            {
+                _initialHeadingAlignmentPending = false;
+                _initialHeadingAlignmentInProgress = false;
+                _log($"[InitialAlign] Timeout after {BotConstants.Movement.InitialHeadingAlignmentTimeoutMs}ms (current {currentBearingDeg:F1}°, target {desiredBearingDeg:F1}°, error {error:+0.0;-0.0;0.0}°) — starting forward movement anyway.");
+                return false;
+            }
+
+            if (!_initialHeadingAlignmentInProgress)
+            {
+                // Guarantee no stale W/A/D from the previous path before the in-place turn.
+                // The turn keys are re-acquired immediately by ApplySteeringBearing below.
+                StopMoving();
+                _initialHeadingAlignmentInProgress = true;
+                _initialHeadingAlignmentDeadlineUtc = now.AddMilliseconds(
+                    BotConstants.Movement.InitialHeadingAlignmentTimeoutMs);
+                _log($"[InitialAlign] New path first step — turning in place to {desiredBearingDeg:F1}° before moving (current {currentBearingDeg:F1}°, error {error:+0.0;-0.0;0.0}°, steering={steeringMode}).");
+            }
+
+            // Turn in place: A/D and the fast-turn mouse may run, but W must stay released
+            // until the first step's heading is within tolerance.
+            ApplySteeringBearing(desiredBearingDeg, steeringMode, moveForward: false);
+            _initialHeadingAlignmentLastTick = _tickCount;
+            return true;
         }
 
         // ========================================================================
@@ -3610,6 +3724,22 @@ namespace DriverScanTester.Services
             _lastSetGameAngle = 0f;
             _hasCameraHysteresisCandidate = false;
             _keyboardFrozenBearingDeg = null;
+        }
+
+        /// <summary>
+        /// Re-arms the first-step heading alignment after a teleport / map change. The
+        /// next route step is then treated like the first step of a new path: turn in
+        /// place to the target bearing before W is pressed.
+        /// </summary>
+        private void RearmInitialHeadingAlignment(string reason)
+        {
+            bool wasPending = _initialHeadingAlignmentPending;
+            _initialHeadingAlignmentPending = true;
+            _initialHeadingAlignmentInProgress = false;
+            _initialHeadingAlignmentDeadlineUtc = DateTime.MinValue;
+
+            if (!wasPending)
+                _log($"[InitialAlign] Re-armed for the next first step ({reason}).");
         }
 
         private void ResetActionStuckTracking()
@@ -3643,6 +3773,9 @@ namespace DriverScanTester.Services
             ClearCombatRetargetSearch();
             ReleaseSkillThree();
             StopMoving();
+            // The teleport/map change invalidates the old camera context: the next route
+            // step must turn in place to its bearing before moving again.
+            RearmInitialHeadingAlignment(reason);
             _log($"[Unstuck] Full reset ({reason}) — old route/unstuck discarded.");
         }
 
@@ -3845,12 +3978,23 @@ namespace DriverScanTester.Services
         /// </summary>
         private void StartReverseDiagonalRecovery(float currX, float currY, Waypoint target)
         {
+            // A failed workflow route must never start another recovery. This also makes
+            // the fatal state robust against a late/duplicate stuck dispatch while
+            // PathRunner is aborting the route.
+            if (_isCityStuckFatal)
+            {
+                _isUnstuckRoutineActive = false;
+                StopMoving();
+                ReleaseCombatKeys();
+                return;
+            }
+
             CancelMobGrouping("ReverseDiagonalRecovery started");
             _consecutiveStuckAttempts++;
             _lastStuckAttemptPos = (currX, currY);
             bool inCity = _memoryService.GetIsInCity();
             int maxAttempts = inCity ? STUCK_MAX_ATTEMPTS_IN_CITY : STUCK_MAX_ATTEMPTS_OUTSIDE;
-            _log($"[Unstuck] Consecutive stuck attempts: {_consecutiveStuckAttempts}/{maxAttempts} ({(inCity ? "in city" : "outside")})");
+            _log($"[Unstuck] Waypoint=({target.X:F1},{target.Y:F1}) Attempt={_consecutiveStuckAttempts}/{maxAttempts} City={inCity}");
 
             if (_consecutiveStuckAttempts >= maxAttempts)
             {
@@ -3866,8 +4010,10 @@ namespace DriverScanTester.Services
                     {
                         // Legacy mode: no external repot flow — press the town teleport and
                         // wait before retrying.
+                        _log("[Unstuck] CITY STUCK LIMIT REACHED.");
                         _log($"[Unstuck] Reached {maxAttempts} stuck attempts in city — pressing 6 and waiting 10 minutes.");
                         StopMoving();
+                        ReleaseCombatKeys();
                         GameInput.PressKey(GameInput.VK_6, GameInput.SCAN_6);
 
                         // Screenshot immediately after the scroll is triggered — before the
@@ -3882,14 +4028,19 @@ namespace DriverScanTester.Services
                         // teleport key / idle for 10 minutes here. Signal a fatal city-stuck
                         // state so PathRunner aborts the route and the coordinator retries
                         // (and eventually fails visibly instead of standing silently).
-                        _log($"[Unstuck] Reached {maxAttempts} stuck attempts in city (workflow) — aborting path so the coordinator can retry from the city.");
+                        _log("[Unstuck] CITY STUCK LIMIT REACHED.");
+                        _log($"[Unstuck] Reached {maxAttempts} stuck attempts in city (workflow) — aborting current route so the coordinator can retry from the city.");
                         _isCityStuckFatal = true;
                         StopMoving();
+                        ReleaseCombatKeys();
                     }
                 }
                 else
                 {
-                    _log($"[Unstuck] Reached {maxAttempts} stuck attempts outside — triggering ReportAndGoBack.");
+                    _log($"[Unstuck] OUTSIDE STUCK LIMIT REACHED ({maxAttempts}).");
+                    _log($"[Unstuck] Triggering ReportAndGoBack.");
+                    StopMoving();
+                    ReleaseCombatKeys();
                     _repotHelper.ReportAndGoBack();
                 }
 
@@ -4022,7 +4173,7 @@ namespace DriverScanTester.Services
         /// in Screenshots/Stuck/ with the current date/time.
         /// Called before triggering ReportAndGoBack after too many consecutive stuck attempts.
         /// </summary>
-        private void CaptureStuckScreenshot()
+        protected virtual void CaptureStuckScreenshot()
         {
             try
             {
@@ -4135,6 +4286,11 @@ namespace DriverScanTester.Services
                             _heldTurnKey = TurnKeyState.None;
                             _keyboardFrozenBearingDeg = null;
                             ReleaseKeyboardFastTurnMouse("StopMoving");
+                            // An external stop (combat/loot/pause) interrupts the in-place
+                            // first-step turn; restart its safety timeout when movement
+                            // resumes instead of counting the paused time.
+                            if (_initialHeadingAlignmentPending)
+                                _initialHeadingAlignmentInProgress = false;
                         }
                     }
                 }
@@ -4450,6 +4606,13 @@ namespace DriverScanTester.Services
             ResetActionStuckTracking();
             ResetCombatStateForWaypointChange();
             ResetSpecialRecoveryAttempt();
+            // A genuinely different target is a new navigation context. Same-target
+            // resynchronization returned SameTarget above and keeps the failure history.
+            if (_consecutiveStuckAttempts > 0)
+            {
+                var newTarget = _waypoints.Count > 0 ? _waypoints.Peek() : oldTarget;
+                _log($"[Unstuck] Navigation failure count reset — new route target ({newTarget.X:F1},{newTarget.Y:F1}).");
+            }
             _consecutiveStuckAttempts = 0;
             _lastStuckAttemptPos = null;
 

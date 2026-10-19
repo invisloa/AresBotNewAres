@@ -347,6 +347,21 @@ namespace DriverScanTester
             /// </summary>
             public const int KeyboardFastTurnHumanOverrideCooldownMs = 1500;
 
+            /// <summary>
+            /// Angular tolerance for the first-step heading alignment. The first waypoint
+            /// of a newly started path turns in place until the camera bearing is within
+            /// this error before W is pressed. Matches the keyboard steering tolerance so
+            /// the A/D controller can actually settle inside it.
+            /// </summary>
+            public const float InitialHeadingAlignmentToleranceDegrees = KeyboardTurnToleranceDegrees;
+
+            /// <summary>
+            /// Safety limit (ms) for the first-step heading alignment. When the camera
+            /// cannot settle (e.g. unreadable memory or an interrupted turn) the bot logs
+            /// a warning and starts moving anyway instead of blocking the route forever.
+            /// </summary>
+            public const int InitialHeadingAlignmentTimeoutMs = 3000;
+
             /// <summary>Grace period in seconds after pressing W during which stuck detection is ignored.</summary>
             public const double StuckGraceAfterStartSeconds = 1.25;
 
@@ -386,10 +401,10 @@ namespace DriverScanTester
             /// <summary>Segment-progress threshold above which the bot skips to the next segment (t >= this → skip).</summary>
             public const float RouteResyncVeryCloseToSegmentEndT = 0.85f;
 
-            /// <summary>Minimum displacement (game tiles) from the position where the last
-            /// stuck attempt started before the consecutive-stuck counter is reset.
-            /// Proximity to the waypoint alone must NOT reset it — otherwise a bot stuck
-            /// next to its target loops the recovery forever without ever escalating.</summary>
+            /// <summary>Minimum displacement (game tiles) used by recovery guards (waypoint
+            /// special-recovery eligibility and combat reposition progress). This is NOT the
+            /// navigation failure counter reset condition — physical displacement must never
+            /// reset the per-waypoint stuck escalation counter.</summary>
             public const float StuckProgressResetDistance = 3.0f;
 
             /// <summary>
