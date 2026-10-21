@@ -247,6 +247,13 @@ namespace DriverScanTester.Services
         /// <see cref="Bitmap.GetPixel"/> call per pixel.
         /// </summary>
         private byte[] _scanBuffer = Array.Empty<byte>();
+
+        // ── White-loot probe continuation (bounded multi-pass coverage) ──
+        // Coordinates already probed during an Incomplete pass. They are skipped only
+        // while the screen/candidate key is unchanged; the key is reset whenever the
+        // capture geometry or the accepted component geometry changes.
+        private readonly HashSet<Point> _probedWhiteProbeProgress = new HashSet<Point>();
+        private string _whiteProbeProgressKey = string.Empty;
         private const int OtherPlayerMarkerRequiredChecks = 3;
         private readonly PlayerMarkerPixelDetector _playerMarkerPixelDetector = new();
         private bool _otherPlayerMarkerWasVisible;
@@ -3133,9 +3140,22 @@ namespace DriverScanTester.Services
             // (including the post-collection refresh) and would otherwise be gone.
             Bitmap? diagnosticFrame = null;
             var diagnosticWhiteHits = new List<Point>();
+            // The detection mask and the cursor-probe positions are separate datasets:
+            // the annotated frame must never present the handful of mouse positions as
+            // if they were the complete detected white-pixel mask.
+            var diagnosticDetectedWhitePixels = new List<Point>();
+            var diagnosticCandidatePixels = new List<Point>();
+            var diagnosticCandidateBounds = new List<Rectangle>();
+            Point? diagnosticSuccessProbe = null;
             Rectangle diagnosticScanRegion = Rectangle.Empty;
             Rectangle diagnosticExcludeZone = Rectangle.Empty;
             int diagnosticWhiteCount = 0;
+            int diagnosticExactWhiteCount = 0;
+            int diagnosticShadedWhiteCount = 0;
+            int diagnosticCandidatePixelCount = 0;
+            int diagnosticComponentCount = 0;
+            int diagnosticCandidateCount = 0;
+            int diagnosticPreviouslyProbedSkipped = 0;
             string diagnosticOutcome = "scan-error";
             LootClientGeometry? diagnosticGeometry = null;
             PixelFormat diagnosticPixelFormat = PixelFormat.Undefined;
@@ -3261,7 +3281,8 @@ namespace DriverScanTester.Services
                     pinkOnly, targetPoints,
                     out diagnosticPixelFormat,
                     out diagnosticStride);
-                diagnosticWhiteCount = targetPoints.Count;
+                diagnosticExactWhiteCount = targetPoints.Count;
+                diagnosticWhiteCount = diagnosticExactWhiteCount;
                 if (!pinkOnly)
                 {
                     CollectScanTargetPoints(
@@ -3269,7 +3290,14 @@ namespace DriverScanTester.Services
                         applyExcludeZone, exclXMin, exclXMax, exclYMin, exclYMax,
                         false, shadedWhitePoints!,
                         out _, out _, shadedWhiteOnly: true);
-                    diagnosticWhiteCount = shadedWhitePoints!.Count;
+                    diagnosticShadedWhiteCount = shadedWhitePoints!.Count;
+                    diagnosticWhiteCount = diagnosticExactWhiteCount + diagnosticShadedWhiteCount;
+
+                    if (ScreenshotService.LootScanCaptureEnabled)
+                    {
+                        diagnosticDetectedWhitePixels.AddRange(targetPoints);
+                        diagnosticDetectedWhitePixels.AddRange(shadedWhitePoints!);
+                    }
                 }
 
                 // ── Phase B: label 8-connected components and keep loot-shaped
@@ -3327,6 +3355,8 @@ namespace DriverScanTester.Services
                     }
                 }
 
+                diagnosticComponentCount = components.Count;
+
                 // Mob names are glyph rows — drop them so a name can never eat the
                 // probe budget before the loot below/next to it is reached. In pink
                 // SOD/SOP mode the pink name/glow itself is the target, so no text
@@ -3339,108 +3369,160 @@ namespace DriverScanTester.Services
 
                 // Probe left → right, like the old column-major pixel scan.
                 candidates.Sort((a, b) => a.XMin != b.XMin ? a.XMin.CompareTo(b.XMin) : a.YMin.CompareTo(b.YMin));
+                diagnosticCandidateCount = candidates.Count;
 
-                // ── Phase C: probe only the surviving candidate blobs. The hover check
-                //    is unchanged: small blobs get every pixel, larger ones a handful of
-                //    sampled points. Tiny blobs keep the old ±1 diagonal search.
+                bool captureCandidateMask = !pinkOnly && ScreenshotService.LootScanCaptureEnabled;
+                foreach (WhiteComponent candidate in candidates)
+                {
+                    diagnosticCandidatePixelCount += candidate.Area;
+                    if (!captureCandidateMask)
+                        continue;
+                    diagnosticCandidatePixels.AddRange(candidate.Points);
+                    diagnosticCandidateBounds.Add(Rectangle.FromLTRB(
+                        candidate.XMin, candidate.YMin, candidate.XMax + 1, candidate.YMax + 1));
+                }
+
+                // ── Phase C: probe only the surviving candidate blobs. White components
+                //    use a deterministic two-stage plan: Stage A covers every occupied
+                //    spatial cell with an actual white pixel; Stage B then exhausts the
+                //    remaining white pixels of the same component. Probes are interleaved
+                //    round-robin between candidates so one large component cannot starve
+                //    the others. Tiny pink blobs keep the old ±1 diagonal search.
                 //
                 //    The normal white-loot scan stays bounded by MaxLootProbesPerRegion
-                //    so UI clutter can never stall it. The SOD/SOP pink pass has NO
-                //    probe budget: it probes EVERY candidate pixel in this single pass,
-                //    as one continuous mouse sweep. The old per-pass budget (16 probes)
-                //    aborted the pass after a few samples and relied on the state machine
-                //    to retry with a rotating offset — each retry re-captured and
-                //    re-scanned the whole window first, which is exactly what produced
-                //    the visible "move x times → pause → move x times" rhythm. ──
+                //    so UI clutter can never stall it; hitting that budget returns
+                //    Incomplete (never NoItem) and the next pass continues with the
+                //    already-examined coordinates skipped while the frame is unchanged.
+                //    The SOD/SOP pink pass has NO probe budget: it probes EVERY candidate
+                //    pixel in this single pass, in the unchanged candidate order. ──
+                string probeProgressKey = pinkOnly
+                    ? string.Empty
+                    : BuildWhiteProbeProgressKey(regionName, diagnosticGeometry, candidates);
+                if (!pinkOnly &&
+                    !string.Equals(probeProgressKey, _whiteProbeProgressKey, StringComparison.Ordinal))
+                {
+                    // Screen/candidate geometry changed — do not trust old coordinates.
+                    _probedWhiteProbeProgress.Clear();
+                    _whiteProbeProgressKey = probeProgressKey;
+                }
+
+                LootProbePlanner probePlanner = pinkOnly
+                    ? LootProbePlanner.CreateForPink(candidates)
+                    : LootProbePlanner.CreateForWhite(candidates, _probedWhiteProbeProgress);
+                diagnosticPreviouslyProbedSkipped = probePlanner.PreviouslyProbedSkipped;
+
                 int probesUsed = 0;
-                foreach (WhiteComponent component in candidates)
+                while (probePlanner.TryNext(out int candidateIndex, out Point probe))
                 {
                     if (ShouldAbortLoot() || _scanToken.IsCancellationRequested ||
                         (pinkOnly && !PinkLootOnlyMode))
                     {
                         diagnosticOutcome = "cancelled-before-probe";
+                        ClearWhiteProbeProgress();
                         return LootScanPassResult.Cancelled;
                     }
 
-                    bool addDiagonals = component.Area <= TinyProbeWithDiagonalsArea;
-                    List<Point> points = pinkOnly ? component.Points : SelectProbePoints(component);
-                    foreach (Point probe in points)
+                    WhiteComponent component = candidates[candidateIndex];
+                    bool addDiagonals = pinkOnly && component.Area <= TinyProbeWithDiagonalsArea;
+                    actualCursorProbes++;
+                    probesUsed++;
+                    if (!pinkOnly)
+                        _probedWhiteProbeProgress.Add(probe);
+
+                    LootProbeResult probeResult = TryCollectAt(probe.X, probe.Y, pinkOnly);
+                    diagnosticWhiteHits.Add(probe);
+                    if (probeResult == LootProbeResult.Collected)
                     {
-                        if (_scanToken.IsCancellationRequested || ShouldAbortLoot() ||
-                            (pinkOnly && !PinkLootOnlyMode))
-                        {
-                            diagnosticOutcome = "cancelled-during-probe";
-                            return LootScanPassResult.Cancelled;
-                        }
-                        actualCursorProbes++;
-                        LootProbeResult probeResult = TryCollectAt(probe.X, probe.Y, pinkOnly);
-                        if (probeResult == LootProbeResult.Collected)
-                        {
-                            diagnosticOutcome = "collected";
-                            return LootScanPassResult.Collected;
-                        }
-                        if (probeResult == LootProbeResult.CaptureInvalid)
-                        {
-                            diagnosticOutcome = "capture-geometry-changed-during-probes";
-                            return LootScanPassResult.CaptureFailed;
-                        }
-                        if (probeResult == LootProbeResult.Cancelled)
-                        {
-                            diagnosticOutcome = "probe-cancelled-or-focus-lost";
-                            return LootScanPassResult.Cancelled;
-                        }
-                        probesUsed++;
+                        diagnosticSuccessProbe = probe;
+                        diagnosticOutcome = "collected";
+                        _log($"[Loot] {regionName}: mouseover confirmed at bitmap-local ({probe.X},{probe.Y}) — " +
+                             $"candidate {candidateIndex + 1}/{candidates.Count} {FormatWhiteComponent(component)}, " +
+                             $"probe {probePlanner.AttemptsFor(candidateIndex)}/{probePlanner.InitialRemainingFor(candidateIndex)} of this candidate, " +
+                             $"{probesUsed} probe(s) this pass{KillElapsed()}.");
+                        ClearWhiteProbeProgress();
+                        return LootScanPassResult.Collected;
+                    }
+                    if (probeResult == LootProbeResult.CaptureInvalid)
+                    {
+                        diagnosticOutcome = "capture-geometry-changed-during-probes";
+                        ClearWhiteProbeProgress();
+                        return LootScanPassResult.CaptureFailed;
+                    }
+                    if (probeResult == LootProbeResult.Cancelled)
+                    {
+                        diagnosticOutcome = "probe-cancelled-or-focus-lost";
+                        ClearWhiteProbeProgress();
+                        return LootScanPassResult.Cancelled;
+                    }
 
-                        if (addDiagonals)
+                    if (addDiagonals)
+                    {
+                        LootProbeResult ProbeDiagonal(int dx, int dy)
                         {
-                            LootProbeResult diagonalResult = TryCollectAtWithCount(
-                                probe.X + 1, probe.Y + 1, pinkOnly, ref actualCursorProbes);
-                            if (diagonalResult != LootProbeResult.Miss)
-                                return HandleProbeResult(diagonalResult, ref diagnosticOutcome);
-                            diagonalResult = TryCollectAtWithCount(
-                                probe.X - 1, probe.Y - 1, pinkOnly, ref actualCursorProbes);
-                            if (diagonalResult != LootProbeResult.Miss)
-                                return HandleProbeResult(diagonalResult, ref diagnosticOutcome);
-                            diagonalResult = TryCollectAtWithCount(
-                                probe.X + 1, probe.Y - 1, pinkOnly, ref actualCursorProbes);
-                            if (diagonalResult != LootProbeResult.Miss)
-                                return HandleProbeResult(diagonalResult, ref diagnosticOutcome);
-                            diagonalResult = TryCollectAtWithCount(
-                                probe.X - 1, probe.Y + 1, pinkOnly, ref actualCursorProbes);
-                            if (diagonalResult != LootProbeResult.Miss)
-                                return HandleProbeResult(diagonalResult, ref diagnosticOutcome);
-                            probesUsed += 4;
+                            var diagonal = new Point(probe.X + dx, probe.Y + dy);
+                            LootProbeResult result = TryCollectAtWithCount(
+                                diagonal.X, diagonal.Y, pinkOnly, ref actualCursorProbes);
+                            if (result == LootProbeResult.Collected)
+                                diagnosticSuccessProbe = diagonal;
+                            return result;
                         }
 
-                        diagnosticWhiteHits.Add(probe);
+                        probesUsed += 4;
+                        LootProbeResult diagonalResult = ProbeDiagonal(1, 1);
+                        if (diagonalResult != LootProbeResult.Miss)
+                            return HandleProbeResult(diagonalResult, ref diagnosticOutcome);
+                        diagonalResult = ProbeDiagonal(-1, -1);
+                        if (diagonalResult != LootProbeResult.Miss)
+                            return HandleProbeResult(diagonalResult, ref diagnosticOutcome);
+                        diagonalResult = ProbeDiagonal(1, -1);
+                        if (diagonalResult != LootProbeResult.Miss)
+                            return HandleProbeResult(diagonalResult, ref diagnosticOutcome);
+                        diagonalResult = ProbeDiagonal(-1, 1);
+                        if (diagonalResult != LootProbeResult.Miss)
+                            return HandleProbeResult(diagonalResult, ref diagnosticOutcome);
+                    }
 
-                        // Only the normal white-loot scan keeps the probe budget.
-                        if (!pinkOnly && probesUsed >= MaxLootProbesPerRegion)
-                        {
-                            _log($"[Loot] {regionName}: probe budget ({MaxLootProbesPerRegion}) exhausted — " +
-                                 $"{diagnosticWhiteHits.Count} probed px of {diagnosticWhiteCount} {pixelNoun} px in {components.Count} components; " +
-                                 $"region incomplete (likely UI/effect clutter), not treated as empty.");
-                            diagnosticOutcome = "probe-budget-exhausted";
-                            return LootScanPassResult.Incomplete;
-                        }
+                    // Only the normal white-loot scan keeps the probe budget.
+                    if (!pinkOnly && probesUsed >= MaxLootProbesPerRegion)
+                    {
+                        _log($"[Loot] {regionName}: probe budget ({MaxLootProbesPerRegion}) exhausted — " +
+                             $"{probesUsed} probes, {probePlanner.RemainingProbeCount} of {probePlanner.InitialRemainingProbes} candidate pixels still unexamined " +
+                             $"across {probePlanner.CandidatesWithRemainingProbes} candidate(s) " +
+                             $"({diagnosticPreviouslyProbedSkipped} already examined in a previous pass); " +
+                             $"region incomplete, not treated as empty.");
+                        diagnosticOutcome = "probe-budget-exhausted";
+                        return LootScanPassResult.Incomplete;
                     }
                 }
 
+                LootScanPassResult sweepResult = ResolveProbeSweepResult(probePlanner.RemainingProbeCount);
                 if (diagnosticWhiteCount > 0)
                 {
-                    string tinyPinkNote = pinkOnly
+                    string pinkNote = pinkOnly
                         ? $", {tinyPinkComponents} below {BotConstants.Loot.PinkMinCandidateWidth}x{BotConstants.Loot.PinkMinCandidateHeight} px skipped"
                         : "";
-                    _log($"[Loot] {regionName}: scanned {scanPixels} px, {diagnosticWhiteCount} {pixelNoun} px in {components.Count} components — " +
-                         $"{filteredComponents} filtered (shape/size; mob-marker rings={mobMarkerComponents}){tinyPinkNote}, {textGlyphs.Count} text glyphs skipped, " +
-                         $"{candidates.Count} loot candidates probed ({probesUsed} probes), no item collected{KillElapsed()}.");
+                    string whiteDetail = pinkOnly
+                        ? ""
+                        : $", exact-white={diagnosticExactWhiteCount}px, shaded-white={diagnosticShadedWhiteCount}px";
+                    _log($"[Loot] {regionName}: scanned {scanPixels} px, {diagnosticWhiteCount} {pixelNoun} px in {components.Count} components{whiteDetail} — " +
+                         $"{filteredComponents} filtered (shape/size; mob-marker rings={mobMarkerComponents}){pinkNote}, {textGlyphs.Count} text glyphs skipped, " +
+                         $"{candidates.Count} loot candidates ({diagnosticCandidatePixelCount} candidate px), " +
+                         $"{probesUsed} probes, no item collected; result={sweepResult}{KillElapsed()}.");
+                    if (!pinkOnly && candidates.Count > 0)
+                    {
+                        _log($"[Loot] {regionName}: candidates {DescribeWhiteCandidates(candidates)}; " +
+                             $"probe attempts {DescribeProbeAttempts(probePlanner, candidates.Count)}; " +
+                             $"previously examined={diagnosticPreviouslyProbedSkipped}px; remaining candidates={probePlanner.CandidatesWithRemainingProbes}.");
+                    }
                 }
                 else
                 {
                     _log($"[Loot] {regionName}: scanned {scanPixels} px, no {pixelNoun} pixels.");
                 }
-                diagnosticOutcome = "no-item";
-                return LootScanPassResult.NoItem;
+                if (!pinkOnly)
+                    ClearWhiteProbeProgress();
+                diagnosticOutcome = sweepResult == LootScanPassResult.NoItem ? "no-item" : "probe-sequence-incomplete";
+                return sweepResult;
             }
             catch (Exception ex)
             {
@@ -3459,8 +3541,15 @@ namespace DriverScanTester.Services
                         pinkAnalysis, actualCursorProbes, diagnosticOutcome);
                 }
 
-                // White-loot retains the existing annotated frame. Pink diagnostics save
-                // an exact unmodified clone separately, before it can be annotated.
+                // Keep probe progress ONLY for a bounded Incomplete pass. Every other
+                // outcome either finished the candidate sweep, collected an item (the
+                // screen changes) or lost a trustworthy frame.
+                if (!pinkOnly && diagnosticOutcome != "probe-budget-exhausted")
+                    ClearWhiteProbeProgress();
+
+                // White-loot retains the existing annotated frame (and now also saves an
+                // unmodified raw frame from the same clone). Pink diagnostics save an
+                // exact unmodified clone separately, before it can be annotated.
                 if (diagnosticFrame != null)
                 {
                     if (pinkOnly)
@@ -3475,10 +3564,33 @@ namespace DriverScanTester.Services
                     }
                     else
                     {
+                        string geometryText = diagnosticGeometry.HasValue
+                            ? $"hwnd=0x{diagnosticGeometry.Value.WindowHandle.ToInt64():X}; " +
+                              $"window={FormatRectangle(diagnosticGeometry.Value.WindowRectangle)}; " +
+                              $"clientOrigin=({diagnosticGeometry.Value.ClientScreenOrigin.X},{diagnosticGeometry.Value.ClientScreenOrigin.Y}); " +
+                              $"client={diagnosticGeometry.Value.ClientSize.Width}x{diagnosticGeometry.Value.ClientSize.Height}"
+                            : "geometry=unavailable";
+                        string rawMetadata =
+                            $"timestampUtc={scanStartedUtc:O}; reason=white-loot; region={regionName}; " +
+                            $"captureStatus={_lastCaptureResult.Status}; outcome={diagnosticOutcome}; {geometryText}; " +
+                            $"scanRegion={FormatRectangle(diagnosticScanRegion)}; " +
+                            $"excludeZone={FormatRectangle(diagnosticExcludeZone)}; " +
+                            $"exactWhite={diagnosticExactWhiteCount}; shadedWhite={diagnosticShadedWhiteCount}; " +
+                            $"components={diagnosticComponentCount}; candidates={diagnosticCandidateCount}; " +
+                            $"candidatePixels={diagnosticCandidatePixelCount}; probes={actualCursorProbes}";
                         ScreenshotService.SaveLootScanFrame(
                             diagnosticFrame, regionName, diagnosticOutcome, _log,
                             diagnosticWhiteCount, diagnosticScanRegion, diagnosticExcludeZone,
-                            diagnosticWhiteHits, pixelNoun);
+                            diagnosticWhiteHits, pixelNoun,
+                            detectedPixels: diagnosticDetectedWhitePixels,
+                            candidatePixels: diagnosticCandidatePixels,
+                            candidateBounds: diagnosticCandidateBounds,
+                            confirmedProbe: diagnosticSuccessProbe,
+                            exactWhiteCount: diagnosticExactWhiteCount,
+                            shadedWhiteCount: diagnosticShadedWhiteCount,
+                            candidatePixelCount: diagnosticCandidatePixelCount,
+                            saveRawFrame: true,
+                            rawMetadata: rawMetadata);
                     }
                 }
             }
@@ -4075,17 +4187,20 @@ namespace DriverScanTester.Services
         private const int WhiteLootMinCandidatePixels = 30;
         private const float WhiteLootMinFillRatio = 0.20f;
 
-        /// <summary>Components up to this area are probed at every pixel.</summary>
-        private const int DenseProbeMaxArea = 12;
-
-        /// <summary>Tiny blobs (1–4 px) additionally get the old ±1 diagonal hover search around each pixel.</summary>
+        /// <summary>Tiny pink blobs (1–4 px) keep the old ±1 diagonal hover search around each pixel.</summary>
         private const int TinyProbeWithDiagonalsArea = 4;
-
-        /// <summary>Max probe points sampled from a non-dense component.</summary>
-        private const int MaxSampleProbePoints = 8;
 
         /// <summary>Hard cap on mouseover probes per region pass — replaces the old raw-white-count abort.</summary>
         private const int MaxLootProbesPerRegion = 400;
+
+        /// <summary>
+        /// Stage A spatial-coverage of a white component: the component's larger dimension
+        /// is split into at most this many cells along each axis, so coverage grows with
+        /// the component (up to 64 cells) instead of being a fixed sample count. Larger
+        /// components use coarser cells; tiny components use at least two-pixel cells.
+        /// </summary>
+        private const int WhiteProbeCellsPerAxis = 8;
+        private const int WhiteProbeCellMinPx = 2;
 
         /// <summary>Text-cluster detection: a horizontal run of at least this many glyph-like blobs is a mob name.</summary>
         private const int TextClusterMinGlyphs = 5;
@@ -4288,25 +4403,404 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Probe points for a candidate component: every pixel for dense (small)
-        /// components, or evenly sampled points for larger ones. Pixels are ordered
-        /// like the old column-major scan (x, then y).
+        /// Deterministic two-stage mouseover plan for one accepted white-loot component.
+        /// Stage A (<see cref="Coverage"/>) probes one actual white pixel per occupied
+        /// spatial cell, ranked by cell density and then by distance from the component
+        /// centroid, so concentrated/interior regions are tested first and the whole
+        /// component shape is covered before neighbours are repeated. Stage B
+        /// (<see cref="Exhaustive"/>) contains every remaining white pixel of the same
+        /// component, ordered centre-out, so an unsuccessful coverage sweep can still
+        /// exhaust the candidate. Every point belongs to the component's detected white
+        /// mask — normal white-loot probing never moves the cursor onto non-white pixels.
         /// </summary>
-        private static List<Point> SelectProbePoints(WhiteComponent component)
+        internal sealed class WhiteProbePlan
         {
-            var ordered = new List<Point>(component.Points);
-            ordered.Sort((a, b) => a.X != b.X ? a.X.CompareTo(b.X) : a.Y.CompareTo(b.Y));
-
-            if (component.Area <= DenseProbeMaxArea || ordered.Count <= MaxSampleProbePoints)
-                return ordered;
-
-            var probes = new List<Point>(MaxSampleProbePoints);
-            for (int i = 0; i < MaxSampleProbePoints; i++)
+            public WhiteProbePlan(
+                IReadOnlyList<Point> coverage,
+                IReadOnlyList<Point> exhaustive,
+                int cellSizePx,
+                int occupiedCells)
             {
-                int index = (int)Math.Round(i * (ordered.Count - 1) / (double)(MaxSampleProbePoints - 1));
-                probes.Add(ordered[index]);
+                Coverage = coverage;
+                Exhaustive = exhaustive;
+                CellSizePx = cellSizePx;
+                OccupiedCells = occupiedCells;
+
+                var all = new List<Point>(coverage.Count + exhaustive.Count);
+                all.AddRange(coverage);
+                all.AddRange(exhaustive);
+                Points = all;
             }
-            return probes;
+
+            /// <summary>Stage A: spatially distributed representatives (one per occupied cell).</summary>
+            public IReadOnlyList<Point> Coverage { get; }
+
+            /// <summary>Stage B: every remaining component pixel, ordered centre-out.</summary>
+            public IReadOnlyList<Point> Exhaustive { get; }
+
+            /// <summary>Coverage followed by exhaustive fallback, with no duplicate coordinates.</summary>
+            public IReadOnlyList<Point> Points { get; }
+
+            public int CellSizePx { get; }
+            public int OccupiedCells { get; }
+        }
+
+        private static int CompareRowMajor(Point a, Point b)
+            => a.Y != b.Y ? a.Y.CompareTo(b.Y) : a.X.CompareTo(b.X);
+
+        /// <summary>
+        /// Builds the deterministic two-stage probe plan for one white component. The
+        /// plan is based only on the component's own detected pixels, so it is pure and
+        /// testable without a live game window.
+        /// </summary>
+        internal static WhiteProbePlan BuildWhiteProbePlan(WhiteComponent component)
+        {
+            ArgumentNullException.ThrowIfNull(component);
+
+            var pixels = new List<Point>(component.Points);
+            pixels.Sort(CompareRowMajor);
+            if (pixels.Count == 0)
+            {
+                return new WhiteProbePlan(
+                    Array.Empty<Point>(), Array.Empty<Point>(),
+                    WhiteProbeCellMinPx, 0);
+            }
+
+            int cellSize = Math.Max(
+                WhiteProbeCellMinPx,
+                (int)Math.Ceiling(Math.Max(component.Width, component.Height) / (double)WhiteProbeCellsPerAxis));
+
+            var occupiedCells = new Dictionary<(int CellX, int CellY), List<Point>>();
+            foreach (Point pixel in pixels)
+            {
+                var cellKey = (
+                    (pixel.X - component.XMin) / cellSize,
+                    (pixel.Y - component.YMin) / cellSize);
+                if (!occupiedCells.TryGetValue(cellKey, out List<Point>? cellPixels))
+                {
+                    cellPixels = new List<Point>();
+                    occupiedCells.Add(cellKey, cellPixels);
+                }
+                cellPixels.Add(pixel);
+            }
+
+            double centroidX = 0;
+            double centroidY = 0;
+            foreach (Point pixel in pixels)
+            {
+                centroidX += pixel.X;
+                centroidY += pixel.Y;
+            }
+            centroidX /= pixels.Count;
+            centroidY /= pixels.Count;
+
+            // Prefer dense/interior cells first; ties fall back to distance from the
+            // component centre and finally to a deterministic row-major cell order.
+            var rankedCells = new List<KeyValuePair<(int CellX, int CellY), List<Point>>>(occupiedCells);
+            rankedCells.Sort((left, right) =>
+            {
+                int density = right.Value.Count.CompareTo(left.Value.Count);
+                if (density != 0)
+                    return density;
+
+                double leftDx = component.XMin + left.Key.CellX * cellSize + cellSize / 2.0 - centroidX;
+                double leftDy = component.YMin + left.Key.CellY * cellSize + cellSize / 2.0 - centroidY;
+                double rightDx = component.XMin + right.Key.CellX * cellSize + cellSize / 2.0 - centroidX;
+                double rightDy = component.YMin + right.Key.CellY * cellSize + cellSize / 2.0 - centroidY;
+                int distance = (leftDx * leftDx + leftDy * leftDy)
+                    .CompareTo(rightDx * rightDx + rightDy * rightDy);
+                if (distance != 0)
+                    return distance;
+
+                int cellY = left.Key.CellY.CompareTo(right.Key.CellY);
+                return cellY != 0 ? cellY : left.Key.CellX.CompareTo(right.Key.CellX);
+            });
+
+            var coverage = new List<Point>(rankedCells.Count);
+            var coverageSet = new HashSet<Point>();
+            foreach (var cell in rankedCells)
+            {
+                Point representative = SelectCellRepresentative(cell.Value);
+                if (coverageSet.Add(representative))
+                    coverage.Add(representative);
+            }
+
+            // Every white pixel that was not used by Stage A remains eligible. Centre-out
+            // ordering keeps the fallback visually similar to the coverage pass instead of
+            // re-scanning one row from left to right.
+            var exhaustive = new List<Point>(pixels.Count - coverage.Count);
+            foreach (Point pixel in pixels)
+            {
+                if (coverageSet.Contains(pixel))
+                    continue;
+                exhaustive.Add(pixel);
+            }
+            exhaustive.Sort((left, right) =>
+            {
+                long leftDx = left.X - (long)centroidX;
+                long leftDy = left.Y - (long)centroidY;
+                long rightDx = right.X - (long)centroidX;
+                long rightDy = right.Y - (long)centroidY;
+                int distance = (leftDx * leftDx + leftDy * leftDy)
+                    .CompareTo(rightDx * rightDx + rightDy * rightDy);
+                return distance != 0 ? distance : CompareRowMajor(left, right);
+            });
+
+            return new WhiteProbePlan(coverage, exhaustive, cellSize, occupiedCells.Count);
+        }
+
+        /// <summary>Picks an actual detected-white pixel closest to the cell's own white centroid.</summary>
+        private static Point SelectCellRepresentative(List<Point> cellPixels)
+        {
+            if (cellPixels.Count == 1)
+                return cellPixels[0];
+
+            double centroidX = 0;
+            double centroidY = 0;
+            foreach (Point pixel in cellPixels)
+            {
+                centroidX += pixel.X;
+                centroidY += pixel.Y;
+            }
+            centroidX /= cellPixels.Count;
+            centroidY /= cellPixels.Count;
+
+            Point best = cellPixels[0];
+            double bestDistance = double.MaxValue;
+            foreach (Point pixel in cellPixels)
+            {
+                double dx = pixel.X - centroidX;
+                double dy = pixel.Y - centroidY;
+                double distance = dx * dx + dy * dy;
+                if (distance < bestDistance ||
+                    (distance == bestDistance && CompareRowMajor(pixel, best) < 0))
+                {
+                    best = pixel;
+                    bestDistance = distance;
+                }
+            }
+            return best;
+        }
+
+        /// <summary>
+        /// Bounded, deterministic probe sweep over the accepted candidates. Normal white
+        /// loot is interleaved round-robin between candidates so a large component cannot
+        /// consume the whole budget before smaller components are touched. Pink SOD/SOP
+        /// keeps its existing candidate-by-candidate order and probes every pixel.
+        /// Already-examined white coordinates from a previous incomplete pass are skipped
+        /// so a bounded budget continues instead of restarting the same prefix forever.
+        /// </summary>
+        internal sealed class LootProbePlanner
+        {
+            private readonly List<List<Point>> _points;
+            private readonly List<int> _next;
+            private readonly bool _interleave;
+            private int _cursor;
+
+            private LootProbePlanner(
+                List<List<Point>> points,
+                bool interleave,
+                int previouslyProbedSkipped)
+            {
+                _points = points;
+                _next = new List<int>(points.Count);
+                for (int i = 0; i < points.Count; i++)
+                    _next.Add(0);
+                _interleave = interleave;
+                PreviouslyProbedSkipped = previouslyProbedSkipped;
+
+                int initialRemaining = 0;
+                var initialPerCandidate = new int[points.Count];
+                for (int i = 0; i < points.Count; i++)
+                {
+                    initialPerCandidate[i] = points[i].Count;
+                    initialRemaining += points[i].Count;
+                }
+                InitialRemainingProbes = initialRemaining;
+                InitialRemainingPerCandidate = initialPerCandidate;
+            }
+
+            public static LootProbePlanner CreateForWhite(
+                IReadOnlyList<WhiteComponent> candidates,
+                IReadOnlySet<Point>? alreadyProbed)
+            {
+                ArgumentNullException.ThrowIfNull(candidates);
+                var points = new List<List<Point>>(candidates.Count);
+                int skipped = 0;
+                foreach (WhiteComponent candidate in candidates)
+                {
+                    WhiteProbePlan plan = BuildWhiteProbePlan(candidate);
+                    var remaining = new List<Point>(plan.Points.Count);
+                    foreach (Point point in plan.Points)
+                    {
+                        if (alreadyProbed != null && alreadyProbed.Contains(point))
+                        {
+                            skipped++;
+                            continue;
+                        }
+                        remaining.Add(point);
+                    }
+                    points.Add(remaining);
+                }
+                return new LootProbePlanner(points, interleave: true, skipped);
+            }
+
+            public static LootProbePlanner CreateForPink(IReadOnlyList<WhiteComponent> candidates)
+            {
+                ArgumentNullException.ThrowIfNull(candidates);
+                var points = new List<List<Point>>(candidates.Count);
+                foreach (WhiteComponent candidate in candidates)
+                    points.Add(new List<Point>(candidate.Points));
+                return new LootProbePlanner(points, interleave: false, previouslyProbedSkipped: 0);
+            }
+
+            public int PreviouslyProbedSkipped { get; }
+            public int InitialRemainingProbes { get; }
+            private int[] InitialRemainingPerCandidate { get; }
+
+            public int RemainingProbeCount
+            {
+                get
+                {
+                    int remaining = 0;
+                    for (int i = 0; i < _points.Count; i++)
+                        remaining += _points[i].Count - _next[i];
+                    return remaining;
+                }
+            }
+
+            public int CandidatesWithRemainingProbes
+            {
+                get
+                {
+                    int count = 0;
+                    for (int i = 0; i < _points.Count; i++)
+                    {
+                        if (_next[i] < _points[i].Count)
+                            count++;
+                    }
+                    return count;
+                }
+            }
+
+            public int AttemptsFor(int candidateIndex)
+                => candidateIndex >= 0 && candidateIndex < _next.Count ? _next[candidateIndex] : 0;
+
+            public int InitialRemainingFor(int candidateIndex)
+                => candidateIndex >= 0 && candidateIndex < InitialRemainingPerCandidate.Length
+                    ? InitialRemainingPerCandidate[candidateIndex]
+                    : 0;
+
+            public bool TryNext(out int candidateIndex, out Point point)
+            {
+                if (_points.Count == 0)
+                {
+                    candidateIndex = -1;
+                    point = default;
+                    return false;
+                }
+
+                if (!_interleave)
+                {
+                    while (_cursor < _points.Count)
+                    {
+                        List<Point> candidatePoints = _points[_cursor];
+                        if (_next[_cursor] < candidatePoints.Count)
+                        {
+                            point = candidatePoints[_next[_cursor]];
+                            _next[_cursor]++;
+                            candidateIndex = _cursor;
+                            return true;
+                        }
+                        _cursor++;
+                    }
+
+                    candidateIndex = -1;
+                    point = default;
+                    return false;
+                }
+
+                for (int offset = 0; offset < _points.Count; offset++)
+                {
+                    int index = (_cursor + offset) % _points.Count;
+                    List<Point> candidatePoints = _points[index];
+                    if (_next[index] >= candidatePoints.Count)
+                        continue;
+
+                    point = candidatePoints[_next[index]];
+                    _next[index]++;
+                    _cursor = (index + 1) % _points.Count;
+                    candidateIndex = index;
+                    return true;
+                }
+
+                candidateIndex = -1;
+                point = default;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// A sweep that stops while candidate pixels remain unexamined is Incomplete —
+        /// never an empty pass. Used by the scan loop after the bounded probe sequence.
+        /// </summary>
+        internal static LootScanPassResult ResolveProbeSweepResult(int remainingCandidateProbes)
+            => remainingCandidateProbes > 0
+                ? LootScanPassResult.Incomplete
+                : LootScanPassResult.NoItem;
+
+        /// <summary>
+        /// Key that ties white-loot probe progress to the exact screen state and accepted
+        /// candidate geometry. A different key means the character/camera/frame changed,
+        /// so previously examined coordinates must not be trusted.
+        /// </summary>
+        internal static string BuildWhiteProbeProgressKey(
+            string regionName,
+            LootClientGeometry? geometry,
+            IReadOnlyList<WhiteComponent> candidates)
+        {
+            string geometryKey = geometry.HasValue
+                ? $"{geometry.Value.WindowHandle.ToInt64():X}:" +
+                  $"{geometry.Value.ClientScreenOrigin.X},{geometry.Value.ClientScreenOrigin.Y}:" +
+                  $"{geometry.Value.ClientSize.Width}x{geometry.Value.ClientSize.Height}"
+                : "no-geometry";
+            string candidateKey = string.Join(";", candidates.Select(c =>
+                $"{c.XMin},{c.YMin},{c.XMax},{c.YMax},{c.Area}"));
+            return $"{regionName}|{geometryKey}|{candidateKey}";
+        }
+
+        private void ClearWhiteProbeProgress()
+        {
+            _probedWhiteProbeProgress.Clear();
+            _whiteProbeProgressKey = string.Empty;
+        }
+
+        private static string FormatWhiteComponent(WhiteComponent component)
+            => $"bounds=({component.XMin},{component.YMin})-({component.XMax},{component.YMax}) " +
+               $"{component.Area}px fill={component.Area / (float)Math.Max(component.Width * component.Height, 1):F2}";
+
+        /// <summary>Compact candidate bounds/pixel summary; bounded so normal logs stay short.</summary>
+        private static string DescribeWhiteCandidates(IReadOnlyList<WhiteComponent> candidates)
+        {
+            const int maxDetails = 8;
+            string details = string.Join("; ", candidates
+                .Take(maxDetails)
+                .Select((candidate, index) => $"#{index + 1} {FormatWhiteComponent(candidate)}"));
+            int hidden = candidates.Count - maxDetails;
+            return hidden > 0 ? $"{details}; +{hidden} more" : details;
+        }
+
+        /// <summary>Per-candidate probe attempts, bounded to the first few candidates.</summary>
+        private static string DescribeProbeAttempts(LootProbePlanner planner, int candidateCount)
+        {
+            const int maxDetails = 8;
+            int shown = Math.Min(candidateCount, maxDetails);
+            var parts = new List<string>(shown + 1);
+            for (int i = 0; i < shown; i++)
+                parts.Add($"#{i + 1}={planner.AttemptsFor(i)}/{planner.InitialRemainingFor(i)}");
+            if (candidateCount > shown)
+                parts.Add($"+{candidateCount - shown} more");
+            return string.Join(", ", parts);
         }
 
         private LootProbeResult CheckProbeCaptureOwnership(bool pinkOnly)
@@ -4409,7 +4903,8 @@ namespace DriverScanTester.Services
             // Pink candidates are identified by the scan. Confirm lootability
             // with the calibrated mouseover, not the separate highlighted-type
             // field, which need not describe the ground item under this cursor.
-            if (_memoryService.IsLootMouseOver())
+            // The read always follows THIS cursor move (never a cached result).
+            if (WaitForLootMouseOver(pinkOnly))
             {
                 if (pinkOnly)
                 {
@@ -4720,12 +5215,39 @@ namespace DriverScanTester.Services
             int clampedY = Math.Clamp(bitmapLocalY, 0, Math.Max(_clientHeight - 1, 0));
             var (screenX, screenY) = BitmapLocalToScreen(clampedX, clampedY);
             MouseOperations.SetCursorPositionAbsolute(screenX, screenY);
-            // Give the game time to update the mouseover memory value before IsLootMouseOver checks it.
-            // Allow 5 ms for SOD/SOP mouseover updates; normal scans keep 1 ms.
+
+            // The client updates its mouseover memory asynchronously. The previous
+            // normal-loot value (1 ms) was too short — eight moves completed in ~22 ms
+            // without ever observing the updated state. Pink keeps its existing 5 ms
+            // settle; normal white loot uses the bounded configurable interval below.
+            int settleMs = pinkOnly
+                ? BotConstants.Delays.SodSopMouseOverSettleMs
+                : BotConstants.Delays.LootWhiteMouseOverSettleMs;
+            _scanToken.WaitHandle.WaitOne(settleMs);
+        }
+
+        /// <summary>
+        /// Reads the calibrated "loot under cursor" indicator after the cursor has
+        /// settled. Normal white loot re-reads a negative result a bounded number of
+        /// times so a late asynchronous mouseover update is not recorded as a miss.
+        /// A read from a previous cursor position is never reused: each probe waits for
+        /// its own settle first and then reads the live memory value again.
+        /// </summary>
+        private bool WaitForLootMouseOver(bool pinkOnly)
+        {
+            if (_memoryService.IsLootMouseOver())
+                return true;
             if (pinkOnly)
-                _scanToken.WaitHandle.WaitOne(5);
-            else
-                Thread.Sleep(1);
+                return false;
+
+            for (int poll = 0; poll < BotConstants.Delays.LootWhiteMouseOverExtraPolls; poll++)
+            {
+                if (_scanToken.WaitHandle.WaitOne(BotConstants.Delays.LootWhiteMouseOverExtraPollMs))
+                    return false;
+                if (_memoryService.IsLootMouseOver())
+                    return true;
+            }
+            return false;
         }
 
         private int GetPositionX()

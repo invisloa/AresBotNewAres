@@ -119,17 +119,38 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Annotates and saves one loot-scan frame as a PNG in LootSSFolder
-        /// (dev: project root, next to Screenshots; published: next to the exe).
-        /// The annotation draws the scanned region (green), the character exclude zone
-        /// (red), every white pixel candidate (yellow) and a caption with the outcome,
-        /// so loot detection problems can be diagnosed from what the bot actually saw.
-        /// The frame is disposed afterwards. Never throws — diagnostics must not break
-        /// the bot.
+        /// Builds the annotated-frame caption. Detection counts and mouseover-probe
+        /// counts come from separate arguments, so a large detected mask can never be
+        /// presented as the handful of positions that were actually probed.
+        /// </summary>
+        internal static string BuildLootScanCaption(
+            string label,
+            string outcome,
+            int whiteCount,
+            int exactWhiteCount,
+            int shadedWhiteCount,
+            int candidateComponents,
+            int candidatePixelCount,
+            int probeCount,
+            Point? confirmedProbe,
+            string pixelLabel)
+        {
+            string detectedDetail = pixelLabel == "white"
+                ? $" ({pixelLabel}: exact={exactWhiteCount}, shaded={shadedWhiteCount})"
+                : $" ({pixelLabel})";
+            return $"{label} | {outcome} | detected={whiteCount}px{detectedDetail} | " +
+                   $"candidates={candidateComponents} comps/{candidatePixelCount}px | probes={probeCount} | " +
+                   $"confirmed={(confirmedProbe.HasValue ? $"({confirmedProbe.Value.X},{confirmedProbe.Value.Y})" : "none")}";
+        }
+
+        /// <summary>
+        /// Saves one loot-scan frame unmodified as a PNG in LootSSFolder (dev: project
+        /// root, next to Screenshots; published: next to the exe), so the exact frame
+        /// consumed by the pixel scan can be inspected without annotations. The frame is
+        /// disposed afterwards. Never throws — diagnostics must not break the bot.
         /// </summary>
         /// <param name="label">Scan label, e.g. "SmallScan", "BigScan", "AfterClick".</param>
-        /// <param name="outcome">Scan result, e.g. "collected", "no-item".</param>
-        /// <param name="pixelLabel">Name of the detected pixel class in the caption ("white" / "pink").</param>
+        /// <param name="metadata">Diagnostic metadata appended to the log line.</param>
         public static void SaveLootScanRawFrame(
             Bitmap? frame,
             string label,
@@ -163,6 +184,20 @@ namespace DriverScanTester.Services
             }
         }
 
+        /// <summary>
+        /// Annotates and saves one loot-scan frame. The annotation keeps the separate
+        /// datasets visually distinct:
+        ///    green rectangle  — scanned region;
+        ///    red rectangle    — character exclusion zone (never an item bounding box);
+        ///    yellow 1px dots  — ALL pixels classified as white/shaded-white;
+        ///    orange 1px dots  — pixels of accepted loot candidate components;
+        ///    magenta outline  — accepted candidate component bounds;
+        ///    cyan 3px dots    — actual mouseover probe positions;
+        ///    bright-green mark— the probe whose mouseover confirmed the item.
+        /// When <paramref name="saveRawFrame"/> is set the untouched clone is written
+        /// first, so the original frame can be inspected without annotations.
+        /// Annotation is best-effort and never modifies the bitmap used for detection.
+        /// </summary>
         public static void SaveLootScanFrame(
             Bitmap? frame,
             string label,
@@ -172,16 +207,58 @@ namespace DriverScanTester.Services
             Rectangle scanRegion = default,
             Rectangle excludeZone = default,
             IReadOnlyList<Point>? whiteHits = null,
-            string pixelLabel = "white")
+            string pixelLabel = "white",
+            IReadOnlyList<Point>? detectedPixels = null,
+            IReadOnlyList<Point>? candidatePixels = null,
+            IReadOnlyList<Rectangle>? candidateBounds = null,
+            Point? confirmedProbe = null,
+            int exactWhiteCount = 0,
+            int shadedWhiteCount = 0,
+            int candidatePixelCount = 0,
+            bool saveRawFrame = false,
+            string rawMetadata = "")
         {
             if (frame == null)
                 return;
 
             try
             {
+                string folder = ResolveLootScanDir();
+                Directory.CreateDirectory(folder);
+                string timestamp = $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss-fff}";
+
+                if (saveRawFrame && LootScanCaptureEnabled)
+                {
+                    string rawPath = Path.Combine(folder, $"{timestamp}_{label}_raw.png");
+                    frame.Save(rawPath, ImageFormat.Png);
+                    log($"[LootSS] Raw {label} frame saved: {rawPath}; {rawMetadata}");
+                }
+
                 try
                 {
                     using Graphics graphics = Graphics.FromImage(frame);
+
+                    // Detection mask first, so candidate/cursor markers stay readable.
+                    if (detectedPixels != null && detectedPixels.Count > 0)
+                    {
+                        using var maskBrush = new SolidBrush(Color.FromArgb(255, 255, 230, 0));
+                        foreach (Point pixel in detectedPixels)
+                            graphics.FillRectangle(maskBrush, pixel.X, pixel.Y, 1, 1);
+                    }
+
+                    if (candidatePixels != null && candidatePixels.Count > 0)
+                    {
+                        using var candidateBrush = new SolidBrush(Color.FromArgb(255, 255, 130, 0));
+                        foreach (Point pixel in candidatePixels)
+                            graphics.FillRectangle(candidateBrush, pixel.X, pixel.Y, 1, 1);
+                    }
+
+                    if (candidateBounds != null)
+                    {
+                        using var candidatePen = new Pen(Color.FromArgb(255, 220, 0, 220), 1);
+                        foreach (Rectangle bounds in candidateBounds)
+                            graphics.DrawRectangle(candidatePen, bounds);
+                    }
 
                     if (scanRegion.Width > 0 && scanRegion.Height > 0)
                     {
@@ -197,12 +274,25 @@ namespace DriverScanTester.Services
 
                     if (whiteHits != null)
                     {
-                        using var hitBrush = new SolidBrush(Color.FromArgb(255, 255, 230, 0));
+                        using var hitBrush = new SolidBrush(Color.FromArgb(255, 0, 220, 255));
                         foreach (Point hit in whiteHits)
                             graphics.FillRectangle(hitBrush, hit.X - 1, hit.Y - 1, 3, 3);
                     }
 
-                    string caption = $"{label} | {outcome} | {pixelLabel} px: {whiteCount}";
+                    if (confirmedProbe.HasValue)
+                    {
+                        Point confirmed = confirmedProbe.Value;
+                        using var confirmedPen = new Pen(Color.FromArgb(255, 0, 255, 80), 2);
+                        graphics.DrawRectangle(confirmedPen, confirmed.X - 5, confirmed.Y - 5, 11, 11);
+                        graphics.DrawLine(confirmedPen, confirmed.X - 7, confirmed.Y, confirmed.X + 7, confirmed.Y);
+                        graphics.DrawLine(confirmedPen, confirmed.X, confirmed.Y - 7, confirmed.X, confirmed.Y + 7);
+                    }
+
+                    int probeCount = whiteHits?.Count ?? 0;
+                    int candidateCount = candidateBounds?.Count ?? 0;
+                    string caption = BuildLootScanCaption(
+                        label, outcome, whiteCount, exactWhiteCount, shadedWhiteCount,
+                        candidateCount, candidatePixelCount, probeCount, confirmedProbe, pixelLabel);
                     using var font = new Font(FontFamily.GenericSansSerif, 16f, FontStyle.Bold);
                     SizeF captionSize = graphics.MeasureString(caption, font);
                     using var captionBg = new SolidBrush(Color.FromArgb(190, 0, 0, 0));
@@ -212,17 +302,14 @@ namespace DriverScanTester.Services
                 }
                 catch
                 {
-                    // Annotation is best-effort — still save the raw frame below.
+                    // Annotation is best-effort — still save the frame below.
                 }
 
-                string folder = ResolveLootScanDir();
-                Directory.CreateDirectory(folder);
-
-                string fileName = $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss-fff}_{label}_{outcome}.png";
+                string fileName = $"{timestamp}_{label}_{outcome}.png";
                 string filePath = Path.Combine(folder, fileName);
 
                 frame.Save(filePath, ImageFormat.Png);
-                log($"[LootSS] {label} {outcome} (white={whiteCount}) saved: {filePath}");
+                log($"[LootSS] {label} {outcome} ({pixelLabel}={whiteCount}, candidates={candidatePixelCount}px, probes={whiteHits?.Count ?? 0}) saved: {filePath}");
             }
             catch (Exception ex)
             {

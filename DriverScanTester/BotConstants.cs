@@ -944,6 +944,23 @@ namespace DriverScanTester
             /// <summary>Wait after setting the SOD/SOP scan camera distance before capturing the frame.</summary>
             public const int SodSopCameraSettleMs = 50;
 
+            /// <summary>Mouseover settle time (ms) for pink SOD/SOP probes (unchanged behavior).</summary>
+            public const int SodSopMouseOverSettleMs = 5;
+
+            /// <summary>
+            /// Minimum mouseover settle time (ms) for normal white-loot probes. The game
+            /// updates its loot-under-cursor memory asynchronously after the cursor moves;
+            /// the previous 1 ms wait regularly read the state before the update landed.
+            /// Kept short enough that a bounded spatial-coverage sweep stays fast.
+            /// </summary>
+            public const int LootWhiteMouseOverSettleMs = 12;
+
+            /// <summary>Extra bounded mouseover re-reads after a negative white-loot probe.</summary>
+            public const int LootWhiteMouseOverExtraPolls = 2;
+
+            /// <summary>Delay (ms) between the extra white-loot mouseover re-reads.</summary>
+            public const int LootWhiteMouseOverExtraPollMs = 6;
+
             /// <summary>Poll interval (ms) between player-weight reads after a
             /// weight-relief potion was drunk for a SOD/SOP scroll.</summary>
             public const int WeightReliefPollMs = 100;
