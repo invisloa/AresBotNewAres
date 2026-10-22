@@ -282,6 +282,13 @@ namespace DriverScanTester.Services
         private readonly Queue<long> _mandatoryLootRequestHistoryOrder = new();
         private const int MaxMandatoryLootRequestHistory = 32;
 
+        // Combat-owned physical recovery movement (RepositionAndRetry / combat unstuck)
+        // under a Deferred post-kill obligation. While this holds the id of the active
+        // Deferred request, the request stays Deferred and no stationary loot cycle may
+        // start (the character is physically walking under combat ownership). Guarded by
+        // _cameraCursorOwnershipGate; 0 = no combat-owned recovery movement is active.
+        private long _combatRecoveryMovementRequestId;
+
         // Exclusive camera ownership for normal loot scans. This is set under
         // _cameraCursorOwnershipGate before camera writes and included in
         // LootOwnsCameraOrCursorLocked, so no movement/retarget write can interleave
@@ -522,6 +529,8 @@ namespace DriverScanTester.Services
                 };
                 _activeMandatoryLootRequest = request;
                 _lastMandatoryLootRequest = request;
+                // A brand new generation can never be owned by a stale combat-recovery handoff.
+                _combatRecoveryMovementRequestId = 0;
                 RememberMandatoryRequestLocked(request);
                 _log($"[LootBarrier] Armed reason={reason} request={request.Id}");
                 return request.Id;
@@ -564,9 +573,72 @@ namespace DriverScanTester.Services
                 _activeMandatoryLootRequest = null;
                 if (_activeTravelCandidate?.RequestId == requestId)
                     _activeTravelCandidate = null;
+                if (_combatRecoveryMovementRequestId == requestId)
+                    _combatRecoveryMovementRequestId = 0;
                 ReleaseLootScanCameraLocked($"request {requestId} cancelled");
                 _log($"[LootBarrier] Cancelled request={requestId} reason={request.Detail}");
             }
+        }
+
+        /// <summary>
+        /// Atomically hands the character to a combat-owned physical recovery for one
+        /// Deferred post-kill request. While the handoff is held the request stays
+        /// Deferred and no stationary loot cycle/camera may start, so a zoom can never
+        /// race the recovery walk. Only the exact Deferred post-kill generation qualifies;
+        /// a request that is Pending/Running/terminal is refused.
+        /// </summary>
+        internal bool TryBeginCombatRecoveryMovement(long requestId)
+        {
+            if (requestId <= 0)
+                return false;
+
+            lock (_cameraCursorOwnershipGate)
+            {
+                MandatoryLootRequest? request = _activeMandatoryLootRequest;
+                if (request == null || request.Id != requestId ||
+                    request.Reason != LootBarrierReason.PostKill ||
+                    request.State != LootRequestState.Deferred)
+                    return false;
+
+                if (_combatRecoveryMovementRequestId != 0)
+                    return false;
+
+                // Never begin the handoff while a capture/collection still drives the
+                // character or the camera.
+                if (_isCollecting || _lootState == LootMachineState.Scan ||
+                    _lootState == LootMachineState.PinkScan)
+                    return false;
+
+                _combatRecoveryMovementRequestId = requestId;
+                _log($"[LootBarrier] Combat recovery movement authorized request={requestId} — obligation stays Deferred.");
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Releases the combat-owned recovery handoff. The obligation is untouched: it
+        /// stays Deferred with its original id and resumes normally once combat ends.
+        /// Idempotent and safe to call for an already released/foreign generation.
+        /// </summary>
+        internal void EndCombatRecoveryMovement(long requestId)
+        {
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (_combatRecoveryMovementRequestId == 0 ||
+                    (requestId > 0 && _combatRecoveryMovementRequestId != requestId))
+                    return;
+
+                long released = _combatRecoveryMovementRequestId;
+                _combatRecoveryMovementRequestId = 0;
+                _log($"[LootBarrier] Combat recovery movement released request={released} — obligation preserved.");
+            }
+        }
+
+        /// <summary>True while combat-owned recovery movement holds the character for this request.</summary>
+        internal bool IsCombatRecoveryMovementActiveFor(long requestId)
+        {
+            lock (_cameraCursorOwnershipGate)
+                return requestId > 0 && _combatRecoveryMovementRequestId == requestId;
         }
 
         /// <summary>Most recently resolved game window handle.</summary>
@@ -2332,7 +2404,16 @@ namespace DriverScanTester.Services
         {
             MandatoryLootRequest? request;
             lock (_cameraCursorOwnershipGate)
+            {
+                // Combat-owned recovery movement currently walks the character under this
+                // obligation. It stays Deferred and no stationary cycle/camera may start —
+                // the loot zoom must never race the recovery walk.
+                if (_activeMandatoryLootRequest != null &&
+                    _combatRecoveryMovementRequestId == _activeMandatoryLootRequest.Id)
+                    return;
+
                 request = _activeMandatoryLootRequest;
+            }
 
             if (request == null || !IsMandatoryRequestActiveLocked(request))
                 return;
@@ -2366,7 +2447,8 @@ namespace DriverScanTester.Services
                     return;
 
                 request = _activeMandatoryLootRequest;
-                if (request == null || !IsMandatoryRequestActiveLocked(request))
+                if (request == null || !IsMandatoryRequestActiveLocked(request) ||
+                    _combatRecoveryMovementRequestId == request.Id)
                     return;
 
                 bool needsFreshStart = request.NeedsFreshCycle ||
@@ -2502,6 +2584,8 @@ namespace DriverScanTester.Services
                         : "verified full scan pass (SmallScan + BigScan)";
                     request.UpdatedAtUtc = DateTime.UtcNow;
                     _activeMandatoryLootRequest = null;
+                    if (_combatRecoveryMovementRequestId == requestId)
+                        _combatRecoveryMovementRequestId = 0;
                     IsLootingActive = false;
                     if (!travelCandidate)
                         _lastKillAt = DateTime.MinValue;
@@ -2556,6 +2640,8 @@ namespace DriverScanTester.Services
                     request.Detail = reason ?? "travel verification unavailable";
                     request.UpdatedAtUtc = DateTime.UtcNow;
                     _activeMandatoryLootRequest = null;
+                    if (_combatRecoveryMovementRequestId == requestId)
+                        _combatRecoveryMovementRequestId = 0;
                     _lootState = LootMachineState.Idle;
                     _consecutiveEmptySpacePresses = 0;
                     IsLootingActive = false;
@@ -2587,6 +2673,8 @@ namespace DriverScanTester.Services
                 request.Detail = reason ?? "loot operation failed";
                 request.UpdatedAtUtc = DateTime.UtcNow;
                 _activeMandatoryLootRequest = null;
+                if (_combatRecoveryMovementRequestId == requestId)
+                    _combatRecoveryMovementRequestId = 0;
                 _lootState = LootMachineState.Idle;
                 _consecutiveEmptySpacePresses = 0;
                 IsLootingActive = false;
@@ -3840,6 +3928,8 @@ namespace DriverScanTester.Services
                         mandatoryRequest.UpdatedAtUtc = DateTime.UtcNow;
                         if (_activeTravelCandidate?.RequestId == mandatoryRequest.Id)
                             _activeTravelCandidate = null;
+                        if (_combatRecoveryMovementRequestId == mandatoryRequest.Id)
+                            _combatRecoveryMovementRequestId = 0;
                         _activeMandatoryLootRequest = null;
                     }
                 }

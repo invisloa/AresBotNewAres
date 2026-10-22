@@ -292,6 +292,18 @@ namespace DriverScanTester.Services
         private bool _lootTargetCycleSuppressedLogged;
         private bool _lootMoveSuppressedLogged;
 
+        // ── Combat-owned physical recovery authorization ──
+        // A Deferred post-kill obligation keeps ordinary waypoint navigation and input
+        // blocked, but a combat-owned recovery (RepositionAndRetry / combat unstuck) must
+        // be able to turn the camera and hold W to physically escape a phantom or
+        // unreachable target — otherwise every recovery input is suppressed while combat
+        // keeps TABbing into the same target. The authorization is scoped to one exact
+        // Deferred PostKill request generation and is revalidated before every authorized
+        // input. Ordinary waypoint navigation never sets it.
+        private bool _combatRecoveryMovementAuthorized;
+        private long _combatRecoveryMovementRequestId;
+        private bool _combatRecoveryMovementDeniedLogged;
+
         // ── Post-kill SOD/SOP pink-scan hold (MoveAndAttack) ──
         // After a kill, first TAB at the closest camera distance. A nearby mob takes
         // priority; only when that check finds none does the loot system run its pink
@@ -1120,6 +1132,7 @@ namespace DriverScanTester.Services
             _gameUnresponsiveDetected = true;
             _log($"[ConnectionWatchdog] {reason} Stopping movement and requesting a full bot stop.");
             CancelMobGrouping("game connection watchdog");
+            EndCombatRecoveryMovement("game connection watchdog");
             StopMoving();
             ReleaseCombatKeys();
             OnGameUnresponsiveDetected?.Invoke(reason);
@@ -1294,12 +1307,19 @@ namespace DriverScanTester.Services
                 return false;
 
             _lootNavigationBarrierHoldsInput = true;
-            StopMoving();
+
+            // An authorized combat-owned recovery currently owns W/camera. The hold must not
+            // release the key the recovery is using, and the loot system was already handed
+            // this obligation as "combat recovery movement active" so no stationary
+            // camera/scan can start. Ordinary navigation stays blocked either way.
+            bool combatRecoveryOwnsInput = IsCombatRecoveryMovementAuthorized;
+            if (!combatRecoveryOwnsInput)
+                StopMoving();
             ReleaseSkillThree();
 
             // The loot system only applies its stationary camera after this explicit
             // acknowledgement that W/steering are released (or its bounded grace fallback).
-            if (_lootBarrier.TryGetRequestId(out long heldRequestId))
+            if (!combatRecoveryOwnsInput && _lootBarrier.TryGetRequestId(out long heldRequestId))
                 LootSystemRef?.NotifyNavigationHeld(heldRequestId);
 
             if (_lootBarrier.HasTerminalFailure && !_lootBarrierFailureLogged)
@@ -1311,6 +1331,181 @@ namespace DriverScanTester.Services
 
             await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
             return true;
+        }
+
+        /// <summary>
+        /// True while a combat-owned recovery is physically repositioning the player under
+        /// an authorized Deferred post-kill loot obligation.
+        /// </summary>
+        internal bool IsCombatRecoveryMovementAuthorized => _combatRecoveryMovementAuthorized;
+
+        /// <summary>
+        /// Grants the narrow combat-recovery authorization: a selected valid mob, the exact
+        /// armed request still Deferred with a PostKill reason, no in-flight loot collection
+        /// and an atomic handoff through <see cref="LootSystem"/>. Ordinary navigation and
+        /// ordinary stuck recovery never call this, so the barrier stays fully in force for
+        /// them.
+        /// </summary>
+        private bool TryBeginCombatRecoveryMovement(string reason)
+        {
+            if (!RequiresMandatoryLootBarrier(CurrentMode))
+                return false;
+
+            if (!_lootBarrier.TryGetRequestId(out long requestId) ||
+                _lootBarrier.Phase != LootBarrierPhase.Deferred ||
+                _lootBarrier.Reason != LootBarrierReason.PostKill)
+                return false;
+
+            if (!_memoryService.IsMobSelected())
+                return false;
+
+            if (LootCollectionStillOwnsInput())
+                return false;
+
+            LootSystem? loot = LootSystemRef;
+            if (loot == null ||
+                !loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus status) ||
+                status.State != LootRequestState.Deferred ||
+                status.Reason != LootBarrierReason.PostKill)
+                return false;
+
+            if (!loot.TryBeginCombatRecoveryMovement(requestId))
+                return false;
+
+            _combatRecoveryMovementAuthorized = true;
+            _combatRecoveryMovementRequestId = requestId;
+            _combatRecoveryMovementDeniedLogged = false;
+            _log($"[CombatRecovery] Authorized physical recovery movement request={requestId} for {reason}.");
+            return true;
+        }
+
+        /// <summary>
+        /// Revalidates the active combat-recovery authorization against live state. It stays
+        /// valid only while the same post-kill generation is still Deferred, a mob is still
+        /// selected and the game client still owns the foreground. Target loss, a request
+        /// phase transition or supersession, focus loss, stop and route-fatal states all
+        /// revoke it; the loot obligation itself is never touched here.
+        /// </summary>
+        private bool IsCombatRecoveryMovementStillValid()
+        {
+            if (!_combatRecoveryMovementAuthorized)
+                return false;
+
+            if (!RequiresMandatoryLootBarrier(CurrentMode) ||
+                _gameUnresponsiveDetected || _isCityStuckFatal)
+                return false;
+
+            if (!_lootBarrier.TryGetRequestId(out long requestId) ||
+                requestId != _combatRecoveryMovementRequestId ||
+                _lootBarrier.Phase != LootBarrierPhase.Deferred ||
+                _lootBarrier.Reason != LootBarrierReason.PostKill)
+                return false;
+
+            if (!_memoryService.IsMobSelected())
+                return false;
+
+            LootSystem? loot = LootSystemRef;
+            if (loot == null ||
+                !loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus status) ||
+                status.State != LootRequestState.Deferred ||
+                !loot.IsCombatRecoveryMovementActiveFor(requestId))
+                return false;
+
+            return IsGameClientForegroundForRecovery();
+        }
+
+        /// <summary>
+        /// Revokes the combat-recovery authorization and releases the loot handoff. The
+        /// obligation keeps its original request id and stays Deferred, so it resumes
+        /// normally once combat ends. Idempotent; callers stop their own input first.
+        /// </summary>
+        private void EndCombatRecoveryMovement(string reason)
+        {
+            if (!_combatRecoveryMovementAuthorized)
+                return;
+
+            long requestId = _combatRecoveryMovementRequestId;
+            _combatRecoveryMovementAuthorized = false;
+            _combatRecoveryMovementRequestId = 0;
+            _combatRecoveryMovementDeniedLogged = false;
+            LootSystemRef?.EndCombatRecoveryMovement(requestId);
+            _log($"[CombatRecovery] Physical recovery authorization released request={requestId} reason={reason}; loot obligation preserved.");
+        }
+
+        /// <summary>
+        /// True while the game client still owns the foreground during a combat-owned
+        /// recovery. An unresolvable client window reports true (no focus evidence), so a
+        /// client rename can never block a legitimate recovery; only a positive mismatch
+        /// aborts the recovery input.
+        /// </summary>
+        protected virtual bool IsGameClientForegroundForRecovery()
+        {
+            nint hwnd = FindWindow(null, "Legend of Ares");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Ares");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
+            if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
+            if (hwnd == nint.Zero)
+                return true;
+
+            nint foreground = GetForegroundWindow();
+            return foreground == nint.Zero || foreground == hwnd;
+        }
+
+        /// <summary>
+        /// Sends one synthesised forward-key event. Production always uses the real
+        /// keybd_event path; tests override it so they never inject a real key-down into
+        /// user32 (the established convention of this project's tests).
+        /// </summary>
+        protected virtual void SendSyntheticForwardKeyEvent(bool keyUp)
+            => GameInput.keybd_event(GameInput.VK_W, GameInput.SCAN_W,
+                keyUp ? (uint)GameInput.KEYEVENTF_KEYUP : 0u, 0);
+
+        /// <summary>
+        /// Presses the target-cycle (TAB) key. Virtual so tests can record a retry TAB
+        /// instead of injecting a real keystroke; production behaviour is unchanged.
+        /// </summary>
+        protected virtual void SendTargetCycleKey()
+            => GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
+
+        /// <summary>
+        /// Advances an authorized combat-owned reverse-diagonal recovery while the mandatory
+        /// loot hold blocks ordinary navigation. Only the recovery's own camera/W input is
+        /// allowed here; waypoint navigation, resync and every other movement stay blocked.
+        /// </summary>
+        private void TickCombatRecoveryUnderLootHold(float currX, float currY)
+        {
+            if (!IsCombatRecoveryMovementStillValid())
+            {
+                _reverseDiagonalRecovery.Stop();
+                EndCombatRecoveryMovement("authorization lost during recovery");
+                _isUnstuckRoutineActive = false;
+                ReleaseRecoveryOwnership("combat recovery authorization lost");
+                _log("[CombatRecovery] Recovery aborted — target, request obligation or focus changed; input released, loot obligation preserved.");
+                return;
+            }
+
+            RecoveryResult recoveryResult = _reverseDiagonalRecovery.Tick(currX, currY);
+            ApplyCameraBearing(_reverseDiagonalRecovery.CurrentBearingDeg); // camera only — Recovery controls W
+            switch (recoveryResult)
+            {
+                case RecoveryResult.InProgress:
+                    return;
+                case RecoveryResult.Recovered:
+                    // The barrier still blocks ordinary navigation, so the release handoff
+                    // must return a released W to the loot owner instead of leaving it down.
+                    StopMoving();
+                    EndCombatRecoveryMovement("ReverseDiagonal recovered");
+                    _isUnstuckRoutineActive = false;
+                    ReleaseRecoveryOwnership("ReverseDiagonal recovered");
+                    _log("[ReverseDiagonal] recovered under the mandatory loot hold — input handed back, loot obligation preserved.");
+                    return;
+                case RecoveryResult.Failed:
+                    EndCombatRecoveryMovement("ReverseDiagonal failed");
+                    _isUnstuckRoutineActive = false;
+                    ReleaseRecoveryOwnership("ReverseDiagonal failed");
+                    _log("[ReverseDiagonal] failed under the mandatory loot hold — all attempts exhausted.");
+                    return;
+            }
         }
 
         private string DescribeCurrentWaypoint()
@@ -1359,6 +1554,7 @@ namespace DriverScanTester.Services
             // immediately after this Update and aborts the route.
             if (_isCityStuckFatal)
             {
+                EndCombatRecoveryMovement("city stuck fatal");
                 StopMoving();
                 ReleaseCombatKeys();
                 return;
@@ -2202,7 +2398,14 @@ namespace DriverScanTester.Services
             // completed. Only a camera-verified Completed request releases movement.
             RefreshLootBarrier();
             if (await HoldNavigationForMandatoryLootAsync(token))
+            {
+                // Only an authorized combat-owned recovery may still act while the hold is
+                // active — it keeps ticking its own camera/W recovery. Waypoint navigation,
+                // route resync, passive scans and every other movement remain blocked.
+                if (IsCombatRecoveryMovementAuthorized && _reverseDiagonalRecovery.IsActive)
+                    TickCombatRecoveryUnderLootHold(currX, currY);
                 return;
+            }
 
             // ── Post-combat loot wait (legacy MoveAndAttack only) ──
             // In MoveAndAttack mode the bot must NOT walk away while the SOD/SOP pink
@@ -2398,6 +2601,19 @@ namespace DriverScanTester.Services
                 // context genuinely changes (see AdvanceReachedWaypoints / resync / map).
 
                 // ── Active ReverseDiagonalRecovery ──
+                // A combat-owned recovery may only keep driving W/camera while its Deferred
+                // post-kill authorization is still valid. Losing it (target gone, request
+                // transitioned/superseded, focus lost) must stop the recovery input at once
+                // and hand the still-Deferred obligation back to the loot system.
+                if (_combatRecoveryMovementAuthorized && _reverseDiagonalRecovery.IsActive &&
+                    !IsCombatRecoveryMovementStillValid())
+                {
+                    _reverseDiagonalRecovery.Stop();
+                    EndCombatRecoveryMovement("authorization lost during recovery");
+                    _isUnstuckRoutineActive = false;
+                    ReleaseRecoveryOwnership("combat recovery authorization lost");
+                }
+
                 if (_reverseDiagonalRecovery.IsActive)
                 {
                     RecoveryResult recoveryResult = _reverseDiagonalRecovery.Tick(currX, currY);
@@ -2408,6 +2624,13 @@ namespace DriverScanTester.Services
                         case RecoveryResult.InProgress:
                             return;
                         case RecoveryResult.Recovered:
+                            if (_combatRecoveryMovementAuthorized)
+                            {
+                                // The barrier still blocks ordinary navigation, so the handoff
+                                // must return a released W to the loot owner.
+                                StopMoving();
+                                EndCombatRecoveryMovement("ReverseDiagonal recovered");
+                            }
                             _isUnstuckRoutineActive = false;
                             ReleaseRecoveryOwnership("ReverseDiagonal recovered");
                             _log($"[ReverseDiagonal] recovered.");
@@ -2423,6 +2646,7 @@ namespace DriverScanTester.Services
                             ResetActionStuckTracking();
                             return;
                         case RecoveryResult.Failed:
+                            EndCombatRecoveryMovement("ReverseDiagonal failed");
                             _isUnstuckRoutineActive = false;
                             ReleaseRecoveryOwnership("ReverseDiagonal failed");
                             _log($"[ReverseDiagonal] failed - all attempts exhausted.");
@@ -3836,7 +4060,7 @@ namespace DriverScanTester.Services
         /// </summary>
         private void ApplyCameraBearing(float bearingDeg)
         {
-            if (_lootNavigationBarrierHoldsInput)
+            if (_lootNavigationBarrierHoldsInput && !IsCombatRecoveryMovementStillValid())
             {
                 StopMoving();
                 return;
@@ -4276,6 +4500,7 @@ namespace DriverScanTester.Services
         {
             CancelMobGrouping($"unstuck state reset: {reason}");
             _reverseDiagonalRecovery.Stop();
+            EndCombatRecoveryMovement($"unstuck reset: {reason}");
             ReleaseRecoveryOwnership($"unstuck reset: {reason}");
             _isUnstuckRoutineActive = false;
             _consecutiveStuckAttempts = 0;
@@ -4614,7 +4839,20 @@ namespace DriverScanTester.Services
                 ? _waypoints.Peek()
                 : new Waypoint(Waypoint2.X, Waypoint2.Y, GlobalPrecision, BotMode.OnlyMove);
             _log("[Combat] Unreachable mob — starting standard unstuck (reverse-diagonal recovery).");
+
+            // A combat-owned recovery may physically walk under a Deferred post-kill
+            // obligation; ordinary waypoint recovery never receives this authorization.
+            if (_lootNavigationBarrierHoldsInput && !TryBeginCombatRecoveryMovement("combat unstuck"))
+            {
+                _log("[CombatRecovery] Combat unstuck has no recovery authorization — the mandatory loot barrier stays in force.");
+            }
+
             StartReverseDiagonalRecovery(currX, currY, target);
+
+            // The recovery never started (fatal route / loot collection still owns input):
+            // drop the authorization immediately so no input owner is left dangling.
+            if (!_reverseDiagonalRecovery.IsActive)
+                EndCombatRecoveryMovement("reverse diagonal did not start");
         }
 
         /// <summary>
@@ -4667,19 +4905,56 @@ namespace DriverScanTester.Services
             int walkMs = BotConstants.Combat.CombatRepositionDurationMs;
             _log($"[Combat] Attack not consuming mana — repositioning: walk toward waypoint ({target.X:F1},{target.Y:F1}) for {walkMs}ms, then TAB + attack.");
 
-            // Force an immediate camera update to the waypoint direction (fresh segment
-            // bypasses the camera filter) and walk forward for the reposition duration.
-            ResetBearingState();
-            ApplyCameraBearing(GeometryUtils.GetBearingToTargetDeg(currX, currY, target.X, target.Y));
-            StartMoving();
+            // A mandatory post-kill obligation keeps ordinary navigation and input blocked.
+            // Combat-owned physical recovery is authorized explicitly for the exact Deferred
+            // PostKill request; without that authorization nothing may move.
+            bool authorized = TryBeginCombatRecoveryMovement("RepositionAndRetry");
+            if (!authorized && _lootNavigationBarrierHoldsInput)
+            {
+                if (!_combatRecoveryMovementDeniedLogged)
+                {
+                    _combatRecoveryMovementDeniedLogged = true;
+                    _log("[CombatRecovery] Reposition denied — mandatory loot barrier holds input and combat recovery is not authorized " +
+                         "(no selected mob / request no longer Deferred PostKill / loot owns input). Not waiting and not TABbing into the same target.");
+                }
+
+                // Bounded retry through the existing escalation policy (counted by the
+                // next invocations), never a long fake movement wait.
+                await Task.Delay(BotConstants.Combat.CombatRepositionPollMs, token);
+                return;
+            }
+
+            bool inputAccepted = false;
+            float displacement = 0f;
             try
             {
-                await Task.Delay(walkMs, token);
+                // Force an immediate camera update to the waypoint direction (fresh segment
+                // bypasses the camera filter) and walk forward for the reposition duration.
+                ResetBearingState();
+                ApplyCameraBearing(GeometryUtils.GetBearingToTargetDeg(currX, currY, target.X, target.Y));
+                inputAccepted = TryStartMoving();
+                if (inputAccepted)
+                    displacement = await WaitForCombatRepositionDisplacementAsync(currX, currY, walkMs, token);
             }
             finally
             {
                 StopMoving();
+                EndCombatRecoveryMovement("reposition finished");
             }
+
+            if (!inputAccepted || displacement < BotConstants.ReverseDiagonal.SuccessDisplacement)
+            {
+                // A denied key-down or a key-down without real displacement is not a
+                // reposition. Keep the live combat baselines (a repeated failure must not be
+                // masked) and do NOT TAB/attack as if the target had been re-approached —
+                // the existing bounded escalation retries and eventually unsticks.
+                _log(inputAccepted
+                    ? $"[Combat] Reposition failed — moved only {displacement:F2} units (< {BotConstants.ReverseDiagonal.SuccessDisplacement:F2}); not reselecting the same target."
+                    : "[Combat] Reposition failed — forward input was not accepted; not reselecting the same target.");
+                return;
+            }
+
+            _log($"[Combat] Reposition confirmed by {displacement:F2} units of real displacement.");
 
             // Fresh combat state for the retry: the next tick re-baselines the mana
             // stuck detection and presses 3 when a target is selected.
@@ -4692,6 +4967,52 @@ namespace DriverScanTester.Services
                 return;
             }
             await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
+        }
+
+        /// <summary>
+        /// Bounded, small-interval wait for real physical displacement during a combat-owned
+        /// reposition. Returns the largest observed displacement from the start position (a
+        /// key-down or an elapsed timer alone is never evidence of motion). The wait ends
+        /// early as soon as the recovery authorization is lost — target lost, request phase
+        /// change/supersession, focus loss, stop/cancellation — so no input stays held while
+        /// the combat context or the loot obligation has changed.
+        /// </summary>
+        private async Task<float> WaitForCombatRepositionDisplacementAsync(
+            float startX, float startY, int budgetMs, CancellationToken token)
+        {
+            DateTime deadline = DateTime.Now.AddMilliseconds(budgetMs);
+            float bestDisplacement = 0f;
+
+            while (DateTime.Now < deadline)
+            {
+                await Task.Delay(BotConstants.Combat.CombatRepositionPollMs, token);
+
+                var (sampleX, sampleY, sampleRead) = _memoryService.GetPlayerPosition();
+                if (sampleRead)
+                {
+                    float moved = GeometryUtils.Distance(sampleX, sampleY, startX, startY);
+                    if (moved > bestDisplacement)
+                        bestDisplacement = moved;
+                }
+
+                if (!IsCombatRecoveryMovementStillValid())
+                {
+                    _log("[CombatRecovery] Reposition aborted — recovery authorization lost (target/request/focus/stop changed).");
+                    break;
+                }
+            }
+
+            // Final sample: success is decided by the last observed position, not by a stale
+            // in-loop reading.
+            var (endX, endY, endRead) = _memoryService.GetPlayerPosition();
+            if (endRead)
+            {
+                float endMoved = GeometryUtils.Distance(endX, endY, startX, startY);
+                if (endMoved > bestDisplacement)
+                    bestDisplacement = endMoved;
+            }
+
+            return bestDisplacement;
         }
 
         [DllImport("user32.dll", SetLastError = true)]
@@ -4747,21 +5068,33 @@ namespace DriverScanTester.Services
 
         private void StartMoving()
         {
+            TryStartMoving();
+        }
+
+        /// <summary>
+        /// Presses W unless a navigation hold (or another owner) forbids it. Returns true only
+        /// when forward input is actually accepted, so a caller can never mistake an elapsed
+        /// timer for a performed movement. The mandatory loot hold keeps blocking ordinary
+        /// navigation; it is bypassed only for an authorized combat-owned recovery of the
+        /// exact Deferred post-kill obligation (see <see cref="TryBeginCombatRecoveryMovement"/>).
+        /// </summary>
+        private bool TryStartMoving()
+        {
             lock (_inputLock)
             {
-                if (_lootNavigationBarrierHoldsInput)
+                if (_lootNavigationBarrierHoldsInput && !IsCombatRecoveryMovementStillValid())
                 {
                     if (!_lootMoveSuppressedLogged)
                     {
                         _lootMoveSuppressedLogged = true;
                         _log("[LootBarrier] StartMoving suppressed — mandatory loot navigation barrier is active.");
                     }
-                    return;
+                    return false;
                 }
 
                 if (_isMovingForward)
                 {
-                    return;
+                    return true;
                 }
 
                 _isMovingForward = true;
@@ -4771,7 +5104,8 @@ namespace DriverScanTester.Services
 
                 _log($"[Input] W down (StartMoving) — call #{_startMoveCount}. Tick:{_tickCount}");
 
-                GameInput.keybd_event(GameInput.VK_W, GameInput.SCAN_W, 0, 0);
+                SendSyntheticForwardKeyEvent(keyUp: false);
+                return true;
             }
         }
 
@@ -4830,7 +5164,7 @@ namespace DriverScanTester.Services
                 // even if one of the native KEYUP calls fails.
                 try
                 {
-                    GameInput.keybd_event(GameInput.VK_W, GameInput.SCAN_W, (uint)GameInput.KEYEVENTF_KEYUP, 0);
+                    SendSyntheticForwardKeyEvent(keyUp: true);
                 }
                 finally
                 {
@@ -4928,7 +5262,7 @@ namespace DriverScanTester.Services
             bool pressed = false;
             void Press()
             {
-                GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
+                SendTargetCycleKey();
                 _combatHandler.NotifyTargetCyclePressed();
                 pressed = true;
             }

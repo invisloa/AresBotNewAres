@@ -193,6 +193,13 @@ namespace DriverScanTester
             /// </summary>
             public const int CombatRepositionDurationMs = 2500;
 
+            /// <summary>
+            /// Poll interval (ms) for the bounded combat reposition loop: the loop samples the
+            /// player position, the selected target and the loot obligation state this often
+            /// instead of sleeping the whole reposition duration unconditionally.
+            /// </summary>
+            public const int CombatRepositionPollMs = 50;
+
             /// <summary>Default distance at which the bot disengages attack from a waypoint.</summary>
             public const short DefaultAttackDisengageDistance = 60;
 
