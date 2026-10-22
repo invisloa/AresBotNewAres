@@ -326,27 +326,24 @@ namespace DriverScanTester.Tests
             var pinkPoints = new List<Point>();
             LootSystem.CollectTargetPointsFromBuffer(
                 buffer, stride, height, 0, width, 0, height,
-                applyExcludeZone: false, 0, 0, 0, 0,
                 pinkOnly: true, pinkPoints);
             Assert.Equal(new[] { new Point(0, 0), new Point(0, 1) }, pinkPoints);
 
             var whitePoints = new List<Point>();
             LootSystem.CollectTargetPointsFromBuffer(
                 buffer, stride, height, 0, width, 0, height,
-                applyExcludeZone: false, 0, 0, 0, 0,
                 pinkOnly: false, whitePoints);
             Assert.Equal(new[] { new Point(1, 0) }, whitePoints);
 
             var shadedWhitePoints = new List<Point>();
             LootSystem.CollectTargetPointsFromBuffer(
                 buffer, stride, height, 0, width, 0, height,
-                applyExcludeZone: false, 0, 0, 0, 0,
                 pinkOnly: false, targetPoints: shadedWhitePoints, shadedWhiteOnly: true);
             Assert.Equal(new[] { new Point(1, 0), new Point(1, 1) }, shadedWhitePoints);
         }
 
         [Fact]
-        public void BulkBufferReader_AppliesCharacterExcludeZone()
+        public void BulkBufferReader_ScansEveryPixelIncludingCharacterCenter()
         {
             const int width = 4;
             const int height = 1;
@@ -360,10 +357,11 @@ namespace DriverScanTester.Tests
             var points = new List<Point>();
             LootSystem.CollectTargetPointsFromBuffer(
                 buffer, stride, height, 0, width, 0, height,
-                applyExcludeZone: true, exclXMin: 1, exclXMax: 2, exclYMin: 0, exclYMax: 0,
                 pinkOnly: true, points);
 
-            Assert.Equal(new[] { new Point(0, 0), new Point(3, 0) }, points);
+            Assert.Equal(
+                new[] { new Point(0, 0), new Point(1, 0), new Point(2, 0), new Point(3, 0) },
+                points);
         }
 
         [Fact]
@@ -379,7 +377,6 @@ namespace DriverScanTester.Tests
             var points = new List<Point>();
             LootSystem.CollectTargetPointsFromBuffer(
                 buffer, stride, height, 0, width, 0, height,
-                applyExcludeZone: false, 0, 0, 0, 0,
                 pinkOnly: true, points);
 
             Assert.Equal(new[] { new Point(0, 0), new Point(1, 1) }, points);

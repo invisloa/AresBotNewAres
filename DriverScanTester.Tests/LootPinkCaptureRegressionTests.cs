@@ -302,7 +302,7 @@ namespace DriverScanTester.Tests
             LootSystem.PixelCollectionStats referenceStats =
                 LootSystem.CollectTargetPointsFromBitmapReference(
                     frame, 0, frame.Width, 0, frame.Height,
-                    applyExcludeZone: false, 0, 0, 0, 0, pinkOnly: true, reference);
+                    pinkOnly: true, reference);
 
             Assert.Equal(reference, bulk);
             Assert.Equal(referenceStats, bulkStats);

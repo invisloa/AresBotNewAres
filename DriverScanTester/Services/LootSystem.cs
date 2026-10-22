@@ -172,12 +172,6 @@ namespace DriverScanTester.Services
         private static readonly int[] bigX = BotConstants.Loot.BigScanX;
         private static readonly int[] bigY = BotConstants.Loot.BigScanY;
 
-        // Character exclude zone
-        private const int ExcludeXMin = BotConstants.Loot.ExcludeXMin;
-        private const int ExcludeXMax = BotConstants.Loot.ExcludeXMax;
-        private const int ExcludeYMin = BotConstants.Loot.ExcludeYMin;
-        private const int ExcludeYMax = BotConstants.Loot.ExcludeYMax;
-
         private Bitmap _bitmap;
         private Graphics _graphics;
         private readonly object _captureGate = new();
@@ -189,9 +183,8 @@ namespace DriverScanTester.Services
         private bool _focusCaptureSkipLogged;
 
         // ── Scan-phase spacebar spam ──
-        // A background task spams spacebar while the pixel scan is running,
-        // collecting items under the character (the exclude zone) that the
-        // pixel scan skips.
+        // A background task spams spacebar while the pixel scan is running so items
+        // under the character are collected even if the character sprite occludes them.
         private CancellationTokenSource? _scanSpacebarCts;
 
         // ── Loot state machine ──
@@ -1166,9 +1159,6 @@ namespace DriverScanTester.Services
 
             LogRegion("SmallScan", smallX, smallY);
             LogRegion("BigScan", bigX, bigY);
-            LogRegion("ExcludeZone",
-                new[] { BotConstants.Loot.ExcludeXMin, BotConstants.Loot.ExcludeXMax },
-                new[] { BotConstants.Loot.ExcludeYMin, BotConstants.Loot.ExcludeYMax });
             LogRegion("UnderCharScan",
                 new[] { BotConstants.Loot.UnderCharScanStartX, BotConstants.Loot.UnderCharScanEndX },
                 new[] { BotConstants.Loot.UnderCharScanStartY, BotConstants.Loot.UnderCharScanEndY });
@@ -1727,10 +1717,14 @@ namespace DriverScanTester.Services
             // PostMobTab→ press TAB (best-effort), then immediately start loot
             //   (combat bot's own targeting interrupts loot via IsMobSelected check;
             //   in loot-priority mode loot never interrupts)
-            // AreaLoot → press spacebar x3, snapshot inventory → AreaLootWait → compare →
+            // AreaLoot → (only when spacebar looting is enabled) press spacebar x3,
+            //   snapshot inventory → AreaLootWait → compare →
             //   (items collected) → AreaLoot again (keep spacebar-looting)
             //   (no items after N tries) → Scan (with 200ms delay)
-            // Scan → pixel-scan for items (meanwhile spam spacebar), collect them → back to AreaLoot
+            //   When spacebar looting is disabled this state is skipped and the
+            //   cycle goes straight to the pixel scan.
+            // Scan → pixel-scan for items (spamming spacebar only when enabled),
+            //   collect them → back to AreaLoot
             // PinkScan → SOD/SOP-only mode: big region, pink pixels, repeat until none left
             // ===================================================================
 
@@ -1767,7 +1761,7 @@ namespace DriverScanTester.Services
                         // Do NOT wait and check the result — that would conflict with
                         // the combat bot's own TAB cycle and might keep loot stuck in Idle.
                         GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB);
-                        _log("[Loot] TAB pressed — starting area loot.");
+                        _log("[Loot] TAB pressed — starting loot cycle.");
                         _lootState = LootMachineState.AreaLoot;
                         _nextActionTime = DateTime.UtcNow;
                     }
@@ -1776,6 +1770,15 @@ namespace DriverScanTester.Services
                 case LootMachineState.AreaLoot:
                     if (DateTime.UtcNow >= _nextActionTime)
                     {
+                        if (!LootRuntimeSettings.SpacebarLootEnabled)
+                        {
+                            _log("[Loot] Spacebar loot disabled — skipping area-loot and starting pixel scan.");
+                            _consecutiveEmptySpacePresses = 0;
+                            _lootState = LootMachineState.Scan;
+                            _nextActionTime = DateTime.UtcNow;
+                            goto case LootMachineState.Scan;
+                        }
+
                         // Snapshot inventory before pressing spacebar.
                         _inventoryChecksumBefore = _memoryService.ComputeInventoryChecksum();
 
@@ -1783,13 +1786,16 @@ namespace DriverScanTester.Services
                         // Check combat between each press so we cancel immediately
                         // if a mob gets selected during the presses (unless loot
                         // priority mode, where looting outranks combat).
-                        GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                        if (LootRuntimeSettings.SpacebarLootEnabled)
+                            GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                         if (ShouldAbortLoot()) { _lootState = LootMachineState.Idle; break; }
                         Thread.Sleep(30);
-                        GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                        if (LootRuntimeSettings.SpacebarLootEnabled)
+                            GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                         if (ShouldAbortLoot()) { _lootState = LootMachineState.Idle; break; }
                         Thread.Sleep(30);
-                        GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                        if (LootRuntimeSettings.SpacebarLootEnabled)
+                            GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                         _log($"[Loot] Spacebar x3 (round {_consecutiveEmptySpacePresses + 1}/3{KillElapsed()}).");
 
                         // Wait ~100ms for the game to process the pickup,
@@ -1837,14 +1843,17 @@ namespace DriverScanTester.Services
 
                 case LootMachineState.Scan:
                 {
-                    // ── Wait 100ms before the pixel scan. During this wait,
-                    //    spam spacebar to opportunistically collect items that
-                    //    are already under / near the character via area-loot. ──
+                    // ── Wait 100ms before the pixel scan. During this wait, when
+                    //    spacebar looting is enabled, spam spacebar to opportunistically
+                    //    collect items that are already under / near the character. ──
                     if (DateTime.UtcNow < _nextActionTime)
                     {
-                        GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
-                        Thread.Sleep(30);
-                        GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                        if (LootRuntimeSettings.SpacebarLootEnabled)
+                        {
+                            GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                            Thread.Sleep(30);
+                            GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                        }
                         break;
                     }
 
@@ -1857,8 +1866,8 @@ namespace DriverScanTester.Services
                     // ── Pixel scan with spacebar spam on a background thread.
                     //    Each successful scan loots one (or more) items, then we
                     //    rescan to catch any other items that may be visible.
-                    //    Items under the character (exclude zone) get collected
-                    //    via the background spacebar spam simultaneously. ──
+                    //    The character-center area is scanned too; spacebar spam still
+                    //    covers items the character sprite physically occludes. ──
                     StartScanSpacebarSpam();
                     LootScanPassOutcome outcome;
                     try
@@ -2047,13 +2056,16 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Starts a background task that spams spacebar (double-press every ~130ms)
-        /// while the pixel scan is active. This collects items under the character
-        /// (the exclude zone that the pixel scan skips) and any items reachable
-        /// via mouseover + spacebar area-loot.
+        /// while the pixel scan is active. This collects any items reachable via
+        /// mouseover + spacebar area-loot, including items hidden by the character.
+        /// Does nothing while <see cref="LootRuntimeSettings.SpacebarLootEnabled"/> is false.
         /// </summary>
         private void StartScanSpacebarSpam()
         {
             StopScanSpacebarSpam(); // Ensure any previous spam task is stopped.
+            if (!LootRuntimeSettings.SpacebarLootEnabled)
+                return;
+
             _scanSpacebarCts = new CancellationTokenSource();
             var token = _scanSpacebarCts.Token;
 
@@ -2061,17 +2073,24 @@ namespace DriverScanTester.Services
             {
                 while (!token.IsCancellationRequested)
                 {
+                    // A runtime toggle-off must stop the spam immediately.
+                    if (!LootRuntimeSettings.SpacebarLootEnabled)
+                        break;
+
                     // If the game window lost focus, stop spamming to avoid
                     // sending keypresses to whatever window is on top.
                     if (GetForegroundWindow() != _hwnd)
                         break;
 
                     // Double-press spacebar with 30ms gap (same pattern as AreaLoot).
-                    GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                    if (LootRuntimeSettings.SpacebarLootEnabled)
+                        GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                     Thread.Sleep(30);
-                    if (token.IsCancellationRequested || GetForegroundWindow() != _hwnd)
+                    if (token.IsCancellationRequested || GetForegroundWindow() != _hwnd ||
+                        !LootRuntimeSettings.SpacebarLootEnabled)
                         break;
-                    GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                    if (LootRuntimeSettings.SpacebarLootEnabled)
+                        GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                     Thread.Sleep(100);
                 }
             }, token);
@@ -2208,18 +2227,12 @@ namespace DriverScanTester.Services
             }
 
             var scanRegion = new Rectangle(xStart, yStart, xEnd - xStart, yEnd - yStart);
-            var excludeZone = new Rectangle(
-                ExcludeXMin - _referenceClientOriginX,
-                ExcludeYMin - _referenceClientOriginY,
-                ExcludeXMax - ExcludeXMin + 1,
-                ExcludeYMax - ExcludeYMin + 1);
 
             try
             {
                 return AnalyzeWhiteLootCandidatesCore(
                     _bitmap,
                     scanRegion,
-                    excludeZone,
                     BotConstants.Loot.PassivePreScanMaxCandidateComponents,
                     ref _scanBuffer);
             }
@@ -2233,24 +2246,23 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Pure passive candidate classifier. It reuses the exact full-scan pixel masks,
-        /// connected-component labeling, shape filters, character exclude zone and
-        /// text-glyph filter, but never probes, moves the cursor or validates mouseover.
+        /// connected-component labeling, shape filters and text-glyph filter, but never
+        /// probes, moves the cursor or validates mouseover. The whole scan region is
+        /// examined; there is no excluded area around the player.
         /// </summary>
         internal static LootPreScanResult AnalyzeWhiteLootCandidates(
             Bitmap bitmap,
             Rectangle scanRegion,
-            Rectangle? excludeZone,
             int maxCandidateComponents)
         {
             byte[] reusableBuffer = Array.Empty<byte>();
             return AnalyzeWhiteLootCandidatesCore(
-                bitmap, scanRegion, excludeZone, maxCandidateComponents, ref reusableBuffer);
+                bitmap, scanRegion, maxCandidateComponents, ref reusableBuffer);
         }
 
         private static LootPreScanResult AnalyzeWhiteLootCandidatesCore(
             Bitmap bitmap,
             Rectangle scanRegion,
-            Rectangle? excludeZone,
             int maxCandidateComponents,
             ref byte[] reusableBuffer)
         {
@@ -2267,20 +2279,15 @@ namespace DriverScanTester.Services
                     "invalid scan geometry");
             }
 
-            bool applyExcludeZone = excludeZone.HasValue && excludeZone.Value.Width > 0 &&
-                                    excludeZone.Value.Height > 0;
-            Rectangle exclude = excludeZone ?? Rectangle.Empty;
             var exactWhitePoints = new List<Point>();
             var shadedWhitePoints = new List<Point>();
 
             CollectBitmapTargetPoints(
                 bitmap, xStart, xEnd, yStart, yEnd,
-                applyExcludeZone, exclude.Left, exclude.Right - 1, exclude.Top, exclude.Bottom - 1,
                 pinkOnly: false, exactWhitePoints, ref reusableBuffer, out _, out _,
                 shadedWhiteOnly: false);
             CollectBitmapTargetPoints(
                 bitmap, xStart, xEnd, yStart, yEnd,
-                applyExcludeZone, exclude.Left, exclude.Right - 1, exclude.Top, exclude.Bottom - 1,
                 pinkOnly: false, shadedWhitePoints, ref reusableBuffer, out _, out _,
                 shadedWhiteOnly: true);
 
@@ -2915,8 +2922,8 @@ namespace DriverScanTester.Services
         /// <summary>
         /// SOD/SOP-only pixel scan (MoveAndAttack post-kill): a single pass over the
         /// WHOLE captured game window looking only for pink pixels. It ignores the
-        /// BigScan rectangle and the character exclude zone, because a pink drop can
-        /// land anywhere on screen (including under the player after a kill). There
+        /// BigScan rectangle because a pink drop can land anywhere on screen
+        /// (including under the player after a kill). There
         /// is no small-region pass and no white normal-loot detection. Every candidate
         /// pixel is probed in one continuous mouse sweep; the caller repeats a fresh
         /// sweep after each successful pickup so remaining drops are still collected,
@@ -3236,7 +3243,6 @@ namespace DriverScanTester.Services
             var diagnosticCandidateBounds = new List<Rectangle>();
             Point? diagnosticSuccessProbe = null;
             Rectangle diagnosticScanRegion = Rectangle.Empty;
-            Rectangle diagnosticExcludeZone = Rectangle.Empty;
             int diagnosticWhiteCount = 0;
             int diagnosticExactWhiteCount = 0;
             int diagnosticShadedWhiteCount = 0;
@@ -3313,17 +3319,9 @@ namespace DriverScanTester.Services
                     yEnd = _bitmap.Height;
                 }
 
-                // The character exclude zone is a white-loot optimisation only.
-                // The pink SOD/SOP scan must see the WHOLE scan region — a drop
-                // lying under the character after a kill would otherwise be
-                // invisible — so the zone is not applied in pink mode.
-                bool applyExcludeZone = !pinkOnly;
-
-                // Also adjust exclude zone to bitmap-local coords.
-                int exclXMin = ExcludeXMin - refX;
-                int exclXMax = ExcludeXMax - refX;
-                int exclYMin = ExcludeYMin - refY;
-                int exclYMax = ExcludeYMax - refY;
+                // Every loot pass scans its whole region, including the character-
+                // center area. Items there are probed normally; the spacebar spam
+                // remains a complementary way to pick up occluded drops.
 
                 if (xStart >= xEnd || yStart >= yEnd)
                 {
@@ -3335,9 +3333,6 @@ namespace DriverScanTester.Services
                 // diagnosticFrame was cloned immediately after this successful capture,
                 // before a later capture, annotation or cursor action can change the pixels.
                 diagnosticScanRegion = new Rectangle(xStart, yStart, xEnd - xStart, yEnd - yStart);
-                diagnosticExcludeZone = applyExcludeZone
-                    ? new Rectangle(exclXMin, exclYMin, exclXMax - exclXMin + 1, exclYMax - exclYMin + 1)
-                    : Rectangle.Empty;
 
                 int scanPixels = (xEnd - xStart) * (yEnd - yStart);
 
@@ -3365,7 +3360,6 @@ namespace DriverScanTester.Services
                 List<Point>? shadedWhitePoints = pinkOnly ? null : new List<Point>();
                 pixelStats = CollectScanTargetPoints(
                     xStart, xEnd, yStart, yEnd,
-                    applyExcludeZone, exclXMin, exclXMax, exclYMin, exclYMax,
                     pinkOnly, targetPoints,
                     out diagnosticPixelFormat,
                     out diagnosticStride);
@@ -3375,7 +3369,6 @@ namespace DriverScanTester.Services
                 {
                     CollectScanTargetPoints(
                         xStart, xEnd, yStart, yEnd,
-                        applyExcludeZone, exclXMin, exclXMax, exclYMin, exclYMax,
                         false, shadedWhitePoints!,
                         out _, out _, shadedWhiteOnly: true);
                     diagnosticShadedWhiteCount = shadedWhitePoints!.Count;
@@ -3662,13 +3655,12 @@ namespace DriverScanTester.Services
                             $"timestampUtc={scanStartedUtc:O}; reason=white-loot; region={regionName}; " +
                             $"captureStatus={_lastCaptureResult.Status}; outcome={diagnosticOutcome}; {geometryText}; " +
                             $"scanRegion={FormatRectangle(diagnosticScanRegion)}; " +
-                            $"excludeZone={FormatRectangle(diagnosticExcludeZone)}; " +
                             $"exactWhite={diagnosticExactWhiteCount}; shadedWhite={diagnosticShadedWhiteCount}; " +
                             $"components={diagnosticComponentCount}; candidates={diagnosticCandidateCount}; " +
                             $"candidatePixels={diagnosticCandidatePixelCount}; probes={actualCursorProbes}";
                         ScreenshotService.SaveLootScanFrame(
                             diagnosticFrame, regionName, diagnosticOutcome, _log,
-                            diagnosticWhiteCount, diagnosticScanRegion, diagnosticExcludeZone,
+                            diagnosticWhiteCount, diagnosticScanRegion,
                             diagnosticWhiteHits, pixelNoun,
                             detectedPixels: diagnosticDetectedWhitePixels,
                             candidatePixels: diagnosticCandidatePixels,
@@ -4034,14 +4026,12 @@ namespace DriverScanTester.Services
         /// </summary>
         private PixelCollectionStats CollectScanTargetPoints(
             int xStart, int xEnd, int yStart, int yEnd,
-            bool applyExcludeZone, int exclXMin, int exclXMax, int exclYMin, int exclYMax,
             bool pinkOnly, List<Point> targetPoints,
             out PixelFormat sourcePixelFormat,
             out int sourceStride,
             bool shadedWhiteOnly = false)
             => CollectBitmapTargetPoints(
                 _bitmap, xStart, xEnd, yStart, yEnd,
-                applyExcludeZone, exclXMin, exclXMax, exclYMin, exclYMax,
                 pinkOnly, targetPoints, ref _scanBuffer,
                 out sourcePixelFormat, out sourceStride, shadedWhiteOnly);
 
@@ -4052,14 +4042,12 @@ namespace DriverScanTester.Services
             byte[] reusableBuffer = Array.Empty<byte>();
             return CollectBitmapTargetPoints(
                 bitmap, 0, bitmap.Width, 0, bitmap.Height,
-                applyExcludeZone: false, 0, 0, 0, 0,
                 pinkOnly, targetPoints, ref reusableBuffer, out _, out _, shadedWhiteOnly);
         }
 
         private static PixelCollectionStats CollectBitmapTargetPoints(
             Bitmap bitmap,
             int xStart, int xEnd, int yStart, int yEnd,
-            bool applyExcludeZone, int exclXMin, int exclXMax, int exclYMin, int exclYMax,
             bool pinkOnly, List<Point> targetPoints,
             ref byte[] reusableBuffer,
             out PixelFormat sourcePixelFormat,
@@ -4108,7 +4096,6 @@ namespace DriverScanTester.Services
                 return CollectTargetPointsFromBuffer(
                     reusableBuffer, rowBytes, scanBitmap.Height,
                     xStart, xEnd, yStart, yEnd,
-                    applyExcludeZone, exclXMin, exclXMax, exclYMin, exclYMax,
                     pinkOnly, targetPoints, shadedWhiteOnly);
             }
             catch
@@ -4131,7 +4118,6 @@ namespace DriverScanTester.Services
                 sourceStride = 0;
                 return CollectTargetPointsFromBitmapReference(
                     bitmap, xStart, xEnd, yStart, yEnd,
-                    applyExcludeZone, exclXMin, exclXMax, exclYMin, exclYMax,
                     pinkOnly, targetPoints, shadedWhiteOnly);
             }
 
@@ -4145,7 +4131,6 @@ namespace DriverScanTester.Services
         internal static PixelCollectionStats CollectTargetPointsFromBitmapReference(
             Bitmap bitmap,
             int xStart, int xEnd, int yStart, int yEnd,
-            bool applyExcludeZone, int exclXMin, int exclXMax, int exclYMin, int exclYMax,
             bool pinkOnly, List<Point> targetPoints, bool shadedWhiteOnly = false)
         {
             ArgumentNullException.ThrowIfNull(bitmap);
@@ -4158,10 +4143,6 @@ namespace DriverScanTester.Services
             {
                 for (int y = yStart; y < yEnd; y++)
                 {
-                    if (applyExcludeZone && x >= exclXMin && x <= exclXMax &&
-                        y >= exclYMin && y <= exclYMax)
-                        continue;
-
                     examined++;
                     Color color = bitmap.GetPixel(x, y);
                     bool isTarget;
@@ -4197,7 +4178,6 @@ namespace DriverScanTester.Services
         internal static PixelCollectionStats CollectTargetPointsFromBuffer(
             byte[] buffer, int stride, int bitmapHeight,
             int xStart, int xEnd, int yStart, int yEnd,
-            bool applyExcludeZone, int exclXMin, int exclXMax, int exclYMin, int exclYMax,
             bool pinkOnly, List<Point> targetPoints, bool shadedWhiteOnly = false)
         {
             ArgumentNullException.ThrowIfNull(buffer);
@@ -4217,12 +4197,8 @@ namespace DriverScanTester.Services
             int markerRejected = 0;
             for (int x = xStart; x < xEnd; x++)
             {
-                bool xOutsideExclude = !applyExcludeZone || x < exclXMin || x > exclXMax;
                 for (int y = yStart; y < yEnd; y++)
                 {
-                    if (!xOutsideExclude && y >= exclYMin && y <= exclYMax)
-                        continue;
-
                     int row = bottomUp ? bitmapHeight - 1 - y : y;
                     long offsetLong = (long)row * absStride + (long)x * 4;
                     if (offsetLong < 0 || offsetLong + 3 >= buffer.Length)
@@ -5172,11 +5148,15 @@ namespace DriverScanTester.Services
                     break;
                 }
 
-                GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                // The background loop still waits for the clicked-item walk to finish,
+                // but spacebar presses only happen when spacebar looting is enabled.
+                if (LootRuntimeSettings.SpacebarLootEnabled)
+                    GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                 Thread.Sleep(30);
                 if (_scanToken.IsCancellationRequested || ShouldAbortLoot() || !IsGameWindowFocused())
                     break;
-                GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                if (LootRuntimeSettings.SpacebarLootEnabled)
+                    GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                 Thread.Sleep(100);
 
                 int checksumAfter = _memoryService.ComputeInventoryChecksum();

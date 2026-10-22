@@ -25,6 +25,21 @@ namespace DriverScanTester.Services
             }
         }
 
+        /// <summary>
+        /// The dedicated Logs directory used by the unlimited bot session log. Exposed so
+        /// diagnostic report folders use exactly the same project/published convention.
+        /// </summary>
+        public static string LogsDirectory
+        {
+            get
+            {
+                lock (_fileLock)
+                {
+                    return ResolveLogsDir();
+                }
+            }
+        }
+
         /// <summary>Appends one already-stamped line to the session log file.</summary>
         public static void AppendLine(string stampedLine)
         {

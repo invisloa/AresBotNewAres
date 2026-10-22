@@ -2,6 +2,7 @@ using DriverScanTester.Models;
 using DriverScanTester.Services;
 using DriverScanTester.Utils;
 using System;
+using System.Linq;
 using System.Windows.Input;
 using static DriverScanTester.BotConstants;
 
@@ -40,6 +41,33 @@ namespace DriverScanTester.ViewModels
         private string _lootScanTestStatus = "Idle";
         private bool _isLootScanTestRunning;
 
+        // Movement Synchronization Diagnostic (Tools tab). One experiment at a time,
+        // explicit user start/stop, and a passive post-test observation phase.
+        private readonly System.Collections.ObjectModel.ObservableCollection<MovementDiagnosticScenarioInfo> _movementDiagnosticScenarios = new();
+        private readonly System.Collections.ObjectModel.ObservableCollection<MovementDiagnosticObservationChoice> _movementDiagnosticObservationChoices = new();
+        private MovementDiagnosticScenarioInfo? _selectedMovementDiagnosticScenario;
+        private MovementDiagnosticObservationChoice? _selectedMovementDiagnosticObservation;
+        private bool _movementDiagnosticAdvancedMode;
+        private string _movementDiagnosticDurationText = "6";
+        private string _movementDiagnosticRepeatIntervalText = "150";
+        private string _movementDiagnosticWaypointXText = "";
+        private string _movementDiagnosticWaypointYText = "";
+        private string _movementDiagnosticNotesText = "";
+        private bool _movementDiagnosticPersistedAfterStop;
+        private bool _movementDiagnosticObservedDuringManualMovement;
+        private string _movementDiagnosticStateText = "Idle";
+        private string _movementDiagnosticMessageText = "Select a scenario and press Start Test.";
+        private string _movementDiagnosticElapsedText = "00:00.0";
+        private string _movementDiagnosticCountdownText = "";
+        private string _movementDiagnosticProgressText = "";
+        private string _movementDiagnosticInputMethodText = "—";
+        private string _movementDiagnosticLastResultText = "No test run yet.";
+        private string _movementDiagnosticCheckpointText = "";
+        private string _movementDiagnosticRecoveryText = "Unknown (not marked).";
+        private string _movementDiagnosticReportDirectoryText = "—";
+        private bool _isMovementDiagnosticBusy;
+        private bool _isMovementDiagnosticObservationActive;
+
         // Profile selection
         private System.Collections.ObjectModel.ObservableCollection<string> _profileNames = new();
         private string? _selectedProfileName;
@@ -59,29 +87,60 @@ namespace DriverScanTester.ViewModels
             // configuration/logging keeps working while detached (the whole point of the
             // offline mode). Stop/Pause/Resume deliberately never require attachment so a
             // running bot can always be stopped.
-            RunBotCommand = new RelayCommand(_ => RunBot(), _ => _main.IsAttached);
+            RunBotCommand = new RelayCommand(_ => RunBot(), _ => _main.IsAttached && !_main.MovementDiagnostic.BlocksOtherRuntimes);
             StopBotCommand = new RelayCommand(_ => StopAllBots(), _ => IsAnyRuntimeActive);
             PauseBotCommand = new RelayCommand(_ => PauseBots(), _ => !IsBotPaused && IsAnyRuntimeActive);
             ResumeBotCommand = new RelayCommand(_ => ResumeBots(), _ => IsBotPaused);
-            ToggleHealManaBotCommand = new RelayCommand(_ => ToggleHealManaBot(), _ => _main.IsAttached || IsHealManaBotRunning);
+            ToggleHealManaBotCommand = new RelayCommand(_ => ToggleHealManaBot(), _ => (_main.IsAttached && !_main.MovementDiagnostic.BlocksOtherRuntimes) || IsHealManaBotRunning);
             OpenPathEditorCommand = new RelayCommand(_ => _main.OpenPathEditorInternal());
             CaptureNpcMouseOverCommand = new RelayCommand(_ => _main.CaptureNpcMouseOver(), _ => _main.IsAttached);
             CaptureItemMouseOverCommand = new RelayCommand(_ => _main.CaptureItemMouseOver(), _ => _main.IsAttached);
-            TestOperationCommand = new RelayCommand(_ => RunOperationTest(), _ => _main.IsAttached && !IsOperationTestRunning);
+            TestOperationCommand = new RelayCommand(_ => RunOperationTest(), _ => _main.IsAttached && !IsOperationTestRunning && !_main.MovementDiagnostic.BlocksOtherRuntimes);
             // Movement/loot/workflow own the camera and cursor, so they must be stopped.
             // The heal bot is independent (potions/HP only) and may keep running.
             TestLootSodSopCommand = new RelayCommand(
                 _ => RunLootScanTest(LootSystem.LootDiagnosticMode.SodSopPink),
                 _ => _main.IsAttached && !IsLootScanTestRunning &&
+                     !_main.MovementDiagnostic.BlocksOtherRuntimes &&
                      !IsMovementBotRunning && !IsLootBotRunning && !IsWorkflowRunning);
             TestLootWhiteCommand = new RelayCommand(
                 _ => RunLootScanTest(LootSystem.LootDiagnosticMode.NormalWhite),
                 _ => _main.IsAttached && !IsLootScanTestRunning &&
+                     !_main.MovementDiagnostic.BlocksOtherRuntimes &&
                      !IsMovementBotRunning && !IsLootBotRunning && !IsWorkflowRunning);
             ClearBotLogCommand = new RelayCommand(_ => ClearBotLog());
 
+            // Movement Synchronization Diagnostic (Tools tab)
+            BuildMovementDiagnosticObservationChoices();
+            RebuildMovementDiagnosticScenarios();
+            if (_selectedMovementDiagnosticScenario?.Scenario == MovementDiagnosticScenario.ManualKeyboardBaseline)
+                _movementDiagnosticDurationText = "15";
+            StartMovementDiagnosticCommand = new RelayCommand(
+                _ => _ = StartMovementDiagnosticAsync(),
+                _ => _main.IsAttached &&
+                     !_main.MovementDiagnostic.BlocksOtherRuntimes &&
+                     !_isOperationTestRunning && !_isLootScanTestRunning);
+            StopMovementDiagnosticCommand = new RelayCommand(
+                _ => _ = StopMovementDiagnosticAsync(),
+                _ => _main.MovementDiagnostic.IsTestActive);
+            StartMovementDiagnosticObservationCommand = new RelayCommand(
+                _ => _ = StartMovementDiagnosticObservationAsync(),
+                _ => _main.MovementDiagnostic.CanStartObservation);
+            StopMovementDiagnosticObservationCommand = new RelayCommand(
+                _ => _ = StopMovementDiagnosticObservationAsync(),
+                _ => _main.MovementDiagnostic.IsObservationActive);
+            MarkMovementRecoveryCommand = new RelayCommand(
+                _ => MarkMovementRecovery(),
+                _ => _main.MovementDiagnostic.CanMarkRecovery);
+            RecordMovementDiagnosticObservationCommand = new RelayCommand(
+                _ => RecordMovementDiagnosticObservation(),
+                _ => _main.MovementDiagnostic.HasCurrentSession);
+            ExportMovementDiagnosticReportCommand = new RelayCommand(
+                _ => _ = ExportMovementDiagnosticReportAsync(),
+                _ => _main.MovementDiagnostic.HasCurrentSession);
+
             // Route Workflow commands
-            StartWorkflowCommand = new RelayCommand(_ => StartWorkflowWithProfile(), _ => _main.IsAttached && CanStartWorkflow && !IsBotPaused);
+            StartWorkflowCommand = new RelayCommand(_ => StartWorkflowWithProfile(), _ => _main.IsAttached && CanStartWorkflow && !IsBotPaused && !_main.MovementDiagnostic.BlocksOtherRuntimes);
             StopWorkflowCommand = new RelayCommand(_ => _main.StopWorkflow(), _ => IsWorkflowRunning);
             PauseWorkflowCommand = new RelayCommand(_ => PauseBots(), _ => !IsBotPaused && IsWorkflowRunning);
             ResumeWorkflowCommand = new RelayCommand(_ => ResumeBots(), _ => IsBotPaused && IsWorkflowRunning);
@@ -337,6 +396,15 @@ namespace DriverScanTester.ViewModels
         public ICommand TestLootWhiteCommand { get; }
         public ICommand ClearBotLogCommand { get; }
 
+        // Movement Synchronization Diagnostic (Tools tab)
+        public ICommand StartMovementDiagnosticCommand { get; }
+        public ICommand StopMovementDiagnosticCommand { get; }
+        public ICommand StartMovementDiagnosticObservationCommand { get; }
+        public ICommand StopMovementDiagnosticObservationCommand { get; }
+        public ICommand MarkMovementRecoveryCommand { get; }
+        public ICommand RecordMovementDiagnosticObservationCommand { get; }
+        public ICommand ExportMovementDiagnosticReportCommand { get; }
+
         // Route Workflow commands
         public ICommand StartWorkflowCommand { get; }
         public ICommand StopWorkflowCommand { get; }
@@ -344,6 +412,430 @@ namespace DriverScanTester.ViewModels
         public ICommand ResumeWorkflowCommand { get; }
         public ICommand RefreshProfilesCommand { get; }
         public ICommand ValidateProfileCommand { get; }
+
+        // -----------------------------------------------------------------
+        //  Movement Synchronization Diagnostic (Tools tab)
+        // -----------------------------------------------------------------
+
+        public System.Collections.ObjectModel.ObservableCollection<MovementDiagnosticScenarioInfo> MovementDiagnosticScenarios
+            => _movementDiagnosticScenarios;
+
+        public MovementDiagnosticScenarioInfo? SelectedMovementDiagnosticScenario
+        {
+            get => _selectedMovementDiagnosticScenario;
+            set
+            {
+                if (!SetProperty(ref _selectedMovementDiagnosticScenario, value))
+                    return;
+
+                if (value != null)
+                    MovementDiagnosticDurationText = value.Scenario == MovementDiagnosticScenario.ManualKeyboardBaseline
+                        ? "15"
+                        : "6";
+
+                OnPropertyChanged(nameof(MovementDiagnosticSelectedInputMethodText));
+                OnPropertyChanged(nameof(MovementDiagnosticScenarioHintText));
+                System.Windows.Input.CommandManager.InvalidateRequerySuggested();
+            }
+        }
+
+        public string MovementDiagnosticSelectedInputMethodText =>
+            _selectedMovementDiagnosticScenario?.InputMethodDescription ?? "—";
+
+        public string MovementDiagnosticScenarioHintText => _selectedMovementDiagnosticScenario?.Scenario switch
+        {
+            MovementDiagnosticScenario.ManualKeyboardBaseline =>
+                "No synthetic input. Move manually with W/A/D while this session records local state for comparison.",
+            MovementDiagnosticScenario.KeybdEventRepeatedW =>
+                "Repeated W-down events are not assumed to be equivalent to real hardware key repeat.",
+            MovementDiagnosticScenario.KeybdEventPulsedW =>
+                "Expected intermittent movement. This is a known-jerky reference, not proof of the original defect.",
+            MovementDiagnosticScenario.DirectCameraMemorySteering =>
+                "ADVANCED: performs one bounded camera-angle memory write plus readback, then a short W hold.",
+            MovementDiagnosticScenario.ExistingMovementSystemOnlyMove =>
+                "Requires a safe waypoint X/Y below, 0.5–30 units ahead. The unmodified MovementSystem is used without combat/loot/repot.",
+            _ => "Independent experiment. The production movement system is not modified."
+        };
+
+        public System.Collections.ObjectModel.ObservableCollection<MovementDiagnosticObservationChoice> MovementDiagnosticObservationChoices
+            => _movementDiagnosticObservationChoices;
+
+        public MovementDiagnosticObservationChoice? SelectedMovementDiagnosticObservation
+        {
+            get => _selectedMovementDiagnosticObservation;
+            set => SetProperty(ref _selectedMovementDiagnosticObservation, value);
+        }
+
+        public bool MovementDiagnosticAdvancedMode
+        {
+            get => _movementDiagnosticAdvancedMode;
+            set
+            {
+                if (!SetProperty(ref _movementDiagnosticAdvancedMode, value))
+                    return;
+
+                RebuildMovementDiagnosticScenarios();
+                OnPropertyChanged(nameof(MovementDiagnosticAdvancedHintText));
+                System.Windows.Input.CommandManager.InvalidateRequerySuggested();
+            }
+        }
+
+        public string MovementDiagnosticAdvancedHintText => MovementDiagnosticAdvancedMode
+            ? "Advanced mode enabled. DirectCamera memory steering is selectable and still requires an explicit Start Test."
+            : "Advanced mode disabled. DirectCamera memory steering (TEST 8) is not available.";
+
+        public string MovementDiagnosticDurationText
+        {
+            get => _movementDiagnosticDurationText;
+            set => SetProperty(ref _movementDiagnosticDurationText, value);
+        }
+
+        public string MovementDiagnosticRepeatIntervalText
+        {
+            get => _movementDiagnosticRepeatIntervalText;
+            set => SetProperty(ref _movementDiagnosticRepeatIntervalText, value);
+        }
+
+        public string MovementDiagnosticWaypointXText
+        {
+            get => _movementDiagnosticWaypointXText;
+            set => SetProperty(ref _movementDiagnosticWaypointXText, value);
+        }
+
+        public string MovementDiagnosticWaypointYText
+        {
+            get => _movementDiagnosticWaypointYText;
+            set => SetProperty(ref _movementDiagnosticWaypointYText, value);
+        }
+
+        public string MovementDiagnosticNotesText
+        {
+            get => _movementDiagnosticNotesText;
+            set => SetProperty(ref _movementDiagnosticNotesText, value);
+        }
+
+        public bool MovementDiagnosticPersistedAfterStop
+        {
+            get => _movementDiagnosticPersistedAfterStop;
+            set => SetProperty(ref _movementDiagnosticPersistedAfterStop, value);
+        }
+
+        public bool MovementDiagnosticObservedDuringManualMovement
+        {
+            get => _movementDiagnosticObservedDuringManualMovement;
+            set => SetProperty(ref _movementDiagnosticObservedDuringManualMovement, value);
+        }
+
+        public string MovementDiagnosticStateText
+        {
+            get => _movementDiagnosticStateText;
+            private set => SetProperty(ref _movementDiagnosticStateText, value);
+        }
+
+        public string MovementDiagnosticMessageText
+        {
+            get => _movementDiagnosticMessageText;
+            private set => SetProperty(ref _movementDiagnosticMessageText, value);
+        }
+
+        public string MovementDiagnosticElapsedText
+        {
+            get => _movementDiagnosticElapsedText;
+            private set => SetProperty(ref _movementDiagnosticElapsedText, value);
+        }
+
+        public string MovementDiagnosticCountdownText
+        {
+            get => _movementDiagnosticCountdownText;
+            private set => SetProperty(ref _movementDiagnosticCountdownText, value);
+        }
+
+        public string MovementDiagnosticProgressText
+        {
+            get => _movementDiagnosticProgressText;
+            private set => SetProperty(ref _movementDiagnosticProgressText, value);
+        }
+
+        public string MovementDiagnosticInputMethodText
+        {
+            get => _movementDiagnosticInputMethodText;
+            private set => SetProperty(ref _movementDiagnosticInputMethodText, value);
+        }
+
+        public string MovementDiagnosticLastResultText
+        {
+            get => _movementDiagnosticLastResultText;
+            private set => SetProperty(ref _movementDiagnosticLastResultText, value);
+        }
+
+        public string MovementDiagnosticCheckpointText
+        {
+            get => _movementDiagnosticCheckpointText;
+            private set => SetProperty(ref _movementDiagnosticCheckpointText, value);
+        }
+
+        public string MovementDiagnosticRecoveryText
+        {
+            get => _movementDiagnosticRecoveryText;
+            private set => SetProperty(ref _movementDiagnosticRecoveryText, value);
+        }
+
+        public string MovementDiagnosticReportDirectoryText
+        {
+            get => _movementDiagnosticReportDirectoryText;
+            private set => SetProperty(ref _movementDiagnosticReportDirectoryText, value);
+        }
+
+        public bool IsMovementDiagnosticBusy
+        {
+            get => _isMovementDiagnosticBusy;
+            private set => SetProperty(ref _isMovementDiagnosticBusy, value);
+        }
+
+        public bool IsMovementDiagnosticObservationActive
+        {
+            get => _isMovementDiagnosticObservationActive;
+            private set => SetProperty(ref _isMovementDiagnosticObservationActive, value);
+        }
+
+        private void BuildMovementDiagnosticObservationChoices()
+        {
+            _movementDiagnosticObservationChoices.Clear();
+            _movementDiagnosticObservationChoices.Add(new(MovementRemoteObservationRating.NotRecorded, "— not recorded —"));
+            _movementDiagnosticObservationChoices.Add(new(MovementRemoteObservationRating.SmoothMovement, "Smooth movement"));
+            _movementDiagnosticObservationChoices.Add(new(MovementRemoteObservationRating.AnimationStutteringOnly, "Stuttering animation only"));
+            _movementDiagnosticObservationChoices.Add(new(MovementRemoteObservationRating.PositionJumping, "Position jumping / rubber-banding"));
+            _movementDiagnosticObservationChoices.Add(new(MovementRemoteObservationRating.BothAnimationAndPosition, "Both animation and position affected"));
+            _movementDiagnosticObservationChoices.Add(new(MovementRemoteObservationRating.CouldNotDetermine, "Could not determine"));
+            _selectedMovementDiagnosticObservation = _movementDiagnosticObservationChoices[0];
+        }
+
+        private void RebuildMovementDiagnosticScenarios()
+        {
+            MovementDiagnosticScenario previous = _selectedMovementDiagnosticScenario?.Scenario
+                ?? MovementDiagnosticScenario.ManualKeyboardBaseline;
+
+            _movementDiagnosticScenarios.Clear();
+            foreach (MovementDiagnosticScenarioInfo info in MovementDiagnosticScenarioCatalog.All)
+            {
+                if (info.RequiresAdvancedMode && !_movementDiagnosticAdvancedMode)
+                    continue;
+                _movementDiagnosticScenarios.Add(info);
+            }
+
+            MovementDiagnosticScenarioInfo? selected = _movementDiagnosticScenarios
+                .FirstOrDefault(s => s.Scenario == previous);
+            _selectedMovementDiagnosticScenario = selected ?? _movementDiagnosticScenarios[0];
+            OnPropertyChanged(nameof(SelectedMovementDiagnosticScenario));
+            OnPropertyChanged(nameof(MovementDiagnosticSelectedInputMethodText));
+            OnPropertyChanged(nameof(MovementDiagnosticScenarioHintText));
+        }
+
+        private async Task StartMovementDiagnosticAsync()
+        {
+            if (_isOperationTestRunning || _isLootScanTestRunning)
+            {
+                MovementDiagnosticMessageText = "Stop the operation/loot diagnostic before starting the movement diagnostic.";
+                AppendBotLog("[MovementDiag] Start refused: another Tools diagnostic is running.");
+                return;
+            }
+
+            MovementDiagnosticScenarioInfo? info = SelectedMovementDiagnosticScenario;
+            if (info == null)
+            {
+                MovementDiagnosticMessageText = "Select a diagnostic scenario first.";
+                return;
+            }
+
+            if (!TryBuildMovementDiagnosticSettings(out MovementDiagnosticSettings? settings, out string error))
+            {
+                MovementDiagnosticMessageText = error;
+                AppendBotLog($"[MovementDiag] Start refused: {error}");
+                return;
+            }
+
+            MovementDiagnosticStartResult result =
+                await _main.MovementDiagnostic.StartTestAsync(info.Scenario, settings);
+            AppendBotLog($"[MovementDiag] {result.Message}");
+            MovementDiagnosticMessageText = result.Message;
+            if (!result.Accepted)
+                MovementDiagnosticLastResultText = result.Message;
+            RefreshMovementDiagnosticUi();
+        }
+
+        private async Task StopMovementDiagnosticAsync()
+        {
+            MovementDiagnosticStartResult result =
+                await _main.MovementDiagnostic.StopTestAsync("Stop Test button");
+            AppendBotLog($"[MovementDiag] {result.Message}");
+            MovementDiagnosticMessageText = result.Message;
+            RefreshMovementDiagnosticUi();
+        }
+
+        private async Task StartMovementDiagnosticObservationAsync()
+        {
+            MovementDiagnosticStartResult result =
+                await _main.MovementDiagnostic.StartPostTestObservationAsync();
+            AppendBotLog($"[MovementDiag] {result.Message}");
+            MovementDiagnosticMessageText = result.Message;
+            RefreshMovementDiagnosticUi();
+        }
+
+        private async Task StopMovementDiagnosticObservationAsync()
+        {
+            MovementDiagnosticStartResult result =
+                await _main.MovementDiagnostic.StopObservationAsync("Stop Observation button");
+            AppendBotLog($"[MovementDiag] {result.Message}");
+            MovementDiagnosticMessageText = result.Message;
+            RefreshMovementDiagnosticUi();
+        }
+
+        private void MarkMovementRecovery()
+        {
+            MovementDiagnosticMarkResult result = _main.MovementDiagnostic.MarkRecoveryObserved();
+            AppendBotLog($"[MovementDiag] {result.Message}");
+            MovementDiagnosticMessageText = result.Message;
+            RefreshMovementDiagnosticUi();
+        }
+
+        private void RecordMovementDiagnosticObservation()
+        {
+            MovementRemoteObservationRating rating =
+                SelectedMovementDiagnosticObservation?.Rating ?? MovementRemoteObservationRating.NotRecorded;
+            MovementDiagnosticStartResult result = _main.MovementDiagnostic.RecordObserverFeedback(
+                rating,
+                MovementDiagnosticPersistedAfterStop,
+                MovementDiagnosticObservedDuringManualMovement,
+                MovementDiagnosticNotesText);
+            AppendBotLog($"[MovementDiag] {result.Message}");
+            MovementDiagnosticMessageText = result.Message;
+            RefreshMovementDiagnosticUi();
+        }
+
+        private async Task ExportMovementDiagnosticReportAsync()
+        {
+            string? path = await _main.MovementDiagnostic.ExportReportAsync();
+            MovementDiagnosticMessageText = path == null
+                ? "Export failed — no diagnostic session exists."
+                : $"Report exported to {path}";
+            RefreshMovementDiagnosticUi();
+        }
+
+        private bool TryBuildMovementDiagnosticSettings(
+            out MovementDiagnosticSettings settings,
+            out string error)
+        {
+            settings = new MovementDiagnosticSettings();
+            error = "";
+
+            if (!double.TryParse(
+                    MovementDiagnosticDurationText,
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.CurrentCulture,
+                    out double durationSeconds) &&
+                !double.TryParse(
+                    MovementDiagnosticDurationText,
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out durationSeconds))
+            {
+                error = "Test duration must be a number of seconds (1–300).";
+                return false;
+            }
+
+            if (durationSeconds < 1 || durationSeconds > 300)
+            {
+                error = "Test duration must be between 1 and 300 seconds.";
+                return false;
+            }
+
+            if (!int.TryParse(MovementDiagnosticRepeatIntervalText, out int repeatMs) ||
+                repeatMs < 20 || repeatMs > 2000)
+            {
+                error = "Repeat interval must be between 20 and 2000 ms.";
+                return false;
+            }
+
+            float? waypointX = ParseOptionalFloat(MovementDiagnosticWaypointXText);
+            float? waypointY = ParseOptionalFloat(MovementDiagnosticWaypointYText);
+            if (waypointX.HasValue != waypointY.HasValue)
+            {
+                error = "Configure BOTH safe waypoint X and Y, or leave both empty.";
+                return false;
+            }
+
+            settings.DurationMs = (int)Math.Round(durationSeconds * 1000.0);
+            settings.CountdownMs = 3000;
+            settings.RepeatIntervalMs = repeatMs;
+            settings.SampleIntervalMs = 100;
+            settings.AdvancedModeEnabled = MovementDiagnosticAdvancedMode;
+            settings.SafeWaypointX = waypointX;
+            settings.SafeWaypointY = waypointY;
+            settings.MaxSafeWaypointDistance = 30f;
+            settings.AutoStartRecoveryObservation = true;
+            settings.RecoveryCheckpointsSeconds = new[] { 15, 30, 60, 120, 300 };
+            settings.MaxObservationMinutes = 30;
+            return true;
+        }
+
+        private static float? ParseOptionalFloat(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return null;
+            if (float.TryParse(text, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.CurrentCulture, out float value) ||
+                float.TryParse(text, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out value))
+                return value;
+            return null;
+        }
+
+        private void RefreshMovementDiagnosticUi()
+        {
+            MovementDiagnosticStatus status = _main.MovementDiagnostic.GetStatus();
+            IsMovementDiagnosticBusy = status.IsTestActive;
+            IsMovementDiagnosticObservationActive = status.IsObservationActive;
+            MovementDiagnosticStateText = status.Phase switch
+            {
+                MovementDiagnosticPhase.Observing => "Post-test observation",
+                _ => status.Phase.ToString()
+            };
+            MovementDiagnosticMessageText = status.Message;
+            MovementDiagnosticElapsedText = FormatDiagnosticTime(status.Elapsed);
+            MovementDiagnosticCountdownText = status.CountdownRemaining.HasValue
+                ? $"Starting in {Math.Max(0, Math.Ceiling(status.CountdownRemaining.Value.TotalSeconds))}..."
+                : "";
+            MovementDiagnosticProgressText = status.HoldElapsed.HasValue && status.HoldTarget.HasValue
+                ? $"{status.HoldLabel} — {status.HoldElapsed.Value.TotalSeconds:F1} / {status.HoldTarget.Value.TotalSeconds:F1} s"
+                : "";
+            MovementDiagnosticInputMethodText = status.HasCurrentSession
+                ? status.InputMethodDescription
+                : MovementDiagnosticSelectedInputMethodText;
+            MovementDiagnosticLastResultText = status.LastResult;
+            MovementDiagnosticCheckpointText = string.IsNullOrEmpty(status.LastCheckpoint)
+                ? ""
+                : $"Last checkpoint: {status.LastCheckpoint}";
+            MovementDiagnosticReportDirectoryText = status.OutputDirectory ?? "—";
+
+            if (status.RecoveryDurationMs.HasValue)
+            {
+                MovementDiagnosticRecoveryText = $"Marked: {status.RecoveryDurationMs.Value:F0} ms after confirmed input stop.";
+            }
+            else if (status.InputInjectionStoppedUtc.HasValue)
+            {
+                double sinceStop = Math.Max(0, (DateTime.UtcNow - status.InputInjectionStoppedUtc.Value).TotalSeconds);
+                MovementDiagnosticRecoveryText = $"Not yet marked ({sinceStop:F0} s since confirmed input stop).";
+            }
+            else
+            {
+                MovementDiagnosticRecoveryText = "Unknown (input has not stopped yet).";
+            }
+
+            System.Windows.Input.CommandManager.InvalidateRequerySuggested();
+        }
+
+        private static string FormatDiagnosticTime(TimeSpan elapsed)
+            => $"{(int)elapsed.TotalMinutes:00}:{elapsed.Seconds:00}.{elapsed.Milliseconds / 100}";
 
         // Profile selection
         public System.Collections.ObjectModel.ObservableCollection<string> ProfileNames
@@ -756,6 +1248,9 @@ namespace DriverScanTester.ViewModels
 
                 OnPropertyChanged(nameof(MobGroupingStatus));
 
+                // Movement synchronization diagnostic state (may run on a worker thread).
+                RefreshMovementDiagnosticUi();
+
                 // Sync workflow state from MainViewModel
                 IsWorkflowRunning = _main.IsWorkflowRunning;
                 WorkflowPhaseText = _main.WorkflowPhaseText;
@@ -858,6 +1353,11 @@ namespace DriverScanTester.ViewModels
         {
             if (System.Threading.Interlocked.Exchange(ref _isDisposed, 1) != 0)
                 return;
+
+            // Closing the Bot Control Panel (which hosts the diagnostic section) must
+            // stop the active experiment. This is a bounded cleanup; failures are logged.
+            try { _main.MovementDiagnostic.StopForWindowClose(); }
+            catch (Exception ex) { AppendBotLog($"[MovementDiag] Window-close cleanup error: {ex.Message}"); }
 
             BotLogService.Instance.LineAppended -= OnBotLogLine;
             _main.AttachmentChanged -= OnMainAttachmentChanged;

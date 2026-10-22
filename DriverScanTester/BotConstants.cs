@@ -293,7 +293,7 @@ namespace DriverScanTester
             public const int CyanMaximumComponentPixels = 80;
             public const float CandidateDeduplicationRadiusFactor = 0.35f;
 
-            /// <summary>Stable anchor inferred from the existing centered loot-exclusion zone.</summary>
+            /// <summary>Stable anchor inferred from the centered local-player marker exclusion zone.</summary>
             public const float PlayerAnchorRatioX = 0.372f;
             public const float PlayerAnchorRatioY = 0.476f;
             /// <summary>ROI half-sizes, as client ratios around the player anchor; right-side UI is mostly excluded.</summary>
@@ -1311,6 +1311,14 @@ namespace DriverScanTester
         // ════════════════════════════════════════════════════════════════
         public static class Loot
         {
+            /// <summary>
+            /// Process-wide default for spacebar-based looting (area loot and the
+            /// spacebar spam during pixel scans). Disabled by default: the bot must
+            /// never press spacebar to loot unless this is explicitly enabled at runtime.
+            /// Never serialized with profiles or paths.
+            /// </summary>
+            public const bool SpacebarLootEnabledDefault = false;
+
             /// <summary>SOD/SOP ground-drop pink detection: EXACT red channel of the solid
             /// texture painted by the client mod (tools/scroll_pink_square.py:
             /// PINK = BGRA(147, 20, 255, 255) → RGB(255, 20, 147) DeepPink). Only this
@@ -1419,17 +1427,19 @@ namespace DriverScanTester
             /// <summary>Big scan region Y range.</summary>
             public static readonly int[] BigScanY = { 290, 760 };
 
-            /// <summary>Character exclude zone — min X. Centered on the character.</summary>
+            /// <summary>Local-player marker exclusion — min X. Centered on the character.
+            /// Used only to avoid misreading the player's own faction marker as another
+            /// player; the loot pixel scan covers this area normally.</summary>
             public const int ExcludeXMin = 880;
 
-            /// <summary>Character exclude zone — max X.</summary>
+            /// <summary>Local-player marker exclusion — max X.</summary>
             public const int ExcludeXMax = 1040;
 
-            /// <summary>Character exclude zone — min Y. Centered on the character
+            /// <summary>Local-player marker exclusion — min Y. Centered on the character
             /// at old-screen-abs Y=503.</summary>
             public const int ExcludeYMin = 418;
 
-            /// <summary>Character exclude zone — max Y.</summary>
+            /// <summary>Local-player marker exclusion — max Y.</summary>
             public const int ExcludeYMax = 588;
 
             /// <summary>Bitmap width for screen capture.</summary>

@@ -241,6 +241,14 @@ namespace DriverScanTester.ViewModels
         /// the user attaches — no reopen and no stale PID.
         /// </summary>
         public BotGameAccess GameAccess { get; }
+
+        /// <summary>
+        /// Independent movement-synchronization experiment runner. It is owned here (not
+        /// by the Bot window) so global Stop All and every normal-bot start path can
+        /// enforce exclusive input ownership and shutdown cleanup.
+        /// </summary>
+        public MovementSynchronizationDiagnosticService MovementDiagnostic { get; }
+
         public string HpPotionUseThresholdText => IsAttached ? HealManaThreshold1.ToString() : "--";
         public string ManaPotionUseThresholdText => IsAttached ? HealManaThreshold2.ToString() : "--";
         private int _cachedPointerSize; // 0 => unknown (lazy init)
@@ -293,6 +301,14 @@ namespace DriverScanTester.ViewModels
                 getPointerSize: GetPointerSize,
                 getModuleBase: ResolveAresModuleBase,
                 readMemory: (pid, address, buffer, _) => DriverRead(pid, address, buffer, out _));
+
+            MovementDiagnostic = new MovementSynchronizationDiagnosticService(
+                log: AppendBotLog,
+                isAttached: () => _isAttached,
+                getPid: () => _attachedPid,
+                createMemoryService: CreateMovementDiagnosticMemoryService,
+                focusGame: FocusGameWindow,
+                getConflictReason: GetMovementDiagnosticConflictReason);
 
             AttachCommand = new RelayCommand(_ => Attach(), _ => true);
 
@@ -601,6 +617,9 @@ namespace DriverScanTester.ViewModels
                 return;
             }
 
+            if (BlockNormalActionForMovementDiagnostic("Run This Path"))
+                return;
+
             // A previous run may have been stopped while paused — always start unpaused.
             PauseController.Resume();
 
@@ -785,6 +804,9 @@ namespace DriverScanTester.ViewModels
 
         private void OpenPixelDetectionTestingWindow()
         {
+            if (BlockNormalActionForMovementDiagnostic("Open Pixel Detection Testing"))
+                return;
+
             try
             {
                 var viewModel = new PixelDetectionTestingViewModel(
@@ -795,6 +817,12 @@ namespace DriverScanTester.ViewModels
                 {
                     DataContext = viewModel,
                     Owner = Application.Current?.MainWindow
+                };
+                _pixelDetectionTestingWindow = window;
+                window.Closed += (_, _) =>
+                {
+                    if (ReferenceEquals(_pixelDetectionTestingWindow, window))
+                        _pixelDetectionTestingWindow = null;
                 };
                 window.Show();
             }
@@ -2113,6 +2141,7 @@ namespace DriverScanTester.ViewModels
 
         /// <summary>Single Bot Control Panel instance (null while closed).</summary>
         private Views.BotWindow? _botWindow;
+        private Views.PixelDetectionTestingWindow? _pixelDetectionTestingWindow;
 
         /// <summary>
         /// Routes a bot log line to the process-wide <see cref="BotLogService"/> (UI history +
@@ -3237,6 +3266,8 @@ namespace DriverScanTester.ViewModels
         {
             if (!_isAttached) { AppendLog("Attach first."); return; }
             if (_workflowCoordinator?.IsRunning == true) { AppendLog("Workflow already running."); return; }
+            if (BlockNormalActionForMovementDiagnostic("Start Workflow"))
+                return;
 
             FocusGameWindow();
 
@@ -3545,6 +3576,15 @@ namespace DriverScanTester.ViewModels
         /// </summary>
         public void StopAllActions(string reason)
         {
+            try
+            {
+                MovementDiagnostic.StopForGlobalStop(reason);
+            }
+            catch (Exception ex)
+            {
+                AppendBotLog($"[MovementDiag] Stop All diagnostic cleanup error: {ex.Message}");
+            }
+
             CancelAutoStopTimer();
             StopGameConnectionMonitor();
             PauseController.Resume();
@@ -3589,6 +3629,8 @@ namespace DriverScanTester.ViewModels
         public async Task<bool> TestOperationAsync(string operationName)
         {
             if (!_isAttached) { AppendLog("[Operation Test] Attach first."); return false; }
+            if (BlockNormalActionForMovementDiagnostic("Operation Test", "[Operation Test] "))
+                return false;
             if (string.IsNullOrWhiteSpace(operationName))
             {
                 AppendLog("[Operation Test] No operation selected.");
@@ -3648,6 +3690,12 @@ namespace DriverScanTester.ViewModels
             LootSystem.LootDiagnosticMode mode)
         {
             string label = mode == LootSystem.LootDiagnosticMode.SodSopPink ? "SOD/SOP" : "white";
+            if (MovementDiagnostic.BlocksOtherRuntimes)
+            {
+                string detail = "Stop the active movement diagnostic (test or post-test observation) first.";
+                AppendBotLog($"[LootTest] {label}: {detail}");
+                return new(mode, LootSystem.LootDiagnosticOutcome.Busy, 0, 0, detail);
+            }
             if (!_isAttached)
             {
                 AppendBotLog($"[LootTest] {label}: attach to the game first.");
@@ -4076,6 +4124,8 @@ namespace DriverScanTester.ViewModels
                     else
                     {
                         if (!_isAttached) { AppendLog("Attach first."); return; }
+                        if (BlockNormalActionForMovementDiagnostic("Start Movement Bot"))
+                            return;
                         // A previous run may have been stopped while paused — always start unpaused.
                         PauseController.Resume();
                         FocusGameWindow();
@@ -4133,6 +4183,8 @@ namespace DriverScanTester.ViewModels
                     else
                     {
                         if (!_isAttached) { AppendLog("Attach first."); return; }
+                        if (BlockNormalActionForMovementDiagnostic("Start Heal/Mana Bot"))
+                            return;
                         FocusGameWindow();
 
                         ulong baseAddr = FindModuleInScanner("Ares.exe", false);
@@ -4172,6 +4224,8 @@ namespace DriverScanTester.ViewModels
                     else
                     {
                         if (!_isAttached) { AppendLog("Attach first."); return; }
+                        if (BlockNormalActionForMovementDiagnostic("Start Loot Bot"))
+                            return;
                         FocusGameWindow();
 
                         ulong baseAddr = FindModuleInScanner("Ares.exe", false);
@@ -4432,6 +4486,74 @@ namespace DriverScanTester.ViewModels
                     var mem = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
                     return mem.GetManaPotionCount();
                 }
+
+        /// <summary>
+        /// Creates the memory service used by the isolated diagnostic. The diagnostic
+        /// never reuses the production movement system or its input ownership.
+        /// </summary>
+        private GameMemoryService? CreateMovementDiagnosticMemoryService()
+        {
+            if (!_isAttached || _attachedPid == 0)
+                return null;
+
+            ulong baseAddr = FindModuleInScanner("Ares.exe", false);
+            if (baseAddr == 0)
+            {
+                _pointerScanner?.RefreshModules();
+                baseAddr = FindModuleInScanner("Ares.exe", true);
+            }
+            if (baseAddr == 0)
+                return null;
+
+            return new GameMemoryService(
+                _attachedPid,
+                DriverRead,
+                DriverWrite,
+                baseAddr,
+                GetPointerSize(),
+                AppendBotLog);
+        }
+
+        /// <summary>
+        /// Conflict source for the diagnostic. Production runtimes are never silently
+        /// stopped to make room for an experiment.
+        /// </summary>
+        private string? GetMovementDiagnosticConflictReason()
+        {
+            if (!_isAttached)
+                return "Game is not attached.";
+
+            if (_isMovementBotRunning)
+                return "Movement bot is running. Stop it before starting the diagnostic.";
+            if (_isHealManaBotRunning)
+                return "Heal/Mana bot is running. Stop it before starting the diagnostic.";
+            if (_isLootBotRunning)
+                return "Loot bot is running. Stop it before starting the diagnostic.";
+            if (_workflowCoordinator?.IsRunning == true)
+                return "Route workflow is running. Stop it before starting the diagnostic.";
+            if (_pixelDetectionTestingWindow != null)
+                return "The Pixel Detection Testing window is open and may control the camera. Close it before starting the diagnostic.";
+            return null;
+        }
+
+        private bool BlockNormalActionForMovementDiagnostic(string action, string logPrefix = "")
+        {
+            if (MovementDiagnostic?.BlocksOtherRuntimes != true)
+                return false;
+
+            AppendLog($"{logPrefix}{action} refused: the movement synchronization diagnostic (test or post-test observation) owns input/monitoring. Stop it first.");
+            return true;
+        }
+
+        /// <summary>
+        /// Application-exit hook for the Bot window/application close paths. Bounded
+        /// cleanup; the diagnostic logs honestly if it could not finish in time.
+        /// </summary>
+        public void StopMovementDiagnosticForApplicationExit()
+        {
+            try { MovementDiagnostic?.StopForApplicationExit(); }
+            catch (Exception ex) { AppendLog($"[MovementDiag] Application-exit cleanup error: {ex.Message}"); }
+        }
 
         private static class Native
         {

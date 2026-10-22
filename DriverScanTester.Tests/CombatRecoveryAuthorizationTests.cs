@@ -145,14 +145,14 @@ namespace DriverScanTester.Tests
             public TestMovementSystem Movement { get; }
             public long RequestId { get; private set; }
 
-            public Scenario()
+            public Scenario(BotMode mode = BotMode.MoveAndAttackAndLoot)
             {
                 Stub = new CombatMemoryStub();
                 GameMemoryService memory = Stub.Create(Log.Add);
                 Loot = new LootSystem(memory, Log.Add);
                 Movement = new TestMovementSystem(memory, Log.Add, new[]
                 {
-                    new Waypoint(1000, 1000, MovementPrecision.Medium, BotMode.MoveAndAttackAndLoot)
+                    new Waypoint(1000, 1000, MovementPrecision.Medium, mode)
                 })
                 {
                     LootSystemRef = Loot,
@@ -227,6 +227,61 @@ namespace DriverScanTester.Tests
             FieldInfo field = typeof(MovementSystem).GetField("_isUnstuckRoutineActive", PrivateInstance)
                 ?? throw new InvalidOperationException("_isUnstuckRoutineActive not found");
             return (bool)field.GetValue(movement)!;
+        }
+
+        private static bool IsReverseDiagonalActive(MovementSystem movement)
+        {
+            FieldInfo field = typeof(MovementSystem).GetField("_reverseDiagonalRecovery", PrivateInstance)
+                ?? throw new InvalidOperationException("_reverseDiagonalRecovery not found");
+            object recovery = field.GetValue(movement)!;
+            PropertyInfo property = recovery.GetType().GetProperty("IsActive")
+                ?? throw new InvalidOperationException("IsActive not found");
+            return (bool)property.GetValue(recovery)!;
+        }
+
+        private static int RepositionRetryCount(MovementSystem movement)
+        {
+            FieldInfo field = typeof(MovementSystem).GetField("_repositionRetryCount", PrivateInstance)
+                ?? throw new InvalidOperationException("_repositionRetryCount not found");
+            return (int)field.GetValue(movement)!;
+        }
+
+        private static (float X, float Y)? LastRepositionPos(MovementSystem movement)
+        {
+            FieldInfo field = typeof(MovementSystem).GetField("_lastRepositionPos", PrivateInstance)
+                ?? throw new InvalidOperationException("_lastRepositionPos not found");
+            return ((float X, float Y)?)field.GetValue(movement);
+        }
+
+        private static bool IsCombatRecoverySuspended(MovementSystem movement)
+        {
+            FieldInfo field = typeof(MovementSystem).GetField("_combatRecoverySuspendedByLootHold", PrivateInstance)
+                ?? throw new InvalidOperationException("_combatRecoverySuspendedByLootHold not found");
+            return (bool)field.GetValue(movement)!;
+        }
+
+        /// <summary>
+        /// Reads the combat handler's attack-episode flag. CombatHandler.ResetState sets it to
+        /// false, so it proves whether a failed/aborted reposition reset the combat baseline.
+        /// </summary>
+        private static bool GetWasAttacking(MovementSystem movement)
+        {
+            FieldInfo handlerField = typeof(MovementSystem).GetField("_combatHandler", PrivateInstance)
+                ?? throw new InvalidOperationException("_combatHandler not found");
+            object handler = handlerField.GetValue(movement)!;
+            FieldInfo field = typeof(CombatHandler).GetField("_wasAttacking", PrivateInstance)
+                ?? throw new InvalidOperationException("_wasAttacking not found");
+            return (bool)field.GetValue(handler)!;
+        }
+
+        private static void SetWasAttacking(MovementSystem movement, bool value)
+        {
+            FieldInfo handlerField = typeof(MovementSystem).GetField("_combatHandler", PrivateInstance)
+                ?? throw new InvalidOperationException("_combatHandler not found");
+            object handler = handlerField.GetValue(movement)!;
+            FieldInfo field = typeof(CombatHandler).GetField("_wasAttacking", PrivateInstance)
+                ?? throw new InvalidOperationException("_wasAttacking not found");
+            field.SetValue(handler, value);
         }
 
         private static LootScanPassOutcome ValidEmptyOutcome()
@@ -602,6 +657,283 @@ namespace DriverScanTester.Tests
 
             Assert.True(BarrierHoldsInput(scenario.Movement));
             Assert.Equal(LootRequestState.Deferred, scenario.Status().State);
+        }
+
+        // ── 9. Unrestricted repositioning without a mandatory loot barrier ─────
+
+        [Theory]
+        [InlineData(BotMode.MoveAndAttack)]
+        [InlineData(BotMode.MoveAndAttackAndLoot)]
+        public async Task RepositionIsUnrestrictedWhenNoMandatoryLootRequestExists(BotMode mode)
+        {
+            using var scenario = new Scenario(mode);
+            Assert.False(BarrierHoldsInput(scenario.Movement));
+            Assert.False(scenario.Movement.IsLootNavigationBlocked);
+
+            short step = 0;
+            scenario.Stub.Position = () => ((short)(100 + (step += 2)), (short)100);
+            SetWasAttacking(scenario.Movement, true);
+
+            var stopwatch = Stopwatch.StartNew();
+            await StartReposition(scenario.Movement, 100, 100, CancellationToken.None);
+            stopwatch.Stop();
+
+            // The full reposition budget is walked (the old regression aborted after the first
+            // 50 ms poll because no combat-recovery authorization existed to lose).
+            Assert.True(stopwatch.ElapsedMilliseconds >= BotConstants.Combat.CombatRepositionDurationMs - 250,
+                $"Unrestricted repositioning must run the full budget (took {stopwatch.ElapsedMilliseconds} ms).");
+            Assert.True(scenario.Movement.ForwardKeyDowns > 0);
+            Assert.Contains(scenario.Log, l => l.Contains("Reposition confirmed by", StringComparison.Ordinal));
+            Assert.Equal(1, scenario.Movement.TargetCyclePresses);
+            Assert.False(GetWasAttacking(scenario.Movement), "A successful reposition resets the combat baseline for the retry.");
+            Assert.False(IsMovingForward(scenario.Movement));
+            Assert.False(scenario.Movement.IsCombatRecoveryMovementAuthorized);
+        }
+
+        // ── 10. Denied authorization: combat unstuck is never activated ────────
+
+        [Fact]
+        public void DeniedAuthorizationNeverLeavesAnActiveUnstuckThatCannotAdvance()
+        {
+            using var scenario = new Scenario();
+            scenario.ArmPostKill();
+            scenario.DeferForCombat();
+
+            // No selected mob: the mandatory hold refuses the recovery authorization.
+            scenario.Stub.TargetId = 0;
+
+            InvokePrivate(scenario.Movement, "StartCombatUnstuck", 100f, 100f);
+
+            Assert.False(IsReverseDiagonalActive(scenario.Movement));
+            Assert.False(IsUnstuckRoutineActive(scenario.Movement));
+            Assert.False(scenario.Movement.IsCombatRecoveryMovementAuthorized);
+            Assert.False(scenario.Loot.IsCombatRecoveryMovementActiveFor(scenario.RequestId));
+            Assert.Equal(LootRequestState.Deferred, scenario.Status().State);
+            Assert.Contains(scenario.Log, l => l.Contains("Combat unstuck not started (1/4)", StringComparison.Ordinal));
+            Assert.False(IsCombatRecoverySuspended(scenario.Movement));
+            Assert.Equal(0, scenario.Movement.ForwardKeyDowns);
+        }
+
+        [Fact]
+        public async Task FailedAuthorizationThenCombatUnstuckIsBoundedAndReleasesCleanly()
+        {
+            using var scenario = new Scenario();
+            scenario.ArmPostKill();
+            scenario.DeferForCombat();
+            scenario.Stub.TargetId = 0;
+
+            // Denied reposition: no movement, no TAB, quick return.
+            await StartReposition(scenario.Movement, 100, 100, CancellationToken.None);
+            Assert.Equal(0, scenario.Movement.ForwardKeyDowns);
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+
+            // Denied combat unstuck: never activates a recovery that cannot run.
+            InvokePrivate(scenario.Movement, "StartCombatUnstuck", 100f, 100f);
+            Assert.False(IsReverseDiagonalActive(scenario.Movement));
+            Assert.False(IsUnstuckRoutineActive(scenario.Movement));
+
+            // Bounded: the fourth denial trips the suspension instead of retrying forever.
+            InvokePrivate(scenario.Movement, "StartCombatUnstuck", 100f, 100f);
+            InvokePrivate(scenario.Movement, "StartCombatUnstuck", 100f, 100f);
+            InvokePrivate(scenario.Movement, "StartCombatUnstuck", 100f, 100f);
+
+            Assert.True(IsCombatRecoverySuspended(scenario.Movement));
+            Assert.Contains(scenario.Log, l => l.Contains("combat unstuck cannot run under the mandatory loot hold", StringComparison.Ordinal));
+            Assert.False(IsReverseDiagonalActive(scenario.Movement));
+            Assert.False(IsUnstuckRoutineActive(scenario.Movement));
+            Assert.Equal(LootRequestState.Deferred, scenario.Status().State);
+
+            // Suspended repositioning stays quiet: no W, no TAB.
+            var stopwatch = Stopwatch.StartNew();
+            await StartReposition(scenario.Movement, 100, 100, CancellationToken.None);
+            Assert.True(stopwatch.ElapsedMilliseconds < 1000);
+            Assert.Equal(0, scenario.Movement.ForwardKeyDowns);
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+            Assert.Contains(scenario.Log, l => l.Contains("Combat recovery movement suspended", StringComparison.Ordinal));
+
+            // Once the obligation completes, the hold releases and the normal recovery chain
+            // becomes available again.
+            scenario.Loot.NotifyNavigationHeld(scenario.RequestId);
+            InvokePrivate(scenario.Loot, "ServiceMandatoryLootRequest", false);
+            Assert.Equal(LootRequestState.Running, scenario.Status().State);
+            InvokePrivate(scenario.Loot, "CompleteMandatoryLootRequest", scenario.RequestId, ValidEmptyOutcome());
+            scenario.RefreshBarrier();
+            Assert.Equal(LootRequestState.Completed, scenario.Status().State);
+            Assert.False(BarrierHoldsInput(scenario.Movement));
+
+            InvokePrivate(scenario.Movement, "StartCombatUnstuck", 100f, 100f);
+            Assert.False(IsCombatRecoverySuspended(scenario.Movement));
+            Assert.True(IsReverseDiagonalActive(scenario.Movement));
+            Assert.True(IsUnstuckRoutineActive(scenario.Movement));
+        }
+
+        // ── 11. Abort after real movement: never reset, never TAB ──────────────
+
+        [Fact]
+        public async Task TargetLossAfterMeaningfulMovementNeverResetsOrRetabs()
+        {
+            using var scenario = new Scenario();
+            scenario.ArmPostKill();
+            scenario.DeferForCombat();
+
+            var stopwatch = Stopwatch.StartNew();
+            float maxMoved = 0f;
+            scenario.Stub.Position = () =>
+            {
+                short x = (short)(100 + Math.Min(20, (int)(stopwatch.ElapsedMilliseconds / 40)));
+                maxMoved = Math.Max(maxMoved, x - 100f);
+                return (x, (short)100);
+            };
+            SetWasAttacking(scenario.Movement, true);
+
+            Task reposition = StartReposition(scenario.Movement, 100, 100, CancellationToken.None);
+            await Task.Delay(220);
+            Assert.True(maxMoved > BotConstants.ReverseDiagonal.SuccessDisplacement,
+                "the scenario must have produced meaningful movement before the target is lost");
+
+            scenario.Stub.TargetId = 0;
+            await reposition;
+
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+            Assert.Contains(scenario.Log, l => l.Contains("Reposition aborted", StringComparison.Ordinal));
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("Reposition confirmed by", StringComparison.Ordinal));
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("Retrying attack", StringComparison.Ordinal));
+            Assert.True(GetWasAttacking(scenario.Movement),
+                "an aborted reposition must not reset the combat baseline");
+            Assert.False(IsMovingForward(scenario.Movement));
+            Assert.Equal(LootRequestState.Deferred, scenario.Status().State);
+        }
+
+        [Fact]
+        public async Task FocusLossAfterMeaningfulMovementNeverResetsOrRetabs()
+        {
+            using var scenario = new Scenario();
+            scenario.ArmPostKill();
+            scenario.DeferForCombat();
+
+            var stopwatch = Stopwatch.StartNew();
+            float maxMoved = 0f;
+            scenario.Stub.Position = () =>
+            {
+                short x = (short)(100 + Math.Min(20, (int)(stopwatch.ElapsedMilliseconds / 40)));
+                maxMoved = Math.Max(maxMoved, x - 100f);
+                return (x, (short)100);
+            };
+            SetWasAttacking(scenario.Movement, true);
+
+            Task reposition = StartReposition(scenario.Movement, 100, 100, CancellationToken.None);
+            await Task.Delay(220);
+            Assert.True(maxMoved > BotConstants.ReverseDiagonal.SuccessDisplacement);
+
+            scenario.Movement.Foreground = false;
+            await reposition;
+
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+            Assert.True(GetWasAttacking(scenario.Movement));
+            Assert.False(IsMovingForward(scenario.Movement));
+            Assert.False(scenario.Movement.IsCombatRecoveryMovementAuthorized);
+            Assert.False(scenario.Loot.IsCombatRecoveryMovementActiveFor(scenario.RequestId));
+            Assert.Equal(LootRequestState.Deferred, scenario.Status().State);
+        }
+
+        [Fact]
+        public async Task LootStateChangeAfterMeaningfulMovementNeverResetsOrRetabs()
+        {
+            using var scenario = new Scenario();
+            scenario.ArmPostKill();
+            scenario.DeferForCombat();
+
+            var stopwatch = Stopwatch.StartNew();
+            float maxMoved = 0f;
+            scenario.Stub.Position = () =>
+            {
+                short x = (short)(100 + Math.Min(20, (int)(stopwatch.ElapsedMilliseconds / 40)));
+                maxMoved = Math.Max(maxMoved, x - 100f);
+                return (x, (short)100);
+            };
+            SetWasAttacking(scenario.Movement, true);
+
+            Task reposition = StartReposition(scenario.Movement, 100, 100, CancellationToken.None);
+            await Task.Delay(220);
+            Assert.True(maxMoved > BotConstants.ReverseDiagonal.SuccessDisplacement);
+
+            scenario.Loot.CancelMandatoryLootRequest(scenario.RequestId, "test phase change");
+            await reposition;
+
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+            Assert.True(GetWasAttacking(scenario.Movement));
+            Assert.False(IsMovingForward(scenario.Movement));
+            Assert.False(scenario.Movement.IsCombatRecoveryMovementAuthorized);
+            Assert.False(scenario.Loot.IsCombatRecoveryMovementActiveFor(scenario.RequestId));
+            Assert.Equal(LootRequestState.Cancelled, scenario.Status().State);
+        }
+
+        // ── 12. Final position decides success, not the historical maximum ─────
+
+        [Fact]
+        public async Task DisplacementLostBeforeTheEndIsNotASuccessfulReposition()
+        {
+            using var scenario = new Scenario(BotMode.MoveAndAttack);
+
+            var stopwatch = Stopwatch.StartNew();
+            float maxMoved = 0f;
+            scenario.Stub.Position = () =>
+            {
+                // Walk away for the first second, then return to the start position.
+                bool away = stopwatch.ElapsedMilliseconds < 1000;
+                short x = away ? (short)112 : (short)100;
+                short y = away ? (short)100 : (short)61;
+                maxMoved = Math.Max(maxMoved, (float)Math.Sqrt((x - 100) * (x - 100) + (y - 61) * (y - 61)));
+                return (x, y);
+            };
+            SetWasAttacking(scenario.Movement, true);
+
+            await StartReposition(scenario.Movement, 100, 61, CancellationToken.None);
+
+            Assert.True(maxMoved > BotConstants.ReverseDiagonal.SuccessDisplacement,
+                "the scenario must have walked beyond the displacement threshold before returning");
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+            Assert.Contains(scenario.Log, l => l.Contains("Reposition failed — moved only", StringComparison.Ordinal));
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("Retrying attack", StringComparison.Ordinal));
+            Assert.True(GetWasAttacking(scenario.Movement));
+            Assert.False(IsMovingForward(scenario.Movement));
+        }
+
+        // ── 13. Escalation accounting after one successful move ────────────────
+
+        [Fact]
+        public async Task StalledRecoveriesAfterOneSuccessfulMoveStillEscalate()
+        {
+            using var scenario = new Scenario(BotMode.MoveAndAttack);
+
+            // Attempt 1 really moves the player (unrestricted, no loot barrier).
+            scenario.Stub.Position = () => ((short)150, (short)100);
+            await StartReposition(scenario.Movement, 100, 100, CancellationToken.None);
+
+            Assert.Equal(1, RepositionRetryCount(scenario.Movement));
+            Assert.Equal((100f, 100f), LastRepositionPos(scenario.Movement)!.Value);
+            Assert.Contains(scenario.Log, l => l.Contains("Reposition confirmed by", StringComparison.Ordinal));
+
+            // Attempt 2 starts from the new position and cannot move any further: the baseline
+            // must advance, otherwise the old pre-move baseline keeps resetting the counter.
+            await StartReposition(scenario.Movement, 150, 100, CancellationToken.None);
+            Assert.Equal(1, RepositionRetryCount(scenario.Movement));
+            Assert.Equal((150f, 100f), LastRepositionPos(scenario.Movement)!.Value);
+
+            // Attempts 3 and 4 from the unchanged position accumulate the failure count.
+            await StartReposition(scenario.Movement, 150, 100, CancellationToken.None);
+            Assert.Equal(2, RepositionRetryCount(scenario.Movement));
+
+            await StartReposition(scenario.Movement, 150, 100, CancellationToken.None);
+            Assert.Equal(3, RepositionRetryCount(scenario.Movement));
+
+            // Attempt 5 reaches the bounded escalation and starts the standard unstuck.
+            await StartReposition(scenario.Movement, 150, 100, CancellationToken.None);
+            Assert.Contains(scenario.Log, l => l.Contains("reposition attempts without escaping the broken target", StringComparison.Ordinal));
+            Assert.Equal(0, RepositionRetryCount(scenario.Movement));
+            Assert.Null(LastRepositionPos(scenario.Movement));
+            Assert.True(IsReverseDiagonalActive(scenario.Movement));
+            Assert.True(IsUnstuckRoutineActive(scenario.Movement));
         }
     }
 }

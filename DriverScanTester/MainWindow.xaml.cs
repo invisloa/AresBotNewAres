@@ -17,11 +17,22 @@ namespace DriverScanTester
     /// </summary>
     public partial class MainWindow : Window
     {
+        private readonly MainViewModel _viewModel;
+
         public MainWindow()
         {
             InitializeComponent();
-            var vm = new MainViewModel();
-            this.DataContext = vm;
+            _viewModel = new MainViewModel();
+            this.DataContext = _viewModel;
+        }
+
+        protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
+        {
+            // Bounded diagnostic cleanup even when the application itself terminates.
+            // The service logs if it could not finish rather than claiming success.
+            try { _viewModel.StopMovementDiagnosticForApplicationExit(); }
+            catch { }
+            base.OnClosing(e);
         }
         private void LogBox_TextChanged(object sender, TextChangedEventArgs e)
         {

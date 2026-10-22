@@ -188,7 +188,6 @@ namespace DriverScanTester.Services
         /// Annotates and saves one loot-scan frame. The annotation keeps the separate
         /// datasets visually distinct:
         ///    green rectangle  — scanned region;
-        ///    red rectangle    — character exclusion zone (never an item bounding box);
         ///    yellow 1px dots  — ALL pixels classified as white/shaded-white;
         ///    orange 1px dots  — pixels of accepted loot candidate components;
         ///    magenta outline  — accepted candidate component bounds;
@@ -205,7 +204,6 @@ namespace DriverScanTester.Services
             Action<string> log,
             int whiteCount = 0,
             Rectangle scanRegion = default,
-            Rectangle excludeZone = default,
             IReadOnlyList<Point>? whiteHits = null,
             string pixelLabel = "white",
             IReadOnlyList<Point>? detectedPixels = null,
@@ -264,12 +262,6 @@ namespace DriverScanTester.Services
                     {
                         using var scanPen = new Pen(Color.FromArgb(255, 0, 220, 0), 2);
                         graphics.DrawRectangle(scanPen, scanRegion);
-                    }
-
-                    if (excludeZone.Width > 0 && excludeZone.Height > 0)
-                    {
-                        using var excludePen = new Pen(Color.FromArgb(255, 230, 0, 0), 2);
-                        graphics.DrawRectangle(excludePen, excludeZone);
                     }
 
                     if (whiteHits != null)
@@ -547,7 +539,7 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Saves the manual player-marker test frame with the accepted pixel component
-        /// and the loot-scanner character-exclusion area outlined. Returns null on failure.
+        /// and the local-player marker exclusion area outlined. Returns null on failure.
         /// </summary>
         internal static string? SavePlayerMarkerDiagnosticScreenshot(
             Bitmap frame,

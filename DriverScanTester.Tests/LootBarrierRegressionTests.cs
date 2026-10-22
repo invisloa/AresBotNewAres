@@ -197,6 +197,33 @@ namespace DriverScanTester.Tests
         // ── Test 3 — passive candidate scan ────────────────────────────────────
 
         [Fact]
+        public void SpacebarLootIsDisabledByDefault()
+        {
+            Assert.False(BotConstants.Loot.SpacebarLootEnabledDefault);
+        }
+
+        [Fact]
+        public void DisabledSpacebarLootNeverStartsTheScanSpamTask()
+        {
+            bool original = LootRuntimeSettings.SpacebarLootEnabled;
+            try
+            {
+                LootRuntimeSettings.SpacebarLootEnabled = false;
+                using var loot = CreateLoot(_ => { });
+
+                InvokePrivate(loot, "StartScanSpacebarSpam");
+
+                var field = typeof(LootSystem).GetField("_scanSpacebarCts", PrivateInstance);
+                Assert.NotNull(field);
+                Assert.Null(field!.GetValue(loot));
+            }
+            finally
+            {
+                LootRuntimeSettings.SpacebarLootEnabled = original;
+            }
+        }
+
+        [Fact]
         public void PassiveAnalysisFindsPlausibleWhiteLootWithoutMovingAnything()
         {
             using var bitmap = new Bitmap(200, 200);
@@ -207,7 +234,7 @@ namespace DriverScanTester.Tests
             }
 
             LootPreScanResult result = LootSystem.AnalyzeWhiteLootCandidates(
-                bitmap, new Rectangle(0, 0, 200, 200), null,
+                bitmap, new Rectangle(0, 0, 200, 200),
                 BotConstants.Loot.PassivePreScanMaxCandidateComponents);
 
             Assert.Equal(LootPreScanOutcome.PotentialCandidate, result.Outcome);
@@ -471,7 +498,7 @@ namespace DriverScanTester.Tests
         {
             using var bitmap = new Bitmap(80, 80);
             LootPreScanResult result = LootSystem.AnalyzeWhiteLootCandidates(
-                bitmap, new Rectangle(-10, -10, 5, 5), null,
+                bitmap, new Rectangle(-10, -10, 5, 5),
                 BotConstants.Loot.PassivePreScanMaxCandidateComponents);
 
             Assert.Equal(LootPreScanOutcome.CaptureUnavailable, result.Outcome);
@@ -599,7 +626,7 @@ namespace DriverScanTester.Tests
             }
 
             LootPreScanResult result = LootSystem.AnalyzeWhiteLootCandidates(
-                bitmap, new Rectangle(0, 0, 200, 100), null,
+                bitmap, new Rectangle(0, 0, 200, 100),
                 BotConstants.Loot.PassivePreScanMaxCandidateComponents);
 
             Assert.Equal(LootPreScanOutcome.NoCandidate, result.Outcome);
@@ -607,7 +634,7 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void CharacterExclusionZoneIsNotScannedByThePreScan()
+        public void CharacterCenterAreaIsScannedByThePreScan()
         {
             using var bitmap = new Bitmap(200, 200);
             using (Graphics graphics = Graphics.FromImage(bitmap))
@@ -619,10 +646,10 @@ namespace DriverScanTester.Tests
             LootPreScanResult result = LootSystem.AnalyzeWhiteLootCandidates(
                 bitmap,
                 new Rectangle(0, 0, 200, 200),
-                new Rectangle(70, 70, 60, 60),
                 BotConstants.Loot.PassivePreScanMaxCandidateComponents);
 
-            Assert.Equal(LootPreScanOutcome.NoCandidate, result.Outcome);
+            Assert.Equal(LootPreScanOutcome.PotentialCandidate, result.Outcome);
+            Assert.True(result.CandidateComponents >= 1);
         }
 
         [Fact]
@@ -643,7 +670,7 @@ namespace DriverScanTester.Tests
             }
 
             LootPreScanResult result = LootSystem.AnalyzeWhiteLootCandidates(
-                bitmap, new Rectangle(0, 0, 300, 300), null,
+                bitmap, new Rectangle(0, 0, 300, 300),
                 maxCandidateComponents: 8);
 
             Assert.Equal(LootPreScanOutcome.NoCandidate, result.Outcome);

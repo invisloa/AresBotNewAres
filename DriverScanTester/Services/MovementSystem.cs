@@ -137,6 +137,29 @@ namespace DriverScanTester.Services
         }
     }
 
+    /// <summary>
+    /// How one combat reposition attempt ended. The reposition and its retry TAB are only
+    /// allowed to continue for <see cref="Moved"/>; every other outcome is a failure/abort
+    /// that must leave the combat baselines and the target selection untouched.
+    /// </summary>
+    internal enum CombatRepositionResult
+    {
+        /// <summary>Real final displacement was observed — the retry TAB/attack may proceed.</summary>
+        Moved,
+
+        /// <summary>Forward input was accepted but the final position did not move enough.</summary>
+        InsufficientDisplacement,
+
+        /// <summary>The forward key-down was never accepted (a navigation hold or other owner blocks it).</summary>
+        InputDenied,
+
+        /// <summary>The caller cancelled the operation — input was released and nothing succeeded.</summary>
+        Cancelled,
+
+        /// <summary>Combat-recovery authorization was lost mid-attempt (target/focus/request change).</summary>
+        AuthorizationLost
+    }
+
     public class MovementSystem
     {
         private readonly GameMemoryService _memoryService;
@@ -181,6 +204,14 @@ namespace DriverScanTester.Services
         /// <summary>If true (default), MovementSystem handles repot internally (legacy mode).
         /// When false, the external BotWorkflowCoordinator is responsible for repot decisions.</summary>
         public bool InternalRepotEnabled { get; set; } = true;
+
+        /// <summary>
+        /// If true (default), the production speed-potion rebuff (keys 7+8) runs in every
+        /// mode exactly as before. The movement-synchronization diagnostic sets this to
+        /// false for TEST 9 so its isolated OnlyMove experiment cannot emit unrelated
+        /// potion input. Production callers never change it.
+        /// </summary>
+        public bool AllowSpeedPotionBuff { get; set; } = true;
 
         private bool _isWaypointSpecialRecoveryActive;
         private bool _waypointRepotRequested;
@@ -936,6 +967,14 @@ namespace DriverScanTester.Services
         private (float X, float Y)? _lastRepositionPos = null;
         private const int REPOSITION_MAX_ATTEMPTS = 4;
 
+        // Combat unstuck escalations that could not start because the mandatory loot hold
+        // refused the recovery authorization. Bounded: once the limit is reached no further
+        // combat recovery movement is attempted while the hold owns the input, so a recovery
+        // can never be marked active while it cannot advance.
+        private const int COMBAT_UNSTUCK_MAX_DENIED_ATTEMPTS = 4;
+        private int _combatUnstuckDeniedCount = 0;
+        private bool _combatRecoverySuspendedByLootHold;
+
         // When stuck in city triggers teleport, wait this long before resuming.
         private DateTime _inCityStuckCooldownUntil = DateTime.MinValue;
 
@@ -1375,6 +1414,8 @@ namespace DriverScanTester.Services
             _combatRecoveryMovementAuthorized = true;
             _combatRecoveryMovementRequestId = requestId;
             _combatRecoveryMovementDeniedLogged = false;
+            _combatUnstuckDeniedCount = 0;
+            _combatRecoverySuspendedByLootHold = false;
             _log($"[CombatRecovery] Authorized physical recovery movement request={requestId} for {reason}.");
             return true;
         }
@@ -1897,7 +1938,7 @@ namespace DriverScanTester.Services
             // suppressed under OnlyMove, so the bot never rebuffed speed pots while
             // walking the city (repot/shop paths) even with the buff missing.
             // CheckAttackSpeed throttles itself to once per CheckIntervalSeconds.
-            if (_combatHandler.CheckAttackSpeed(_memoryService))
+            if (AllowSpeedPotionBuff && _combatHandler.CheckAttackSpeed(_memoryService))
             {
                 // Slot reserve: the last red/white potion is never drunk — one of each
                 // must stay so the inventory slots keep their places. The 7:red / 8:white
@@ -4510,6 +4551,8 @@ namespace DriverScanTester.Services
             _lastMoveProgressTime = DateTime.MinValue;
             _repositionRetryCount = 0;
             _lastRepositionPos = null;
+            _combatUnstuckDeniedCount = 0;
+            _combatRecoverySuspendedByLootHold = false;
             _routeResyncPendingAfterCombat = false;
             _attackSuppressedForCurrentWaypoint = false;
             _combatHandler.ResetState();
@@ -4835,17 +4878,48 @@ namespace DriverScanTester.Services
         {
             CancelMobGrouping("combat unstuck started");
             ReleaseSkillThree();
+
+            // The bounded denial limit already tripped: stay quiet and inactive while the
+            // loot hold still owns the input (it was reported once).
+            if (_combatRecoverySuspendedByLootHold)
+            {
+                if (_lootNavigationBarrierHoldsInput)
+                    return;
+
+                // The hold released — the normal bounded recovery chain may run again.
+                _combatRecoverySuspendedByLootHold = false;
+                _combatUnstuckDeniedCount = 0;
+                _combatRecoveryMovementDeniedLogged = false;
+            }
+
+            // A combat-owned recovery may physically walk only under the exact Deferred
+            // post-kill authorization; ordinary waypoint recovery never receives it. When the
+            // mandatory loot hold owns the input and refuses the authorization, starting the
+            // ReverseDiagonalRecovery would leave the unstuck routine active while neither the
+            // camera nor W can run — so it is not started at all and the denial is bounded.
+            if (_lootNavigationBarrierHoldsInput && !TryBeginCombatRecoveryMovement("combat unstuck"))
+            {
+                _combatUnstuckDeniedCount++;
+                if (_combatUnstuckDeniedCount >= COMBAT_UNSTUCK_MAX_DENIED_ATTEMPTS)
+                {
+                    _combatUnstuckDeniedCount = 0;
+                    _combatRecoverySuspendedByLootHold = true;
+                    _combatRecoveryMovementDeniedLogged = false;
+                    _log("[CombatRecovery] FATAL: combat unstuck cannot run under the mandatory loot hold — " +
+                         "no recovery is active and no recovery movement is attempted; loot obligation preserved.");
+                }
+                else
+                {
+                    _log($"[CombatRecovery] Combat unstuck not started ({_combatUnstuckDeniedCount}/{COMBAT_UNSTUCK_MAX_DENIED_ATTEMPTS}) — " +
+                         "recovery authorization refused by the mandatory loot hold; loot obligation preserved.");
+                }
+                return;
+            }
+
             Waypoint target = _waypoints.Count > 0
                 ? _waypoints.Peek()
                 : new Waypoint(Waypoint2.X, Waypoint2.Y, GlobalPrecision, BotMode.OnlyMove);
             _log("[Combat] Unreachable mob — starting standard unstuck (reverse-diagonal recovery).");
-
-            // A combat-owned recovery may physically walk under a Deferred post-kill
-            // obligation; ordinary waypoint recovery never receives this authorization.
-            if (_lootNavigationBarrierHoldsInput && !TryBeginCombatRecoveryMovement("combat unstuck"))
-            {
-                _log("[CombatRecovery] Combat unstuck has no recovery authorization — the mandatory loot barrier stays in force.");
-            }
 
             StartReverseDiagonalRecovery(currX, currY, target);
 
@@ -4869,24 +4943,50 @@ namespace DriverScanTester.Services
             ReleaseSkillThree();
             ClearCombatRetargetSearch();
 
+            // Bounded combat-unstuck denials suspended recovery movement while the mandatory
+            // loot hold owns the input. Retry only once the hold is gone.
+            if (_combatRecoverySuspendedByLootHold)
+            {
+                if (_lootNavigationBarrierHoldsInput)
+                {
+                    if (!_combatRecoveryMovementDeniedLogged)
+                    {
+                        _combatRecoveryMovementDeniedLogged = true;
+                        _log("[CombatRecovery] Combat recovery movement suspended by the mandatory loot hold — " +
+                             "no reposition and no TAB; loot obligation preserved.");
+                    }
+
+                    await Task.Delay(BotConstants.Combat.CombatRepositionPollMs, token);
+                    return;
+                }
+
+                _combatRecoverySuspendedByLootHold = false;
+                _combatUnstuckDeniedCount = 0;
+                _combatRecoveryMovementDeniedLogged = false;
+                _repositionRetryCount = 0;
+                _lastRepositionPos = null;
+            }
+
             // ── Escalation ──
-            // Count consecutive reposition cycles. Real movement progress (the player
-            // actually walked away from the broken spot) resets the counter; repeated
-            // cycles with zero progress mean the player cannot leave (geometry block +
-            // phantom target re-selected by TAB) — escalate to the standard unstuck so
-            // the existing escalation chain (reverse-diagonal → ReportAndGoBack) applies.
+            // Count consecutive reposition cycles. Real movement progress since the previous
+            // attempt resets the counter; repeated cycles from an unchanged position mean the
+            // player cannot leave (geometry block + phantom target re-selected by TAB) —
+            // escalate to the standard unstuck so the existing escalation chain
+            // (reverse-diagonal → ReportAndGoBack) applies.
             if (_lastRepositionPos.HasValue)
             {
-                float moved = GeometryUtils.Distance(currX, currY, _lastRepositionPos.Value.X, _lastRepositionPos.Value.Y);
-                if (moved > BotConstants.Movement.StuckProgressResetDistance)
+                float movedSinceLastAttempt = GeometryUtils.Distance(
+                    currX, currY, _lastRepositionPos.Value.X, _lastRepositionPos.Value.Y);
+                if (movedSinceLastAttempt > BotConstants.Movement.StuckProgressResetDistance)
                 {
                     _repositionRetryCount = 0;
                 }
             }
-            else
-            {
-                _lastRepositionPos = (currX, currY);
-            }
+
+            // The baseline always advances to the position this attempt starts from. Progress
+            // must be measured per attempt: a stale pre-move baseline kept resetting the
+            // counter forever after one successful move, so stalled recoveries never escalated.
+            _lastRepositionPos = (currX, currY);
 
             _repositionRetryCount++;
             if (_repositionRetryCount >= REPOSITION_MAX_ATTEMPTS)
@@ -4903,28 +5003,35 @@ namespace DriverScanTester.Services
                 : new Waypoint(Waypoint2.X, Waypoint2.Y, GlobalPrecision, BotMode.OnlyMove);
 
             int walkMs = BotConstants.Combat.CombatRepositionDurationMs;
-            _log($"[Combat] Attack not consuming mana — repositioning: walk toward waypoint ({target.X:F1},{target.Y:F1}) for {walkMs}ms, then TAB + attack.");
 
-            // A mandatory post-kill obligation keeps ordinary navigation and input blocked.
-            // Combat-owned physical recovery is authorized explicitly for the exact Deferred
-            // PostKill request; without that authorization nothing may move.
-            bool authorized = TryBeginCombatRecoveryMovement("RepositionAndRetry");
-            if (!authorized && _lootNavigationBarrierHoldsInput)
+            // ── Input authorization ──
+            // Without a mandatory loot hold the reposition is unrestricted (the original
+            // behaviour, unchanged for MoveAndAttack and for MoveAndAttackAndLoot without a
+            // request). Only a hold that blocks input needs the explicit combat-recovery
+            // authorization for the exact Deferred PostKill request.
+            bool authorizedRecovery = false;
+            if (_lootNavigationBarrierHoldsInput)
             {
-                if (!_combatRecoveryMovementDeniedLogged)
+                authorizedRecovery = TryBeginCombatRecoveryMovement("RepositionAndRetry");
+                if (!authorizedRecovery)
                 {
-                    _combatRecoveryMovementDeniedLogged = true;
-                    _log("[CombatRecovery] Reposition denied — mandatory loot barrier holds input and combat recovery is not authorized " +
-                         "(no selected mob / request no longer Deferred PostKill / loot owns input). Not waiting and not TABbing into the same target.");
-                }
+                    if (!_combatRecoveryMovementDeniedLogged)
+                    {
+                        _combatRecoveryMovementDeniedLogged = true;
+                        _log("[CombatRecovery] Reposition denied — mandatory loot barrier holds input and combat recovery is not authorized " +
+                             "(no selected mob / request no longer Deferred PostKill / loot owns input). Not waiting and not TABbing into the same target.");
+                    }
 
-                // Bounded retry through the existing escalation policy (counted by the
-                // next invocations), never a long fake movement wait.
-                await Task.Delay(BotConstants.Combat.CombatRepositionPollMs, token);
-                return;
+                    // Bounded retry through the existing escalation policy (counted by the
+                    // next invocations), never a long fake movement wait.
+                    await Task.Delay(BotConstants.Combat.CombatRepositionPollMs, token);
+                    return;
+                }
             }
 
-            bool inputAccepted = false;
+            _log($"[Combat] Attack not consuming mana — repositioning: walk toward waypoint ({target.X:F1},{target.Y:F1}) for {walkMs}ms, then TAB + attack.");
+
+            CombatRepositionResult result;
             float displacement = 0f;
             try
             {
@@ -4932,9 +5039,19 @@ namespace DriverScanTester.Services
                 // bypasses the camera filter) and walk forward for the reposition duration.
                 ResetBearingState();
                 ApplyCameraBearing(GeometryUtils.GetBearingToTargetDeg(currX, currY, target.X, target.Y));
-                inputAccepted = TryStartMoving();
+
+                // A performed key-down and a performed movement are tracked separately: only
+                // the second one may ever count as a successful reposition.
+                bool inputAccepted = TryStartMoving();
                 if (inputAccepted)
-                    displacement = await WaitForCombatRepositionDisplacementAsync(currX, currY, walkMs, token);
+                {
+                    (result, displacement) = await WaitForCombatRepositionAsync(
+                        currX, currY, walkMs, authorizedRecovery, token);
+                }
+                else
+                {
+                    result = CombatRepositionResult.InputDenied;
+                }
             }
             finally
             {
@@ -4942,19 +5059,33 @@ namespace DriverScanTester.Services
                 EndCombatRecoveryMovement("reposition finished");
             }
 
-            if (!inputAccepted || displacement < BotConstants.ReverseDiagonal.SuccessDisplacement)
+            // ── Completion ──
+            // Only a confirmed physical reposition may reset the combat baselines and re-TAB.
+            // Every other outcome returns here, so an aborted or failed attempt is never
+            // reported as success and a repeated failure is never masked.
+            switch (result)
             {
-                // A denied key-down or a key-down without real displacement is not a
-                // reposition. Keep the live combat baselines (a repeated failure must not be
-                // masked) and do NOT TAB/attack as if the target had been re-approached —
-                // the existing bounded escalation retries and eventually unsticks.
-                _log(inputAccepted
-                    ? $"[Combat] Reposition failed — moved only {displacement:F2} units (< {BotConstants.ReverseDiagonal.SuccessDisplacement:F2}); not reselecting the same target."
-                    : "[Combat] Reposition failed — forward input was not accepted; not reselecting the same target.");
-                return;
-            }
+                case CombatRepositionResult.Moved:
+                    _log($"[Combat] Reposition confirmed by {displacement:F2} units of real displacement.");
+                    break;
 
-            _log($"[Combat] Reposition confirmed by {displacement:F2} units of real displacement.");
+                case CombatRepositionResult.InsufficientDisplacement:
+                    _log($"[Combat] Reposition failed — moved only {displacement:F2} units (< {BotConstants.ReverseDiagonal.SuccessDisplacement:F2}); not reselecting the same target.");
+                    return;
+
+                case CombatRepositionResult.InputDenied:
+                    _log("[Combat] Reposition failed — forward input was not accepted; not reselecting the same target.");
+                    return;
+
+                case CombatRepositionResult.AuthorizationLost:
+                    _log("[Combat] Reposition aborted — authorization lost mid-attempt; combat baselines kept, no retry TAB.");
+                    return;
+
+                case CombatRepositionResult.Cancelled:
+                    _log("[Combat] Reposition cancelled — input released, no retry TAB.");
+                    token.ThrowIfCancellationRequested();
+                    return;
+            }
 
             // Fresh combat state for the retry: the next tick re-baselines the mana
             // stuck detection and presses 3 when a target is selected.
@@ -4970,49 +5101,61 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Bounded, small-interval wait for real physical displacement during a combat-owned
-        /// reposition. Returns the largest observed displacement from the start position (a
-        /// key-down or an elapsed timer alone is never evidence of motion). The wait ends
-        /// early as soon as the recovery authorization is lost — target lost, request phase
-        /// change/supersession, focus loss, stop/cancellation — so no input stays held while
-        /// the combat context or the loot obligation has changed.
+        /// Bounded, small-interval observation of one combat reposition. The result distinguishes
+        /// a performed movement from a performed key-down: success requires a readable final
+        /// position whose displacement from the start exceeds coordinate noise. The largest
+        /// historical reading is deliberately NOT used — a character that walked away and came
+        /// back did not reposition. In an authorized recovery the attempt aborts as soon as the
+        /// authorization is lost (target/focus/request change); unrestricted repositioning is
+        /// observed for the full budget like before.
         /// </summary>
-        private async Task<float> WaitForCombatRepositionDisplacementAsync(
-            float startX, float startY, int budgetMs, CancellationToken token)
+        private async Task<(CombatRepositionResult Result, float Displacement)> WaitForCombatRepositionAsync(
+            float startX, float startY, int budgetMs, bool authorizedRecovery, CancellationToken token)
         {
             DateTime deadline = DateTime.Now.AddMilliseconds(budgetMs);
-            float bestDisplacement = 0f;
+            float lastDisplacement = 0f;
+            bool anyPositionRead = false;
 
             while (DateTime.Now < deadline)
             {
-                await Task.Delay(BotConstants.Combat.CombatRepositionPollMs, token);
+                // Cancellation is reported as an explicit outcome (the caller re-throws it after
+                // releasing the input) so it can never be mistaken for a successful reposition.
+                if (token.IsCancellationRequested)
+                    return (CombatRepositionResult.Cancelled, lastDisplacement);
 
+                await Task.Delay(BotConstants.Combat.CombatRepositionPollMs, CancellationToken.None);
+
+                // A failed position read is not proof of motion: it leaves the last known
+                // displacement untouched.
                 var (sampleX, sampleY, sampleRead) = _memoryService.GetPlayerPosition();
                 if (sampleRead)
                 {
-                    float moved = GeometryUtils.Distance(sampleX, sampleY, startX, startY);
-                    if (moved > bestDisplacement)
-                        bestDisplacement = moved;
+                    anyPositionRead = true;
+                    lastDisplacement = GeometryUtils.Distance(sampleX, sampleY, startX, startY);
                 }
 
-                if (!IsCombatRecoveryMovementStillValid())
+                if (authorizedRecovery && !IsCombatRecoveryMovementStillValid())
                 {
                     _log("[CombatRecovery] Reposition aborted — recovery authorization lost (target/request/focus/stop changed).");
-                    break;
+                    return (CombatRepositionResult.AuthorizationLost, lastDisplacement);
                 }
             }
 
-            // Final sample: success is decided by the last observed position, not by a stale
-            // in-loop reading.
+            if (token.IsCancellationRequested)
+                return (CombatRepositionResult.Cancelled, lastDisplacement);
+
+            // Final position sample: the decision is made on where the character ended the walk.
             var (endX, endY, endRead) = _memoryService.GetPlayerPosition();
             if (endRead)
             {
-                float endMoved = GeometryUtils.Distance(endX, endY, startX, startY);
-                if (endMoved > bestDisplacement)
-                    bestDisplacement = endMoved;
+                anyPositionRead = true;
+                lastDisplacement = GeometryUtils.Distance(endX, endY, startX, startY);
             }
 
-            return bestDisplacement;
+            if (!anyPositionRead || lastDisplacement < BotConstants.ReverseDiagonal.SuccessDisplacement)
+                return (CombatRepositionResult.InsufficientDisplacement, lastDisplacement);
+
+            return (CombatRepositionResult.Moved, lastDisplacement);
         }
 
         [DllImport("user32.dll", SetLastError = true)]

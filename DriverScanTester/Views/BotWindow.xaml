@@ -470,6 +470,152 @@
                             </StackPanel>
                         </GroupBox>
 
+                        <GroupBox Header="Movement Synchronization Diagnostic" Margin="0,0,0,10" Padding="7">
+                            <StackPanel>
+                                <TextBlock Text="Independent experiment runner. It never changes the production movement system. Run one experiment at a time and observe the character on the second client."
+                                           FontSize="10" Foreground="Gray" TextWrapping="Wrap" Margin="3,0,3,6"/>
+
+                                <Grid Margin="0,0,0,5">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="58"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="58"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="Scenario:" FontWeight="SemiBold" VerticalAlignment="Center" Margin="3,0,6,0"/>
+                                    <ComboBox Grid.Column="1" ItemsSource="{Binding MovementDiagnosticScenarios}"
+                                              SelectedItem="{Binding SelectedMovementDiagnosticScenario}"
+                                              DisplayMemberPath="DisplayText"
+                                              VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                    <TextBlock Grid.Column="2" Text="Duration (s):" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                    <TextBox Grid.Column="3" Text="{Binding MovementDiagnosticDurationText, UpdateSourceTrigger=PropertyChanged}"
+                                             ToolTip="1–300 s. TEST 0 defaults to 15 s; other tests default to 6 s." VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="4" Text="Repeat (ms):" VerticalAlignment="Center" Margin="8,0,5,0"/>
+                                    <TextBox Grid.Column="5" Text="{Binding MovementDiagnosticRepeatIntervalText, UpdateSourceTrigger=PropertyChanged}"
+                                             ToolTip="TEST 2 repeated W-down interval: 20–2000 ms." VerticalAlignment="Center"/>
+                                </Grid>
+
+                                <WrapPanel Margin="0,0,0,5">
+                                    <Button Content="Start Test" Command="{Binding StartMovementDiagnosticCommand}" Style="{StaticResource StartActionButtonStyle}"/>
+                                    <Button Content="Stop Test" Command="{Binding StopMovementDiagnosticCommand}" Style="{StaticResource ScopedDangerActionButtonStyle}"/>
+                                    <Button Content="Start Post-Test Observation" Command="{Binding StartMovementDiagnosticObservationCommand}" Style="{StaticResource SecondaryActionButtonStyle}"/>
+                                    <Button Content="Stop Observation" Command="{Binding StopMovementDiagnosticObservationCommand}" Style="{StaticResource ScopedDangerActionButtonStyle}"/>
+                                    <Button Content="Mark Movement Recovered" Command="{Binding MarkMovementRecoveryCommand}" Style="{StaticResource WarningActionButtonStyle}"
+                                            ToolTip="Record the exact moment the other client finally shows normal movement. Recovery duration is computed from the confirmed input-stop timestamp."/>
+                                    <Button Content="Export Report" Command="{Binding ExportMovementDiagnosticReportCommand}" Style="{StaticResource SecondaryActionButtonStyle}"/>
+                                </WrapPanel>
+
+                                <CheckBox Content="Enable advanced mode (DirectCamera memory steering — TEST 8)"
+                                          IsChecked="{Binding MovementDiagnosticAdvancedMode, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                          Margin="3,2" FontWeight="SemiBold"/>
+                                <TextBlock Text="{Binding MovementDiagnosticAdvancedHintText}" FontSize="10" Foreground="Gray" TextWrapping="Wrap" Margin="22,0,3,3"/>
+
+                                <Border Background="#FFF7F8FA" BorderBrush="#FFE0E4E8" BorderThickness="1" CornerRadius="3" Padding="6" Margin="2,3">
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding MovementDiagnosticSelectedInputMethodText}" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                                        <TextBlock Text="{Binding MovementDiagnosticScenarioHintText}" FontSize="10" Foreground="#FF555D65" TextWrapping="Wrap" Margin="0,2,0,0"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <Grid Margin="2,3">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="1.0*"/>
+                                        <ColumnDefinition Width="1.0*"/>
+                                        <ColumnDefinition Width="1.0*"/>
+                                        <ColumnDefinition Width="0.8*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Border Grid.Column="0" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="2">
+                                        <StackPanel>
+                                            <TextBlock Text="Current state" FontSize="10" Foreground="Gray"/>
+                                            <TextBlock Text="{Binding MovementDiagnosticStateText}" FontWeight="SemiBold"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Grid.Column="1" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="2">
+                                        <StackPanel>
+                                            <TextBlock Text="Elapsed" FontSize="10" Foreground="Gray"/>
+                                            <TextBlock Text="{Binding MovementDiagnosticElapsedText}" FontWeight="SemiBold"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Grid.Column="2" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="2">
+                                        <StackPanel>
+                                            <TextBlock Text="Countdown / progress" FontSize="10" Foreground="Gray"/>
+                                            <TextBlock Text="{Binding MovementDiagnosticCountdownText}" FontWeight="SemiBold"/>
+                                            <TextBlock Text="{Binding MovementDiagnosticProgressText}" FontSize="10" Foreground="#FF555D65"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Grid.Column="3" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="2">
+                                        <StackPanel>
+                                            <TextBlock Text="Recovery" FontSize="10" Foreground="Gray"/>
+                                            <TextBlock Text="{Binding MovementDiagnosticRecoveryText}" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </Border>
+                                </Grid>
+
+                                <TextBlock Text="{Binding MovementDiagnosticMessageText}" TextWrapping="Wrap" Foreground="#FF245B91" FontWeight="SemiBold" Margin="3,4"/>
+                                <TextBlock Text="{Binding MovementDiagnosticCheckpointText}" TextWrapping="Wrap" Foreground="#FF555D65" FontSize="10" Margin="3,0,3,3"/>
+                                <TextBlock Text="{Binding MovementDiagnosticLastResultText}" TextWrapping="Wrap" FontSize="10" Foreground="#FF555D65" Margin="3,0,3,3"/>
+                                <TextBlock Text="{Binding MovementDiagnosticReportDirectoryText}" TextWrapping="Wrap" FontSize="10" Foreground="Gray" Margin="3,0,3,3"/>
+
+                                <Grid Margin="0,4,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="80"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="80"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="70"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="TEST 9 safe waypoint X:" VerticalAlignment="Center" Margin="3,0,5,0"/>
+                                    <TextBox Grid.Column="1" Text="{Binding MovementDiagnosticWaypointXText, UpdateSourceTrigger=PropertyChanged}" VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="2" Text="Y:" VerticalAlignment="Center" Margin="8,0,5,0"/>
+                                    <TextBox Grid.Column="3" Text="{Binding MovementDiagnosticWaypointYText, UpdateSourceTrigger=PropertyChanged}" VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="4" Text="Required only for TEST 9; configure a point 0.5–30 units ahead. No default is invented." FontSize="10" Foreground="Gray" VerticalAlignment="Center" Margin="8,0,0,0" Grid.ColumnSpan="3" TextWrapping="Wrap"/>
+                                </Grid>
+
+                                <GroupBox Header="Remote-client observation (user-reported)" Margin="0,6,0,0" Padding="6">
+                                    <StackPanel>
+                                        <TextBlock Text="Record what the OTHER game client showed. These values are stored as observer reports, not automatic measurements."
+                                                   FontSize="10" Foreground="Gray" TextWrapping="Wrap" Margin="2,0,2,4"/>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="Auto"/>
+                                            </Grid.RowDefinitions>
+                                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Observed:" VerticalAlignment="Center" Margin="2,2,6,2"/>
+                                            <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding MovementDiagnosticObservationChoices}"
+                                                      SelectedItem="{Binding SelectedMovementDiagnosticObservation}"
+                                                      DisplayMemberPath="Label" Margin="2"/>
+                                            <WrapPanel Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Margin="0,2">
+                                                <CheckBox Content="Problem persisted after synthetic input stopped"
+                                                          IsChecked="{Binding MovementDiagnosticPersistedAfterStop, Mode=TwoWay}" Margin="2,2,12,2"/>
+                                                <CheckBox Content="Problem observed during subsequent manual movement"
+                                                          IsChecked="{Binding MovementDiagnosticObservedDuringManualMovement, Mode=TwoWay}" Margin="2,2,12,2"/>
+                                            </WrapPanel>
+                                            <TextBlock Grid.Row="2" Grid.Column="0" Text="Notes:" VerticalAlignment="Top" Margin="2,6,6,2"/>
+                                            <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding MovementDiagnosticNotesText, UpdateSourceTrigger=PropertyChanged}"
+                                                     MinHeight="42" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" Margin="2"/>
+                                            <WrapPanel Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2" Margin="0,3,0,0">
+                                                <Button Content="Save Observation Without Rerunning" Command="{Binding RecordMovementDiagnosticObservationCommand}"
+                                                        Style="{StaticResource SecondaryActionButtonStyle}"/>
+                                            </WrapPanel>
+                                        </Grid>
+                                    </StackPanel>
+                                </GroupBox>
+
+                                <TextBlock Text="Telemetry: events.csv, samples.csv, session.json and report.txt under Logs/MovementSyncDiagnostics. Local memory X/Y values are not server positions. EXPECTED PULSE MOVEMENT in TEST 5 is not proof of the original defect."
+                                           FontSize="10" Foreground="Gray" TextWrapping="Wrap" Margin="3,5,3,0"/>
+                            </StackPanel>
+                        </GroupBox>
+
                         <GroupBox Header="Calibration" Margin="0,0,0,10" Padding="7">
                             <StackPanel>
                                 <WrapPanel>

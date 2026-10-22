@@ -45,7 +45,6 @@ namespace DriverScanTester.Tests
 
             LootSystem.CollectTargetPointsFromBitmapReference(
                 bitmap, 0, bitmap.Width, 0, bitmap.Height,
-                applyExcludeZone: false, 0, 0, 0, 0,
                 pinkOnly: false, targetPoints: points, shadedWhiteOnly: true);
 
             Assert.Equal(new[] { new Point(0, 0) }, points);

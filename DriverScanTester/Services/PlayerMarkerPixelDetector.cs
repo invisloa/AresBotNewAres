@@ -16,8 +16,9 @@ namespace DriverScanTester.Services
     /// <summary>
     /// Detects the installed top-down player faction markers: Empire yellow squares
     /// (RGB #FFFF00) and Alliance green triangles (RGB #00FF00). Components overlapping
-    /// the local-character exclusion or known HUD regions are ignored, and faction-specific
-    /// shape checks reject compact UI glyphs.
+    /// the local-player exclusion or known HUD regions are ignored, and faction-specific
+    /// shape checks reject compact UI glyphs. This exclusion applies only to marker
+    /// detection; the loot pixel scan covers the whole scan region.
     /// </summary>
     internal sealed class PlayerMarkerPixelDetector
     {
