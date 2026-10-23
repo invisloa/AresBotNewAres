@@ -458,7 +458,7 @@
                                     <Button Content="Test SOD/SOP Loot" Command="{Binding TestLootSodSopCommand}"
                                             Style="{StaticResource SecondaryActionButtonStyle}"
                                             ToolTip="Uruchamia prawdziwy loot SOD/SOP: zoom kamery, zrzut okna gry, skan rozowych pikseli, najechanie na kandydatow i klikniecie zbiorki. Szczegoly w zakladce Log."/>
-                                    <Button Content="Test Normal Pixel Loot" Command="{Binding TestLootWhiteCommand}"
+                                    <Button Content="Test Normal Pixel Loot" Command="{Binding TestLootNormalCommand}"
                                             Style="{StaticResource SecondaryActionButtonStyle}"
                                             ToolTip="Uruchamia prawdziwy loot zwyklych przedmiotow: zoom kamery, zrzut okna gry, skan bialych i akwamarynowych pikseli w malym i duzym regionie, najechanie i klikniecie zbiorki. Szczegoly w zakladce Log."/>
                                     <Border Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="6,4,4,4" VerticalAlignment="Center">

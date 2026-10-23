@@ -20,6 +20,7 @@ namespace DriverScanTester.Tests
     public sealed class LootBarrierRegressionTests
     {
         private const BindingFlags PrivateInstance = BindingFlags.Instance | BindingFlags.NonPublic;
+        private static readonly Color AquamarineLoot = Color.FromArgb(0, 255, 170);
 
         private static GameMemoryService CreateStubMemory(Action<string> log)
         {
@@ -36,6 +37,24 @@ namespace DriverScanTester.Tests
                     return false;
                 };
             return new GameMemoryService(0, read, write, 0, 8, log);
+        }
+
+        private static GameMemoryService CreateIdentityMemory(
+            uint pid, ulong moduleBase, Action<string> log)
+        {
+            GameMemoryService.ReadMemoryDelegate read =
+                (uint readPid, ulong address, byte[] buffer, out uint bytesRead) =>
+                {
+                    bytesRead = 0;
+                    return false;
+                };
+            GameMemoryService.WriteMemoryDelegate write =
+                (uint writePid, ulong address, byte[] buffer, out uint bytesWritten) =>
+                {
+                    bytesWritten = 0;
+                    return false;
+                };
+            return new GameMemoryService(pid, read, write, moduleBase, 8, log);
         }
 
         private static LootSystem CreateLoot(Action<string> log)
@@ -224,22 +243,23 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void PassiveAnalysisFindsPlausibleWhiteLootWithoutMovingAnything()
+        public void PassiveAnalysisFindsPlausibleAquamarineLootWithoutMovingAnything()
         {
             using var bitmap = new Bitmap(200, 200);
             using (Graphics graphics = Graphics.FromImage(bitmap))
+            using (var brush = new SolidBrush(AquamarineLoot))
             {
                 graphics.Clear(Color.Black);
-                graphics.FillRectangle(Brushes.White, 50, 50, 14, 14);
+                graphics.FillRectangle(brush, 50, 50, 14, 14);
             }
 
-            LootPreScanResult result = LootSystem.AnalyzeWhiteLootCandidates(
+            LootPreScanResult result = LootSystem.AnalyzeNormalLootCandidates(
                 bitmap, new Rectangle(0, 0, 200, 200),
                 BotConstants.Loot.PassivePreScanMaxCandidateComponents);
 
             Assert.Equal(LootPreScanOutcome.PotentialCandidate, result.Outcome);
             Assert.True(result.CandidateComponents >= 1);
-            Assert.True(result.WhitePixels > 0);
+            Assert.True(result.LootPixels > 0);
             Assert.False(result.CandidateBounds.IsEmpty);
             Assert.Equal((short)17000, BotConstants.Camera.LootScanDistance);
             Assert.Equal(BotConstants.Camera.LootScanDistance, LootSystem.NormalLootScanDistance);
@@ -549,13 +569,41 @@ namespace DriverScanTester.Tests
             Assert.Equal(1, writes);
         }
 
+        [Fact]
+        public void StandaloneLootCreatesNoCameraSessionAndKeepsTheProvidedSharedController()
+        {
+            const uint standalonePid = 911;
+            const ulong standaloneBase = 0x730000;
+            var standaloneMemory = CreateIdentityMemory(standalonePid, standaloneBase, _ => { });
+
+            Assert.False(WKeyCameraController.HasActiveSession(standalonePid, standaloneBase));
+            using (var standaloneLoot = new LootSystem(standaloneMemory, _ => { }))
+            {
+                Assert.False(WKeyCameraController.HasActiveSession(standalonePid, standaloneBase));
+                Assert.Null(typeof(LootSystem)
+                    .GetField("_wKeyCameraController", PrivateInstance)!
+                    .GetValue(standaloneLoot));
+            }
+
+            const uint sharedPid = 912;
+            const ulong sharedBase = 0x740000;
+            var sharedMemory = CreateIdentityMemory(sharedPid, sharedBase, _ => { });
+            using var controller = new WKeyCameraController(sharedMemory, _ => { });
+            using var sharedLoot = new LootSystem(sharedMemory, _ => { }, controller);
+
+            Assert.True(WKeyCameraController.HasActiveSession(sharedPid, sharedBase));
+            Assert.Same(controller, typeof(LootSystem)
+                .GetField("_wKeyCameraController", PrivateInstance)!
+                .GetValue(sharedLoot));
+        }
+
         // ── Test 10 — capture failure ───────────────────────────────────────────
 
         [Fact]
         public void InvalidPreScanGeometryIsCaptureUnavailableNotACandidate()
         {
             using var bitmap = new Bitmap(80, 80);
-            LootPreScanResult result = LootSystem.AnalyzeWhiteLootCandidates(
+            LootPreScanResult result = LootSystem.AnalyzeNormalLootCandidates(
                 bitmap, new Rectangle(-10, -10, 5, 5),
                 BotConstants.Loot.PassivePreScanMaxCandidateComponents);
 
@@ -677,13 +725,14 @@ namespace DriverScanTester.Tests
         {
             using var bitmap = new Bitmap(200, 100);
             using (Graphics graphics = Graphics.FromImage(bitmap))
+            using (var brush = new SolidBrush(AquamarineLoot))
             {
                 graphics.Clear(Color.Black);
                 for (int i = 0; i < 7; i++)
-                    graphics.FillRectangle(Brushes.White, 20 + i * 6, 30, 4, 4);
+                    graphics.FillRectangle(brush, 20 + i * 6, 30, 4, 4);
             }
 
-            LootPreScanResult result = LootSystem.AnalyzeWhiteLootCandidates(
+            LootPreScanResult result = LootSystem.AnalyzeNormalLootCandidates(
                 bitmap, new Rectangle(0, 0, 200, 100),
                 BotConstants.Loot.PassivePreScanMaxCandidateComponents);
 
@@ -696,12 +745,13 @@ namespace DriverScanTester.Tests
         {
             using var bitmap = new Bitmap(200, 200);
             using (Graphics graphics = Graphics.FromImage(bitmap))
+            using (var brush = new SolidBrush(AquamarineLoot))
             {
                 graphics.Clear(Color.Black);
-                graphics.FillRectangle(Brushes.White, 90, 90, 14, 14);
+                graphics.FillRectangle(brush, 90, 90, 14, 14);
             }
 
-            LootPreScanResult result = LootSystem.AnalyzeWhiteLootCandidates(
+            LootPreScanResult result = LootSystem.AnalyzeNormalLootCandidates(
                 bitmap,
                 new Rectangle(0, 0, 200, 200),
                 BotConstants.Loot.PassivePreScanMaxCandidateComponents);
@@ -715,6 +765,7 @@ namespace DriverScanTester.Tests
         {
             using var bitmap = new Bitmap(300, 300);
             using (Graphics graphics = Graphics.FromImage(bitmap))
+            using (var brush = new SolidBrush(AquamarineLoot))
             {
                 graphics.Clear(Color.Black);
                 for (int i = 0; i < 6; i++)
@@ -722,12 +773,12 @@ namespace DriverScanTester.Tests
                     for (int j = 0; j < 6; j++)
                     {
                         if (i == j) continue;
-                        graphics.FillRectangle(Brushes.White, 20 + i * 40, 20 + j * 40, 12, 12);
+                        graphics.FillRectangle(brush, 20 + i * 40, 20 + j * 40, 12, 12);
                     }
                 }
             }
 
-            LootPreScanResult result = LootSystem.AnalyzeWhiteLootCandidates(
+            LootPreScanResult result = LootSystem.AnalyzeNormalLootCandidates(
                 bitmap, new Rectangle(0, 0, 300, 300),
                 maxCandidateComponents: 8);
 

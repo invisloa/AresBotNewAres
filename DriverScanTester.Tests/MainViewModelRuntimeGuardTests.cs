@@ -189,23 +189,236 @@ namespace DriverScanTester.Tests
             }
         }
 
+        [Fact]
+        public async Task EndedControllerReferenceDoesNotBlockStandaloneLoot()
+        {
+            MainViewModel vm = MainViewModelTestHarness.CreateAttached();
+            var memory = new CameraMemoryFixture();
+            using var endedController = new WKeyCameraController(memory.CreateService(), _ => { });
+            endedController.EndSession();
+            Assert.True(endedController.IsEnded);
+            MainViewModelTestHarness.SetField(vm, "_wKeyCameraController", endedController);
+
+            MainViewModelTestHarness.InvokePrivate(vm, "ToggleLootBot", true);
+
+            Assert.NotNull(MainViewModelTestHarness.GetFieldOrNull<LootSystem>(vm, "_lootSystem"));
+            Task lootTask = MainViewModelTestHarness.GetField<Task>(vm, "_lootBotTask");
+            Assert.True(MainViewModelTestHarness.GetField<bool>(vm, "_isLootBotRunning"));
+
+            MainViewModelTestHarness.InvokePrivate(vm, "ToggleLootBot", false);
+            Task completed = await Task.WhenAny(lootTask, Task.Delay(TimeSpan.FromSeconds(5)));
+            Assert.Same(lootTask, completed);
+        }
+
+        [Fact]
+        public void StandaloneLootIsRejectedWhileAnIndependentOperationTestOwnsTheCamera()
+        {
+            MainViewModel vm = MainViewModelTestHarness.CreateAttached();
+            MainViewModelTestHarness.SetField(vm, "_attachedPid", Pid);
+            var memory = new CameraMemoryFixture(pid: Pid, moduleBase: 0);
+            using var operationController = new WKeyCameraController(memory.CreateService(), _ => { });
+            WKeyCameraOwner operationOwner = operationController.CreateOwner("operation test", _ => { });
+            Assert.True(operationController.TryAcquireW(operationOwner));
+            memory.VerticalWrites.Clear();
+            memory.Events.Clear();
+
+            try
+            {
+                MainViewModelTestHarness.InvokePrivate(vm, "ToggleLootBot", true);
+
+                Assert.Null(MainViewModelTestHarness.GetFieldOrNull<LootSystem>(vm, "_lootSystem"));
+                Assert.Null(MainViewModelTestHarness.GetFieldOrNull<Task>(vm, "_lootBotTask"));
+                Assert.False(MainViewModelTestHarness.GetField<bool>(vm, "_isLootBotRunning"));
+                Assert.Equal(1, operationController.ActiveWOwnerCount);
+                Assert.Equal(BotConstants.Camera.MovementVerticalLock, memory.ReadCameraVerticalLock());
+                Assert.Empty(memory.VerticalWrites);
+                Assert.Empty(memory.Events);
+                Assert.Contains("camera-owning operation", vm.LogText, StringComparison.Ordinal);
+                Assert.True(WKeyCameraController.HasActiveSession(Pid, 0));
+            }
+            finally
+            {
+                operationController.ReleaseW(operationOwner);
+            }
+
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.ReadCameraVerticalLock());
+        }
+
+        [Fact]
+        public async Task PreviousOperationTestCleanupBlocksStandaloneLootUntilTheSessionEnds()
+        {
+            MainViewModel vm = MainViewModelTestHarness.CreateAttached();
+            MainViewModelTestHarness.SetField(vm, "_attachedPid", Pid);
+            var memory = new CameraMemoryFixture(pid: Pid, moduleBase: 0);
+            using var operationController = new WKeyCameraController(memory.CreateService(), _ => { });
+            bool failWUp = true;
+            WKeyCameraOwner operationOwner = operationController.CreateOwner("operation test", keyUp =>
+            {
+                if (keyUp && failWUp)
+                    throw new InvalidOperationException("test W-up failure");
+            });
+
+            Assert.True(operationController.TryAcquireW(operationOwner));
+            operationController.ReleaseW(operationOwner);
+            Assert.True(operationController.HasUnresolvedPhysicalWRelease);
+            operationController.EndSession();
+            Assert.False(operationController.IsEnded);
+            Assert.True(WKeyCameraController.HasActiveSession(Pid, 0));
+
+            MainViewModelTestHarness.InvokePrivate(vm, "ToggleLootBot", true);
+
+            Assert.Null(MainViewModelTestHarness.GetFieldOrNull<LootSystem>(vm, "_lootSystem"));
+            Assert.Null(MainViewModelTestHarness.GetFieldOrNull<Task>(vm, "_lootBotTask"));
+            Assert.False(MainViewModelTestHarness.GetField<bool>(vm, "_isLootBotRunning"));
+            Assert.Contains("camera-owning operation", vm.LogText, StringComparison.Ordinal);
+            Assert.Equal(BotConstants.Camera.MovementVerticalLock, memory.ReadCameraVerticalLock());
+
+            failWUp = false;
+            operationController.EndSession();
+            Assert.True(operationController.IsEnded);
+            Assert.False(WKeyCameraController.HasActiveSession(Pid, 0));
+
+            MainViewModelTestHarness.InvokePrivate(vm, "ToggleLootBot", true);
+
+            LootSystem loot = MainViewModelTestHarness.GetField<LootSystem>(vm, "_lootSystem");
+            Task lootTask = MainViewModelTestHarness.GetField<Task>(vm, "_lootBotTask");
+            Assert.True(MainViewModelTestHarness.GetField<bool>(vm, "_isLootBotRunning"));
+            Assert.Null(MainViewModelTestHarness.GetFieldOrNull<WKeyCameraController>(loot, "_wKeyCameraController"));
+
+            MainViewModelTestHarness.InvokePrivate(vm, "ToggleLootBot", false);
+            Task completed = await Task.WhenAny(lootTask, Task.Delay(TimeSpan.FromSeconds(5)));
+            Assert.Same(lootTask, completed);
+        }
+
+        [Fact]
+        public async Task IncompletePreviousLootTaskBlocksRestartUntilItsCleanupCompletes()
+        {
+            MainViewModel vm = MainViewModelTestHarness.CreateAttached();
+            var previousTaskGate = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            MainViewModelTestHarness.SetField(vm, "_lootBotTask", previousTaskGate.Task);
+            MainViewModelTestHarness.SetField(vm, "_isLootBotRunning", false);
+
+            MainViewModelTestHarness.InvokePrivate(vm, "ToggleLootBot", true);
+
+            Assert.Null(MainViewModelTestHarness.GetFieldOrNull<LootSystem>(vm, "_lootSystem"));
+            Assert.Same(previousTaskGate.Task,
+                MainViewModelTestHarness.GetFieldOrNull<Task>(vm, "_lootBotTask"));
+            Assert.False(MainViewModelTestHarness.GetField<bool>(vm, "_isLootBotRunning"));
+            Assert.Contains("previous standalone loot task", vm.LogText, StringComparison.Ordinal);
+
+            previousTaskGate.SetResult(true);
+
+            MainViewModelTestHarness.InvokePrivate(vm, "ToggleLootBot", true);
+
+            Assert.NotNull(MainViewModelTestHarness.GetFieldOrNull<LootSystem>(vm, "_lootSystem"));
+            Task lootTask = MainViewModelTestHarness.GetField<Task>(vm, "_lootBotTask");
+            Assert.True(MainViewModelTestHarness.GetField<bool>(vm, "_isLootBotRunning"));
+
+            MainViewModelTestHarness.InvokePrivate(vm, "ToggleLootBot", false);
+            Task completed = await Task.WhenAny(lootTask, Task.Delay(TimeSpan.FromSeconds(5)));
+            Assert.Same(lootTask, completed);
+        }
+
+        [Fact]
+        public async Task CompletedPreviousLootTaskDoesNotBlockRestart()
+        {
+            MainViewModel vm = MainViewModelTestHarness.CreateAttached();
+            MainViewModelTestHarness.SetField(vm, "_lootBotTask", Task.CompletedTask);
+            MainViewModelTestHarness.SetField(vm, "_isLootBotRunning", false);
+
+            MainViewModelTestHarness.InvokePrivate(vm, "ToggleLootBot", true);
+
+            Assert.NotNull(MainViewModelTestHarness.GetFieldOrNull<LootSystem>(vm, "_lootSystem"));
+            Task lootTask = MainViewModelTestHarness.GetField<Task>(vm, "_lootBotTask");
+            Assert.True(MainViewModelTestHarness.GetField<bool>(vm, "_isLootBotRunning"));
+            Assert.DoesNotContain("previous standalone loot task", vm.LogText, StringComparison.Ordinal);
+
+            MainViewModelTestHarness.InvokePrivate(vm, "ToggleLootBot", false);
+            Task completed = await Task.WhenAny(lootTask, Task.Delay(TimeSpan.FromSeconds(5)));
+            Assert.Same(lootTask, completed);
+        }
+
+        [Fact]
+        public async Task CameraSessionCreationCannotOvertakeAnInProgressLootStartup()
+        {
+            MainViewModel vm = MainViewModelTestHarness.CreateAttached();
+            using var startupEntered = new ManualResetEventSlim(false);
+            using var allowStartupToFinish = new ManualResetEventSlim(false);
+            vm.CameraRuntimeStartupGateHeldForTests = () =>
+            {
+                startupEntered.Set();
+                Assert.True(allowStartupToFinish.Wait(TimeSpan.FromSeconds(10)),
+                    "test did not release the standalone-loot startup");
+            };
+
+            Task lootStart = Task.Run(() =>
+                MainViewModelTestHarness.InvokePrivate(vm, "ToggleLootBot", true));
+            Assert.True(startupEntered.Wait(TimeSpan.FromSeconds(10)),
+                "standalone loot never reached its registered startup state");
+
+            // The loot runtime is registered and the startup gate is still held. A
+            // concurrent camera-owning start must not create a controller/session.
+            Task movementStart = Task.Run(() =>
+                MainViewModelTestHarness.InvokePrivate(vm, "ToggleMovementBot", true));
+
+            Assert.Null(MainViewModelTestHarness.GetFieldOrNull<WKeyCameraController>(vm, "_wKeyCameraController"));
+
+            allowStartupToFinish.Set();
+            Task startupCompletion = Task.WhenAll(lootStart, movementStart);
+            Task finishedStartups = await Task.WhenAny(startupCompletion, Task.Delay(TimeSpan.FromSeconds(10)));
+            Assert.Same(startupCompletion, finishedStartups);
+            await startupCompletion;
+
+            try
+            {
+                Assert.Null(MainViewModelTestHarness.GetFieldOrNull<WKeyCameraController>(vm, "_wKeyCameraController"));
+                Assert.False(MainViewModelTestHarness.GetField<bool>(vm, "_isMovementBotRunning"));
+                Assert.NotNull(MainViewModelTestHarness.GetFieldOrNull<LootSystem>(vm, "_lootSystem"));
+                Assert.True(MainViewModelTestHarness.GetField<bool>(vm, "_isLootBotRunning"));
+                Assert.Contains("standalone loot bot is running", vm.LogText, StringComparison.Ordinal);
+            }
+            finally
+            {
+                vm.CameraRuntimeStartupGateHeldForTests = null;
+                MainViewModelTestHarness.InvokePrivate(vm, "ToggleLootBot", false);
+            }
+
+            Task lootTask = MainViewModelTestHarness.GetField<Task>(vm, "_lootBotTask");
+            Task completed = await Task.WhenAny(lootTask, Task.Delay(TimeSpan.FromSeconds(5)));
+            Assert.Same(lootTask, completed);
+        }
+
         private sealed class CameraMemoryFixture
         {
             private readonly Dictionary<ulong, byte[]> _memory = new();
+            private readonly uint _pid;
+            private readonly ulong _moduleBase;
+            private readonly ulong _cameraBase;
 
             public List<string> Events { get; } = new();
             public List<string> VerticalWrites { get; } = new();
 
-            public CameraMemoryFixture()
+            public CameraMemoryFixture(
+                uint pid = Pid,
+                ulong moduleBase = ModuleBase,
+                ulong cameraBase = CameraBase)
             {
-                Set(ModuleBase + BotConstants.MemoryOffsets.CameraPtr, BitConverter.GetBytes(CameraBase));
-                Set(CameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset,
+                _pid = pid;
+                _moduleBase = moduleBase;
+                _cameraBase = cameraBase;
+                Set(moduleBase + BotConstants.MemoryOffsets.CameraPtr, BitConverter.GetBytes(cameraBase));
+                Set(cameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset,
                     BitConverter.GetBytes(BotConstants.Camera.StationaryVerticalLock));
-                Set(CameraBase + BotConstants.MemoryOffsets.CameraAngle, BitConverter.GetBytes(0f));
-                Set(CameraBase + BotConstants.MemoryOffsets.CameraDistance, BitConverter.GetBytes((short)17000));
+                Set(cameraBase + BotConstants.MemoryOffsets.CameraAngle, BitConverter.GetBytes(0f));
+                Set(cameraBase + BotConstants.MemoryOffsets.CameraDistance, BitConverter.GetBytes((short)17000));
             }
 
             private void Set(ulong address, byte[] value) => _memory[address] = value;
+
+            public short ReadCameraVerticalLock()
+                => BitConverter.ToInt16(
+                    _memory[_cameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset], 0);
 
             public GameMemoryService CreateService()
             {
@@ -226,7 +439,7 @@ namespace DriverScanTester.Tests
                         bytesWritten = 0;
                         _memory[address] = (byte[])buffer.Clone();
                         bytesWritten = (uint)buffer.Length;
-                        if (address == CameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset)
+                        if (address == _cameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset)
                         {
                             string entry = $"Vertical:{BitConverter.ToInt16(buffer, 0)}";
                             Events.Add(entry);
@@ -235,7 +448,7 @@ namespace DriverScanTester.Tests
                         return true;
                     };
 
-                return new GameMemoryService(Pid, read, write, ModuleBase, 8, _ => { });
+                return new GameMemoryService(_pid, read, write, _moduleBase, 8, _ => { });
             }
         }
     }

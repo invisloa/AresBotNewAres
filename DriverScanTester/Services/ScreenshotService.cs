@@ -126,9 +126,7 @@ namespace DriverScanTester.Services
         internal static string BuildLootScanCaption(
             string label,
             string outcome,
-            int whiteCount,
-            int exactWhiteCount,
-            int shadedWhiteCount,
+            int lootCount,
             int candidateComponents,
             int candidatePixelCount,
             int probeCount,
@@ -136,10 +134,10 @@ namespace DriverScanTester.Services
             string pixelLabel,
             int aquamarineCount = 0)
         {
-            string detectedDetail = pixelLabel is "white" or "normal"
-                ? $" ({pixelLabel}: exact={exactWhiteCount}, shaded={shadedWhiteCount}, aquamarine={aquamarineCount})"
+            string detectedDetail = pixelLabel == "normal"
+                ? $" ({pixelLabel}: aquamarine={aquamarineCount})"
                 : $" ({pixelLabel})";
-            return $"{label} | {outcome} | detected={whiteCount}px{detectedDetail} | " +
+            return $"{label} | {outcome} | detected={lootCount}px{detectedDetail} | " +
                    $"candidates={candidateComponents} comps/{candidatePixelCount}px | probes={probeCount} | " +
                    $"confirmed={(confirmedProbe.HasValue ? $"({confirmedProbe.Value.X},{confirmedProbe.Value.Y})" : "none")}";
         }
@@ -189,7 +187,7 @@ namespace DriverScanTester.Services
         /// Annotates and saves one loot-scan frame. The annotation keeps the separate
         /// datasets visually distinct:
         ///    green rectangle  — scanned region;
-        ///    yellow 1px dots  — ALL pixels classified as white/shaded-white;
+        ///    yellow 1px dots  — ALL pixels classified as aquamarine;
         ///    orange 1px dots  — pixels of accepted loot candidate components;
         ///    magenta outline  — accepted candidate component bounds;
         ///    cyan 3px dots    — actual mouseover probe positions;
@@ -203,16 +201,14 @@ namespace DriverScanTester.Services
             string label,
             string outcome,
             Action<string> log,
-            int whiteCount = 0,
+            int lootCount = 0,
             Rectangle scanRegion = default,
-            IReadOnlyList<Point>? whiteHits = null,
-            string pixelLabel = "white",
+            IReadOnlyList<Point>? probeHits = null,
+            string pixelLabel = "normal",
             IReadOnlyList<Point>? detectedPixels = null,
             IReadOnlyList<Point>? candidatePixels = null,
             IReadOnlyList<Rectangle>? candidateBounds = null,
             Point? confirmedProbe = null,
-            int exactWhiteCount = 0,
-            int shadedWhiteCount = 0,
             int aquamarineCount = 0,
             int candidatePixelCount = 0,
             bool saveRawFrame = false,
@@ -266,10 +262,10 @@ namespace DriverScanTester.Services
                         graphics.DrawRectangle(scanPen, scanRegion);
                     }
 
-                    if (whiteHits != null)
+                    if (probeHits != null)
                     {
                         using var hitBrush = new SolidBrush(Color.FromArgb(255, 0, 220, 255));
-                        foreach (Point hit in whiteHits)
+                        foreach (Point hit in probeHits)
                             graphics.FillRectangle(hitBrush, hit.X - 1, hit.Y - 1, 3, 3);
                     }
 
@@ -282,10 +278,10 @@ namespace DriverScanTester.Services
                         graphics.DrawLine(confirmedPen, confirmed.X, confirmed.Y - 7, confirmed.X, confirmed.Y + 7);
                     }
 
-                    int probeCount = whiteHits?.Count ?? 0;
+                    int probeCount = probeHits?.Count ?? 0;
                     int candidateCount = candidateBounds?.Count ?? 0;
                     string caption = BuildLootScanCaption(
-                        label, outcome, whiteCount, exactWhiteCount, shadedWhiteCount,
+                        label, outcome, lootCount,
                         candidateCount, candidatePixelCount, probeCount, confirmedProbe, pixelLabel,
                         aquamarineCount);
                     using var font = new Font(FontFamily.GenericSansSerif, 16f, FontStyle.Bold);
@@ -304,7 +300,7 @@ namespace DriverScanTester.Services
                 string filePath = Path.Combine(folder, fileName);
 
                 frame.Save(filePath, ImageFormat.Png);
-                log($"[LootSS] {label} {outcome} ({pixelLabel}={whiteCount}, candidates={candidatePixelCount}px, probes={whiteHits?.Count ?? 0}) saved: {filePath}");
+                log($"[LootSS] {label} {outcome} ({pixelLabel}={lootCount}, candidates={candidatePixelCount}px, probes={probeHits?.Count ?? 0}) saved: {filePath}");
             }
             catch (Exception ex)
             {

@@ -1232,7 +1232,7 @@ namespace DriverScanTester.Tests
         public void PinkLootScanExcludesSparseMarkerRingsButKeepsSolidDropSquares()
         {
             using var frame = NewFrame(120, 840);
-            var ring = new LootSystem.WhiteComponent();
+            var ring = new LootSystem.LootComponent();
             var ringPixels = new HashSet<(int X, int Y)>();
             for (int angle = 0; angle < 360; angle++)
             {
@@ -1247,7 +1247,7 @@ namespace DriverScanTester.Tests
             foreach (var pixel in ringPixels)
                 ring.Add(pixel.X, pixel.Y);
 
-            var solidDrop = new LootSystem.WhiteComponent();
+            var solidDrop = new LootSystem.LootComponent();
             for (int x = 0; x < 24; x++)
             for (int y = 0; y < 24; y++)
                 solidDrop.Add(x, y);

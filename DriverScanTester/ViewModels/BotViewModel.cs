@@ -103,7 +103,7 @@ namespace DriverScanTester.ViewModels
                 _ => _main.IsAttached && !IsLootScanTestRunning &&
                      !_main.MovementDiagnostic.BlocksOtherRuntimes &&
                      !IsMovementBotRunning && !IsLootBotRunning && !IsWorkflowRunning);
-            TestLootWhiteCommand = new RelayCommand(
+            TestLootNormalCommand = new RelayCommand(
                 _ => RunLootScanTest(LootSystem.LootDiagnosticMode.NormalLoot),
                 _ => _main.IsAttached && !IsLootScanTestRunning &&
                      !_main.MovementDiagnostic.BlocksOtherRuntimes &&
@@ -393,7 +393,7 @@ namespace DriverScanTester.ViewModels
         public ICommand CaptureItemMouseOverCommand { get; }
         public ICommand TestOperationCommand { get; }
         public ICommand TestLootSodSopCommand { get; }
-        public ICommand TestLootWhiteCommand { get; }
+        public ICommand TestLootNormalCommand { get; }
         public ICommand ClearBotLogCommand { get; }
 
         // Movement Synchronization Diagnostic (Tools tab)

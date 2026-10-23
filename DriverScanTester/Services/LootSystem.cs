@@ -26,9 +26,9 @@ namespace DriverScanTester.Services
         private enum LootProbeResult { Miss, Collected, CaptureInvalid, Cancelled }
 
         /// <summary>
-        /// Outcome of one normal white-loot pass. The result preserves the distinction
-        /// between a verified empty pass, a collected item, a capture failure and a
-        /// cancelled/invalid scan so failures can never be reported as "no items".
+        /// Outcome of one normal-loot (aquamarine) pass. The result preserves the
+        /// distinction between a verified empty pass, a collected item, a capture failure
+        /// and a cancelled/invalid scan so failures can never be reported as "no items".
         /// </summary>
         internal readonly record struct LootScanPassOutcome(
             LootScanPassResult Result,
@@ -77,7 +77,7 @@ namespace DriverScanTester.Services
             /// <summary>Nothing loot-like was visible; navigation must continue.</summary>
             NoCandidate,
 
-            /// <summary>Plausible normal-loot (white or aquamarine) pixels were found;
+            /// <summary>Plausible normal-loot (aquamarine) pixels were found;
             /// verify with the loot camera.</summary>
             PotentialCandidate,
 
@@ -93,7 +93,7 @@ namespace DriverScanTester.Services
         internal readonly record struct LootPreScanResult(
             LootPreScanOutcome Outcome,
             int CandidateComponents,
-            int WhitePixels,
+            int LootPixels,
             Rectangle CandidateBounds,
             string Detail);
 
@@ -159,8 +159,8 @@ namespace DriverScanTester.Services
             internal int TinyComponents { get; init; }
             internal int FinalProbeCount { get; init; }
             internal IReadOnlyList<PinkComponentSummary> CandidateDetails { get; init; } = Array.Empty<PinkComponentSummary>();
-            internal IReadOnlyList<WhiteComponent> CandidateComponents { get; init; } = Array.Empty<WhiteComponent>();
-            internal IReadOnlyList<WhiteComponent> AllComponents { get; init; } = Array.Empty<WhiteComponent>();
+            internal IReadOnlyList<LootComponent> CandidateComponents { get; init; } = Array.Empty<LootComponent>();
+            internal IReadOnlyList<LootComponent> AllComponents { get; init; } = Array.Empty<LootComponent>();
         }
 
         private const int MaxDiagnosticPinkComponentDetails = 8;
@@ -196,7 +196,7 @@ namespace DriverScanTester.Services
         //   AreaLoot    → press spacebar x3, snapshot inventory, check after 100ms
         //   AreaLootWait→ compare inventory snapshot; if changed → keep spacebar-looting;
         //                  if no change after several tries → switch to Scan
-        //   Scan        → pixel-scan: label shaded-white blobs and probe only
+        //   Scan        → pixel-scan: label aquamarine blobs and probe only
         //                  sufficiently large, concentrated loot-like components
         //   PinkScan   → SOD/SOP-only mode (MoveAndAttack waypoints): after the close-mob
         //                  check, sweep the WHOLE captured client bitmap for PINK pixels
@@ -244,12 +244,12 @@ namespace DriverScanTester.Services
         /// </summary>
         private byte[] _scanBuffer = Array.Empty<byte>();
 
-        // ── White-loot probe continuation (bounded multi-pass coverage) ──
+        // ── Normal-loot probe continuation (bounded multi-pass coverage) ──
         // Coordinates already probed during an Incomplete pass. They are skipped only
         // while the screen/candidate key is unchanged; the key is reset whenever the
         // capture geometry or the accepted component geometry changes.
-        private readonly HashSet<Point> _probedWhiteProbeProgress = new HashSet<Point>();
-        private string _whiteProbeProgressKey = string.Empty;
+        private readonly HashSet<Point> _probedLootProbeProgress = new HashSet<Point>();
+        private string _lootProbeProgressKey = string.Empty;
         private const int OtherPlayerMarkerRequiredChecks = 3;
         private readonly PlayerMarkerPixelDetector _playerMarkerPixelDetector = new();
         private bool _otherPlayerMarkerWasVisible;
@@ -417,7 +417,7 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// True while the effective waypoint mode is MoveAndAttackAndLoot. In this mode
-        /// the normal white-loot collector is request-driven: it never starts a full
+        /// the normal-loot collector is request-driven: it never starts a full
         /// stationary cycle on a timer. While travelling it runs only the passive
         /// pre-scan; a mandatory post-kill request or a travel-candidate verification
         /// explicitly starts the full scan.
@@ -656,7 +656,7 @@ namespace DriverScanTester.Services
         /// <summary>
         /// SOD/SOP-only loot mode, used for MoveAndAttack waypoints: after each mob kill
         /// the loot machine runs ONE full-window pixel scan that looks ONLY for PINK
-        /// (SOD/SOP) blobs — no small-region pass, no white normal-loot scanning and no
+        /// (SOD/SOP) blobs — no small-region pass, no normal-loot scanning and no
         /// spacebar area-loot cycle. Every candidate pixel is probed in one continuous
         /// mouse sweep; a fresh sweep starts after each successful pickup, and a sweep
         /// that collects nothing over its whole candidate set ends the post-kill check.
@@ -1228,9 +1228,10 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Runs one manual loot diagnostic from the Tools tab: zooms the loot camera,
-        /// captures the game client, scans for SOD/SOP pink pixels or normal white-loot
-        /// pixels, probes the candidates and performs the same mouseover-confirmed click
-        /// as the running bot. This does not start or alter the loot state machine.
+        /// captures the game client, scans for SOD/SOP pink pixels or normal
+        /// aquamarine loot pixels, probes the candidates and performs the same
+        /// mouseover-confirmed click as the running bot. This does not start or alter the
+        /// loot state machine.
         /// </summary>
         public async Task<LootDiagnosticResult> RunDiagnosticScanAsync(
             LootDiagnosticMode mode, CancellationToken token)
@@ -1460,7 +1461,7 @@ namespace DriverScanTester.Services
         }
 
         private static string DiagnosticModeName(LootDiagnosticMode mode) =>
-            mode == LootDiagnosticMode.SodSopPink ? "SOD/SOP" : "White";
+            mode == LootDiagnosticMode.SodSopPink ? "SOD/SOP" : "Normal";
 
         public async Task Update(CancellationToken token)
         {
@@ -1755,7 +1756,7 @@ namespace DriverScanTester.Services
                     if (PinkLootOnlyMode)
                     {
                         // SOD/SOP-only mode scans solely after a kill. While walking
-                        // there is nothing to do — no area-loot, no white-pixel scan.
+                        // there is nothing to do — no area-loot, no normal-loot scan.
                         break;
                     }
 
@@ -2156,7 +2157,7 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// One passive pre-scan tick. Captures the CURRENT view, classifies white-loot
+        /// One passive pre-scan tick. Captures the CURRENT view, classifies aquamarine loot
         /// candidates with the production pixel/shape/text filters, and arms at most one
         /// travel-verification request. It never changes the camera, cursor or navigation
         /// input and never starts the stationary collector by itself.
@@ -2180,7 +2181,7 @@ namespace DriverScanTester.Services
 
             if (result.Outcome == LootPreScanOutcome.NoCandidate)
             {
-                LogPassivePreScan($"[LootPreScan] NoCandidate whitePixels={result.WhitePixels} " +
+                LogPassivePreScan($"[LootPreScan] NoCandidate lootPixels={result.LootPixels} " +
                                  $"components={result.CandidateComponents} detail={result.Detail}");
                 return;
             }
@@ -2214,7 +2215,7 @@ namespace DriverScanTester.Services
                     ObservedAtUtc = now
                 };
                 _log($"[LootPreScan] PotentialCandidate detected components={result.CandidateComponents} " +
-                     $"whitePixels={result.WhitePixels} bounds={FormatRectangle(result.CandidateBounds)}");
+                     $"lootPixels={result.LootPixels} bounds={FormatRectangle(result.CandidateBounds)}");
                 _log($"[LootVerify] Starting stationary verification request={requestId} " +
                      "reason=TravelCandidateVerification");
             }
@@ -2251,7 +2252,7 @@ namespace DriverScanTester.Services
 
             try
             {
-                return AnalyzeWhiteLootCandidatesCore(
+                return AnalyzeNormalLootCandidatesCore(
                     _bitmap,
                     scanRegion,
                     BotConstants.Loot.PassivePreScanMaxCandidateComponents,
@@ -2271,17 +2272,17 @@ namespace DriverScanTester.Services
         /// probes, moves the cursor or validates mouseover. The whole scan region is
         /// examined; there is no excluded area around the player.
         /// </summary>
-        internal static LootPreScanResult AnalyzeWhiteLootCandidates(
+        internal static LootPreScanResult AnalyzeNormalLootCandidates(
             Bitmap bitmap,
             Rectangle scanRegion,
             int maxCandidateComponents)
         {
             byte[] reusableBuffer = Array.Empty<byte>();
-            return AnalyzeWhiteLootCandidatesCore(
+            return AnalyzeNormalLootCandidatesCore(
                 bitmap, scanRegion, maxCandidateComponents, ref reusableBuffer);
         }
 
-        private static LootPreScanResult AnalyzeWhiteLootCandidatesCore(
+        private static LootPreScanResult AnalyzeNormalLootCandidatesCore(
             Bitmap bitmap,
             Rectangle scanRegion,
             int maxCandidateComponents,
@@ -2300,49 +2301,28 @@ namespace DriverScanTester.Services
                     "invalid scan geometry");
             }
 
-            var exactWhitePoints = new List<Point>();
-            var shadedWhitePoints = new List<Point>();
-            var aquamarinePoints = new List<Point>();
+            var lootPoints = new List<Point>();
 
             CollectBitmapTargetPoints(
                 bitmap, xStart, xEnd, yStart, yEnd,
-                pinkOnly: false, exactWhitePoints, ref reusableBuffer, out _, out _,
-                shadedWhiteOnly: false);
-            CollectBitmapTargetPoints(
-                bitmap, xStart, xEnd, yStart, yEnd,
-                pinkOnly: false, shadedWhitePoints, ref reusableBuffer, out _, out _,
-                shadedWhiteOnly: true);
-            CollectBitmapTargetPoints(
-                bitmap, xStart, xEnd, yStart, yEnd,
-                pinkOnly: false, aquamarinePoints, ref reusableBuffer, out _, out _,
-                aquamarineOnly: true);
+                pinkOnly: false, lootPoints, ref reusableBuffer, out _, out _);
 
-            int whitePixels = exactWhitePoints.Count + shadedWhitePoints.Count + aquamarinePoints.Count;
-            var candidates = new List<WhiteComponent>();
-            foreach (WhiteComponent component in LabelWhiteComponents(exactWhitePoints))
+            int lootPixels = lootPoints.Count;
+            var candidates = new List<LootComponent>();
+            foreach (LootComponent component in LabelLootComponents(lootPoints))
             {
-                if (IsLegacyWhiteSparkleCandidate(component))
-                    candidates.Add(component);
-            }
-            foreach (WhiteComponent component in LabelWhiteComponents(shadedWhitePoints))
-            {
-                if (IsShadedWhiteLootCandidate(component))
-                    candidates.Add(component);
-            }
-            foreach (WhiteComponent component in LabelWhiteComponents(aquamarinePoints))
-            {
-                if (IsShadedWhiteLootCandidate(component))
+                if (IsNormalLootCandidate(component))
                     candidates.Add(component);
             }
 
-            HashSet<WhiteComponent> textGlyphs = FindTextGlyphs(candidates);
+            HashSet<LootComponent> textGlyphs = FindTextGlyphs(candidates);
             if (textGlyphs.Count > 0)
                 candidates.RemoveAll(textGlyphs.Contains);
 
             if (candidates.Count == 0)
             {
                 return new LootPreScanResult(
-                    LootPreScanOutcome.NoCandidate, 0, whitePixels, Rectangle.Empty,
+                    LootPreScanOutcome.NoCandidate, 0, lootPixels, Rectangle.Empty,
                     $"scanRegion={FormatRectangle(scanRegion)}");
             }
 
@@ -2355,12 +2335,12 @@ namespace DriverScanTester.Services
             if (candidates.Count > maxCandidateComponents)
             {
                 return new LootPreScanResult(
-                    LootPreScanOutcome.NoCandidate, candidates.Count, whitePixels, bounds,
+                    LootPreScanOutcome.NoCandidate, candidates.Count, lootPixels, bounds,
                     "candidate count looks like UI/effect clutter");
             }
 
             return new LootPreScanResult(
-                LootPreScanOutcome.PotentialCandidate, candidates.Count, whitePixels, bounds,
+                LootPreScanOutcome.PotentialCandidate, candidates.Count, lootPixels, bounds,
                 "plausible normal-loot candidates");
         }
 
@@ -2730,7 +2710,7 @@ namespace DriverScanTester.Services
                 _log($"[LootCamera] Verification failed: {detail}");
         }
 
-        /// <summary>The normal white-loot scan always uses the configured stationary view.</summary>
+        /// <summary>The normal-loot scan always uses the configured stationary view.</summary>
         internal static short NormalLootScanDistance => BotConstants.Camera.LootScanDistance;
 
         /// <summary>
@@ -2973,7 +2953,7 @@ namespace DriverScanTester.Services
         /// WHOLE captured game window looking only for pink pixels. It ignores the
         /// BigScan rectangle because a pink drop can land anywhere on screen
         /// (including under the player after a kill). There
-        /// is no small-region pass and no white normal-loot detection. Every candidate
+        /// is no small-region pass and no normal-loot detection. Every candidate
         /// pixel is probed in one continuous mouse sweep; the caller repeats a fresh
         /// sweep after each successful pickup so remaining drops are still collected,
         /// and a sweep that collects nothing ends the post-kill check.
@@ -3121,27 +3101,12 @@ namespace DriverScanTester.Services
         internal static bool IsPinkLootMaskPixel(int r, int g, int b)
             => IsSodSopPinkPixel(r, g, b) && !MobMarkerDetector.IsMagentaMarkerPixel(r, g, b);
 
-        // White ground textures are modulated by scene lighting and distance fog.
-        // Accept bright, low-chroma grays as shaded white while rejecting strongly
-        // tinted pixels. Component size/density filtering below rejects isolated noise.
-        private const int WhiteLootMinChannel = 145;
-        private const int WhiteLootMaxChannelSpread = 36;
-
-        internal static bool IsShadedWhiteLootPixel(Color pixelColor)
-            => IsShadedWhiteLootPixel(pixelColor.R, pixelColor.G, pixelColor.B);
-
-        internal static bool IsShadedWhiteLootPixel(int r, int g, int b)
-        {
-            int min = Math.Min(r, Math.Min(g, b));
-            int max = Math.Max(r, Math.Max(g, b));
-            return min >= WhiteLootMinChannel && max - min <= WhiteLootMaxChannelSpread;
-        }
-
         // The selected G9 ground bundle is painted solid aquamarine (#00FFAA).
-        // Scene lighting and distance fog modulate the texture, so accept the
-        // saturated cyan-green family rather than one literal RGB value: low red,
-        // strong green, and blue clearly above red but below green. Pure green,
-        // pure cyan, pink and neutral white/gray all fail these tests.
+        // This is the ONLY normal-loot texture color; the legacy loot masks are
+        // intentionally gone. Scene lighting and distance fog modulate the texture,
+        // so accept the saturated cyan-green family rather than one literal RGB
+        // value: low red, strong green, and blue clearly above red but below green.
+        // Pure green, pure cyan, pink and neutral white/gray all fail these tests.
         private const int AquamarineMinGreen = 120;
         private const int AquamarineMaxRed = 130;
         private const int AquamarineMinBlue = 80;
@@ -3179,8 +3144,8 @@ namespace DriverScanTester.Services
             List<Point> maskPoints,
             PixelCollectionStats stats)
         {
-            List<WhiteComponent> components = LabelWhiteComponents(maskPoints);
-            var candidates = new List<WhiteComponent>();
+            List<LootComponent> components = LabelLootComponents(maskPoints);
+            var candidates = new List<LootComponent>();
             var candidateDetails = new List<PinkComponentSummary>(MaxDiagnosticPinkComponentDetails);
             var rejectedDetails = new List<PinkComponentSummary>(MaxDiagnosticPinkComponentDetails);
             int markerRings = 0;
@@ -3188,7 +3153,7 @@ namespace DriverScanTester.Services
             int rejected = 0;
             int probeCount = 0;
 
-            foreach (WhiteComponent component in components)
+            foreach (LootComponent component in components)
             {
                 bool candidate = IsPinkLootCandidate(component);
                 if (candidate && IsMobMarkerRingComponent(component, bitmap))
@@ -3308,18 +3273,16 @@ namespace DriverScanTester.Services
             // right after CaptureScreen(): _bitmap is reused by every capture
             // (including the post-collection refresh) and would otherwise be gone.
             Bitmap? diagnosticFrame = null;
-            var diagnosticWhiteHits = new List<Point>();
+            var diagnosticProbeHits = new List<Point>();
             // The detection mask and the cursor-probe positions are separate datasets:
             // the annotated frame must never present the handful of mouse positions as
-            // if they were the complete detected white-pixel mask.
-            var diagnosticDetectedWhitePixels = new List<Point>();
+            // if they were the complete detected loot-pixel mask.
+            var diagnosticDetectedLootPixels = new List<Point>();
             var diagnosticCandidatePixels = new List<Point>();
             var diagnosticCandidateBounds = new List<Rectangle>();
             Point? diagnosticSuccessProbe = null;
             Rectangle diagnosticScanRegion = Rectangle.Empty;
-            int diagnosticWhiteCount = 0;
-            int diagnosticExactWhiteCount = 0;
-            int diagnosticShadedWhiteCount = 0;
+            int diagnosticLootCount = 0;
             int diagnosticAquamarineCount = 0;
             int diagnosticCandidatePixelCount = 0;
             int diagnosticComponentCount = 0;
@@ -3385,7 +3348,7 @@ namespace DriverScanTester.Services
                 // drop can land anywhere on screen (a corner outside BigScan, or
                 // under the character after a kill), so the BigScan rectangle does
                 // not bound this pass. Override the clamped range with the full
-                // bitmap; normal white-loot scans keep using their region.
+                // bitmap; normal-loot scans keep using their region.
                 if (pinkOnly)
                 {
                     xStart = 0;
@@ -3426,51 +3389,26 @@ namespace DriverScanTester.Services
                 }
 
                 // ── Phase A: collect pixels without moving the cursor. Normal loot
-                //    keeps its exact-white sparkle mask and adds separate shaded-white
-                //    and aquamarine masks; SOD/SOP keeps the existing pink-family mask
-                //    with artificial marker magenta removed before labeling. All normal
-                //    masks are read from this captured frame; only concentrated color
-                //    components become new candidates. ──
+                //    uses the aquamarine family only; SOD/SOP keeps the existing
+                //    pink-family mask with artificial marker magenta removed before
+                //    labeling. Only concentrated color components become candidates. ──
                 var targetPoints = new List<Point>();
-                List<Point>? shadedWhitePoints = pinkOnly ? null : new List<Point>();
-                List<Point>? aquamarinePoints = pinkOnly ? null : new List<Point>();
                 pixelStats = CollectScanTargetPoints(
                     xStart, xEnd, yStart, yEnd,
                     pinkOnly, targetPoints,
                     out diagnosticPixelFormat,
                     out diagnosticStride);
-                diagnosticExactWhiteCount = targetPoints.Count;
-                diagnosticWhiteCount = diagnosticExactWhiteCount;
-                if (!pinkOnly)
-                {
-                    CollectScanTargetPoints(
-                        xStart, xEnd, yStart, yEnd,
-                        false, shadedWhitePoints!,
-                        out _, out _, shadedWhiteOnly: true);
-                    CollectScanTargetPoints(
-                        xStart, xEnd, yStart, yEnd,
-                        false, aquamarinePoints!,
-                        out _, out _, aquamarineOnly: true);
-                    diagnosticShadedWhiteCount = shadedWhitePoints!.Count;
-                    diagnosticAquamarineCount = aquamarinePoints!.Count;
-                    diagnosticWhiteCount = diagnosticExactWhiteCount
-                        + diagnosticShadedWhiteCount
-                        + diagnosticAquamarineCount;
+                diagnosticLootCount = targetPoints.Count;
+                diagnosticAquamarineCount = pinkOnly ? 0 : targetPoints.Count;
 
-                    if (ScreenshotService.LootScanCaptureEnabled)
-                    {
-                        diagnosticDetectedWhitePixels.AddRange(targetPoints);
-                        diagnosticDetectedWhitePixels.AddRange(shadedWhitePoints!);
-                        diagnosticDetectedWhitePixels.AddRange(aquamarinePoints!);
-                    }
-                }
+                if (!pinkOnly && ScreenshotService.LootScanCaptureEnabled)
+                    diagnosticDetectedLootPixels.AddRange(targetPoints);
 
                 // ── Phase B: label 8-connected components and keep loot-shaped
-                //    blobs. White mode preserves compact sparkles and adds dense large
-                //    white and aquamarine candidates; pink mode shares the
-                //    AnalyzePinkFrame production path. ──
-                List<WhiteComponent> components;
-                var candidates = new List<WhiteComponent>();
+                //    blobs. Normal mode accepts dense large aquamarine components;
+                //    pink mode shares the AnalyzePinkFrame production path. ──
+                List<LootComponent> components;
+                var candidates = new List<LootComponent>();
                 int filteredComponents;
                 int tinyPinkComponents;
                 int mobMarkerComponents;
@@ -3499,33 +3437,13 @@ namespace DriverScanTester.Services
                 }
                 else
                 {
-                    List<WhiteComponent> exactWhiteComponents = LabelWhiteComponents(targetPoints);
-                    List<WhiteComponent> shadedWhiteComponents = LabelWhiteComponents(shadedWhitePoints!);
-                    List<WhiteComponent> aquamarineComponents = LabelWhiteComponents(aquamarinePoints!);
-                    components = exactWhiteComponents
-                        .Concat(shadedWhiteComponents)
-                        .Concat(aquamarineComponents)
-                        .ToList();
+                    components = LabelLootComponents(targetPoints);
                     filteredComponents = 0;
                     tinyPinkComponents = 0;
                     mobMarkerComponents = 0;
-                    foreach (WhiteComponent component in exactWhiteComponents)
+                    foreach (LootComponent component in components)
                     {
-                        if (IsLegacyWhiteSparkleCandidate(component))
-                            candidates.Add(component);
-                        else
-                            filteredComponents++;
-                    }
-                    foreach (WhiteComponent component in shadedWhiteComponents)
-                    {
-                        if (IsShadedWhiteLootCandidate(component))
-                            candidates.Add(component);
-                        else
-                            filteredComponents++;
-                    }
-                    foreach (WhiteComponent component in aquamarineComponents)
-                    {
-                        if (IsShadedWhiteLootCandidate(component))
+                        if (IsNormalLootCandidate(component))
                             candidates.Add(component);
                         else
                             filteredComponents++;
@@ -3538,8 +3456,8 @@ namespace DriverScanTester.Services
                 // probe budget before the loot below/next to it is reached. In pink
                 // SOD/SOP mode the pink name/glow itself is the target, so no text
                 // filtering is applied there.
-                HashSet<WhiteComponent> textGlyphs = pinkOnly
-                    ? new HashSet<WhiteComponent>()
+                HashSet<LootComponent> textGlyphs = pinkOnly
+                    ? new HashSet<LootComponent>()
                     : FindTextGlyphs(candidates);
                 if (textGlyphs.Count > 0)
                     candidates.RemoveAll(textGlyphs.Contains);
@@ -3549,7 +3467,7 @@ namespace DriverScanTester.Services
                 diagnosticCandidateCount = candidates.Count;
 
                 bool captureCandidateMask = !pinkOnly && ScreenshotService.LootScanCaptureEnabled;
-                foreach (WhiteComponent candidate in candidates)
+                foreach (LootComponent candidate in candidates)
                 {
                     diagnosticCandidatePixelCount += candidate.Area;
                     if (!captureCandidateMask)
@@ -3559,14 +3477,14 @@ namespace DriverScanTester.Services
                         candidate.XMin, candidate.YMin, candidate.XMax + 1, candidate.YMax + 1));
                 }
 
-                // ── Phase C: probe only the surviving candidate blobs. White components
+                // ── Phase C: probe only the surviving candidate blobs. Loot components
                 //    use a deterministic two-stage plan: Stage A covers every occupied
-                //    spatial cell with an actual white pixel; Stage B then exhausts the
-                //    remaining white pixels of the same component. Probes are interleaved
+                //    spatial cell with an actual aquamarine pixel; Stage B then exhausts the
+                //    remaining aquamarine pixels of the same component. Probes are interleaved
                 //    round-robin between candidates so one large component cannot starve
                 //    the others. Tiny pink blobs keep the old ±1 diagonal search.
                 //
-                //    The normal white-loot scan stays bounded by MaxLootProbesPerRegion
+                //    The normal-loot scan stays bounded by MaxLootProbesPerRegion
                 //    so UI clutter can never stall it; hitting that budget returns
                 //    Incomplete (never NoItem) and the next pass continues with the
                 //    already-examined coordinates skipped while the frame is unchanged.
@@ -3574,18 +3492,18 @@ namespace DriverScanTester.Services
                 //    pixel in this single pass, in the unchanged candidate order. ──
                 string probeProgressKey = pinkOnly
                     ? string.Empty
-                    : BuildWhiteProbeProgressKey(regionName, diagnosticGeometry, candidates);
+                    : BuildLootProbeProgressKey(regionName, diagnosticGeometry, candidates);
                 if (!pinkOnly &&
-                    !string.Equals(probeProgressKey, _whiteProbeProgressKey, StringComparison.Ordinal))
+                    !string.Equals(probeProgressKey, _lootProbeProgressKey, StringComparison.Ordinal))
                 {
                     // Screen/candidate geometry changed — do not trust old coordinates.
-                    _probedWhiteProbeProgress.Clear();
-                    _whiteProbeProgressKey = probeProgressKey;
+                    _probedLootProbeProgress.Clear();
+                    _lootProbeProgressKey = probeProgressKey;
                 }
 
                 LootProbePlanner probePlanner = pinkOnly
                     ? LootProbePlanner.CreateForPink(candidates)
-                    : LootProbePlanner.CreateForWhite(candidates, _probedWhiteProbeProgress);
+                    : LootProbePlanner.CreateForNormal(candidates, _probedLootProbeProgress);
                 diagnosticPreviouslyProbedSkipped = probePlanner.PreviouslyProbedSkipped;
 
                 int probesUsed = 0;
@@ -3595,40 +3513,40 @@ namespace DriverScanTester.Services
                         (pinkOnly && !PinkLootOnlyMode))
                     {
                         diagnosticOutcome = "cancelled-before-probe";
-                        ClearWhiteProbeProgress();
+                        ClearLootProbeProgress();
                         return LootScanPassResult.Cancelled;
                     }
 
-                    WhiteComponent component = candidates[candidateIndex];
+                    LootComponent component = candidates[candidateIndex];
                     bool addDiagonals = pinkOnly && component.Area <= TinyProbeWithDiagonalsArea;
                     actualCursorProbes++;
                     probesUsed++;
                     if (!pinkOnly)
-                        _probedWhiteProbeProgress.Add(probe);
+                        _probedLootProbeProgress.Add(probe);
 
                     LootProbeResult probeResult = TryCollectAt(probe.X, probe.Y, pinkOnly);
-                    diagnosticWhiteHits.Add(probe);
+                    diagnosticProbeHits.Add(probe);
                     if (probeResult == LootProbeResult.Collected)
                     {
                         diagnosticSuccessProbe = probe;
                         diagnosticOutcome = "collected";
                         _log($"[Loot] {regionName}: mouseover confirmed at bitmap-local ({probe.X},{probe.Y}) — " +
-                             $"candidate {candidateIndex + 1}/{candidates.Count} {FormatWhiteComponent(component)}, " +
+                             $"candidate {candidateIndex + 1}/{candidates.Count} {FormatLootComponent(component)}, " +
                              $"probe {probePlanner.AttemptsFor(candidateIndex)}/{probePlanner.InitialRemainingFor(candidateIndex)} of this candidate, " +
                              $"{probesUsed} probe(s) this pass{KillElapsed()}.");
-                        ClearWhiteProbeProgress();
+                        ClearLootProbeProgress();
                         return LootScanPassResult.Collected;
                     }
                     if (probeResult == LootProbeResult.CaptureInvalid)
                     {
                         diagnosticOutcome = "capture-geometry-changed-during-probes";
-                        ClearWhiteProbeProgress();
+                        ClearLootProbeProgress();
                         return LootScanPassResult.CaptureFailed;
                     }
                     if (probeResult == LootProbeResult.Cancelled)
                     {
                         diagnosticOutcome = "probe-cancelled-or-focus-lost";
-                        ClearWhiteProbeProgress();
+                        ClearLootProbeProgress();
                         return LootScanPassResult.Cancelled;
                     }
 
@@ -3659,7 +3577,7 @@ namespace DriverScanTester.Services
                             return HandleProbeResult(diagonalResult, ref diagnosticOutcome);
                     }
 
-                    // Only the normal white-loot scan keeps the probe budget.
+                    // Only the normal-loot scan keeps the probe budget.
                     if (!pinkOnly && probesUsed >= MaxLootProbesPerRegion)
                     {
                         _log($"[Loot] {regionName}: probe budget ({MaxLootProbesPerRegion}) exhausted — " +
@@ -3673,21 +3591,21 @@ namespace DriverScanTester.Services
                 }
 
                 LootScanPassResult sweepResult = ResolveProbeSweepResult(probePlanner.RemainingProbeCount);
-                if (diagnosticWhiteCount > 0)
+                if (diagnosticLootCount > 0)
                 {
                     string pinkNote = pinkOnly
                         ? $", {tinyPinkComponents} below {BotConstants.Loot.PinkMinCandidateWidth}x{BotConstants.Loot.PinkMinCandidateHeight} px skipped"
                         : "";
-                    string whiteDetail = pinkOnly
+                    string lootDetail = pinkOnly
                         ? ""
-                        : $", exact-white={diagnosticExactWhiteCount}px, shaded-white={diagnosticShadedWhiteCount}px, aquamarine={diagnosticAquamarineCount}px";
-                    _log($"[Loot] {regionName}: scanned {scanPixels} px, {diagnosticWhiteCount} {pixelNoun} px in {components.Count} components{whiteDetail} — " +
+                        : $", aquamarine={diagnosticAquamarineCount}px";
+                    _log($"[Loot] {regionName}: scanned {scanPixels} px, {diagnosticLootCount} {pixelNoun} px in {components.Count} components{lootDetail} — " +
                          $"{filteredComponents} filtered (shape/size; mob-marker rings={mobMarkerComponents}){pinkNote}, {textGlyphs.Count} text glyphs skipped, " +
                          $"{candidates.Count} loot candidates ({diagnosticCandidatePixelCount} candidate px), " +
                          $"{probesUsed} probes, no item collected; result={sweepResult}{KillElapsed()}.");
                     if (!pinkOnly && candidates.Count > 0)
                     {
-                        _log($"[Loot] {regionName}: candidates {DescribeWhiteCandidates(candidates)}; " +
+                        _log($"[Loot] {regionName}: candidates {DescribeLootCandidates(candidates)}; " +
                              $"probe attempts {DescribeProbeAttempts(probePlanner, candidates.Count)}; " +
                              $"previously examined={diagnosticPreviouslyProbedSkipped}px; remaining candidates={probePlanner.CandidatesWithRemainingProbes}.");
                     }
@@ -3697,7 +3615,7 @@ namespace DriverScanTester.Services
                     _log($"[Loot] {regionName}: scanned {scanPixels} px, no {pixelNoun} pixels.");
                 }
                 if (!pinkOnly)
-                    ClearWhiteProbeProgress();
+                    ClearLootProbeProgress();
                 diagnosticOutcome = sweepResult == LootScanPassResult.NoItem ? "no-item" : "probe-sequence-incomplete";
                 return sweepResult;
             }
@@ -3722,9 +3640,9 @@ namespace DriverScanTester.Services
                 // outcome either finished the candidate sweep, collected an item (the
                 // screen changes) or lost a trustworthy frame.
                 if (!pinkOnly && diagnosticOutcome != "probe-budget-exhausted")
-                    ClearWhiteProbeProgress();
+                    ClearLootProbeProgress();
 
-                // White-loot retains the existing annotated frame (and now also saves an
+                // Normal-loot retains the existing annotated frame (and now also saves an
                 // unmodified raw frame from the same clone). Pink diagnostics save an
                 // exact unmodified clone separately, before it can be annotated.
                 if (diagnosticFrame != null)
@@ -3751,20 +3669,17 @@ namespace DriverScanTester.Services
                             $"timestampUtc={scanStartedUtc:O}; reason=normal-loot; region={regionName}; " +
                             $"captureStatus={_lastCaptureResult.Status}; outcome={diagnosticOutcome}; {geometryText}; " +
                             $"scanRegion={FormatRectangle(diagnosticScanRegion)}; " +
-                            $"exactWhite={diagnosticExactWhiteCount}; shadedWhite={diagnosticShadedWhiteCount}; " +
                             $"aquamarine={diagnosticAquamarineCount}; " +
                             $"components={diagnosticComponentCount}; candidates={diagnosticCandidateCount}; " +
                             $"candidatePixels={diagnosticCandidatePixelCount}; probes={actualCursorProbes}";
                         ScreenshotService.SaveLootScanFrame(
                             diagnosticFrame, regionName, diagnosticOutcome, _log,
-                            diagnosticWhiteCount, diagnosticScanRegion,
-                            diagnosticWhiteHits, pixelNoun,
-                            detectedPixels: diagnosticDetectedWhitePixels,
+                            diagnosticLootCount, diagnosticScanRegion,
+                            diagnosticProbeHits, pixelNoun,
+                            detectedPixels: diagnosticDetectedLootPixels,
                             candidatePixels: diagnosticCandidatePixels,
                             candidateBounds: diagnosticCandidateBounds,
                             confirmedProbe: diagnosticSuccessProbe,
-                            exactWhiteCount: diagnosticExactWhiteCount,
-                            shadedWhiteCount: diagnosticShadedWhiteCount,
                             aquamarineCount: diagnosticAquamarineCount,
                             candidatePixelCount: diagnosticCandidatePixelCount,
                             saveRawFrame: true,
@@ -4117,31 +4032,28 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Phase A of a region pass: collects exact-white legacy pixels, an optional
-        /// shaded near-white candidate mask, or the hot-pink family for SOD/SOP.
-        /// The bitmap is bulk-read row by row so positive and negative GDI+ strides map
-        /// to the same logical top-down client coordinates as GetPixel.
+        /// Phase A of a region pass: collects the aquamarine normal-loot family or the
+        /// hot-pink family for SOD/SOP. The bitmap is bulk-read row by row so positive
+        /// and negative GDI+ strides map to the same logical top-down client coordinates
+        /// as GetPixel.
         /// </summary>
         private PixelCollectionStats CollectScanTargetPoints(
             int xStart, int xEnd, int yStart, int yEnd,
             bool pinkOnly, List<Point> targetPoints,
             out PixelFormat sourcePixelFormat,
-            out int sourceStride,
-            bool shadedWhiteOnly = false,
-            bool aquamarineOnly = false)
+            out int sourceStride)
             => CollectBitmapTargetPoints(
                 _bitmap, xStart, xEnd, yStart, yEnd,
                 pinkOnly, targetPoints, ref _scanBuffer,
-                out sourcePixelFormat, out sourceStride, shadedWhiteOnly, aquamarineOnly);
+                out sourcePixelFormat, out sourceStride);
 
         internal static PixelCollectionStats CollectTargetPointsFromBitmap(
-            Bitmap bitmap, bool pinkOnly, List<Point> targetPoints,
-            bool shadedWhiteOnly = false, bool aquamarineOnly = false)
+            Bitmap bitmap, bool pinkOnly, List<Point> targetPoints)
         {
             byte[] reusableBuffer = Array.Empty<byte>();
             return CollectBitmapTargetPoints(
                 bitmap, 0, bitmap.Width, 0, bitmap.Height,
-                pinkOnly, targetPoints, ref reusableBuffer, out _, out _, shadedWhiteOnly, aquamarineOnly);
+                pinkOnly, targetPoints, ref reusableBuffer, out _, out _);
         }
 
         private static PixelCollectionStats CollectBitmapTargetPoints(
@@ -4150,9 +4062,7 @@ namespace DriverScanTester.Services
             bool pinkOnly, List<Point> targetPoints,
             ref byte[] reusableBuffer,
             out PixelFormat sourcePixelFormat,
-            out int sourceStride,
-            bool shadedWhiteOnly = false,
-            bool aquamarineOnly = false)
+            out int sourceStride)
         {
             ArgumentNullException.ThrowIfNull(bitmap);
             ArgumentNullException.ThrowIfNull(targetPoints);
@@ -4196,7 +4106,7 @@ namespace DriverScanTester.Services
                 return CollectTargetPointsFromBuffer(
                     reusableBuffer, rowBytes, scanBitmap.Height,
                     xStart, xEnd, yStart, yEnd,
-                    pinkOnly, targetPoints, shadedWhiteOnly, aquamarineOnly);
+                    pinkOnly, targetPoints);
             }
             catch
             {
@@ -4218,7 +4128,7 @@ namespace DriverScanTester.Services
                 sourceStride = 0;
                 return CollectTargetPointsFromBitmapReference(
                     bitmap, xStart, xEnd, yStart, yEnd,
-                    pinkOnly, targetPoints, shadedWhiteOnly, aquamarineOnly);
+                    pinkOnly, targetPoints);
             }
 
             return default;
@@ -4231,8 +4141,7 @@ namespace DriverScanTester.Services
         internal static PixelCollectionStats CollectTargetPointsFromBitmapReference(
             Bitmap bitmap,
             int xStart, int xEnd, int yStart, int yEnd,
-            bool pinkOnly, List<Point> targetPoints, bool shadedWhiteOnly = false,
-            bool aquamarineOnly = false)
+            bool pinkOnly, List<Point> targetPoints)
         {
             ArgumentNullException.ThrowIfNull(bitmap);
             ArgumentNullException.ThrowIfNull(targetPoints);
@@ -4254,17 +4163,9 @@ namespace DriverScanTester.Services
                         isTarget = IsPinkLootMaskPixel(color);
                         if (raw && !isTarget) markerRejected++;
                     }
-                    else if (shadedWhiteOnly)
-                    {
-                        isTarget = IsShadedWhiteLootPixel(color);
-                    }
-                    else if (aquamarineOnly)
-                    {
-                        isTarget = IsAquamarineLootPixel(color);
-                    }
                     else
                     {
-                        isTarget = color.R == 255 && color.G == 255 && color.B == 255;
+                        isTarget = IsAquamarineLootPixel(color);
                     }
 
                     if (isTarget)
@@ -4283,8 +4184,7 @@ namespace DriverScanTester.Services
         internal static PixelCollectionStats CollectTargetPointsFromBuffer(
             byte[] buffer, int stride, int bitmapHeight,
             int xStart, int xEnd, int yStart, int yEnd,
-            bool pinkOnly, List<Point> targetPoints, bool shadedWhiteOnly = false,
-            bool aquamarineOnly = false)
+            bool pinkOnly, List<Point> targetPoints)
         {
             ArgumentNullException.ThrowIfNull(buffer);
             ArgumentNullException.ThrowIfNull(targetPoints);
@@ -4323,17 +4223,9 @@ namespace DriverScanTester.Services
                         isTarget = IsPinkLootMaskPixel(r, g, b);
                         if (raw && !isTarget) markerRejected++;
                     }
-                    else if (shadedWhiteOnly)
-                    {
-                        isTarget = IsShadedWhiteLootPixel(r, g, b);
-                    }
-                    else if (aquamarineOnly)
-                    {
-                        isTarget = IsAquamarineLootPixel(r, g, b);
-                    }
                     else
                     {
-                        isTarget = r == 255 && g == 255 && b == 255;
+                        isTarget = IsAquamarineLootPixel(r, g, b);
                     }
 
                     if (isTarget)
@@ -4345,38 +4237,30 @@ namespace DriverScanTester.Services
         }
 
         // ════════════════════════════════════════════════════════════════
-        //  WHITE-PIXEL SHAPE FILTER (loot candidate detection)
-        //  Keep the legacy compact white-sparkle candidates and also accept larger,
-        //  concentrated shaded-white components like the SOD/SOP ground squares.
-        //  The mouseover check remains authoritative for pickup in both paths.
+        //  NORMAL-LOOT SHAPE FILTER (aquamarine ground-drop detection)
+        //  The selected G9 drop is a large, concentrated aquamarine square.
+        //  The mouseover check remains authoritative for pickup.
         // ════════════════════════════════════════════════════════════════
 
-        private const int MaxLootCandidateArea = 60;
-        private const int MaxLootCandidateDimension = 24;
-        private const int ThinLineMaxThickness = 2;
-        private const int ThinLineMinLength = 12;
-        private const int WideBandMinWidth = 18;
-        private const int WideBandMinHeight = 12;
-
-        private const int WhiteLootMinCandidateWidth = 10;
-        private const int WhiteLootMinCandidateHeight = 10;
-        private const int WhiteLootMinCandidatePixels = 30;
-        private const float WhiteLootMinFillRatio = 0.20f;
+        private const int NormalLootMinCandidateWidth = 10;
+        private const int NormalLootMinCandidateHeight = 10;
+        private const int NormalLootMinCandidatePixels = 30;
+        private const float NormalLootMinFillRatio = 0.20f;
 
         /// <summary>Tiny pink blobs (1–4 px) keep the old ±1 diagonal hover search around each pixel.</summary>
         private const int TinyProbeWithDiagonalsArea = 4;
 
-        /// <summary>Hard cap on mouseover probes per region pass — replaces the old raw-white-count abort.</summary>
+        /// <summary>Hard cap on mouseover probes per region pass — replaces the old raw-pixel-count abort.</summary>
         private const int MaxLootProbesPerRegion = 400;
 
         /// <summary>
-        /// Stage A spatial-coverage of a white component: the component's larger dimension
+        /// Stage A spatial-coverage of a loot component: the component's larger dimension
         /// is split into at most this many cells along each axis, so coverage grows with
         /// the component (up to 64 cells) instead of being a fixed sample count. Larger
         /// components use coarser cells; tiny components use at least two-pixel cells.
         /// </summary>
-        private const int WhiteProbeCellsPerAxis = 8;
-        private const int WhiteProbeCellMinPx = 2;
+        private const int LootProbeCellsPerAxis = 8;
+        private const int LootProbeCellMinPx = 2;
 
         /// <summary>Text-cluster detection: a horizontal run of at least this many glyph-like blobs is a mob name.</summary>
         private const int TextClusterMinGlyphs = 5;
@@ -4387,7 +4271,7 @@ namespace DriverScanTester.Services
         private const int TextClusterMaxBaselineDriftPx = 5;
 
         /// <summary>A connected group of loot-color pixels found during a region scan.</summary>
-        internal sealed class WhiteComponent
+        internal sealed class LootComponent
         {
             public readonly List<Point> Points = new List<Point>();
             public int XMin = int.MaxValue, YMin = int.MaxValue;
@@ -4407,23 +4291,23 @@ namespace DriverScanTester.Services
             }
         }
 
-        /// <summary>Groups white pixels into 8-connected components.</summary>
-        private static List<WhiteComponent> LabelWhiteComponents(List<Point> whitePoints)
+        /// <summary>Groups loot pixels into 8-connected components.</summary>
+        private static List<LootComponent> LabelLootComponents(List<Point> points)
         {
-            var present = new HashSet<(int X, int Y)>(whitePoints.Count);
-            foreach (Point p in whitePoints)
+            var present = new HashSet<(int X, int Y)>(points.Count);
+            foreach (Point p in points)
                 present.Add((p.X, p.Y));
 
-            var visited = new HashSet<(int X, int Y)>(whitePoints.Count);
-            var components = new List<WhiteComponent>();
+            var visited = new HashSet<(int X, int Y)>(points.Count);
+            var components = new List<LootComponent>();
 
-            foreach (Point start in whitePoints)
+            foreach (Point start in points)
             {
                 var startKey = (start.X, start.Y);
                 if (!visited.Add(startKey))
                     continue;
 
-                var component = new WhiteComponent();
+                var component = new LootComponent();
                 var queue = new Queue<(int X, int Y)>();
                 queue.Enqueue(startKey);
 
@@ -4453,37 +4337,21 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// True when a shaded-white component is a large, concentrated potential
-        /// ground drop. There is no upper-size cap, so distance/zoom does not make a
-        /// real drop disappear. This only selects probe locations: TryCollectAt still
-        /// requires the normal lootable mouseover before the unchanged collection action.
+        /// True when an aquamarine component is a large, concentrated potential ground
+        /// drop. There is no upper-size cap, so distance/zoom does not make a real drop
+        /// disappear. This only selects probe locations: TryCollectAt still requires
+        /// the normal lootable mouseover before the unchanged collection action.
         /// </summary>
-        internal static bool IsShadedWhiteLootCandidate(WhiteComponent component)
+        internal static bool IsNormalLootCandidate(LootComponent component)
         {
-            if (component.Width < WhiteLootMinCandidateWidth ||
-                component.Height < WhiteLootMinCandidateHeight ||
-                component.Area < WhiteLootMinCandidatePixels)
+            if (component.Width < NormalLootMinCandidateWidth ||
+                component.Height < NormalLootMinCandidateHeight ||
+                component.Area < NormalLootMinCandidatePixels)
                 return false;
 
             float fillRatio = component.Area /
                 (float)Math.Max(component.Width * component.Height, 1);
-            return fillRatio >= WhiteLootMinFillRatio;
-        }
-
-        /// <summary>Original compact exact-white sparkle filter; retained for legacy loot.</summary>
-        internal static bool IsLegacyWhiteSparkleCandidate(WhiteComponent component)
-        {
-            if (component.Area > MaxLootCandidateArea)
-                return false;
-            if (component.Width > MaxLootCandidateDimension ||
-                component.Height > MaxLootCandidateDimension)
-                return false;
-            if (Math.Min(component.Width, component.Height) <= ThinLineMaxThickness &&
-                Math.Max(component.Width, component.Height) >= ThinLineMinLength)
-                return false;
-            if (component.Width >= WideBandMinWidth && component.Height >= WideBandMinHeight)
-                return false;
-            return true;
+            return fillRatio >= NormalLootMinFillRatio;
         }
 
         /// <summary>
@@ -4498,7 +4366,7 @@ namespace DriverScanTester.Services
         /// are skipped (treated as not-loot) so the probe budget is not burned on
         /// noise.
         /// </summary>
-        internal static bool IsPinkLootCandidate(WhiteComponent component)
+        internal static bool IsPinkLootCandidate(LootComponent component)
         {
             return component.Width >= BotConstants.Loot.PinkMinCandidateWidth &&
                    component.Height >= BotConstants.Loot.PinkMinCandidateHeight;
@@ -4511,7 +4379,7 @@ namespace DriverScanTester.Services
         /// state from remaining armed on living mobs whose magenta marker cannot pass the
         /// exact item mouseover check.
         /// </summary>
-        internal static bool IsMobMarkerRingComponent(WhiteComponent component, Bitmap bitmap)
+        internal static bool IsMobMarkerRingComponent(LootComponent component, Bitmap bitmap)
         {
             float expectedRadius = Math.Max(6f,
                 BotConstants.MobGrouping.ExpectedMarkerRadiusPx * bitmap.Height /
@@ -4535,10 +4403,10 @@ namespace DriverScanTester.Services
         /// returns them so they are excluded from probing. Loot sparkles are few and
         /// never arranged in long tight rows, so they survive this filter.
         /// </summary>
-        private static HashSet<WhiteComponent> FindTextGlyphs(List<WhiteComponent> candidates)
+        private static HashSet<LootComponent> FindTextGlyphs(List<LootComponent> candidates)
         {
-            var glyphs = new List<WhiteComponent>();
-            foreach (WhiteComponent c in candidates)
+            var glyphs = new List<LootComponent>();
+            foreach (LootComponent c in candidates)
             {
                 if (c.Area <= TextClusterMaxGlyphArea &&
                     c.Width <= TextClusterMaxGlyphWidth &&
@@ -4547,24 +4415,24 @@ namespace DriverScanTester.Services
             }
             glyphs.Sort((a, b) => a.XMin != b.XMin ? a.XMin.CompareTo(b.XMin) : a.YMin.CompareTo(b.YMin));
 
-            var textGlyphs = new HashSet<WhiteComponent>();
-            var run = new List<WhiteComponent>();
+            var textGlyphs = new HashSet<LootComponent>();
+            var run = new List<LootComponent>();
 
             void FlushRun()
             {
                 if (run.Count >= TextClusterMinGlyphs)
                 {
-                    foreach (WhiteComponent glyph in run)
+                    foreach (LootComponent glyph in run)
                         textGlyphs.Add(glyph);
                 }
                 run.Clear();
             }
 
-            foreach (WhiteComponent glyph in glyphs)
+            foreach (LootComponent glyph in glyphs)
             {
                 if (run.Count > 0)
                 {
-                    WhiteComponent prev = run[run.Count - 1];
+                    LootComponent prev = run[run.Count - 1];
                     int gap = glyph.XMin - prev.XMax - 1;
                     double prevCenterY = (prev.YMin + prev.YMax) / 2.0;
                     double centerY = (glyph.YMin + glyph.YMax) / 2.0;
@@ -4580,19 +4448,19 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Deterministic two-stage mouseover plan for one accepted white-loot component.
-        /// Stage A (<see cref="Coverage"/>) probes one actual white pixel per occupied
+        /// Deterministic two-stage mouseover plan for one accepted normal-loot component.
+        /// Stage A (<see cref="Coverage"/>) probes one actual aquamarine pixel per occupied
         /// spatial cell, ranked by cell density and then by distance from the component
         /// centroid, so concentrated/interior regions are tested first and the whole
         /// component shape is covered before neighbours are repeated. Stage B
-        /// (<see cref="Exhaustive"/>) contains every remaining white pixel of the same
+        /// (<see cref="Exhaustive"/>) contains every remaining aquamarine pixel of the same
         /// component, ordered centre-out, so an unsuccessful coverage sweep can still
-        /// exhaust the candidate. Every point belongs to the component's detected white
-        /// mask — normal white-loot probing never moves the cursor onto non-white pixels.
+        /// exhaust the candidate. Every point belongs to the component's detected loot
+        /// mask — normal-loot probing never moves the cursor onto non-loot pixels.
         /// </summary>
-        internal sealed class WhiteProbePlan
+        internal sealed class LootProbePlan
         {
-            public WhiteProbePlan(
+            public LootProbePlan(
                 IReadOnlyList<Point> coverage,
                 IReadOnlyList<Point> exhaustive,
                 int cellSizePx,
@@ -4626,11 +4494,11 @@ namespace DriverScanTester.Services
             => a.Y != b.Y ? a.Y.CompareTo(b.Y) : a.X.CompareTo(b.X);
 
         /// <summary>
-        /// Builds the deterministic two-stage probe plan for one white component. The
+        /// Builds the deterministic two-stage probe plan for one loot component. The
         /// plan is based only on the component's own detected pixels, so it is pure and
         /// testable without a live game window.
         /// </summary>
-        internal static WhiteProbePlan BuildWhiteProbePlan(WhiteComponent component)
+        internal static LootProbePlan BuildLootProbePlan(LootComponent component)
         {
             ArgumentNullException.ThrowIfNull(component);
 
@@ -4638,14 +4506,14 @@ namespace DriverScanTester.Services
             pixels.Sort(CompareRowMajor);
             if (pixels.Count == 0)
             {
-                return new WhiteProbePlan(
+                return new LootProbePlan(
                     Array.Empty<Point>(), Array.Empty<Point>(),
-                    WhiteProbeCellMinPx, 0);
+                    LootProbeCellMinPx, 0);
             }
 
             int cellSize = Math.Max(
-                WhiteProbeCellMinPx,
-                (int)Math.Ceiling(Math.Max(component.Width, component.Height) / (double)WhiteProbeCellsPerAxis));
+                LootProbeCellMinPx,
+                (int)Math.Ceiling(Math.Max(component.Width, component.Height) / (double)LootProbeCellsPerAxis));
 
             var occupiedCells = new Dictionary<(int CellX, int CellY), List<Point>>();
             foreach (Point pixel in pixels)
@@ -4702,7 +4570,7 @@ namespace DriverScanTester.Services
                     coverage.Add(representative);
             }
 
-            // Every white pixel that was not used by Stage A remains eligible. Centre-out
+            // Every aquamarine pixel that was not used by Stage A remains eligible. Centre-out
             // ordering keeps the fallback visually similar to the coverage pass instead of
             // re-scanning one row from left to right.
             var exhaustive = new List<Point>(pixels.Count - coverage.Count);
@@ -4723,10 +4591,10 @@ namespace DriverScanTester.Services
                 return distance != 0 ? distance : CompareRowMajor(left, right);
             });
 
-            return new WhiteProbePlan(coverage, exhaustive, cellSize, occupiedCells.Count);
+            return new LootProbePlan(coverage, exhaustive, cellSize, occupiedCells.Count);
         }
 
-        /// <summary>Picks an actual detected-white pixel closest to the cell's own white centroid.</summary>
+        /// <summary>Picks an actual detected-aquamarine pixel closest to the cell's own loot centroid.</summary>
         private static Point SelectCellRepresentative(List<Point> cellPixels)
         {
             if (cellPixels.Count == 1)
@@ -4760,11 +4628,11 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Bounded, deterministic probe sweep over the accepted candidates. Normal white
+        /// Bounded, deterministic probe sweep over the accepted candidates. Normal
         /// loot is interleaved round-robin between candidates so a large component cannot
         /// consume the whole budget before smaller components are touched. Pink SOD/SOP
         /// keeps its existing candidate-by-candidate order and probes every pixel.
-        /// Already-examined white coordinates from a previous incomplete pass are skipped
+        /// Already-examined loot coordinates from a previous incomplete pass are skipped
         /// so a bounded budget continues instead of restarting the same prefix forever.
         /// </summary>
         internal sealed class LootProbePlanner
@@ -4797,16 +4665,16 @@ namespace DriverScanTester.Services
                 InitialRemainingPerCandidate = initialPerCandidate;
             }
 
-            public static LootProbePlanner CreateForWhite(
-                IReadOnlyList<WhiteComponent> candidates,
+            public static LootProbePlanner CreateForNormal(
+                IReadOnlyList<LootComponent> candidates,
                 IReadOnlySet<Point>? alreadyProbed)
             {
                 ArgumentNullException.ThrowIfNull(candidates);
                 var points = new List<List<Point>>(candidates.Count);
                 int skipped = 0;
-                foreach (WhiteComponent candidate in candidates)
+                foreach (LootComponent candidate in candidates)
                 {
-                    WhiteProbePlan plan = BuildWhiteProbePlan(candidate);
+                    LootProbePlan plan = BuildLootProbePlan(candidate);
                     var remaining = new List<Point>(plan.Points.Count);
                     foreach (Point point in plan.Points)
                     {
@@ -4822,11 +4690,11 @@ namespace DriverScanTester.Services
                 return new LootProbePlanner(points, interleave: true, skipped);
             }
 
-            public static LootProbePlanner CreateForPink(IReadOnlyList<WhiteComponent> candidates)
+            public static LootProbePlanner CreateForPink(IReadOnlyList<LootComponent> candidates)
             {
                 ArgumentNullException.ThrowIfNull(candidates);
                 var points = new List<List<Point>>(candidates.Count);
-                foreach (WhiteComponent candidate in candidates)
+                foreach (LootComponent candidate in candidates)
                     points.Add(new List<Point>(candidate.Points));
                 return new LootProbePlanner(points, interleave: false, previouslyProbedSkipped: 0);
             }
@@ -4927,14 +4795,14 @@ namespace DriverScanTester.Services
                 : LootScanPassResult.NoItem;
 
         /// <summary>
-        /// Key that ties white-loot probe progress to the exact screen state and accepted
+        /// Key that ties normal-loot probe progress to the exact screen state and accepted
         /// candidate geometry. A different key means the character/camera/frame changed,
         /// so previously examined coordinates must not be trusted.
         /// </summary>
-        internal static string BuildWhiteProbeProgressKey(
+        internal static string BuildLootProbeProgressKey(
             string regionName,
             LootClientGeometry? geometry,
-            IReadOnlyList<WhiteComponent> candidates)
+            IReadOnlyList<LootComponent> candidates)
         {
             string geometryKey = geometry.HasValue
                 ? $"{geometry.Value.WindowHandle.ToInt64():X}:" +
@@ -4946,23 +4814,23 @@ namespace DriverScanTester.Services
             return $"{regionName}|{geometryKey}|{candidateKey}";
         }
 
-        private void ClearWhiteProbeProgress()
+        private void ClearLootProbeProgress()
         {
-            _probedWhiteProbeProgress.Clear();
-            _whiteProbeProgressKey = string.Empty;
+            _probedLootProbeProgress.Clear();
+            _lootProbeProgressKey = string.Empty;
         }
 
-        private static string FormatWhiteComponent(WhiteComponent component)
+        private static string FormatLootComponent(LootComponent component)
             => $"bounds=({component.XMin},{component.YMin})-({component.XMax},{component.YMax}) " +
                $"{component.Area}px fill={component.Area / (float)Math.Max(component.Width * component.Height, 1):F2}";
 
         /// <summary>Compact candidate bounds/pixel summary; bounded so normal logs stay short.</summary>
-        private static string DescribeWhiteCandidates(IReadOnlyList<WhiteComponent> candidates)
+        private static string DescribeLootCandidates(IReadOnlyList<LootComponent> candidates)
         {
             const int maxDetails = 8;
             string details = string.Join("; ", candidates
                 .Take(maxDetails)
-                .Select((candidate, index) => $"#{index + 1} {FormatWhiteComponent(candidate)}"));
+                .Select((candidate, index) => $"#{index + 1} {FormatLootComponent(candidate)}"));
             int hidden = candidates.Count - maxDetails;
             return hidden > 0 ? $"{details}; +{hidden} more" : details;
         }
@@ -5400,16 +5268,16 @@ namespace DriverScanTester.Services
             // The client updates its mouseover memory asynchronously. The previous
             // normal-loot value (1 ms) was too short — eight moves completed in ~22 ms
             // without ever observing the updated state. Pink keeps its existing 5 ms
-            // settle; normal white loot uses the bounded configurable interval below.
+            // settle; normal loot uses the bounded configurable interval below.
             int settleMs = pinkOnly
                 ? BotConstants.Delays.SodSopMouseOverSettleMs
-                : BotConstants.Delays.LootWhiteMouseOverSettleMs;
+                : BotConstants.Delays.NormalLootMouseOverSettleMs;
             _scanToken.WaitHandle.WaitOne(settleMs);
         }
 
         /// <summary>
         /// Reads the calibrated "loot under cursor" indicator after the cursor has
-        /// settled. Normal white loot re-reads a negative result a bounded number of
+        /// settled. Normal loot re-reads a negative result a bounded number of
         /// times so a late asynchronous mouseover update is not recorded as a miss.
         /// A read from a previous cursor position is never reused: each probe waits for
         /// its own settle first and then reads the live memory value again.
@@ -5421,9 +5289,9 @@ namespace DriverScanTester.Services
             if (pinkOnly)
                 return false;
 
-            for (int poll = 0; poll < BotConstants.Delays.LootWhiteMouseOverExtraPolls; poll++)
+            for (int poll = 0; poll < BotConstants.Delays.NormalLootMouseOverExtraPolls; poll++)
             {
-                if (_scanToken.WaitHandle.WaitOne(BotConstants.Delays.LootWhiteMouseOverExtraPollMs))
+                if (_scanToken.WaitHandle.WaitOne(BotConstants.Delays.NormalLootMouseOverExtraPollMs))
                     return false;
                 if (_memoryService.IsLootMouseOver())
                     return true;

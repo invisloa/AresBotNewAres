@@ -34,7 +34,7 @@ namespace DriverScanTester.Tests
             Assert.Equal(0, result.MobMarkerRings);
             Assert.Equal(430, result.FinalProbeCount);
 
-            LootSystem.WhiteComponent scroll = Assert.Single(result.CandidateComponents);
+            LootSystem.LootComponent scroll = Assert.Single(result.CandidateComponents);
             Assert.Equal(new Rectangle(463, 298, 26, 29),
                 Rectangle.FromLTRB(scroll.XMin, scroll.YMin, scroll.XMax + 1, scroll.YMax + 1));
             Assert.Equal(430, scroll.Area);

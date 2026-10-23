@@ -98,11 +98,11 @@
     },
     {
       "Type": 3,
-      "PathFile": "COT LEVEL 2.json",
+      "PathFile": "COT LEVEL 1.json",
       "StartDelayMs": 0,
       "Routes": [
         {
-          "PathFile": "COT LEVEL 2.json",
+          "PathFile": "COT LEVEL 1.json",
           "StartDelayMs": 0,
           "StartCheckEnabled": true,
           "StartPositionX": 128,

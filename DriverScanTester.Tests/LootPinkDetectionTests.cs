@@ -11,14 +11,13 @@ namespace DriverScanTester.Tests
     /// Regression tests for the SOD/SOP pink-pixel detection used by the
     /// MoveAndAttack loot mode.
     ///
-    /// Normal loot keeps compact white sparkles and adds shaded, low-chroma
-    /// near-white large components; SOD/SOP drops use a custom
+    /// Normal loot uses the aquamarine #00FFAA family only; SOD/SOP drops use a custom
     /// hot-pink scroll texture whose shading/anti-aliasing produces MANY
     /// pink shades (observed roughly R 239..255, G 21..109, B 148..255), so
     /// <see cref="LootSystem"/> classifies the hot-pink COLOR FAMILY — strong
     /// red, significant blue, substantially weaker green and clear magenta
     /// dominance — rather than one literal RGB value. Both the darker red/pink
-    /// and the brighter magenta areas therefore qualify, while white sparkles,
+    /// and the brighter magenta areas therefore qualify, while white, gray/stone
     /// gray/stone floor, green terrain and red/yellow/blue/cyan effects are
     /// rejected. Blobs must still be at least 10x10 px (the rendered loot
     /// square) while smaller pink specks are skipped; the mouseover memory check
@@ -54,7 +53,7 @@ namespace DriverScanTester.Tests
         [InlineData(255, 192, 203, false)] // classic pink (green too strong)
         [InlineData(140, 10, 80, false)]   // DeepPink at ~55% ground-light brightness
         // Not pink / wrong hue — must be rejected.
-        [InlineData(255, 255, 255, false)] // white loot sparkle
+        [InlineData(255, 255, 255, false)] // white is not pink
         [InlineData(128, 128, 128, false)] // gray floor
         [InlineData(0, 255, 0, false)]     // pure green — old paint / grass
         [InlineData(60, 200, 60, false)]   // saturated grass green
@@ -76,9 +75,9 @@ namespace DriverScanTester.Tests
             Assert.False(IsPink(130, 110, 90));
         }
 
-        private static LootSystem.WhiteComponent MakeBlob(int width, int height)
+        private static LootSystem.LootComponent MakeBlob(int width, int height)
         {
-            var component = new LootSystem.WhiteComponent();
+            var component = new LootSystem.LootComponent();
             for (int x = 0; x < width; x++)
             {
                 for (int y = 0; y < height; y++)
@@ -147,11 +146,11 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void WhiteComponent_NestedType_IsInternalForTesting()
+        public void LootComponent_NestedType_IsInternalForTesting()
         {
             // Guards the InternalsVisibleTo test hook: if this type stops being
             // accessible the pink candidate tests above no longer compile/run.
-            Type? nested = typeof(LootSystem).GetNestedType("WhiteComponent", BindingFlags.NonPublic);
+            Type? nested = typeof(LootSystem).GetNestedType("LootComponent", BindingFlags.NonPublic);
             Assert.NotNull(nested);
         }
 
@@ -161,7 +160,7 @@ namespace DriverScanTester.Tests
         /// The production connected-component labeler, fed through the pink-loot mask.
         /// Mirrors exactly what ScanRegion does in Phase A for pinkOnly=true.
         /// </summary>
-        private static List<LootSystem.WhiteComponent> LabelPinkLootComponents(
+        private static List<LootSystem.LootComponent> LabelPinkLootComponents(
             IEnumerable<(Point Point, Color Color)> pixels)
         {
             List<Point> maskPoints = pixels
@@ -171,12 +170,12 @@ namespace DriverScanTester.Tests
             return LabelRawComponents(maskPoints);
         }
 
-        private static List<LootSystem.WhiteComponent> LabelRawComponents(IEnumerable<Point> pixels)
+        private static List<LootSystem.LootComponent> LabelRawComponents(IEnumerable<Point> pixels)
         {
             MethodInfo method = typeof(LootSystem).GetMethod(
-                "LabelWhiteComponents", BindingFlags.NonPublic | BindingFlags.Static)
-                ?? throw new InvalidOperationException("LootSystem.LabelWhiteComponents was not found.");
-            return (List<LootSystem.WhiteComponent>)method.Invoke(
+                "LabelLootComponents", BindingFlags.NonPublic | BindingFlags.Static)
+                ?? throw new InvalidOperationException("LootSystem.LabelLootComponents was not found.");
+            return (List<LootSystem.LootComponent>)method.Invoke(
                 null, new object[] { pixels.ToList() })!;
         }
 
@@ -246,7 +245,7 @@ namespace DriverScanTester.Tests
 
             // The raw magenta structure merges into one wide connected component —
             // the exact shape that previously could slip through IsMobMarkerRingComponent.
-            List<LootSystem.WhiteComponent> raw = LabelRawComponents(pixels.Select(pixel => pixel.Point));
+            List<LootSystem.LootComponent> raw = LabelRawComponents(pixels.Select(pixel => pixel.Point));
             Assert.Contains(raw, component => component.Width > 40);
 
             // Filtering through the production pink-loot mask removes every marker pixel,
@@ -267,7 +266,7 @@ namespace DriverScanTester.Tests
             // A marker ring overlaps the pink square; only the ring pixels are removed.
             pixels.AddRange(RingPixels(52, 52));
 
-            List<LootSystem.WhiteComponent> components = LabelPinkLootComponents(pixels);
+            List<LootSystem.LootComponent> components = LabelPinkLootComponents(pixels);
             Assert.Contains(components, LootSystem.IsPinkLootCandidate);
         }
 
@@ -281,15 +280,15 @@ namespace DriverScanTester.Tests
                     pixels.Add((new Point(x, y), Color.FromArgb(255, 34, 175)));
             }
 
-            List<LootSystem.WhiteComponent> components = LabelPinkLootComponents(pixels);
-            LootSystem.WhiteComponent component = Assert.Single(components);
+            List<LootSystem.LootComponent> components = LabelPinkLootComponents(pixels);
+            LootSystem.LootComponent component = Assert.Single(components);
             Assert.True(LootSystem.IsPinkLootCandidate(component));
         }
 
         // ── Bulk LockBits buffer reader (Phase A of the loot scan) ──
         // The pink sweep reads the whole captured frame as one 32bpp BGRA buffer
         // instead of calling Bitmap.GetPixel per pixel. These tests pin the byte
-        // order, the pink/white classifiers and the exclude-zone handling so a
+        // order, the pink/aquamarine classifiers and the exclude-zone handling so a
         // regression cannot silently invert colors or shift rows.
 
         private static byte[] BgraBuffer(
@@ -310,18 +309,18 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void BulkBufferReader_ReadsBgraAndAppliesPinkLootMask()
+        public void BulkBufferReader_ReadsBgraAndAppliesPinkAndAquamarineMasks()
         {
             const int width = 3;
             const int height = 2;
             const int stride = width * 4;
             byte[] buffer = BgraBuffer(width, height, stride,
                 (0, 0, 255, 34, 175),   // hot pink — loot family
-                (1, 0, 255, 255, 255),  // white loot
+                (1, 0, 0, 255, 170),    // aquamarine — normal loot family
                 (2, 0, 255, 0, 255),    // pure magenta — artificial marker, excluded
                 (0, 1, 239, 21, 148),   // dark hot pink — loot family
-                (1, 1, 180, 174, 169),  // shaded neutral white — normal loot family
-                (2, 1, 128, 128, 128)); // too dark for shaded-white detection
+                (1, 1, 255, 255, 255),  // white — no longer normal loot
+                (2, 1, 128, 128, 128)); // neutral gray — no longer normal loot
 
             var pinkPoints = new List<Point>();
             LootSystem.CollectTargetPointsFromBuffer(
@@ -329,17 +328,11 @@ namespace DriverScanTester.Tests
                 pinkOnly: true, pinkPoints);
             Assert.Equal(new[] { new Point(0, 0), new Point(0, 1) }, pinkPoints);
 
-            var whitePoints = new List<Point>();
+            var normalPoints = new List<Point>();
             LootSystem.CollectTargetPointsFromBuffer(
                 buffer, stride, height, 0, width, 0, height,
-                pinkOnly: false, whitePoints);
-            Assert.Equal(new[] { new Point(1, 0) }, whitePoints);
-
-            var shadedWhitePoints = new List<Point>();
-            LootSystem.CollectTargetPointsFromBuffer(
-                buffer, stride, height, 0, width, 0, height,
-                pinkOnly: false, targetPoints: shadedWhitePoints, shadedWhiteOnly: true);
-            Assert.Equal(new[] { new Point(1, 0), new Point(1, 1) }, shadedWhitePoints);
+                pinkOnly: false, normalPoints);
+            Assert.Equal(new[] { new Point(1, 0) }, normalPoints);
         }
 
         [Fact]

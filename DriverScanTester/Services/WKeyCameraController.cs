@@ -266,16 +266,11 @@ namespace DriverScanTester.Services
                         _log("[WCamera] ForceStartMoving W-down failed and its W-up cleanup could not be confirmed. " +
                              "The session stays blocked until a later Stop/session cleanup releases W.");
                     }
-                    else if (_externalCameraOwners.Count == 0)
-                    {
-                        RestoreStationaryView("ForceStartMoving W-down failed");
-                    }
                     else
                     {
-                        _stationaryRestorePending = true;
+                        FinishClosingIfNeeded("ForceStartMoving W-down failed");
                     }
 
-                    FinishClosingIfNeeded();
                     return WKeyRestartResult.Failed;
                 }
 
@@ -300,7 +295,8 @@ namespace DriverScanTester.Services
                 // final W-up that previously failed. The owner token is retained for this.
                 if (ReferenceEquals(_unresolvedWUpOwner, owner))
                 {
-                    TryRetryUnresolvedWUp(owner, "repeated last owner release");
+                    if (TryRetryUnresolvedWUp(owner, "repeated last owner release"))
+                        FinishClosingIfNeeded("repeated last owner release");
                     return;
                 }
 
@@ -332,9 +328,7 @@ namespace DriverScanTester.Services
                     return;
                 }
 
-                RestoreStationaryView("last W owner released");
-                _stationaryRestorePending = false;
-                FinishClosingIfNeeded();
+                FinishClosingIfNeeded("last W owner released");
             }
         }
 
@@ -413,10 +407,7 @@ namespace DriverScanTester.Services
                 }
 
                 if (shouldRestore)
-                    RestoreStationaryView("camera operation released");
-
-                _stationaryRestorePending = false;
-                FinishClosingIfNeeded();
+                    FinishClosingIfNeeded("camera operation released");
             }
         }
 
@@ -484,10 +475,7 @@ namespace DriverScanTester.Services
                 if (_wOwners.Count != 0 || _externalCameraOwners.Count != 0)
                     return;
 
-                RestoreStationaryView("workflow ended");
-                _stationaryRestorePending = false;
-                _ended = true;
-                UnregisterSession();
+                FinishClosingIfNeeded("workflow ended");
             }
         }
 
@@ -518,9 +506,35 @@ namespace DriverScanTester.Services
             }
         }
 
-        private void FinishClosingIfNeeded()
+        /// <summary>
+        /// Performs the final stationary-camera write for an idle controller and, when the
+        /// session is closing, unregisters it afterwards. Unregistration is deliberately
+        /// the last step: a replacement controller cannot register while the session is
+        /// still current, and this generation performs no camera write after it unregisters.
+        /// Callers must hold <see cref="_gate"/>.
+        /// </summary>
+        private void FinishClosingIfNeeded(string reason)
         {
-            if (!_closing || _ended || _unresolvedWUpOwner != null)
+            if (_ended || _unresolvedWUpOwner != null)
+                return;
+
+            if (_wOwners.Count != 0 || _externalCameraOwners.Count != 0)
+            {
+                _stationaryRestorePending = true;
+                return;
+            }
+
+            // Defensive: a stale generation must never touch a newer session's camera.
+            if (!IsCurrentGeneration())
+            {
+                _ended = true;
+                return;
+            }
+
+            RestoreStationaryView(reason);
+            _stationaryRestorePending = false;
+
+            if (!_closing)
                 return;
 
             _ended = true;
@@ -528,9 +542,10 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// One bounded retry of an unconfirmed physical W-up. Success clears the pending
-        /// state, restores the stationary view only when no other owner exists, and lets a
-        /// closing session unregister. Failure leaves the session safely blocked.
+        /// One bounded retry of an unconfirmed physical W-up. This only performs the
+        /// physical release and clears the pending state; the caller owns the single
+        /// follow-up finalization so the retry helper and its caller cannot both restore
+        /// the camera or unregister the session. Failure leaves the session safely blocked.
         /// </summary>
         private bool TryRetryUnresolvedWUp(WKeyCameraOwner owner, string reason)
         {
@@ -546,20 +561,6 @@ namespace DriverScanTester.Services
 
             _unresolvedWUpOwner = null;
             _log($"[WCamera] Physical W-up callback completed on retry ({reason}, {owner.Source}).");
-
-            if (_wOwners.Count == 0 && _externalCameraOwners.Count == 0)
-            {
-                RestoreStationaryView(reason);
-                _stationaryRestorePending = false;
-                FinishClosingIfNeeded();
-            }
-            else
-            {
-                // Defensive: new owners are rejected while the release is unresolved, so
-                // this branch is not expected. Keep the movement view rather than racing it.
-                _stationaryRestorePending = true;
-            }
-
             return true;
         }
 

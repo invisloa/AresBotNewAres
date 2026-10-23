@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
 using DriverScanTester.Services;
 using Xunit;
 
@@ -588,6 +590,241 @@ namespace DriverScanTester.Tests
             AssertNormalLootCameraVerifies(memory);
         }
 
+        [Fact]
+        public void SuccessfulFinalReleaseRestoresStationaryBeforeUnregisteringSession()
+        {
+            var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            WKeyCameraOwner owner = controller.CreateOwner("final release", keyUp =>
+                memory.Events.Add(keyUp ? "W-up" : "W-down"));
+            Assert.True(controller.TryAcquireW(owner));
+
+            // Closing with an active W owner keeps the session registered until the
+            // final release completes.
+            controller.EndSession();
+            Assert.False(controller.IsEnded);
+            Assert.True(WKeyCameraController.HasActiveSession(Pid, ModuleBase));
+
+            bool? sessionRegisteredDuringFinalRestore = null;
+            memory.BeforeVerticalWrite = value =>
+            {
+                if (value == BotConstants.Camera.StationaryVerticalLock)
+                    sessionRegisteredDuringFinalRestore = WKeyCameraController.HasActiveSession(Pid, ModuleBase);
+            };
+            int writesBefore = memory.VerticalWrites.Count;
+
+            controller.ReleaseW(owner);
+
+            Assert.Equal(writesBefore + 1, memory.VerticalWrites.Count);
+            Assert.True(sessionRegisteredDuringFinalRestore,
+                "the final stationary restore must happen before the session is unregistered");
+            Assert.True(controller.IsEnded);
+            Assert.False(WKeyCameraController.HasActiveSession(Pid, ModuleBase));
+
+            using var replacement = new WKeyCameraController(memory.CreateService(), _ => { });
+            Assert.True(replacement.IsAcceptingOperations);
+        }
+
+        [Fact]
+        public void FailedReleaseThenEndSessionRetryRestoresExactlyOnceBeforeUnregistering()
+        {
+            var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            bool failWUp = true;
+            int stationaryRestoresDuringEndSession = 0;
+            bool? sessionRegisteredDuringFinalRestore = null;
+            WKeyCameraOwner owner = controller.CreateOwner("failed final release", keyUp =>
+            {
+                if (keyUp && failWUp)
+                    throw new InvalidOperationException("test W-up failure");
+                memory.Events.Add(keyUp ? "W-up" : "W-down");
+            });
+
+            Assert.True(controller.TryAcquireW(owner));
+            controller.ReleaseW(owner);
+            Assert.True(controller.HasUnresolvedPhysicalWRelease);
+            Assert.True(WKeyCameraController.HasActiveSession(Pid, ModuleBase));
+            Assert.Equal(BotConstants.Camera.MovementVerticalLock, memory.ReadCameraVerticalLock());
+
+            failWUp = false;
+            memory.BeforeVerticalWrite = value =>
+            {
+                if (value != BotConstants.Camera.StationaryVerticalLock)
+                    return;
+                stationaryRestoresDuringEndSession++;
+                sessionRegisteredDuringFinalRestore = WKeyCameraController.HasActiveSession(Pid, ModuleBase);
+            };
+            int writesBeforeEndSession = memory.VerticalWrites.Count;
+
+            controller.EndSession();
+
+            Assert.Equal(writesBeforeEndSession + 1, memory.VerticalWrites.Count);
+            Assert.Equal(1, stationaryRestoresDuringEndSession);
+            Assert.True(sessionRegisteredDuringFinalRestore,
+                "session-end retry must restore the camera before unregistering");
+            Assert.False(controller.HasUnresolvedPhysicalWRelease);
+            Assert.True(controller.IsEnded);
+            Assert.False(WKeyCameraController.HasActiveSession(Pid, ModuleBase));
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.ReadCameraVerticalLock());
+
+            // The ended generation can no longer write to the game camera.
+            memory.VerticalWrites.Clear();
+            controller.EndSession();
+            controller.Dispose();
+            controller.ReleaseW(owner);
+            Assert.Empty(memory.VerticalWrites);
+
+            using var replacement = new WKeyCameraController(memory.CreateService(), _ => { });
+            Assert.True(replacement.IsAcceptingOperations);
+        }
+
+        [Fact]
+        public async Task NewControllerCannotRegisterDuringFinalRestorationAndOldSessionNeverOverwritesIt()
+        {
+            var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
+            using var oldController = new WKeyCameraController(memory.CreateService(), _ => { });
+            object externalOwner = new();
+            Assert.True(oldController.TryAcquireExternalCameraOwner(externalOwner));
+            short operationView = 16400;
+            memory.Set(CameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset,
+                BitConverter.GetBytes(operationView));
+
+            // A closing session waits for its external camera owner before the final write.
+            oldController.EndSession();
+            Assert.False(oldController.IsEnded);
+            Assert.True(WKeyCameraController.HasActiveSession(Pid, ModuleBase));
+
+            using var restoreStarted = new ManualResetEventSlim(false);
+            using var allowRestoreToFinish = new ManualResetEventSlim(false);
+            memory.BeforeVerticalWrite = value =>
+            {
+                if (value != BotConstants.Camera.StationaryVerticalLock)
+                    return;
+                restoreStarted.Set();
+                Assert.True(allowRestoreToFinish.Wait(TimeSpan.FromSeconds(10)),
+                    "test did not release the blocked final restoration");
+            };
+
+            Task releaseTask = Task.Run(() =>
+                oldController.ReleaseExternalCameraOwner(externalOwner, restoreStationary: true));
+            Assert.True(restoreStarted.Wait(TimeSpan.FromSeconds(10)),
+                "the old controller never entered its final restoration");
+
+            // The session is still registered while the final camera write is in flight.
+            Assert.Throws<InvalidOperationException>(
+                () => new WKeyCameraController(memory.CreateService(), _ => { }));
+
+            allowRestoreToFinish.Set();
+            Task finishedRelease = await Task.WhenAny(releaseTask, Task.Delay(TimeSpan.FromSeconds(10)));
+            Assert.Same(releaseTask, finishedRelease);
+            await releaseTask;
+            Assert.True(oldController.IsEnded);
+            Assert.False(WKeyCameraController.HasActiveSession(Pid, ModuleBase));
+            memory.BeforeVerticalWrite = null;
+
+            using var replacement = new WKeyCameraController(memory.CreateService(), _ => { });
+            WKeyCameraOwner newOwner = replacement.CreateOwner("new session W", keyUp =>
+                memory.Events.Add(keyUp ? "new-W-up" : "new-W-down"));
+            Assert.True(replacement.TryAcquireW(newOwner));
+            Assert.Equal(BotConstants.Camera.MovementVerticalLock, memory.ReadCameraVerticalLock());
+            memory.VerticalWrites.Clear();
+            memory.Events.Clear();
+
+            // Every late call from the old generation must be a no-op.
+            oldController.ReleaseExternalCameraOwner(externalOwner);
+            oldController.ReleaseW(newOwner);
+            oldController.EndSession();
+            oldController.Dispose();
+
+            Assert.Empty(memory.VerticalWrites);
+            Assert.Empty(memory.Events);
+            Assert.Equal(BotConstants.Camera.MovementVerticalLock, memory.ReadCameraVerticalLock());
+            Assert.Equal(1, replacement.ActiveWOwnerCount);
+            replacement.ReleaseW(newOwner);
+        }
+
+        [Fact]
+        public void RepeatedCleanupAfterSuccessfulReleaseIsIdempotentAndDoesNotAffectReplacement()
+        {
+            var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            int wUpCount = 0;
+            WKeyCameraOwner owner = controller.CreateOwner("repeated cleanup", keyUp =>
+            {
+                if (keyUp) wUpCount++;
+                memory.Events.Add(keyUp ? "W-up" : "W-down");
+            });
+
+            Assert.True(controller.TryAcquireW(owner));
+            controller.EndSession();
+            controller.ReleaseW(owner);
+
+            Assert.True(controller.IsEnded);
+            Assert.Equal(1, wUpCount);
+            int writesAfterSuccessfulRelease = memory.VerticalWrites.Count;
+
+            for (int i = 0; i < 5; i++)
+            {
+                controller.ReleaseW(owner);
+                controller.EndSession();
+                controller.Dispose();
+            }
+
+            Assert.Equal(writesAfterSuccessfulRelease, memory.VerticalWrites.Count);
+            Assert.Equal(1, wUpCount);
+            Assert.False(WKeyCameraController.HasActiveSession(Pid, ModuleBase));
+
+            using var replacement = new WKeyCameraController(memory.CreateService(), _ => { });
+            WKeyCameraOwner newOwner = replacement.CreateOwner("replacement W", keyUp =>
+                memory.Events.Add(keyUp ? "new-W-up" : "new-W-down"));
+            Assert.True(replacement.TryAcquireW(newOwner));
+            Assert.Equal(BotConstants.Camera.MovementVerticalLock, memory.ReadCameraVerticalLock());
+            memory.VerticalWrites.Clear();
+            memory.Events.Clear();
+
+            for (int i = 0; i < 5; i++)
+            {
+                controller.ReleaseW(owner);
+                controller.EndSession();
+                controller.Dispose();
+            }
+
+            Assert.Empty(memory.VerticalWrites);
+            Assert.Empty(memory.Events);
+            Assert.Equal(BotConstants.Camera.MovementVerticalLock, memory.ReadCameraVerticalLock());
+            Assert.Equal(1, replacement.ActiveWOwnerCount);
+            replacement.ReleaseW(newOwner);
+        }
+
+        [Fact]
+        public void ExternalCameraOwnershipDelaysSessionCompletionUntilItsRelease()
+        {
+            var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            object externalOwner = new();
+            Assert.True(controller.TryAcquireExternalCameraOwner(externalOwner));
+            short operationView = 16400;
+            memory.Set(CameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset,
+                BitConverter.GetBytes(operationView));
+
+            controller.EndSession();
+
+            Assert.False(controller.IsEnded);
+            Assert.True(WKeyCameraController.HasActiveSession(Pid, ModuleBase));
+            Assert.Equal(operationView, memory.ReadCameraVerticalLock());
+            Assert.Throws<InvalidOperationException>(
+                () => new WKeyCameraController(memory.CreateService(), _ => { }));
+
+            controller.ReleaseExternalCameraOwner(externalOwner, restoreStationary: true);
+
+            Assert.True(controller.IsEnded);
+            Assert.False(WKeyCameraController.HasActiveSession(Pid, ModuleBase));
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.ReadCameraVerticalLock());
+
+            using var replacement = new WKeyCameraController(memory.CreateService(), _ => { });
+            Assert.True(replacement.IsAcceptingOperations);
+        }
+
         private static void AssertNormalLootCameraVerifies(MemoryFixture memory)
         {
             using var loot = new LootSystem(memory.CreateService(), _ => { }, wKeyCameraController: null);
@@ -677,6 +914,9 @@ namespace DriverScanTester.Tests
             public List<string> VerticalWrites { get; } = new();
             public bool IgnoreVerticalWrites { get; init; }
 
+            /// <summary>Optional hook used by deterministic shutdown-race tests.</summary>
+            public Action<short>? BeforeVerticalWrite { get; set; }
+
             public MemoryFixture(short verticalLock)
             {
                 Set(ModuleBase + BotConstants.MemoryOffsets.CameraPtr, BitConverter.GetBytes(CameraBase));
@@ -712,6 +952,8 @@ namespace DriverScanTester.Tests
                         bytesWritten = 0;
                         if (address == CameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset && IgnoreVerticalWrites)
                             return false;
+                        if (address == CameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset)
+                            BeforeVerticalWrite?.Invoke(BitConverter.ToInt16(buffer, 0));
                         _memory[address] = (byte[])buffer.Clone();
                         bytesWritten = (uint)buffer.Length;
                         if (address == CameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset)

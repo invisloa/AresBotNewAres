@@ -629,9 +629,39 @@ namespace DriverScanTester.ViewModels
             // before a replacement session is created. The previous movement/loot (and
             // heal) tasks must have completed their captured cleanup; otherwise this
             // launch is rejected and the user can retry once they finish. A workflow may
-            // not be replaced at all.
-            if (!TryPrepareReplacementCameraSession("Run This Path"))
-                return;
+            // not be replaced at all. The replacement session is created under the
+            // shared startup gate so standalone-loot startup cannot interleave.
+            ulong baseAddr;
+            GameMemoryService memoryService;
+            lock (_cameraRuntimeStartupGate)
+            {
+                if (!TryPrepareReplacementCameraSession("Run This Path"))
+                    return;
+
+                // 2. Resolve base
+                baseAddr = FindModuleInScanner("Ares.exe", false);
+                if (baseAddr == 0)
+                {
+                    _pointerScanner?.RefreshModules();
+                    baseAddr = FindModuleInScanner("Ares.exe", true);
+                }
+
+                memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
+                if (WKeyCameraController.HasActiveSession(_attachedPid, baseAddr))
+                {
+                    AppendBotLog("[Path Editor] Run This Path rejected: another camera session is still active. Retry after its cleanup finishes.");
+                    return;
+                }
+                try
+                {
+                    _wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    AppendBotLog($"[Path Editor] Run This Path rejected: {ex.Message}");
+                    return;
+                }
+            }
 
             // A previous run may have been stopped while paused — always start unpaused.
             PauseController.Resume();
@@ -644,35 +674,11 @@ namespace DriverScanTester.ViewModels
             // changes, potions are never consumed).
             FocusGameWindow();
 
-            // 2. Resolve base
-            ulong baseAddr = FindModuleInScanner("Ares.exe", false);
-            if (baseAddr == 0)
-            {
-                _pointerScanner?.RefreshModules();
-                baseAddr = FindModuleInScanner("Ares.exe", true);
-            }
-
             // 3. Init MovementSystem with path
             if (!float.TryParse(BotTargetXText, out float tx)) tx = 0;
             if (!float.TryParse(BotTargetYText, out float ty)) ty = 0;
 
             var initialMode = path.Count > 0 ? path[0].Mode : Services.BotMode.OnlyMove;
-
-            var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
-            if (WKeyCameraController.HasActiveSession(_attachedPid, baseAddr))
-            {
-                AppendBotLog("[Path Editor] Run This Path rejected: another camera session is still active. Retry after its cleanup finishes.");
-                return;
-            }
-            try
-            {
-                _wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
-            }
-            catch (InvalidOperationException ex)
-            {
-                AppendBotLog($"[Path Editor] Run This Path rejected: {ex.Message}");
-                return;
-            }
             var pathLoader = new SavedPathLoader(AppendBotLog);
             var profile = _workflowCoordinator?.ActiveProfile ?? new BotProfile();
             var itemSeller = new ItemSellerService(memoryService, AppendBotLog, _wKeyCameraController);
@@ -3156,6 +3162,17 @@ namespace DriverScanTester.ViewModels
         private HealManaSystem? _healManaSystem;
         private LootSystem? _lootSystem;
 
+        // Serializes camera-session creation with the standalone-loot startup decision
+        // so neither entry point can pass its exclusivity check while the other is
+        // starting. Only short startup/registration work is done under this lock;
+        // running bot loops, scans and awaits never hold it.
+        private readonly object _cameraRuntimeStartupGate = new();
+
+        // Deterministic test seam: invoked while the startup gate is held, after the
+        // standalone-loot runtime has been registered and before the gate is released.
+        // Null in production.
+        internal Action? CameraRuntimeStartupGateHeldForTests { get; set; }
+
         // --- Route Workflow Coordinator ---
         private BotWorkflowCoordinator? _workflowCoordinator;
         private Task? _workflowTask;
@@ -3380,6 +3397,8 @@ namespace DriverScanTester.ViewModels
             if (_workflowCoordinator?.IsRunning == true) { AppendLog("Workflow already running."); return; }
             if (BlockNormalActionForMovementDiagnostic("Start Workflow"))
                 return;
+            // Fast-fail before touching window focus; the startup gate re-checks this
+            // atomically before the camera session is registered.
             if (!TryEnsureNoActiveCameraRuntime("Start Workflow"))
                 return;
 
@@ -3390,32 +3409,42 @@ namespace DriverScanTester.ViewModels
             int offsetY = profile.WindowOffsetY;
             DetectAndSetWindowOffset(offsetX, offsetY);
 
-            ulong baseAddr = FindModuleInScanner("Ares.exe", false);
-            if (baseAddr == 0)
+            // The runtime check, session check and controller registration form one
+            // atomic startup decision against standalone-loot startup.
+            ulong baseAddr;
+            GameMemoryService memoryService;
+            lock (_cameraRuntimeStartupGate)
             {
-                _pointerScanner?.RefreshModules();
-                baseAddr = FindModuleInScanner("Ares.exe", true);
-            }
-            if (baseAddr == 0)
-            {
-                AppendLog("Failed to resolve module base for GameMemoryService.");
-                return;
-            }
+                if (!TryEnsureNoActiveCameraRuntime("Start Workflow"))
+                    return;
 
-            var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
-            if (WKeyCameraController.HasActiveSession(_attachedPid, baseAddr))
-            {
-                AppendBotLog("[Coordinator] Start Workflow rejected: another camera session is still active. Retry after its cleanup finishes.");
-                return;
-            }
-            try
-            {
-                _wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
-            }
-            catch (InvalidOperationException ex)
-            {
-                AppendBotLog($"[Coordinator] Start Workflow rejected: {ex.Message}");
-                return;
+                baseAddr = FindModuleInScanner("Ares.exe", false);
+                if (baseAddr == 0)
+                {
+                    _pointerScanner?.RefreshModules();
+                    baseAddr = FindModuleInScanner("Ares.exe", true);
+                }
+                if (baseAddr == 0)
+                {
+                    AppendLog("Failed to resolve module base for GameMemoryService.");
+                    return;
+                }
+
+                memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
+                if (WKeyCameraController.HasActiveSession(_attachedPid, baseAddr))
+                {
+                    AppendBotLog("[Coordinator] Start Workflow rejected: another camera session is still active. Retry after its cleanup finishes.");
+                    return;
+                }
+                try
+                {
+                    _wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    AppendBotLog($"[Coordinator] Start Workflow rejected: {ex.Message}");
+                    return;
+                }
             }
             var repotSystem = new RepotSystem(memoryService, AppendBotLog, _wKeyCameraController);
             var repotDetector = new RepotDetectorService(AppendBotLog);
@@ -3799,20 +3828,31 @@ namespace DriverScanTester.ViewModels
             }
 
             var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
-            if (WKeyCameraController.HasActiveSession(_attachedPid, baseAddr))
-            {
-                AppendBotLog("[Operation Test] Rejected: a previous camera session is still performing input/camera cleanup. Retry when it has finished.");
-                return false;
-            }
+
+            // Re-check and register the camera session under the shared startup gate so
+            // a concurrent standalone-loot start cannot pass its own check between this
+            // guard and the new controller becoming the active session.
             WKeyCameraController wKeyCameraController;
-            try
+            lock (_cameraRuntimeStartupGate)
             {
-                wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
-            }
-            catch (InvalidOperationException ex)
-            {
-                AppendBotLog($"[Operation Test] Rejected before creating a camera controller: {ex.Message}");
-                return false;
+                if (!TryEnsureNoActiveCameraRuntime("Operation Test", "[Operation Test] "))
+                    return false;
+
+                if (WKeyCameraController.HasActiveSession(_attachedPid, baseAddr))
+                {
+                    AppendBotLog("[Operation Test] Rejected: a previous camera session is still performing input/camera cleanup. Retry when it has finished.");
+                    return false;
+                }
+
+                try
+                {
+                    wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    AppendBotLog($"[Operation Test] Rejected before creating a camera controller: {ex.Message}");
+                    return false;
+                }
             }
             var pathRunner = new PathRunnerService(
                 memoryService, AppendBotLog,
@@ -3851,7 +3891,7 @@ namespace DriverScanTester.ViewModels
 
         /// <summary>
         /// Runs one manual diagnostic loot scan (SOD/SOP pink pixels or normal
-        /// white/aquamarine-pixel loot) for the Tools tab. Uses a fresh <see cref="LootSystem"/>,
+        /// aquamarine-pixel loot) for the Tools tab. Uses a fresh <see cref="LootSystem"/>,
         /// zooms the loot camera, captures the game client and exercises the same
         /// mouseover-probe/pickup path as the running loot bot. The loot state machine
         /// and waypoint modes are not touched.
@@ -4300,39 +4340,47 @@ namespace DriverScanTester.ViewModels
                         if (!_isAttached) { AppendLog("Attach first."); return; }
                         if (BlockNormalActionForMovementDiagnostic("Start Movement Bot"))
                             return;
-                        if (!TryEnsureNoActiveCameraRuntime("Start Movement Bot"))
-                            return;
-                        // A previous run may have been stopped while paused — always start unpaused.
-                        PauseController.Resume();
-                        FocusGameWindow();
-                        if (!float.TryParse(BotTargetXText, out float tx)) tx = 5000;
-                        if (!float.TryParse(BotTargetYText, out float ty)) ty = 5000;
-        
-                        ulong baseAddr = FindModuleInScanner("Ares.exe", false);
-                        if (baseAddr == 0)
+
+                        float tx;
+                        float ty;
+                        ulong baseAddr;
+                        GameMemoryService memoryService;
+                        lock (_cameraRuntimeStartupGate)
                         {
-                            _pointerScanner?.RefreshModules();
-                            baseAddr = FindModuleInScanner("Ares.exe", true);
-                        }
-                        if (baseAddr == 0)
-                        {
-                            AppendLog("Failed to resolve module base for GameMemoryService.");
-                            return;
-                        }
-                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
-                        if (WKeyCameraController.HasActiveSession(_attachedPid, baseAddr))
-                        {
-                            AppendBotLog("[MovementBot] Start rejected: another camera session is still active. Retry after its cleanup finishes.");
-                            return;
-                        }
-                        try
-                        {
-                            _wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
-                        }
-                        catch (InvalidOperationException ex)
-                        {
-                            AppendBotLog($"[MovementBot] Start rejected: {ex.Message}");
-                            return;
+                            if (!TryEnsureNoActiveCameraRuntime("Start Movement Bot"))
+                                return;
+                            // A previous run may have been stopped while paused — always start unpaused.
+                            PauseController.Resume();
+                            FocusGameWindow();
+                            if (!float.TryParse(BotTargetXText, out tx)) tx = 5000;
+                            if (!float.TryParse(BotTargetYText, out ty)) ty = 5000;
+
+                            baseAddr = FindModuleInScanner("Ares.exe", false);
+                            if (baseAddr == 0)
+                            {
+                                _pointerScanner?.RefreshModules();
+                                baseAddr = FindModuleInScanner("Ares.exe", true);
+                            }
+                            if (baseAddr == 0)
+                            {
+                                AppendLog("Failed to resolve module base for GameMemoryService.");
+                                return;
+                            }
+                            memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
+                            if (WKeyCameraController.HasActiveSession(_attachedPid, baseAddr))
+                            {
+                                AppendBotLog("[MovementBot] Start rejected: another camera session is still active. Retry after its cleanup finishes.");
+                                return;
+                            }
+                            try
+                            {
+                                _wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
+                            }
+                            catch (InvalidOperationException ex)
+                            {
+                                AppendBotLog($"[MovementBot] Start rejected: {ex.Message}");
+                                return;
+                            }
                         }
                         Interlocked.Exchange(ref _gameFailureStopHandled, 0);
                         _movementSystem = new MovementSystem(
@@ -4428,24 +4476,6 @@ namespace DriverScanTester.ViewModels
                         if (BlockNormalActionForMovementDiagnostic("Start Loot Bot"))
                             return;
 
-                        // A profile workflow owns movement, camera and its own loot system.
-                        // A separate standalone loot loop may not join it (and may not start
-                        // while the workflow task is still cleaning up).
-                        WKeyCameraController? sharedCameraController = GetSharedCameraControllerForLoot();
-                        StandaloneLootStartupDecision startupDecision = StandaloneLootStartupPolicy.Evaluate(
-                            workflowRunning: IsWorkflowRunning,
-                            workflowTaskActive: IsTaskActive(_workflowTask),
-                            movementRunning: _isMovementBotRunning,
-                            movementCameraAvailable: sharedCameraController != null);
-                        if (!startupDecision.CanStart)
-                        {
-                            AppendBotLog($"[LootBot] Start rejected: {startupDecision.RejectionReason}. " +
-                                "No standalone LootSystem, scanning task or camera controller was created; the active workflow is unchanged.");
-                            return;
-                        }
-
-                        FocusGameWindow();
-
                         ulong baseAddr = FindModuleInScanner("Ares.exe", false);
                         if (baseAddr == 0)
                         {
@@ -4453,24 +4483,65 @@ namespace DriverScanTester.ViewModels
                             baseAddr = FindModuleInScanner("Ares.exe", true);
                         }
 
-                        var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
-                        var profile = _workflowCoordinator?.ActiveProfile ?? new BotProfile();
-                        if (!_isMovementBotRunning && !_isHealManaBotRunning && !_isLootBotRunning &&
-                            _workflowCoordinator?.IsRunning != true)
-                            Interlocked.Exchange(ref _gameFailureStopHandled, 0);
-                        _lootSystem = new LootSystem(memoryService, AppendBotLog, sharedCameraController);
-                        _lootSystem.ShouldStopOnOtherPlayerMarker = () => StopOnOtherPlayerDetected;
-                        Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 0);
-                        _lootSystem.OtherPlayerMarkerDetected =
-                            () => HandleStandalonePlayerMarkerDetected(memoryService, profile);
-                        if (_isMovementBotRunning && _movementSystem != null)
-                            _movementSystem.LootSystemRef = _lootSystem;
-                        _lootBotCts = new CancellationTokenSource();
-                        _isLootBotRunning = true;
-                        var lootToken = _lootBotCts.Token;
-                        LootSystem lootForTask = _lootSystem;
-                        _lootBotTask = Task.Run(() => LootBotLoop(lootToken, lootForTask), lootToken);
-                        AppendBotLog("Loot Bot started.");
+                        // The runtime-state and camera-session checks, LootSystem creation
+                        // and runtime registration are one atomic startup decision. A
+                        // concurrent movement/workflow/operation-test start cannot create
+                        // a camera session between the check and this registration.
+                        lock (_cameraRuntimeStartupGate)
+                        {
+                            if (_isLootBotRunning)
+                            {
+                                AppendBotLog("[LootBot] Start ignored: the loot bot is already running.");
+                                return;
+                            }
+
+                            // A profile workflow owns movement, camera and its own loot system.
+                            // A separate standalone loot loop may not join it, may not start
+                            // while the workflow/previous loot task is still cleaning up, and
+                            // may not overlap an independent camera-owning operation test.
+                            // A valid standalone movement controller is the only session a
+                            // standalone loot loop is allowed to share.
+                            WKeyCameraController? sharedCameraController = GetSharedCameraControllerForLoot();
+                            bool foreignCameraSessionActive =
+                                sharedCameraController == null &&
+                                WKeyCameraController.HasActiveSession(_attachedPid, baseAddr);
+                            StandaloneLootStartupDecision startupDecision = StandaloneLootStartupPolicy.Evaluate(
+                                workflowRunning: IsWorkflowRunning,
+                                workflowTaskActive: IsTaskActive(_workflowTask),
+                                movementRunning: _isMovementBotRunning,
+                                movementCameraAvailable: sharedCameraController != null,
+                                lootTaskActive: IsTaskActive(_lootBotTask),
+                                foreignCameraSessionActive: foreignCameraSessionActive);
+                            if (!startupDecision.CanStart)
+                            {
+                                AppendBotLog($"[LootBot] Start rejected: {startupDecision.RejectionReason}. " +
+                                    "No standalone LootSystem, scanning task or camera controller was created; the active runtime is unchanged.");
+                                return;
+                            }
+
+                            FocusGameWindow();
+
+                            var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
+                            var profile = _workflowCoordinator?.ActiveProfile ?? new BotProfile();
+                            if (!_isMovementBotRunning && !_isHealManaBotRunning && !_isLootBotRunning &&
+                                _workflowCoordinator?.IsRunning != true)
+                                Interlocked.Exchange(ref _gameFailureStopHandled, 0);
+                            _lootSystem = new LootSystem(memoryService, AppendBotLog, sharedCameraController);
+                            _lootSystem.ShouldStopOnOtherPlayerMarker = () => StopOnOtherPlayerDetected;
+                            Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 0);
+                            _lootSystem.OtherPlayerMarkerDetected =
+                                () => HandleStandalonePlayerMarkerDetected(memoryService, profile);
+                            if (_isMovementBotRunning && _movementSystem != null)
+                                _movementSystem.LootSystemRef = _lootSystem;
+                            _lootBotCts = new CancellationTokenSource();
+                            _isLootBotRunning = true;
+                            var lootToken = _lootBotCts.Token;
+                            LootSystem lootForTask = _lootSystem;
+                            _lootBotTask = Task.Run(() => LootBotLoop(lootToken, lootForTask), lootToken);
+                            AppendBotLog("Loot Bot started.");
+                            CameraRuntimeStartupGateHeldForTests?.Invoke();
+                        }
+
                         if (!_isMovementBotRunning)
                             StartGameConnectionMonitor();
                     }

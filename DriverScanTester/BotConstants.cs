@@ -27,7 +27,7 @@ namespace DriverScanTester
             /// <summary>Default camera distance lock for waypoints and movement.</summary>
             public const short DefaultDistanceLock = 17020;
 
-            /// <summary>Camera distance used during normal white/aquamarine loot pixel scans.</summary>
+            /// <summary>Camera distance used during normal aquamarine loot pixel scans.</summary>
             public const short LootScanDistance = 17000;
 
             /// <summary>Camera distance used by the other-player marker detector.</summary>
@@ -980,18 +980,18 @@ namespace DriverScanTester
             public const int SodSopMouseOverSettleMs = 5;
 
             /// <summary>
-            /// Minimum mouseover settle time (ms) for normal white/aquamarine loot probes. The game
+            /// Minimum mouseover settle time (ms) for normal aquamarine loot probes. The game
             /// updates its loot-under-cursor memory asynchronously after the cursor moves;
             /// the previous 1 ms wait regularly read the state before the update landed.
             /// Kept short enough that a bounded spatial-coverage sweep stays fast.
             /// </summary>
-            public const int LootWhiteMouseOverSettleMs = 12;
+            public const int NormalLootMouseOverSettleMs = 12;
 
-            /// <summary>Extra bounded mouseover re-reads after a negative white-loot probe.</summary>
-            public const int LootWhiteMouseOverExtraPolls = 2;
+            /// <summary>Extra bounded mouseover re-reads after a negative normal-loot probe.</summary>
+            public const int NormalLootMouseOverExtraPolls = 2;
 
-            /// <summary>Delay (ms) between the extra white-loot mouseover re-reads.</summary>
-            public const int LootWhiteMouseOverExtraPollMs = 6;
+            /// <summary>Delay (ms) between the extra normal-loot mouseover re-reads.</summary>
+            public const int NormalLootMouseOverExtraPollMs = 6;
 
             /// <summary>Poll interval (ms) between player-weight reads after a
             /// weight-relief potion was drunk for a SOD/SOP scroll.</summary>

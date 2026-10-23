@@ -64,5 +64,64 @@ namespace DriverScanTester.Tests
 
             Assert.Null(reason);
         }
+
+        [Fact]
+        public void StandaloneLootIsRejectedWhileAnIndependentCameraSessionIsActive()
+        {
+            StandaloneLootStartupDecision decision = StandaloneLootStartupPolicy.Evaluate(
+                workflowRunning: false,
+                workflowTaskActive: false,
+                movementRunning: false,
+                movementCameraAvailable: false,
+                lootTaskActive: false,
+                foreignCameraSessionActive: true);
+
+            Assert.False(decision.CanStart);
+            Assert.Contains("camera-owning operation", decision.RejectionReason!, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void StandaloneLootIsRejectedWhileThePreviousLootTaskCleansUp()
+        {
+            StandaloneLootStartupDecision decision = StandaloneLootStartupPolicy.Evaluate(
+                workflowRunning: false,
+                workflowTaskActive: false,
+                movementRunning: false,
+                movementCameraAvailable: false,
+                lootTaskActive: true,
+                foreignCameraSessionActive: false);
+
+            Assert.False(decision.CanStart);
+            Assert.Contains("previous standalone loot task", decision.RejectionReason!, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void StandaloneLootMayJoinAValidSharedMovementCamera()
+        {
+            StandaloneLootStartupDecision decision = StandaloneLootStartupPolicy.Evaluate(
+                workflowRunning: false,
+                workflowTaskActive: false,
+                movementRunning: true,
+                movementCameraAvailable: true,
+                lootTaskActive: false,
+                foreignCameraSessionActive: false);
+
+            Assert.True(decision.CanStart);
+            Assert.Null(decision.RejectionReason);
+        }
+
+        [Fact]
+        public void StandaloneLootMayStartWhenNoCameraSessionExists()
+        {
+            StandaloneLootStartupDecision decision = StandaloneLootStartupPolicy.Evaluate(
+                workflowRunning: false,
+                workflowTaskActive: false,
+                movementRunning: false,
+                movementCameraAvailable: false,
+                lootTaskActive: false,
+                foreignCameraSessionActive: false);
+
+            Assert.True(decision.CanStart);
+        }
     }
 }
