@@ -579,7 +579,7 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Writes the camera vertical "lock" (16-bit) value used by the sell view,
-        /// e.g. 16310. The address is +0x1BE relative to the camera base, which
+        /// e.g. 16160. The address is +0x1BE relative to the camera base, which
         /// is distinct from the float vertical angle at +0x1B0 (CameraVerticalAngle).
         /// </summary>
         public void SetCameraVerticalLock(short value)

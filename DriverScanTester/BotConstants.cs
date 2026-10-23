@@ -49,8 +49,8 @@ namespace DriverScanTester
             /// <summary>Camera distance used only during SOD/SOP pink-pixel loot scans.</summary>
             public const short SodSopLootScanDistance = 17050;
 
-            /// <summary>Default camera vertical lock value, matching the sell-view vertical (16310).</summary>
-            public const short DefaultVerticalLock = 16310;
+            /// <summary>Default camera vertical lock value, matching the sell-view vertical (16160).</summary>
+            public const short DefaultVerticalLock = 16160;
 
             /// <summary>Very low (closest) camera distance used during combat retarget very-low-search phase.</summary>
             public const short CombatRetargetVeryLowDistance = 16880;
@@ -136,7 +136,7 @@ namespace DriverScanTester
         public static class SpeedPotion
         {
             /// <summary>Attack speed value at which bot drinks speed potions (key 7 + key 8).</summary>
-            public const short AttackSpeedThreshold = 16384; //16341 +2 speed //16384 +3 speed (archer bos+giko)
+            public const short AttackSpeedThreshold = 16341; //16341 +2 speed //16384 +3 speed (archer bos+giko)
 
             /// <summary>Interval in seconds between attack-speed checks.</summary>
             public const double CheckIntervalSeconds = 5.0;
@@ -588,7 +588,7 @@ namespace DriverScanTester
             public const ulong IsSellerPointedPtr = 0x4853E8;
             public const ulong IsSellerPointed = 0xC;
 
-            // Camera vertical "lock" used by the sell view (16-bit value, e.g. 16310).
+            // Camera vertical "lock" used by the sell view (16-bit value, e.g. 16160).
             // Distinct from the float vertical angle at +0x1B0 (CameraVerticalAngle).
             public const ulong CameraVerticalLockOffset = 0x1BE;
         }

@@ -4395,10 +4395,11 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Identifies only sparse, approximately circular magenta ring components with the
-        /// configured artificial mob-marker scale. Solid SOD/SOP squares keep their existing
-        /// candidate behavior. This guards the pink scan's retry state from remaining armed on
-        /// living mobs whose magenta marker can never pass the exact item mouseover check.
+        /// Identifies only sparse, approximately circular or perspective-squashed magenta
+        /// ring components with the configured artificial mob-marker scale. Solid SOD/SOP
+        /// squares keep their existing candidate behavior. This guards the pink scan's retry
+        /// state from remaining armed on living mobs whose magenta marker cannot pass the
+        /// exact item mouseover check.
         /// </summary>
         internal static bool IsMobMarkerRingComponent(WhiteComponent component, Bitmap bitmap)
         {

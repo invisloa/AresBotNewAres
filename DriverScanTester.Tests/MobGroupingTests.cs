@@ -1290,6 +1290,49 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void DetectorAcceptsCyanCenterConfirmedByPerspectiveProjectedEllipse()
+        {
+            using var detector = new MobMarkerDetector();
+            using var frame = NewFrame(180, 100);
+            float radius = BotConstants.MobGrouping.ExpectedMarkerRadiusPx;
+            float verticalScale = 0.7071f;
+            using (Graphics graphics = Graphics.FromImage(frame))
+            {
+                using var ringPen = new Pen(Color.Magenta, 2f);
+                graphics.DrawEllipse(ringPen, 90 - radius, 50 - radius * verticalScale,
+                    radius * 2, radius * 2 * verticalScale);
+                using var centerBrush = new SolidBrush(Color.Cyan);
+                graphics.FillEllipse(centerBrush, 90 - 2, 50 - 2, 5, 5);
+            }
+
+            MobMarker[] markers = detector.DetectBitmapForTesting(frame);
+            Assert.Contains(markers, marker => marker.Source == MobMarkerSource.CyanCenter &&
+                Math.Abs(marker.Center.X - 90) <= 2 && Math.Abs(marker.Center.Y - 50) <= 2);
+        }
+
+        [Fact]
+        public void DetectorInfersPerspectiveProjectedEllipseWithoutCyanCenter()
+        {
+            using var detector = new MobMarkerDetector();
+            using var frame = NewFrame(180, 100);
+            float radius = BotConstants.MobGrouping.ExpectedMarkerRadiusPx;
+            float verticalScale = 0.7071f;
+            float innerRadius = radius * BotConstants.MobGrouping.InnerRingRadiusRatio;
+            using (Graphics graphics = Graphics.FromImage(frame))
+            using (var ringPen = new Pen(Color.Magenta, 2f))
+            {
+                graphics.DrawEllipse(ringPen, 90 - radius, 50 - radius * verticalScale,
+                    radius * 2, radius * 2 * verticalScale);
+                graphics.DrawEllipse(ringPen, 90 - innerRadius, 50 - innerRadius * verticalScale,
+                    innerRadius * 2, innerRadius * 2 * verticalScale);
+            }
+
+            MobMarker[] markers = detector.DetectBitmapForTesting(frame);
+            Assert.Contains(markers, marker => marker.Source == MobMarkerSource.MagentaRing &&
+                Math.Abs(marker.Center.X - 90) <= 3 && Math.Abs(marker.Center.Y - 50) <= 3);
+        }
+
+        [Fact]
         public void KeyboardFeedbackReleasesTheTurnKeyWithinTheConfiguredTolerance()
         {
             // KeyboardTurn re-evaluates this pure decision against the live camera bearing

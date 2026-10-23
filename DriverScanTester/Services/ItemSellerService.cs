@@ -88,7 +88,7 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Opens the seller/shop dialog the same way the old bot did:
-        /// 1. Zoom the camera to the known sell view (distance 16720, vertical 16310)
+        /// 1. Zoom the camera to the known sell view (distance 16720, vertical 16160)
         ///    so the shop NPC is in its expected on-screen position.
         /// 2. Scan the game window from the center outward, moving the mouse until
         ///    S_IsSellerPointed == SellerPointedValue (the mouse is over the NPC),
@@ -152,7 +152,7 @@ namespace DriverScanTester.Services
             }
 
             // ── NEW PRE-STEP: ensure the seller dialog is open ──
-            // 1. Force the known sell-view camera (distance 16720, vertical 16310)
+            // 1. Force the known sell-view camera (distance 16720, vertical 16160)
             //    so the shop NPC is in its expected on-screen position.
             // 2. If the dialog is already open, skip scanning and continue.
             // 3. Otherwise, scan the game window from center outward looking for
@@ -1146,7 +1146,7 @@ namespace DriverScanTester.Services
         private const int SellerScanPointDelayMs = 4;
 
         /// <summary>
-        /// Forces the camera to the known sell view: distance 16720 and vertical 16310.
+        /// Forces the camera to the known sell view: distance 16720 and vertical 16160.
         /// This makes the seller NPC appear at its expected on-screen position so the
         /// center-outward scan can find it.
         /// </summary>

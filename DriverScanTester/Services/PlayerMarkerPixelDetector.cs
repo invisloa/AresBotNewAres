@@ -14,8 +14,9 @@ namespace DriverScanTester.Services
         PointF Center);
 
     /// <summary>
-    /// Detects the installed top-down player faction markers: Empire yellow squares
-    /// (RGB #FFFF00) and Alliance green triangles (RGB #00FF00). Components overlapping
+    /// Detects Empire yellow and Alliance green player faction markers from their colored
+    /// components. The silhouette checks tolerate rotation and perspective projection so
+    /// ground markers remain detectable when the camera is tilted. Components overlapping
     /// the local-player exclusion or known HUD regions are ignored, and faction-specific
     /// shape checks reject compact UI glyphs. This exclusion applies only to marker
     /// detection; the loot pixel scan covers the whole scan region.
@@ -361,7 +362,126 @@ namespace DriverScanTester.Services
             return HasTriangleProfileAlongAxis(
                        componentPixels, componentPixelCount, frameWidth, bounds, horizontalAxis: false) ||
                    HasTriangleProfileAlongAxis(
-                       componentPixels, componentPixelCount, frameWidth, bounds, horizontalAxis: true);
+                       componentPixels, componentPixelCount, frameWidth, bounds, horizontalAxis: true) ||
+                   HasTriangleProfileAlongPrincipalAxis(componentPixels, componentPixelCount, frameWidth, bounds);
+        }
+
+        /// <summary>
+        /// Tests the taper along the component's principal axis. The old row/column-only
+        /// test rejects a valid faction triangle as soon as an oblique camera projects it
+        /// diagonally across the screen. PCA gives a rotation-independent axis; coarse
+        /// slices avoid requiring a pixel-perfect edge after rasterization/occlusion.
+        /// </summary>
+        private static bool HasTriangleProfileAlongPrincipalAxis(
+            int[] componentPixels,
+            int componentPixelCount,
+            int frameWidth,
+            Rectangle bounds)
+        {
+            double meanX = 0;
+            double meanY = 0;
+            for (int i = 0; i < componentPixelCount; i++)
+            {
+                int index = componentPixels[i];
+                meanX += index % frameWidth;
+                meanY += index / frameWidth;
+            }
+            meanX /= componentPixelCount;
+            meanY /= componentPixelCount;
+
+            double varianceX = 0;
+            double varianceY = 0;
+            double covariance = 0;
+            for (int i = 0; i < componentPixelCount; i++)
+            {
+                int index = componentPixels[i];
+                double dx = index % frameWidth - meanX;
+                double dy = index / frameWidth - meanY;
+                varianceX += dx * dx;
+                varianceY += dy * dy;
+                covariance += dx * dy;
+            }
+
+            double angle = 0.5 * Math.Atan2(2 * covariance, varianceX - varianceY);
+            double axisX = Math.Cos(angle);
+            double axisY = Math.Sin(angle);
+            double crossX = -axisY;
+            double crossY = axisX;
+            double minProjection = double.PositiveInfinity;
+            double maxProjection = double.NegativeInfinity;
+            for (int i = 0; i < componentPixelCount; i++)
+            {
+                int index = componentPixels[i];
+                double dx = index % frameWidth - meanX;
+                double dy = index / frameWidth - meanY;
+                double projection = dx * axisX + dy * axisY;
+                minProjection = Math.Min(minProjection, projection);
+                maxProjection = Math.Max(maxProjection, projection);
+            }
+
+            double span = maxProjection - minProjection;
+            if (span < 6)
+                return false;
+
+            const int binCount = 12;
+            var minimumCross = new double[binCount];
+            var maximumCross = new double[binCount];
+            Array.Fill(minimumCross, double.PositiveInfinity);
+            Array.Fill(maximumCross, double.NegativeInfinity);
+            for (int i = 0; i < componentPixelCount; i++)
+            {
+                int index = componentPixels[i];
+                double dx = index % frameWidth - meanX;
+                double dy = index / frameWidth - meanY;
+                double projection = dx * axisX + dy * axisY;
+                int bin = Math.Clamp((int)((projection - minProjection) / span * binCount), 0, binCount - 1);
+                double crossProjection = dx * crossX + dy * crossY;
+                minimumCross[bin] = Math.Min(minimumCross[bin], crossProjection);
+                maximumCross[bin] = Math.Max(maximumCross[bin], crossProjection);
+            }
+
+            var widths = new double[binCount];
+            int occupiedBins = 0;
+            double maximumWidth = 0;
+            for (int i = 0; i < binCount; i++)
+            {
+                if (double.IsPositiveInfinity(minimumCross[i]))
+                    continue;
+                widths[i] = maximumCross[i] - minimumCross[i] + 1;
+                maximumWidth = Math.Max(maximumWidth, widths[i]);
+                occupiedBins++;
+            }
+
+            if (occupiedBins < 9 || maximumWidth <= 1)
+                return false;
+
+            int endBinCount = binCount / 4;
+            double firstEndWidth = 0;
+            double lastEndWidth = 0;
+            int firstOccupied = 0;
+            int lastOccupied = 0;
+            for (int i = 0; i < endBinCount; i++)
+            {
+                if (widths[i] > 0)
+                {
+                    firstEndWidth += widths[i];
+                    firstOccupied++;
+                }
+                int reverseIndex = binCount - 1 - i;
+                if (widths[reverseIndex] > 0)
+                {
+                    lastEndWidth += widths[reverseIndex];
+                    lastOccupied++;
+                }
+            }
+
+            if (firstOccupied == 0 || lastOccupied == 0)
+                return false;
+
+            firstEndWidth /= firstOccupied;
+            lastEndWidth /= lastOccupied;
+            return (firstEndWidth <= maximumWidth * 0.70 && lastEndWidth >= maximumWidth * 0.70) ||
+                   (lastEndWidth <= maximumWidth * 0.70 && firstEndWidth >= maximumWidth * 0.70);
         }
 
         private static bool HasTriangleProfileAlongAxis(

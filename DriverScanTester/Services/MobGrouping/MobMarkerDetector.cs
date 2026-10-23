@@ -24,6 +24,9 @@ namespace DriverScanTester.Services
     public sealed class MobMarkerDetector : IDisposable
     {
         private const int CenterRingAngleSamples = BotConstants.MobGrouping.RingAngularSamples;
+        // Ground-plane circles become vertical ellipses as the camera pitches away from
+        // top-down. Include the unprojected case for old views and a 45-degree projection.
+        private static readonly float[] GroundPlaneVerticalScales = { 1f, 0.7071f };
         private readonly Action<string> _log;
         private readonly object _gate = new();
 
@@ -386,14 +389,19 @@ namespace DriverScanTester.Services
                 // around the expected ring radius before emitting the candidate. The center
                 // is already known, so this confirmation threshold is intentionally lower
                 // than the ring-only fallback (partial/occluded rings still pass).
-                float magentaRingSupport = ScoreCircularRing(
-                    (int)Math.Round(centerX),
-                    (int)Math.Round(centerY),
-                    width,
-                    height,
-                    expectedRadius,
-                    expectedRadius * BotConstants.MobGrouping.InnerRingRadiusRatio,
-                    BotConstants.MobGrouping.RingValidationTolerancePx);
+                float magentaRingSupport = 0;
+                foreach (float verticalScale in GroundPlaneVerticalScales)
+                {
+                    magentaRingSupport = Math.Max(magentaRingSupport, ScoreGroundRing(
+                        (int)Math.Round(centerX),
+                        (int)Math.Round(centerY),
+                        width,
+                        height,
+                        expectedRadius,
+                        expectedRadius * BotConstants.MobGrouping.InnerRingRadiusRatio,
+                        BotConstants.MobGrouping.RingValidationTolerancePx,
+                        verticalScale));
+                }
                 if (magentaRingSupport < BotConstants.MobGrouping.CyanCenterMinimumMagentaRingSupport)
                     continue;
 
@@ -412,7 +420,6 @@ namespace DriverScanTester.Services
                 return;
 
             int pixelCount = width * height;
-            Array.Clear(_votes, 0, pixelCount);
             float innerRadius = expectedRadius * BotConstants.MobGrouping.InnerRingRadiusRatio;
             int tolerance = Math.Max(1, BotConstants.MobGrouping.MarkerRadiusTolerancePx);
             int[] radii =
@@ -421,70 +428,77 @@ namespace DriverScanTester.Services
                 Math.Max(3, (int)Math.Round(innerRadius))
             };
             int[] radialOffsets = { -tolerance, 0, tolerance };
-
-            foreach (int pointIndex in _magentaPixels)
-            {
-                int px = pointIndex % width;
-                int py = pointIndex / width;
-                foreach (int ringRadius in radii)
-                {
-                    foreach (int radialOffset in radialOffsets)
-                    {
-                        int radius = Math.Max(2, ringRadius + radialOffset);
-                        for (int angleIndex = 0; angleIndex < CenterRingAngleSamples; angleIndex++)
-                        {
-                            double angle = angleIndex * 2.0 * Math.PI / CenterRingAngleSamples;
-                            int cx = (int)Math.Round(px - radius * Math.Cos(angle));
-                            int cy = (int)Math.Round(py - radius * Math.Sin(angle));
-                            if ((uint)cx < (uint)width && (uint)cy < (uint)height)
-                                _votes[cy * width + cx]++;
-                        }
-                    }
-                }
-            }
-
-            _peaks.Clear();
             int minimumVotes = BotConstants.MobGrouping.MinimumRingHoughVotes;
-            for (int y = 1; y < height - 1; y++)
-            {
-                int row = y * width;
-                for (int x = 1; x < width - 1; x++)
-                {
-                    int index = row + x;
-                    int value = _votes[index];
-                    if (value < minimumVotes)
-                        continue;
+            _ringCandidates.Clear();
 
-                    bool isMaximum = true;
-                    for (int dy = -1; dy <= 1 && isMaximum; dy++)
+            foreach (float verticalScale in GroundPlaneVerticalScales)
+            {
+                Array.Clear(_votes, 0, pixelCount);
+                foreach (int pointIndex in _magentaPixels)
+                {
+                    int px = pointIndex % width;
+                    int py = pointIndex / width;
+                    foreach (int ringRadius in radii)
                     {
-                        for (int dx = -1; dx <= 1; dx++)
+                        foreach (int radialOffset in radialOffsets)
                         {
-                            if (dx == 0 && dy == 0) continue;
-                            int neighborIndex = (y + dy) * width + x + dx;
-                            int neighborValue = _votes[neighborIndex];
-                            if (neighborValue > value || (neighborValue == value && neighborIndex < index))
+                            int radius = Math.Max(2, ringRadius + radialOffset);
+                            for (int angleIndex = 0; angleIndex < CenterRingAngleSamples; angleIndex++)
                             {
-                                isMaximum = false;
-                                break;
+                                double angle = angleIndex * 2.0 * Math.PI / CenterRingAngleSamples;
+                                int cx = (int)Math.Round(px - radius * Math.Cos(angle));
+                                int cy = (int)Math.Round(py - radius * verticalScale * Math.Sin(angle));
+                                if ((uint)cx < (uint)width && (uint)cy < (uint)height)
+                                    _votes[cy * width + cx]++;
                             }
                         }
                     }
-                    if (isMaximum)
-                        _peaks.Add((x, y, value));
                 }
-            }
 
-            _ringCandidates.Clear();
-            foreach (var peak in _peaks)
-            {
-                float coverage = ScoreCircularRing(
-                    peak.X, peak.Y, width, height, expectedRadius, innerRadius,
-                    BotConstants.MobGrouping.RingValidationTolerancePx);
-                if (coverage < BotConstants.MobGrouping.MinimumRingCoverage ||
-                    HasFilledMagentaCenter(peak.X, peak.Y, width, height, expectedRadius))
-                    continue;
-                _ringCandidates.Add((peak.X, peak.Y, peak.Votes, coverage));
+                _peaks.Clear();
+                for (int y = 1; y < height - 1; y++)
+                {
+                    int row = y * width;
+                    for (int x = 1; x < width - 1; x++)
+                    {
+                        int index = row + x;
+                        int value = _votes[index];
+                        if (value < minimumVotes)
+                            continue;
+
+                        bool isMaximum = true;
+                        for (int dy = -1; dy <= 1 && isMaximum; dy++)
+                        {
+                            for (int dx = -1; dx <= 1; dx++)
+                            {
+                                if (dx == 0 && dy == 0) continue;
+                                int neighborIndex = (y + dy) * width + x + dx;
+                                int neighborValue = _votes[neighborIndex];
+                                if (neighborValue > value || (neighborValue == value && neighborIndex < index))
+                                {
+                                    isMaximum = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if (isMaximum)
+                            _peaks.Add((x, y, value));
+                    }
+                }
+
+                foreach (var peak in _peaks)
+                {
+                    float coverage = ScoreGroundRing(
+                        peak.X, peak.Y, width, height, expectedRadius, innerRadius,
+                        BotConstants.MobGrouping.RingValidationTolerancePx, verticalScale);
+                    float minimumCoverage = verticalScale < 0.9f
+                        ? Math.Max(BotConstants.MobGrouping.MinimumRingCoverage, 0.50f)
+                        : BotConstants.MobGrouping.MinimumRingCoverage;
+                    if (coverage < minimumCoverage ||
+                        HasFilledMagentaCenter(peak.X, peak.Y, width, height, expectedRadius, verticalScale))
+                        continue;
+                    _ringCandidates.Add((peak.X, peak.Y, peak.Votes, coverage));
+                }
             }
 
             // Rank geometry before raw Hough votes: an off-center hypothesis can receive many
@@ -523,39 +537,40 @@ namespace DriverScanTester.Services
             }
         }
 
-        private float ScoreCircularRing(int centerX, int centerY, int width, int height,
-            float outerRadius, float innerRadius, int tolerance)
+        private float ScoreGroundRing(int centerX, int centerY, int width, int height,
+            float outerRadius, float innerRadius, int tolerance, float verticalScale)
         {
             int outerHits = 0;
             int innerHits = 0;
             for (int i = 0; i < CenterRingAngleSamples; i++)
             {
                 double angle = i * 2.0 * Math.PI / CenterRingAngleSamples;
-                if (HasMagentaNearCircle(centerX, centerY, width, height, outerRadius, tolerance, angle))
+                if (HasMagentaNearGroundRing(centerX, centerY, width, height, outerRadius, tolerance, angle, verticalScale))
                     outerHits++;
-                if (HasMagentaNearCircle(centerX, centerY, width, height, innerRadius, tolerance, angle))
+                if (HasMagentaNearGroundRing(centerX, centerY, width, height, innerRadius, tolerance, angle, verticalScale))
                     innerHits++;
             }
 
             return Math.Max(outerHits, innerHits) / (float)CenterRingAngleSamples;
         }
 
-        private bool HasMagentaNearCircle(int centerX, int centerY, int width, int height,
-            float radius, int tolerance, double angle)
+        private bool HasMagentaNearGroundRing(int centerX, int centerY, int width, int height,
+            float radius, int tolerance, double angle, float verticalScale)
         {
             float dx = (float)Math.Cos(angle);
             float dy = (float)Math.Sin(angle);
             for (int radialOffset = -tolerance; radialOffset <= tolerance; radialOffset++)
             {
                 int x = (int)Math.Round(centerX + (radius + radialOffset) * dx);
-                int y = (int)Math.Round(centerY + (radius + radialOffset) * dy);
+                int y = (int)Math.Round(centerY + (radius + radialOffset) * verticalScale * dy);
                 if ((uint)x < (uint)width && (uint)y < (uint)height && _magentaMask[y * width + x])
                     return true;
             }
             return false;
         }
 
-        private bool HasFilledMagentaCenter(int centerX, int centerY, int width, int height, float radius)
+        private bool HasFilledMagentaCenter(
+            int centerX, int centerY, int width, int height, float radius, float verticalScale)
         {
             float clearRadius = radius * BotConstants.MobGrouping.RingCenterClearRadiusRatio;
             int samples = CenterRingAngleSamples / 2;
@@ -568,7 +583,7 @@ namespace DriverScanTester.Services
                 {
                     double angle = i * 2.0 * Math.PI / samples;
                     int x = (int)Math.Round(centerX + sampleRadius * Math.Cos(angle));
-                    int y = (int)Math.Round(centerY + sampleRadius * Math.Sin(angle));
+                    int y = (int)Math.Round(centerY + sampleRadius * verticalScale * Math.Sin(angle));
                     if ((uint)x >= (uint)width || (uint)y >= (uint)height)
                         continue;
                     tested++;

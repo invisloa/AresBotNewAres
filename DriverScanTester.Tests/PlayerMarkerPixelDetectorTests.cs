@@ -45,6 +45,27 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void DetectsAllianceTriangleProjectedDiagonallyByTiltedCamera()
+        {
+            using Bitmap frame = CreateFrame();
+            FillProjectedTriangle(frame, centerX: 210, centerY: 90, length: 18, halfBase: 8,
+                angleDegrees: 45, Color.FromArgb(0, 255, 0));
+
+            Assert.True(new PlayerMarkerPixelDetector().ContainsOtherPlayerMarker(
+                frame, new Rectangle(130, 130, 40, 40)));
+        }
+
+        [Fact]
+        public void DetectsEmpireMarkerProjectedAsDiamond()
+        {
+            using Bitmap frame = CreateFrame();
+            FillDiamond(frame, centerX: 210, centerY: 90, radius: 9, Color.FromArgb(255, 255, 0));
+
+            Assert.True(new PlayerMarkerPixelDetector().ContainsOtherPlayerMarker(
+                frame, new Rectangle(130, 130, 40, 40)));
+        }
+
+        [Fact]
         public void RejectsYellowChatGlyphThatPreviouslyPassedTheDetector()
         {
             using Bitmap frame = CreateFrame();
@@ -202,6 +223,46 @@ namespace DriverScanTester.Tests
                 int halfWidth = (int)Math.Round(row * (size / 2.0) / (size - 1));
                 for (int px = centerX - halfWidth; px <= centerX + halfWidth; px++)
                     bitmap.SetPixel(px, y + row, color);
+            }
+        }
+
+        private static void FillProjectedTriangle(
+            Bitmap bitmap,
+            int centerX,
+            int centerY,
+            int length,
+            int halfBase,
+            double angleDegrees,
+            Color color)
+        {
+            double angle = angleDegrees * Math.PI / 180.0;
+            double axisX = Math.Cos(angle);
+            double axisY = Math.Sin(angle);
+            double crossX = -axisY;
+            double crossY = axisX;
+            int extent = length + halfBase;
+            for (int y = centerY - extent; y <= centerY + extent; y++)
+            for (int x = centerX - extent; x <= centerX + extent; x++)
+            {
+                double dx = x - centerX;
+                double dy = y - centerY;
+                double along = dx * axisX + dy * axisY;
+                if (along < -length / 2.0 || along > length / 2.0)
+                    continue;
+                double across = Math.Abs(dx * crossX + dy * crossY);
+                double allowedHalfWidth = halfBase * (along + length / 2.0) / length;
+                if (across <= allowedHalfWidth)
+                    bitmap.SetPixel(x, y, color);
+            }
+        }
+
+        private static void FillDiamond(Bitmap bitmap, int centerX, int centerY, int radius, Color color)
+        {
+            for (int y = centerY - radius; y <= centerY + radius; y++)
+            for (int x = centerX - radius; x <= centerX + radius; x++)
+            {
+                if (Math.Abs(x - centerX) + Math.Abs(y - centerY) <= radius)
+                    bitmap.SetPixel(x, y, color);
             }
         }
 
