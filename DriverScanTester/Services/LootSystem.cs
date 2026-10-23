@@ -5084,9 +5084,44 @@ namespace DriverScanTester.Services
                 _log($"[Loot] Weight now {currentWeight}/{maxWeight} — room for the SOD/SOP scroll.");
         }
 
+        private static long _nextLootCollectionAttemptId;
+
+        internal sealed class LootCollectionDiagnostics
+        {
+            public long AttemptId { get; init; }
+            public int BeforeTriggerX { get; init; }
+            public bool BeforePositionValid { get; init; }
+            public float BeforePositionX { get; init; }
+            public float BeforePositionY { get; init; }
+            public int ChecksumBeforeWait { get; set; }
+            public int ChecksumAfterWait { get; set; }
+            public bool InventoryChanged { get; set; }
+            public bool XMovementObserved { get; set; }
+            public int StableChecks { get; set; }
+            public int StableChecksRequired { get; set; }
+            public int EmptyRounds { get; set; }
+            public int MaxEmptyRounds { get; set; }
+            public string ExitReason { get; set; } = "Unknown";
+        }
+
         private void CollectionClick()
         {
+            long attemptId = Interlocked.Increment(ref _nextLootCollectionAttemptId);
             int positionBeforeClick = GetPositionX();
+            var beforePosition = TryGetDiagnosticPlayerPosition("CollectionStart");
+            var collectionDiagnostics = new LootCollectionDiagnostics
+            {
+                AttemptId = attemptId,
+                BeforeTriggerX = positionBeforeClick,
+                BeforePositionValid = beforePosition.Success,
+                BeforePositionX = beforePosition.X,
+                BeforePositionY = beforePosition.Y
+            };
+            _log($"[LootUnstuck] COLLECTION START attempt={attemptId} source=LootSystem.CollectionClick " +
+                 $"BeforeX={positionBeforeClick} BeforeXSource={LootPositionXSource} " +
+                 $"BeforePosition={FormatDiagnosticPosition(beforePosition.Success, beforePosition.X, beforePosition.Y)} " +
+                 $"BeforePositionSource={PlayerPositionSource}");
+
             bool leftButtonDown = false;
             _isCollecting = true;
             try
@@ -5109,20 +5144,31 @@ namespace DriverScanTester.Services
             // the entire walk so the character also area-loots any other items
             // it passes along the way.
             int checksumBefore = _memoryService.ComputeInventoryChecksum();
+            int checksumAtCollectionStart = checksumBefore;
+            int checksumAfter = checksumBefore;
+            bool inventoryChanged = false;
+            collectionDiagnostics.ChecksumBeforeWait = checksumBefore;
+            collectionDiagnostics.ChecksumAfterWait = checksumBefore;
             int beforeX = positionBeforeClick;
             int lastX = beforeX;
             int stableChecks = 0;
             const int stableRequired = 3;
             int emptyRounds = 0;
             const int maxEmptyRounds = 10;
+            bool xMovementObserved = false;
 
             while (true)
             {
                 // If the player entered city, abort immediately. A mob being selected
                 // only aborts the spacebar spam outside loot-priority mode — in
                 // priority mode the walk to the clicked loot item must finish.
-                if (_scanToken.IsCancellationRequested || ShouldAbortLoot() || !IsGameWindowFocused())
+                bool scanCancelled = _scanToken.IsCancellationRequested;
+                bool lootAborted = !scanCancelled && ShouldAbortLoot();
+                bool focusLost = !scanCancelled && !lootAborted && !IsGameWindowFocused();
+                string? abortReason = DetectCollectionAbortReason(scanCancelled, lootAborted, focusLost);
+                if (abortReason != null)
                 {
+                    collectionDiagnostics.ExitReason = abortReason;
                     _log("[Loot] Stop/city/focus change detected during collection — aborting spacebar spam.");
                     break;
                 }
@@ -5132,40 +5178,57 @@ namespace DriverScanTester.Services
                 if (LootRuntimeSettings.SpacebarLootEnabled)
                     GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                 Thread.Sleep(30);
-                if (_scanToken.IsCancellationRequested || ShouldAbortLoot() || !IsGameWindowFocused())
+                bool scanCancelledAfterSleep = _scanToken.IsCancellationRequested;
+                bool lootAbortedAfterSleep = !scanCancelledAfterSleep && ShouldAbortLoot();
+                bool focusLostAfterSleep = !scanCancelledAfterSleep && !lootAbortedAfterSleep && !IsGameWindowFocused();
+                string? abortReasonAfterSleep = DetectCollectionAbortReason(
+                    scanCancelledAfterSleep, lootAbortedAfterSleep, focusLostAfterSleep);
+                if (abortReasonAfterSleep != null)
+                {
+                    collectionDiagnostics.ExitReason = abortReasonAfterSleep;
                     break;
+                }
                 if (LootRuntimeSettings.SpacebarLootEnabled)
                     GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                 Thread.Sleep(100);
 
-                int checksumAfter = _memoryService.ComputeInventoryChecksum();
+                checksumAfter = _memoryService.ComputeInventoryChecksum();
+                collectionDiagnostics.ChecksumAfterWait = checksumAfter;
                 if (checksumAfter != checksumBefore)
                 {
                     // Item collected along the way — reset baseline, keep spamming.
+                    inventoryChanged = true;
+                    collectionDiagnostics.InventoryChanged = true;
                     checksumBefore = checksumAfter;
                     emptyRounds = 0;
                     continue;
                 }
 
                 emptyRounds++;
+                collectionDiagnostics.EmptyRounds = emptyRounds;
 
                 int currentX = GetPositionX();
                 bool hasMoved = currentX != beforeX;
 
                 if (hasMoved)
                 {
+                    xMovementObserved = true;
+                    collectionDiagnostics.XMovementObserved = true;
                     if (currentX == lastX)
                     {
                         stableChecks++;
+                        collectionDiagnostics.StableChecks = stableChecks;
                         if (stableChecks >= stableRequired)
                         {
                             // Character reached destination and stopped — done.
+                            collectionDiagnostics.ExitReason = "PositionStable";
                             break;
                         }
                     }
                     else
                     {
                         stableChecks = 0; // still walking
+                        collectionDiagnostics.StableChecks = stableChecks;
                     }
                     lastX = currentX;
                 }
@@ -5173,13 +5236,24 @@ namespace DriverScanTester.Services
                 // Safety exit: no movement at all or walking too long with no pickups.
                 if (emptyRounds >= maxEmptyRounds)
                 {
+                    collectionDiagnostics.ExitReason = "MaxEmptyRoundsReached";
                     break;
                 }
             }
 
+            collectionDiagnostics.ChecksumBeforeWait = checksumAtCollectionStart;
+            collectionDiagnostics.ChecksumAfterWait = checksumAfter;
+            collectionDiagnostics.InventoryChanged = inventoryChanged;
+            collectionDiagnostics.XMovementObserved = xMovementObserved;
+            collectionDiagnostics.StableChecks = stableChecks;
+            collectionDiagnostics.StableChecksRequired = stableRequired;
+            collectionDiagnostics.EmptyRounds = emptyRounds;
+            collectionDiagnostics.MaxEmptyRounds = maxEmptyRounds;
+
             Thread.Sleep(BotConstants.Delays.CollectAnimationMs); // Wait for collection animation/movement
 
-            UnbugWhenCollecting(positionBeforeClick);
+            LogLootCollectionSummary(collectionDiagnostics);
+            UnbugWhenCollecting(positionBeforeClick, collectionDiagnostics);
 
             // PixelScanUnderChar disabled — spam spacebar instead.
             // PixelScanUnderChar();
@@ -5216,19 +5290,140 @@ namespace DriverScanTester.Services
             }
         }
 
-        private void UnbugWhenCollecting(int beforeClickPosX)
+        internal static string? DetectCollectionAbortReason(
+            bool scanCancelled, bool lootAborted, bool gameWindowFocusLost)
+        {
+            if (scanCancelled) return "ScanCancelled";
+            if (lootAborted) return "LootAborted";
+            if (gameWindowFocusLost) return "GameWindowFocusLost";
+            return null;
+        }
+
+        internal void LogLootCollectionSummary(LootCollectionDiagnostics collectionDiagnostics)
+        {
+            _log($"[LootUnstuck] COLLECTION SUMMARY attempt={collectionDiagnostics.AttemptId} " +
+                 $"BeforeX={collectionDiagnostics.BeforeTriggerX} " +
+                 $"XMovementObserved={collectionDiagnostics.XMovementObserved} " +
+                 $"StableChecks={collectionDiagnostics.StableChecks}/{collectionDiagnostics.StableChecksRequired} " +
+                 $"UnsuccessfulInventoryRounds={collectionDiagnostics.EmptyRounds}/{collectionDiagnostics.MaxEmptyRounds} " +
+                 $"ChecksumBefore={collectionDiagnostics.ChecksumBeforeWait} " +
+                 $"ChecksumAfter={collectionDiagnostics.ChecksumAfterWait} " +
+                 $"ChecksumBeforeTiming=after-click-release-before-collection-wait " +
+                 $"InventoryChanged={collectionDiagnostics.InventoryChanged} " +
+                 $"InventoryChangedMeaning=checksum-change-only-not-pickup-proof " +
+                 $"CollectionExitReason={collectionDiagnostics.ExitReason}");
+        }
+
+        internal void UnbugWhenCollecting(
+            int beforeClickPosX,
+            LootCollectionDiagnostics collectionDiagnostics,
+            Action<int, int, int>? clickOperation = null)
         {
             int currentX = GetPositionX();
-            if (beforeClickPosX == currentX)
+            var currentPosition = TryGetDiagnosticPlayerPosition("UnstuckDecision");
+            int deltaX = currentX - beforeClickPosX;
+            bool condition = beforeClickPosX == currentX;
+            bool hasDisplacement = collectionDiagnostics.BeforePositionValid && currentPosition.Success;
+            double displacement2D = hasDisplacement
+                ? Math.Sqrt(
+                    Math.Pow(currentPosition.X - collectionDiagnostics.BeforePositionX, 2) +
+                    Math.Pow(currentPosition.Y - collectionDiagnostics.BeforePositionY, 2))
+                : double.NaN;
+            bool xUnchangedButYChanged = condition && hasDisplacement &&
+                Math.Abs(currentPosition.Y - collectionDiagnostics.BeforePositionY) > 0.001f;
+            string beforePositionText = FormatDiagnosticPosition(
+                collectionDiagnostics.BeforePositionValid,
+                collectionDiagnostics.BeforePositionX,
+                collectionDiagnostics.BeforePositionY);
+            string currentPositionText = FormatDiagnosticPosition(
+                currentPosition.Success, currentPosition.X, currentPosition.Y);
+            string displacementText = hasDisplacement
+                ? displacement2D.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)
+                : "Unavailable";
+            string decision = condition ? "TRIGGERED" : "SKIPPED";
+
+            _log($"[LootUnstuck] {decision} attempt={collectionDiagnostics.AttemptId}");
+            _log($"[LootUnstuck] BeforeX={beforeClickPosX} BeforeXSource={LootPositionXSource}");
+            _log($"[LootUnstuck] CurrentX={currentX} CurrentXSource={LootPositionXSource}");
+            _log($"[LootUnstuck] DeltaX={deltaX}");
+            _log($"[LootUnstuck] BeforePosition={beforePositionText} BeforePositionSource={PlayerPositionSource}");
+            _log($"[LootUnstuck] CurrentPosition={currentPositionText} CurrentPositionSource={PlayerPositionSource}");
+            _log($"[LootUnstuck] Displacement2D={displacementText}");
+            _log($"[LootUnstuck] InventoryChanged={collectionDiagnostics.InventoryChanged}");
+            _log($"[LootUnstuck] CollectionExitReason={collectionDiagnostics.ExitReason}");
+            _log($"[LootUnstuck] Condition=(beforeClickPosX == currentX) => {(condition ? "True" : "False")}");
+
+            if (!condition)
             {
-                // Hardcoded UnbugClickX/Y are screen-absolute → convert to bitmap-local.
-                int refX = _referenceClientOriginX;
-                int refY = _referenceClientOriginY;
-                int bx = Math.Clamp(BotConstants.Loot.UnbugClickX - refX, 0, Math.Max(_clientWidth - 1, 0));
-                int by = Math.Clamp(BotConstants.Loot.UnbugClickY - refY, 0, Math.Max(_clientHeight - 1, 0));
-                var (screenX, screenY) = BitmapLocalToScreen(bx, by);
-                MouseOperations.MoveAndLeftClickAbsolute(screenX, screenY, 100);
+                _log("[LootUnstuck] Reason=XChangedDuringCollection");
+                _log("[LootUnstuck] GroundClickExecuted=False");
+                return;
             }
+
+            _log("[LootUnstuck] Reason=BeforeAndAfterXAreEqual");
+            if (xUnchangedButYChanged)
+            {
+                _log("[LootUnstuck] WARNING: X is unchanged, but 2D position indicates player movement. Existing X-only condition still triggers the ground click.");
+            }
+
+            // Hardcoded UnbugClickX/Y are screen-absolute → convert to bitmap-local.
+            int refX = _referenceClientOriginX;
+            int refY = _referenceClientOriginY;
+            int bx = Math.Clamp(BotConstants.Loot.UnbugClickX - refX, 0, Math.Max(_clientWidth - 1, 0));
+            int by = Math.Clamp(BotConstants.Loot.UnbugClickY - refY, 0, Math.Max(_clientHeight - 1, 0));
+            var (screenX, screenY) = BitmapLocalToScreen(bx, by);
+            const int clickDelayMs = 100;
+
+            _log("[LootUnstuck] Action=GroundClick");
+            _log($"[LootUnstuck] ClickConfiguredX={BotConstants.Loot.UnbugClickX} ClickConfiguredY={BotConstants.Loot.UnbugClickY}");
+            _log($"[LootUnstuck] ClickReferenceClientOrigin=({refX},{refY})");
+            _log($"[LootUnstuck] ClickBitmapLocalAfterClamp=({bx},{by})");
+            _log($"[LootUnstuck] ClickScreen=({screenX},{screenY})");
+            _log($"[LootUnstuck] ClickDelayMs={clickDelayMs}");
+            _log("[LootUnstuck] ClickSource=LootSystem.UnbugWhenCollecting");
+            _log($"[LootUnstuck] CLICK START source=UnbugWhenCollecting screen=({screenX},{screenY})");
+            try
+            {
+                Action<int, int, int> click = clickOperation ?? MouseOperations.MoveAndLeftClickAbsolute;
+                click(screenX, screenY, clickDelayMs);
+                _log("[LootUnstuck] CLICK RETURNED source=UnbugWhenCollecting");
+            }
+            catch (Exception ex)
+            {
+                _log($"[LootUnstuck] CLICK FAILED source=UnbugWhenCollecting error={ex.GetType().Name}: {ex.Message}");
+                throw;
+            }
+        }
+
+        private (float X, float Y, bool Success) TryGetDiagnosticPlayerPosition(string stage)
+        {
+            try
+            {
+                var (x, y, success) = _memoryService.GetPlayerPosition();
+                if (!success)
+                    _log($"[LootUnstuck] POSITION READ FAILED stage={stage} source={PlayerPositionSource}");
+                return (x, y, success);
+            }
+            catch (Exception ex)
+            {
+                _log($"[LootUnstuck] POSITION READ FAILED stage={stage} source={PlayerPositionSource} error={ex.GetType().Name}: {ex.Message}");
+                return (0f, 0f, false);
+            }
+        }
+
+        private const string LootPositionXSource =
+            "GetLootPositionX(playerBase+XOffset, short; 0 also returned when read fails)";
+
+        private const string PlayerPositionSource =
+            "GetPlayerPosition(playerBase+X/YOffset, short; separate diagnostic read)";
+
+        private static string FormatDiagnosticPosition(bool success, float x, float y)
+        {
+            if (!success)
+                return "<unavailable>";
+
+            return $"({x.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)}," +
+                   $"{y.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)})";
         }
 
         // DISABLED — spam spacebar in CollectionClick instead.
