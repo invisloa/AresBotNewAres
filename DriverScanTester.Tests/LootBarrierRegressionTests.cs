@@ -455,6 +455,8 @@ namespace DriverScanTester.Tests
 
             short distance = LootSystem.NormalLootScanDistance;
             short lockValue = BotConstants.Camera.StationaryVerticalLock;
+            Assert.Equal((short)16310, lockValue);
+            Assert.Equal((short)16160, BotConstants.Camera.MovementVerticalLock);
 
             Assert.True(LootSystem.IsLootCaptureAuthorized(
                 distance, distance, lockValue, lockValue,
@@ -507,7 +509,7 @@ namespace DriverScanTester.Tests
                 };
 
             var memory = new GameMemoryService(pid, read, write, moduleBase, 8, _ => { });
-            var controller = new WKeyCameraController(memory, _ => { });
+            using var controller = new WKeyCameraController(memory, _ => { });
             using var loot = new LootSystem(memory, _ => { }, controller);
             MethodInfo ensure = typeof(LootSystem).GetMethod("EnsureLootScanCamera", PrivateInstance)
                 ?? throw new InvalidOperationException("EnsureLootScanCamera was not found.");
@@ -517,7 +519,7 @@ namespace DriverScanTester.Tests
             Assert.Equal(BotConstants.Camera.StationaryVerticalLock,
                 BitConverter.ToInt16(memoryBytes[cameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset], 0));
 
-            WKeyCameraOwner movementOwner = controller.CreateOwner("loot scan race regression");
+            WKeyCameraOwner movementOwner = controller.CreateOwner("loot scan race regression", _ => { });
             Assert.False(controller.TryAcquireW(movementOwner));
 
             MethodInfo release = typeof(LootSystem).GetMethod("ReleaseLootScanCameraLocked", PrivateInstance)

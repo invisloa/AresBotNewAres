@@ -16,7 +16,9 @@ namespace DriverScanTester.Tests
         public void WKeyCameraSettingsKeepMovementAndStationaryValuesDistinct()
         {
             Assert.Equal((short)16160, BotConstants.Camera.MovementVerticalLock);
-            Assert.Equal((short)16320, BotConstants.Camera.StationaryVerticalLock);
+            Assert.Equal((short)16310, BotConstants.Camera.StationaryVerticalLock);
+            Assert.Equal((short)16160, BotConstants.Camera.SellerVerticalLock);
+            Assert.Equal((short)16720, BotConstants.Camera.SellerDistanceLock);
             Assert.Equal((ulong)0x1BE, BotConstants.MemoryOffsets.CameraVerticalLockOffset);
         }
 

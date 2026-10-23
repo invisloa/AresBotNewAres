@@ -196,7 +196,12 @@ namespace DriverScanTester.Services
             _options = options ?? new PositionSyncOptions();
             _keyEvent = keyEvent ?? ((vk, scan, flags) => GameInput.keybd_event(vk, scan, flags, 0));
             _wKeyCameraController = wKeyCameraController;
-            _wKeyCameraOwner = wKeyCameraController?.CreateOwner("PositionSync W refresh");
+            _wKeyCameraOwner = wKeyCameraController?.CreateOwner(
+                "PositionSync W refresh",
+                keyUp => _keyEvent(
+                    GameInput.VK_W,
+                    GameInput.SCAN_W,
+                    keyUp ? (uint)GameInput.KEYEVENTF_KEYUP : 0u));
         }
 
         /// <summary>Current state of the transition/position lifecycle.</summary>
@@ -512,22 +517,20 @@ namespace DriverScanTester.Services
 
             try
             {
-                // Apply the movement view immediately before the bounded W-down.
-                _keyEvent(GameInput.VK_W, GameInput.SCAN_W, 0);
+                // The shared controller applies the movement view and performs the
+                // physical W-down only after that lock verifies. The legacy path keeps
+                // its direct bounded key-down when no controller is configured.
+                if (!cameraOwnerAcquired)
+                    _keyEvent(GameInput.VK_W, GameInput.SCAN_W, 0);
                 await Task.Delay(_options.NudgeKeyDownMs, token);
             }
             finally
             {
-                try
-                {
+                if (cameraOwnerAcquired && _wKeyCameraController != null && _wKeyCameraOwner != null)
+                    _wKeyCameraController.ReleaseW(_wKeyCameraOwner);
+                else
                     _keyEvent(GameInput.VK_W, GameInput.SCAN_W, (uint)GameInput.KEYEVENTF_KEYUP);
-                    _log("[PositionSync] W refresh completed: KeyReleased=True.");
-                }
-                finally
-                {
-                    if (cameraOwnerAcquired && _wKeyCameraController != null && _wKeyCameraOwner != null)
-                        _wKeyCameraController.ReleaseW(_wKeyCameraOwner);
-                }
+                _log("[PositionSync] W refresh completed: KeyReleased=True.");
             }
         }
 

@@ -96,7 +96,7 @@ namespace DriverScanTester.Services
             // Determine initial mode from first waypoint
             var initialMode = waypoints[0].Mode;
 
-            _movementSystem = new MovementSystem(
+            MovementSystem movementSystem = new MovementSystem(
                 _memoryService,
                 _log,
                 targetX: waypoints[^1].X,
@@ -118,6 +118,7 @@ namespace DriverScanTester.Services
                 ExpectedMap = expectedMap,
                 RouteLabel = routeLabel
             };
+            _movementSystem = movementSystem;
 
             _log($"[PathRunner] Started path with {waypoints.Count} points, loop={loop}.");
 
@@ -136,9 +137,9 @@ namespace DriverScanTester.Services
                             _log("[PathRunner] Paused — holding route position.");
                             pauseLogged = true;
                         }
-                        _movementSystem?.CancelMobGrouping("bot paused");
-                        _movementSystem?.StopMoving();
-                        _movementSystem?.ReleaseCombatKeys();
+                        movementSystem?.CancelMobGrouping("bot paused");
+                        movementSystem?.StopMoving();
+                        movementSystem?.ReleaseCombatKeys();
                         await PauseController.WaitIfPausedAsync(token);
                         if (token.IsCancellationRequested) break;
                         _log("[PathRunner] Resumed — continuing route.");
@@ -146,32 +147,32 @@ namespace DriverScanTester.Services
                         continue;
                     }
 
-                    await _movementSystem.Update(token);
+                    await movementSystem.Update(token);
 
                     // A confirmed unexpected map change permanently invalidates the route.
                     // Abort before any recovery/combat/loot logic can act on old-map
                     // waypoints; the coordinator synchronizes the new position and runs
                     // the existing recovery workflow.
-                    if (_movementSystem.IsMapRouteInvalidated)
+                    if (movementSystem.IsMapRouteInvalidated)
                     {
                         LastStopReason = PathRunStopReason.MapTransition;
                         _log($"[PathRunner] Route '{routeLabel}' invalidated — unexpected map " +
-                             $"change confirmed (expected={_movementSystem.ExpectedMap}, " +
-                             $"observed={_movementSystem.ConfirmedTransitionMap}); aborting path.");
+                             $"change confirmed (expected={movementSystem.ExpectedMap}, " +
+                             $"observed={movementSystem.ConfirmedTransitionMap}); aborting path.");
                         return false;
                     }
 
                     // ReportAndGoBack teleport: the old route is dead. Abort immediately
                     // (no 10s ZoneBlock wait, no city-poll delay) so the coordinator can
                     // discard the stale Exp queue and start Repot from its first command.
-                    if (_movementSystem.IsReportAndGoBackRequested)
+                    if (movementSystem.IsReportAndGoBackRequested)
                     {
                         LastStopReason = PathRunStopReason.ReportAndGoBack;
                         _log("[PathRunner] ReportAndGoBack teleport requested — aborting path (coordinator will start Repot from scratch).");
                         return false;
                     }
 
-                    if (_movementSystem.IsWaypointRepotRequested)
+                    if (movementSystem.IsWaypointRepotRequested)
                     {
                         LastStopReason = PathRunStopReason.WaypointRepotRequested;
                         _log("[WaypointRecovery] Workflow route stopped for waypoint Repot request.");
@@ -179,7 +180,7 @@ namespace DriverScanTester.Services
                     }
 
                     // Check for terminal stop AFTER update so standby mode keeps running.
-                    if (_movementSystem.IsGoalReached)
+                    if (movementSystem.IsGoalReached)
                     {
                         _log("[PathRunner] Path completed (goal reached terminal).");
                         LastStopReason = PathRunStopReason.Completed;
@@ -190,7 +191,7 @@ namespace DriverScanTester.Services
                     // (InternalRepotEnabled=false); entering final-waypoint standby IS the
                     // completion signal for them. Loop paths never keep standby active
                     // (they re-enqueue), so this only fires for non-loop routes.
-                    if (!loop && _movementSystem.IsFinalStandbyActive)
+                    if (!loop && movementSystem.IsFinalStandbyActive)
                     {
                         _log("[PathRunner] Path completed (final waypoint standby).");
                         LastStopReason = PathRunStopReason.Completed;
@@ -202,18 +203,18 @@ namespace DriverScanTester.Services
                     // wilderness), the movement system stops and would idle here forever.
                     // Abort after a sustained block so the coordinator can restart from the
                     // city (go repot → travel back out).
-                    if (_movementSystem.IsZoneBlocked &&
-                        _movementSystem.ZoneBlockedDuration.TotalMilliseconds >= BotConstants.Delays.ZoneBlockAbortMs)
+                    if (movementSystem.IsZoneBlocked &&
+                        movementSystem.ZoneBlockedDuration.TotalMilliseconds >= BotConstants.Delays.ZoneBlockAbortMs)
                     {
                         LastStopReason = PathRunStopReason.ZoneBlocked;
-                        _log($"[PathRunner] Zone-blocked for {_movementSystem.ZoneBlockedDuration.TotalSeconds:F0}s — aborting path (player likely in the wrong zone).");
+                        _log($"[PathRunner] Zone-blocked for {movementSystem.ZoneBlockedDuration.TotalSeconds:F0}s — aborting path (player likely in the wrong zone).");
                         return false;
                     }
 
                     // City-stuck watchdog: in workflow mode the in-city stuck escalation
                     // signals a route that cannot complete. Abort so the coordinator retries
                     // from the city instead of idling for 10 minutes.
-                    if (_movementSystem.IsCityStuckFatal)
+                    if (movementSystem.IsCityStuckFatal)
                     {
                         _log("[PathRunner] City-stuck escalation fired — aborting path (coordinator will retry from the city).");
                         LastStopReason = PathRunStopReason.CityStuck;
@@ -240,9 +241,9 @@ namespace DriverScanTester.Services
             finally
             {
                 // Persist any pending stuck-cell data before stopping
-                _movementSystem?.SaveLocalMap();
-                _movementSystem?.CancelMobGrouping("path runner stopped");
-                _movementSystem?.CancelWaypointSpecialRecovery();
+                movementSystem?.SaveLocalMap();
+                movementSystem?.CancelMobGrouping("path runner stopped");
+                movementSystem?.CancelWaypointSpecialRecovery();
                 // Centralized input cleanup for every termination path (normal
                 // completion, cancellation, exception, phase change): StopMoving
                 // releases W/A/D, ReleaseCombatKeys releases the combat-owned
@@ -250,9 +251,9 @@ namespace DriverScanTester.Services
                 // idempotent, so an EXP → Repot interruption while 3 is held
                 // can never leak it into the Repot phase. The "[Key] 3 up"
                 // release log therefore always precedes "[PathRunner] Path stopped."
-                _movementSystem?.ReleaseCombatKeys();
-                _movementSystem?.StopMoving();
-                _movementSystem?.DisposeMobGroupingDetector();
+                movementSystem?.ReleaseCombatKeys();
+                movementSystem?.ReleaseCameraOwnership();
+                movementSystem?.DisposeMobGroupingDetector();
                 _log($"[PathRunner] final stop reason={LastStopReason}.");
                 _log("[PathRunner] Path stopped.");
             }
@@ -272,7 +273,7 @@ namespace DriverScanTester.Services
             _movementSystem?.CancelMobGrouping("path runner stop requested");
             _movementSystem?.CancelWaypointSpecialRecovery();
             _movementSystem?.ReleaseCombatKeys();
-            _movementSystem?.StopMoving();
+            _movementSystem?.ReleaseCameraOwnership();
         }
     }
 }

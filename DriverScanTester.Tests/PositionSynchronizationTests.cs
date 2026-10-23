@@ -890,7 +890,7 @@ namespace DriverScanTester.Tests
         {
             var memory = new SyncMemory { VerticalLock = BotConstants.Camera.StationaryVerticalLock };
             var events = memory.Events;
-            var controller = new WKeyCameraController(memory.CreateMemory(_ => { }), _ => { });
+            using var controller = new WKeyCameraController(memory.CreateMemory(_ => { }), _ => { });
             var options = FastOptions();
             options.NudgeKeyDownMs = 5000;
             var service = new PositionSyncService(

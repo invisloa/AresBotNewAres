@@ -1215,9 +1215,9 @@ namespace DriverScanTester.Services
         /// </summary>
         private void SetSellCameraView()
         {
-            const short sellCameraDistance = 16720;
+            const short sellCameraDistance = BotConstants.Camera.SellerDistanceLock;
 
-            short sellVerticalLock = BotConstants.Camera.DefaultVerticalLock;
+            short sellVerticalLock = BotConstants.Camera.SellerVerticalLock;
             _log($"ItemSeller: Setting sell-view camera (distance={sellCameraDistance}, vertical={sellVerticalLock}).");
             _memory.SetCameraDistance(sellCameraDistance);
             if (!_memory.TryGetCameraVerticalLock(out short currentVerticalLock) ||

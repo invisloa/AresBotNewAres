@@ -22,7 +22,7 @@ namespace DriverScanTester.Tests
             var memory = new MemoryFixture();
             var events = memory.Events;
             GameMemoryService service = memory.CreateService();
-            var cameraController = new WKeyCameraController(service, _ => { });
+            using var cameraController = new WKeyCameraController(service, _ => { });
             var pathRunner = new PathRunnerService(service, _ => { }, wKeyCameraController: cameraController);
             var operationContext = new OperationContext(
                 service,
@@ -62,7 +62,7 @@ namespace DriverScanTester.Tests
             var memory = new MemoryFixture();
             var events = memory.Events;
             GameMemoryService service = memory.CreateService();
-            var cameraController = new WKeyCameraController(service, _ => { });
+            using var cameraController = new WKeyCameraController(service, _ => { });
             var pathRunner = new PathRunnerService(service, _ => { }, wKeyCameraController: cameraController);
             var operationContext = new OperationContext(
                 service,

@@ -1102,7 +1102,7 @@ namespace DriverScanTester.Services
             _memoryService = memoryService;
             _log = log;
             _wKeyCameraController = wKeyCameraController;
-            _wKeyCameraOwner = wKeyCameraController?.CreateOwner("MovementSystem");
+            _wKeyCameraOwner = wKeyCameraController?.CreateOwner("MovementSystem", SendSyntheticForwardKeyEvent);
             _combatHandler = new CombatHandler(log);
             _mobMarkerDetector = new MobMarkerDetector(log);
             _mobGroupingController = new MobGroupingController(log);
@@ -5253,7 +5253,6 @@ namespace DriverScanTester.Services
                     return true;
                 }
 
-                bool cameraOwnerAcquired = false;
                 if (_wKeyCameraController != null && _wKeyCameraOwner != null)
                 {
                     if (!_wKeyCameraController.TryAcquireW(
@@ -5263,33 +5262,31 @@ namespace DriverScanTester.Services
                         _log("[WCamera] StartMoving suppressed — movement vertical lock was not verified or the camera is owned by another operation.");
                         return false;
                     }
-                    cameraOwnerAcquired = true;
                 }
 
                 _log($"[Input] W down (StartMoving) — call #{_startMoveCount + 1}. Tick:{_tickCount}");
 
-                try
+                if (_wKeyCameraController == null)
                 {
-                    // The verified movement lock is applied by TryAcquireW above,
-                    // immediately before this first physical W-down.
-                    SendSyntheticForwardKeyEvent(keyUp: false);
-                }
-                catch (Exception ex)
-                {
-                    try { SendSyntheticForwardKeyEvent(keyUp: true); }
-                    catch (Exception cleanupEx)
+                    try
                     {
-                        _log($"[Input] W-up cleanup after failed StartMoving also failed: {cleanupEx.Message}");
+                        // Legacy path: no shared camera controller means this movement
+                        // system owns its own physical W transition.
+                        SendSyntheticForwardKeyEvent(keyUp: false);
                     }
-                    finally
+                    catch (Exception ex)
                     {
-                        if (cameraOwnerAcquired && _wKeyCameraController != null && _wKeyCameraOwner != null)
-                            _wKeyCameraController.ReleaseW(_wKeyCameraOwner);
+                        try { SendSyntheticForwardKeyEvent(keyUp: true); }
+                        catch (Exception cleanupEx)
+                        {
+                            _log($"[Input] W-up cleanup after failed StartMoving also failed: {cleanupEx.Message}");
+                        }
+                        _log($"[Input] W down (StartMoving) failed: {ex.Message}");
+                        return false;
                     }
-
-                    _log($"[Input] W down (StartMoving) failed: {ex.Message}");
-                    return false;
                 }
+                // With a shared controller, the physical W-down was performed only
+                // after the movement vertical lock was applied and verified.
 
                 _isMovingForward = true;
                 _startMoveCount++;
@@ -5321,8 +5318,6 @@ namespace DriverScanTester.Services
                     return;
                 }
 
-                bool cameraOwnerAcquired = false;
-                bool cameraOwnershipWasAlreadyHeld = _isMovingForward;
                 if (_wKeyCameraController != null && _wKeyCameraOwner != null)
                 {
                     if (!_wKeyCameraController.TryAcquireW(_wKeyCameraOwner))
@@ -5330,10 +5325,30 @@ namespace DriverScanTester.Services
                         _log("[WCamera] ForceStartMoving suppressed — movement vertical lock was not verified or the camera is owned by another operation.");
                         return;
                     }
-                    cameraOwnerAcquired = !_isMovingForward;
                 }
 
                 _lastForceStartMovingAt = DateTime.Now;
+
+                if (_wKeyCameraController != null && _wKeyCameraOwner != null)
+                {
+                    // The controller keeps the movement camera across the internal
+                    // up/down gap and suppresses the restart if another W owner exists.
+                    _log($"[Input] ForceStartMoving — restarting W (call #{_startMoveCount + 1}). Tick:{_tickCount}");
+                    if (!_wKeyCameraController.TryRestartW(
+                        _wKeyCameraOwner, BotConstants.Delays.ForceStartReleaseGapMs))
+                    {
+                        _isMovingForward = false;
+                        _log("[Input] ForceStartMoving failed: W ownership was not available after the restart attempt.");
+                        return;
+                    }
+
+                    _isMovingForward = true;
+                    _startMoveCount++;
+                    _lootMoveSuppressedLogged = false;
+                    _ignoreStuckUntil = DateTime.Now.AddSeconds(STUCK_GRACE_AFTER_START_SECONDS);
+                    return;
+                }
+
                 _log($"[Input] ForceStartMoving — releasing W key (call #{_startMoveCount + 1}). Tick:{_tickCount}");
                 try
                 {
@@ -5358,9 +5373,6 @@ namespace DriverScanTester.Services
                         _log($"[Input] W-up cleanup after failed ForceStartMoving also failed: {cleanupEx.Message}");
                     }
                     _isMovingForward = false;
-                    if (_wKeyCameraController != null && _wKeyCameraOwner != null &&
-                        (cameraOwnerAcquired || cameraOwnershipWasAlreadyHeld))
-                        _wKeyCameraController.ReleaseW(_wKeyCameraOwner);
                     _log($"[Input] ForceStartMoving failed: {ex.Message}");
                 }
             }
@@ -5380,19 +5392,22 @@ namespace DriverScanTester.Services
                 }
 
                 // Physical cleanup is unconditional and logical turn ownership is reset
-                // even if one of the native KEYUP calls fails.
+                // even if one of the native KEYUP calls fails. With a shared camera
+                // controller only the final logical W owner sends the physical W-up;
+                // stopping one component can never release another component's hold.
                 try
                 {
                     try
                     {
-                        SendSyntheticForwardKeyEvent(keyUp: true);
+                        if (_wKeyCameraController != null && _wKeyCameraOwner != null)
+                            _wKeyCameraController.ReleaseW(_wKeyCameraOwner);
+                        else
+                            SendSyntheticForwardKeyEvent(keyUp: true);
                     }
                     finally
                     {
                         // W is physically released before the last owner restores the
                         // stationary camera view. Repeated StopMoving remains idempotent.
-                        if (_wKeyCameraController != null && _wKeyCameraOwner != null)
-                            _wKeyCameraController.ReleaseW(_wKeyCameraOwner);
                     }
                 }
                 finally
@@ -5423,6 +5438,24 @@ namespace DriverScanTester.Services
 
                 if (wasMovingForward)
                     _log($"[Input] W up (StopMoving) — call #{_stopMoveCount}. Tick:{_tickCount}");
+            }
+        }
+
+        /// <summary>
+        /// Terminates this movement instance's camera-controller participation.
+        /// It releases only its own W owner and its own mandatory-loot navigation
+        /// barrier registration; the authoritative LootSystem obligation is untouched.
+        /// Safe to call repeatedly and from every route/workflow termination path.
+        /// </summary>
+        public void ReleaseCameraOwnership()
+        {
+            try
+            {
+                SetLootNavigationBarrierHoldsInput(false);
+            }
+            finally
+            {
+                StopMoving();
             }
         }
 

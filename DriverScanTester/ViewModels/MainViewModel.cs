@@ -631,16 +631,10 @@ namespace DriverScanTester.ViewModels
             // changes, potions are never consumed).
             FocusGameWindow();
 
-            // 1. Stop existing
-            if (_isMovementBotRunning || _isHealManaBotRunning || _isLootBotRunning)
-            {
-                _movementBotCts?.Cancel();
-                _healManaBotCts?.Cancel();
-                _lootBotCts?.Cancel();
-                _isMovementBotRunning = false;
-                _isHealManaBotRunning = false;
-                _isLootBotRunning = false;
-            }
+            // 1. Stop existing standalone runtimes and close their camera session
+            // before a replacement session is created. A workflow may not be replaced.
+            if (!TryPrepareReplacementCameraSession("Run This Path"))
+                return;
 
             // 2. Resolve base
             ulong baseAddr = FindModuleInScanner("Ares.exe", false);
@@ -657,7 +651,20 @@ namespace DriverScanTester.ViewModels
             var initialMode = path.Count > 0 ? path[0].Mode : Services.BotMode.OnlyMove;
 
             var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
-            _wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
+            if (WKeyCameraController.HasActiveSession(_attachedPid, baseAddr))
+            {
+                AppendBotLog("[Path Editor] Run This Path rejected: another camera session is still active. Retry after its cleanup finishes.");
+                return;
+            }
+            try
+            {
+                _wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
+            }
+            catch (InvalidOperationException ex)
+            {
+                AppendBotLog($"[Path Editor] Run This Path rejected: {ex.Message}");
+                return;
+            }
             var pathLoader = new SavedPathLoader(AppendBotLog);
             var profile = _workflowCoordinator?.ActiveProfile ?? new BotProfile();
             var itemSeller = new ItemSellerService(memoryService, AppendBotLog, _wKeyCameraController);
@@ -692,7 +699,7 @@ namespace DriverScanTester.ViewModels
             MovementSystem movementForTask = _movementSystem!;
             WKeyCameraController cameraControllerForTask = _wKeyCameraController!;
 
-            Task.Run(() => MovementBotLoop(token, movementForTask, cameraControllerForTask), token);
+            _movementBotTask = Task.Run(() => MovementBotLoop(token, movementForTask, cameraControllerForTask), token);
             AppendBotLog($"Bot started with Custom Route ({path.Count} points). Loop: {loop}");
 
             // 4. Start Heal/Mana using the values initialized for the Bot Window.
@@ -719,17 +726,18 @@ namespace DriverScanTester.ViewModels
             }
             else if (!_isLootBotRunning)
             {
-                _lootSystem = new LootSystem(memoryService, AppendBotLog, _wKeyCameraController);
+                _lootSystem = new LootSystem(memoryService, AppendBotLog, GetSharedCameraControllerForLoot());
                 _lootSystem.ShouldStopOnOtherPlayerMarker = () => StopOnOtherPlayerDetected;
                 Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 0);
                 _lootSystem.OtherPlayerMarkerDetected =
                     () => HandleStandalonePlayerMarkerDetected(memoryService, profile);
-                if (_movementSystem != null)
+                if (_isMovementBotRunning && _movementSystem != null)
                     _movementSystem.LootSystemRef = _lootSystem;
                 _lootBotCts = new CancellationTokenSource();
                 _isLootBotRunning = true;
                 var lootToken = _lootBotCts.Token;
-                Task.Run(() => LootBotLoop(lootToken), lootToken);
+                LootSystem lootForTask = _lootSystem;
+                _lootBotTask = Task.Run(() => LootBotLoop(lootToken, lootForTask), lootToken);
                 AppendBotLog("Loot Bot started.");
             }
 
@@ -865,7 +873,7 @@ namespace DriverScanTester.ViewModels
                 GetPointerSize(),
                 AppendBotLog);
             bool distanceSet = memoryService.TrySetCameraDistance(cameraDistance);
-            bool verticalLockSet = _wKeyCameraController != null
+            bool verticalLockSet = _wKeyCameraController is { IsAcceptingOperations: true }
                 ? _wKeyCameraController.TrySetStationaryWhenIdle("manual pixel-detection camera setup")
                 : memoryService.TrySetCameraVerticalLock(verticalLock);
             if (!distanceSet || !verticalLockSet)
@@ -1049,7 +1057,7 @@ namespace DriverScanTester.ViewModels
                         NameText = "Camera Vertical Angle",
                         AddressText = "[Ares.exe + 0x4853F0] + 0x1BE",
                         ValueType = LockValueType.Short,
-                        ValueText = "16320"
+                        ValueText = BotConstants.Camera.StationaryVerticalLock.ToString()
                     });
                 }
 
@@ -3132,6 +3140,8 @@ namespace DriverScanTester.ViewModels
         private CancellationTokenSource? _healManaBotCts;
         private int _standalonePlayerMarkerStopHandled;
         private CancellationTokenSource? _lootBotCts;
+        private Task? _movementBotTask;
+        private Task? _lootBotTask;
         private MovementSystem? _movementSystem;
         private WKeyCameraController? _wKeyCameraController;
         private HealManaSystem? _healManaSystem;
@@ -3215,6 +3225,79 @@ namespace DriverScanTester.ViewModels
             try { _workflowCoordinator?.RequestPauseInputRelease(); } catch { }
         }
 
+        private static bool IsTaskActive(Task? task) => task != null && !task.IsCompleted;
+
+        /// <summary>
+        /// Rejects a new camera-owning runtime while another bot workflow, standalone
+        /// bot, movement diagnostic or still-running cleanup task is active. This is
+        /// the shared exclusivity guard used before any new W-camera controller is
+        /// constructed, so a new session can never invalidate a running workflow.
+        /// </summary>
+        private bool TryEnsureNoActiveCameraRuntime(string action, string logPrefix = "")
+        {
+            string? busyReason = CameraSessionExclusivity.FindConflict(
+                workflowRunning: IsWorkflowRunning,
+                movementRunning: _isMovementBotRunning,
+                lootRunning: _isLootBotRunning,
+                movementDiagnosticBlocking: MovementDiagnostic.BlocksOtherRuntimes,
+                workflowTaskActive: IsTaskActive(_workflowTask),
+                movementTaskActive: IsTaskActive(_movementBotTask),
+                lootTaskActive: IsTaskActive(_lootBotTask));
+
+            if (busyReason == null)
+                return true;
+
+            AppendBotLog($"{logPrefix}{action} rejected: {busyReason}. Stop/wait for it to finish before starting a new camera-owning operation.");
+            return false;
+        }
+
+        /// <summary>
+        /// Stops standalone runtimes synchronously enough for a replacement Path run.
+        /// The old controller is closed before the replacement is created; when an
+        /// in-flight loot scan still owns its external camera lease the caller waits
+        /// for that cleanup instead of invalidating it.
+        /// </summary>
+        private bool TryPrepareReplacementCameraSession(string action)
+        {
+            if (IsWorkflowRunning || IsTaskActive(_workflowTask))
+            {
+                AppendBotLog($"[Path Editor] {action} rejected: the profile workflow is still running or cleaning up.");
+                return false;
+            }
+
+            _movementBotCts?.Cancel();
+            _healManaBotCts?.Cancel();
+            _lootBotCts?.Cancel();
+            _isMovementBotRunning = false;
+            _isHealManaBotRunning = false;
+            _isLootBotRunning = false;
+
+            try { _lootSystem?.Stop(); } catch (Exception ex) { AppendBotLog($"[Path Editor] Previous loot cleanup error: {ex.Message}"); }
+            try { _movementSystem?.ReleaseCameraOwnership(); } catch (Exception ex) { AppendBotLog($"[Path Editor] Previous movement cleanup error: {ex.Message}"); }
+            _wKeyCameraController?.EndSession();
+
+            if (_wKeyCameraController is { IsEnded: false })
+            {
+                AppendBotLog($"[Path Editor] {action} rejected: the previous camera session is still releasing protected input/camera ownership. Retry once it has finished.");
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Loot started together with a running movement bot must reuse that workflow's
+        /// controller. A standalone/ended controller is never reused for standalone loot.
+        /// </summary>
+        private WKeyCameraController? GetSharedCameraControllerForLoot()
+        {
+            if (_isMovementBotRunning &&
+                _wKeyCameraController is { IsAcceptingOperations: true })
+                return _wKeyCameraController;
+
+            return null;
+        }
+
         public bool IsWorkflowRunning => _workflowCoordinator?.IsRunning ?? false;
 
         public string MobGroupingStatus => _isMovementBotRunning && _movementSystem != null
@@ -3275,6 +3358,8 @@ namespace DriverScanTester.ViewModels
             if (_workflowCoordinator?.IsRunning == true) { AppendLog("Workflow already running."); return; }
             if (BlockNormalActionForMovementDiagnostic("Start Workflow"))
                 return;
+            if (!TryEnsureNoActiveCameraRuntime("Start Workflow"))
+                return;
 
             FocusGameWindow();
 
@@ -3296,7 +3381,20 @@ namespace DriverScanTester.ViewModels
             }
 
             var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
-            _wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
+            if (WKeyCameraController.HasActiveSession(_attachedPid, baseAddr))
+            {
+                AppendBotLog("[Coordinator] Start Workflow rejected: another camera session is still active. Retry after its cleanup finishes.");
+                return;
+            }
+            try
+            {
+                _wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
+            }
+            catch (InvalidOperationException ex)
+            {
+                AppendBotLog($"[Coordinator] Start Workflow rejected: {ex.Message}");
+                return;
+            }
             var repotSystem = new RepotSystem(memoryService, AppendBotLog, _wKeyCameraController);
             var repotDetector = new RepotDetectorService(AppendBotLog);
             var pathLoader = new SavedPathLoader(AppendBotLog);
@@ -3657,6 +3755,12 @@ namespace DriverScanTester.ViewModels
                 return false;
             }
 
+            // The operation test creates its own W-camera session. It must never
+            // invalidate a running workflow, standalone bot or movement diagnostic.
+            // The guard runs before any controller is constructed.
+            if (!TryEnsureNoActiveCameraRuntime("Operation Test", "[Operation Test] "))
+                return false;
+
             FocusGameWindow();
             DetectAndSetWindowOffset();
 
@@ -3673,7 +3777,21 @@ namespace DriverScanTester.ViewModels
             }
 
             var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
-            var wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
+            if (WKeyCameraController.HasActiveSession(_attachedPid, baseAddr))
+            {
+                AppendBotLog("[Operation Test] Rejected: a previous camera session is still performing input/camera cleanup. Retry when it has finished.");
+                return false;
+            }
+            WKeyCameraController wKeyCameraController;
+            try
+            {
+                wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
+            }
+            catch (InvalidOperationException ex)
+            {
+                AppendBotLog($"[Operation Test] Rejected before creating a camera controller: {ex.Message}");
+                return false;
+            }
             var pathRunner = new PathRunnerService(
                 memoryService, AppendBotLog,
                 wKeyCameraController: wKeyCameraController);
@@ -3733,7 +3851,8 @@ namespace DriverScanTester.ViewModels
                     "Attach to the game first.");
             }
 
-            if (_isMovementBotRunning || _isLootBotRunning || IsWorkflowRunning)
+            if (_isMovementBotRunning || _isLootBotRunning || IsWorkflowRunning ||
+                IsTaskActive(_movementBotTask) || IsTaskActive(_lootBotTask) || IsTaskActive(_workflowTask))
             {
                 string detail = "Stop the movement bot, loot bot and workflow first — the diagnostic needs exclusive camera/mouse control.";
                 AppendBotLog($"[LootTest] {label}: {detail}");
@@ -3747,7 +3866,8 @@ namespace DriverScanTester.ViewModels
 
             // Re-check after the delay: a bot/workflow could have been started while
             // the diagnostic was waiting for the game window to become foreground.
-            if (_isMovementBotRunning || _isLootBotRunning || IsWorkflowRunning)
+            if (_isMovementBotRunning || _isLootBotRunning || IsWorkflowRunning ||
+                IsTaskActive(_movementBotTask) || IsTaskActive(_lootBotTask) || IsTaskActive(_workflowTask))
             {
                 string detail = "A bot/workflow was started during the focus delay — diagnostic cancelled. Stop it and retry.";
                 AppendBotLog($"[LootTest] {label}: {detail}");
@@ -4149,12 +4269,16 @@ namespace DriverScanTester.ViewModels
                         _isMovementBotRunning = false;
                         // Also stop loot bot when movement stops
                         ToggleLootBot(false);
+                        try { _movementSystem?.ReleaseCameraOwnership(); } catch { }
+                        _wKeyCameraController?.EndSession();
                         AppendBotLog("Movement Bot stopped.");
                     }
                     else
                     {
                         if (!_isAttached) { AppendLog("Attach first."); return; }
                         if (BlockNormalActionForMovementDiagnostic("Start Movement Bot"))
+                            return;
+                        if (!TryEnsureNoActiveCameraRuntime("Start Movement Bot"))
                             return;
                         // A previous run may have been stopped while paused — always start unpaused.
                         PauseController.Resume();
@@ -4168,8 +4292,26 @@ namespace DriverScanTester.ViewModels
                             _pointerScanner?.RefreshModules();
                             baseAddr = FindModuleInScanner("Ares.exe", true);
                         }
+                        if (baseAddr == 0)
+                        {
+                            AppendLog("Failed to resolve module base for GameMemoryService.");
+                            return;
+                        }
                         var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
-                        _wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
+                        if (WKeyCameraController.HasActiveSession(_attachedPid, baseAddr))
+                        {
+                            AppendBotLog("[MovementBot] Start rejected: another camera session is still active. Retry after its cleanup finishes.");
+                            return;
+                        }
+                        try
+                        {
+                            _wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
+                        }
+                        catch (InvalidOperationException ex)
+                        {
+                            AppendBotLog($"[MovementBot] Start rejected: {ex.Message}");
+                            return;
+                        }
                         Interlocked.Exchange(ref _gameFailureStopHandled, 0);
                         _movementSystem = new MovementSystem(
                             memoryService, AppendBotLog, tx, ty, SelectedPrecision, null, SelectedBotMode,
@@ -4184,7 +4326,7 @@ namespace DriverScanTester.ViewModels
                         var movementToken = _movementBotCts.Token;
                         MovementSystem movementForTask = _movementSystem!;
                         WKeyCameraController cameraControllerForTask = _wKeyCameraController!;
-                        Task.Run(
+                        _movementBotTask = Task.Run(
                             () => MovementBotLoop(movementToken, movementForTask, cameraControllerForTask),
                             movementToken);
                         AppendBotLog("Movement Bot started.");
@@ -4255,6 +4397,7 @@ namespace DriverScanTester.ViewModels
                     {
                         _lootBotCts?.Cancel();
                         _isLootBotRunning = false;
+                        try { _lootSystem?.Stop(); } catch (Exception ex) { AppendBotLog($"[LootBot] Stop cleanup error: {ex.Message}"); }
                         AppendBotLog("Loot Bot stopped.");
                     }
                     else
@@ -4273,20 +4416,27 @@ namespace DriverScanTester.ViewModels
 
                         var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
                         var profile = _workflowCoordinator?.ActiveProfile ?? new BotProfile();
+                        WKeyCameraController? sharedCameraController = GetSharedCameraControllerForLoot();
+                        if (_isMovementBotRunning && sharedCameraController == null)
+                        {
+                            AppendBotLog("[LootBot] Start rejected: the movement bot's camera session is still active, closing, or unavailable. Retry after it has finished.");
+                            return;
+                        }
                         if (!_isMovementBotRunning && !_isHealManaBotRunning && !_isLootBotRunning &&
                             _workflowCoordinator?.IsRunning != true)
                             Interlocked.Exchange(ref _gameFailureStopHandled, 0);
-                        _lootSystem = new LootSystem(memoryService, AppendBotLog, _wKeyCameraController);
+                        _lootSystem = new LootSystem(memoryService, AppendBotLog, sharedCameraController);
                         _lootSystem.ShouldStopOnOtherPlayerMarker = () => StopOnOtherPlayerDetected;
                         Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 0);
                         _lootSystem.OtherPlayerMarkerDetected =
                             () => HandleStandalonePlayerMarkerDetected(memoryService, profile);
-                        if (_movementSystem != null)
+                        if (_isMovementBotRunning && _movementSystem != null)
                             _movementSystem.LootSystemRef = _lootSystem;
                         _lootBotCts = new CancellationTokenSource();
                         _isLootBotRunning = true;
                         var lootToken = _lootBotCts.Token;
-                        Task.Run(() => LootBotLoop(lootToken), lootToken);
+                        LootSystem lootForTask = _lootSystem;
+                        _lootBotTask = Task.Run(() => LootBotLoop(lootToken, lootForTask), lootToken);
                         AppendBotLog("Loot Bot started.");
                         if (!_isMovementBotRunning)
                             StartGameConnectionMonitor();
@@ -4316,15 +4466,15 @@ namespace DriverScanTester.ViewModels
                             if (PauseController.IsPaused)
                             {
                                 movementForTask.CancelMobGrouping("manual movement paused");
-                                _movementSystem.StopMoving();
-                                _movementSystem.ReleaseCombatKeys();
+                                movementForTask.StopMoving();
+                                movementForTask.ReleaseCombatKeys();
                                 await PauseController.WaitIfPausedAsync(token);
                                 if (token.IsCancellationRequested) break;
                                 FocusGameWindow();
                                 continue;
                             }
 
-                            await _movementSystem.Update(token);
+                            await movementForTask.Update(token);
 
                             // Zone-block watchdog (same as PathRunnerService): if the player
                             // ends up in a zone the current path forbids (e.g. teleported to
@@ -4332,12 +4482,12 @@ namespace DriverScanTester.ViewModels
                             // otherwise stand idle forever. Stop it with a clear message so
                             // the user can react (e.g. start the profile workflow, which
                             // auto-repots and resumes).
-                            if (_movementSystem.IsZoneBlocked &&
-                                _movementSystem.ZoneBlockedDuration.TotalMilliseconds >= BotConstants.Delays.ZoneBlockAbortMs)
+                            if (movementForTask.IsZoneBlocked &&
+                                movementForTask.ZoneBlockedDuration.TotalMilliseconds >= BotConstants.Delays.ZoneBlockAbortMs)
                             {
                                 AppendBotLog(
                                     $"[MovementBot] Player is in the wrong zone for this path " +
-                                    $"(zone-blocked for {_movementSystem.ZoneBlockedDuration.TotalSeconds:F0}s — likely teleported to the city). " +
+                                    $"(zone-blocked for {movementForTask.ZoneBlockedDuration.TotalSeconds:F0}s — likely teleported to the city). " +
                                     $"Stopping the bot. Start the profile workflow to auto-repot and resume.");
                                 break;
                             }
@@ -4354,18 +4504,21 @@ namespace DriverScanTester.ViewModels
                     {
                         Application.Current?.Dispatcher?.Invoke(() => 
                         {
-                            _isMovementBotRunning = false;
+                            if (ReferenceEquals(_movementSystem, movementForTask))
+                                _isMovementBotRunning = false;
                             AppendBotLog("Movement Bot loop ended.");
                         });
                         
                         // Persist any pending stuck-cell data before stopping
-                        _movementSystem?.SaveLocalMap();
+                        movementForTask.SaveLocalMap();
 
-                        // Ensure movement stops even on cancellation
+                        // Ensure movement stops even on cancellation. Cleanup is scoped
+                        // to this captured instance so an old loop can never release a
+                        // newer run's W ownership or camera session.
                         movementForTask.CancelMobGrouping("manual movement loop stopped");
                         movementForTask.CancelWaypointSpecialRecovery();
                         movementForTask.ReleaseCombatKeys();
-                        movementForTask.StopMoving();
+                        movementForTask.ReleaseCameraOwnership();
                         movementForTask.DisposeMobGroupingDetector();
                         cameraControllerForTask.EndSession();
                         StopGameConnectionMonitorIfIdle();
@@ -4404,11 +4557,11 @@ namespace DriverScanTester.ViewModels
                     }
                 }
 
-                private async Task LootBotLoop(CancellationToken token)
+                private async Task LootBotLoop(CancellationToken token, LootSystem lootForTask)
                 {
                     try
                     {
-                        while (!token.IsCancellationRequested && _isAttached && _lootSystem != null)
+                        while (!token.IsCancellationRequested && _isAttached)
                         {
                             if (PauseController.IsPaused)
                             {
@@ -4425,25 +4578,25 @@ namespace DriverScanTester.ViewModels
                             // already quiesced any in-flight scan when it took ownership.
                             if (_movementSystem?.IsRecoveryInputOwnershipActive == true)
                             {
-                                _lootSystem.PinkLootOnlyMode = false;
-                                _lootSystem.MoveAndAttackAndLootMode = false;
-                                _lootSystem.PlayerMarkerScanEnabled = false;
+                                lootForTask.PinkLootOnlyMode = false;
+                                lootForTask.MoveAndAttackAndLootMode = false;
+                                lootForTask.PlayerMarkerScanEnabled = false;
                                 await PauseController.PausableDelayAsync(10, token);
                                 continue;
                             }
                             if (_movementSystem?.IsWaypointSpecialRecoveryActive == true)
                             {
-                                _lootSystem.PinkLootOnlyMode = false;
-                                _lootSystem.MoveAndAttackAndLootMode = false;
-                                _lootSystem.PlayerMarkerScanEnabled = false;
+                                lootForTask.PinkLootOnlyMode = false;
+                                lootForTask.MoveAndAttackAndLootMode = false;
+                                lootForTask.PlayerMarkerScanEnabled = false;
                                 await PauseController.PausableDelayAsync(10, token);
                                 continue;
                             }
                             if (_movementSystem?.IsMoveOnlyActive == true)
                             {
-                                _lootSystem.PinkLootOnlyMode = false;
-                                _lootSystem.MoveAndAttackAndLootMode = false;
-                                _lootSystem.PlayerMarkerScanEnabled = false;
+                                lootForTask.PinkLootOnlyMode = false;
+                                lootForTask.MoveAndAttackAndLootMode = false;
+                                lootForTask.PlayerMarkerScanEnabled = false;
                                 await PauseController.PausableDelayAsync(10, token);
                                 continue;
                             }
@@ -4452,14 +4605,14 @@ namespace DriverScanTester.ViewModels
                             // the SOD/SOP pink-only scan; MoveAndAttackAndLoot is
                             // request-driven (passive moving pre-scan + post-kill scans).
                             Services.BotMode? currentMode = _movementSystem?.CurrentMode;
-                            _lootSystem.PinkLootOnlyMode = currentMode == Services.BotMode.MoveAndAttack;
-                            _lootSystem.MoveAndAttackAndLootMode =
+                            lootForTask.PinkLootOnlyMode = currentMode == Services.BotMode.MoveAndAttack;
+                            lootForTask.MoveAndAttackAndLootMode =
                                 currentMode == Services.BotMode.MoveAndAttackAndLoot;
-                            _lootSystem.PlayerMarkerScanEnabled =
+                            lootForTask.PlayerMarkerScanEnabled =
                                 currentMode == Services.BotMode.MoveAndAttack ||
                                 currentMode == Services.BotMode.MoveAndAttackAndLoot;
 
-                            await _lootSystem.Update(token);
+                            await lootForTask.Update(token);
                             await PauseController.PausableDelayAsync(10, token); // Update rate for loot
                         }
                     }
@@ -4470,10 +4623,11 @@ namespace DriverScanTester.ViewModels
                     }
                     finally
                     {
-                        _lootSystem?.Stop();
+                        lootForTask.Stop();
                         Application.Current?.Dispatcher?.Invoke(() =>
                         {
-                            _isLootBotRunning = false;
+                            if (ReferenceEquals(_lootSystem, lootForTask))
+                                _isLootBotRunning = false;
                             AppendBotLog("Loot Bot loop ended.");
                         });
                         StopGameConnectionMonitorIfIdle();

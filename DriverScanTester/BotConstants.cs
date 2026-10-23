@@ -49,14 +49,32 @@ namespace DriverScanTester
             /// <summary>Camera distance used only during SOD/SOP pink-pixel loot scans.</summary>
             public const short SodSopLootScanDistance = 17050;
 
-            /// <summary>Default camera vertical lock value currently used by the existing sell view (16160).</summary>
+            /// <summary>
+            /// Legacy name retained for the existing seller calibration (16160). New code
+            /// should use the explicitly named seller/movement constants below.
+            /// </summary>
             public const short DefaultVerticalLock = 16160;
 
-            /// <summary>Stationary vertical camera lock restored whenever no bot W input owns movement view.</summary>
-            public const short StationaryVerticalLock = 16320;
+            /// <summary>
+            /// Stationary vertical camera lock: the original normal-camera baseline
+            /// (16310), used for targeting, normal loot scans and every non-W view.
+            /// </summary>
+            public const short StationaryVerticalLock = 16310;
 
-            /// <summary>Vertical camera lock used only while a bot-owned W input is held.</summary>
-            public const short MovementVerticalLock = DefaultVerticalLock;
+            /// <summary>
+            /// Vertical camera lock used only while a bot-owned W input is held (16160).
+            /// This is the movement setting that existed before the W-camera refactor.
+            /// </summary>
+            public const short MovementVerticalLock = 16160;
+
+            /// <summary>
+            /// Seller/NPC vertical camera lock (16160). Numerically equal to the movement
+            /// lock but a separate calibration concept for the existing sell view.
+            /// </summary>
+            public const short SellerVerticalLock = 16160;
+
+            /// <summary>Existing seller/NPC camera distance (16720).</summary>
+            public const short SellerDistanceLock = 16720;
 
             /// <summary>Very low (closest) camera distance used during combat retarget very-low-search phase.</summary>
             public const short CombatRetargetVeryLowDistance = 16880;
@@ -699,7 +717,8 @@ namespace DriverScanTester
             public const int Dl = 541403;         // 0x000842DB
 
             /// <summary>Camera vertical angle (short at [Ares.exe + 0x4853F0] + 0x1BE)
-            /// observed while hovering the NPC.</summary>
+            /// observed while hovering the NPC. This is an NPC-hover observation only;
+            /// it is NOT the general stationary camera baseline (16310).</summary>
             public const short CameraVerticalAngle = 16320; // 0x3FB6
         }
 

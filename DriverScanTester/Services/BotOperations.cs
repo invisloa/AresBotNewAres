@@ -303,7 +303,8 @@ namespace DriverScanTester.Services
                 return false;
             }
 
-            WKeyCameraOwner cameraOwner = cameraController.CreateOwner("EtanaRepotUnstuck");
+            WKeyCameraOwner cameraOwner = cameraController.CreateOwner(
+                "EtanaRepotUnstuck", ctx.SendWKeyEvent);
             if (!cameraController.TryAcquireW(cameraOwner))
             {
                 ctx.Log("[Operation] EtanaRepotUnstuck: W input blocked because the movement camera lock was not verified or another operation owns the camera.");
@@ -312,19 +313,13 @@ namespace DriverScanTester.Services
 
             try
             {
-                ctx.SendWKeyEvent(keyUp: false);
+                // The shared controller owns the physical W transition as well as the
+                // movement camera lock; this operation only owns its logical W lease.
                 await Task.Delay(2400, token);
             }
             finally
             {
-                try
-                {
-                    ctx.SendWKeyEvent(keyUp: true);
-                }
-                finally
-                {
-                    cameraController.ReleaseW(cameraOwner);
-                }
+                cameraController.ReleaseW(cameraOwner);
             }
 
             ctx.Log("[Operation] EtanaRepotUnstuck: done (W up). ");

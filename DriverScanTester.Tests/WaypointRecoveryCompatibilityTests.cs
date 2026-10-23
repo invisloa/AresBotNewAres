@@ -58,7 +58,7 @@ namespace DriverScanTester.Tests
         {
             var log = new List<string>();
             GameMemoryService memory = CreateStubMemory(log.Add);
-            var cameraController = new WKeyCameraController(memory, log.Add);
+            using var cameraController = new WKeyCameraController(memory, log.Add);
             var pathLoader = new SavedPathLoader(log.Add);
             var itemSeller = new ItemSellerService(memory, log.Add, cameraController);
             var positionSync = new PositionSyncService(

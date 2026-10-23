@@ -13,12 +13,28 @@ namespace DriverScanTester.Tests
         private const ulong CameraBase = 0x2400000;
 
         [Fact]
+        public void SessionStartEstablishesStationaryViewWithoutRedundantWritesOrYawChange()
+        {
+            var memory = new MemoryFixture(BotConstants.Camera.MovementVerticalLock);
+            float yawBefore = memory.ReadCameraYaw();
+
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+
+            Assert.Equal(new[] { $"Vertical:{BotConstants.Camera.StationaryVerticalLock}" }, memory.VerticalWrites);
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.ReadCameraVerticalLock());
+            Assert.Equal(yawBefore, memory.ReadCameraYaw());
+
+            Assert.True(controller.TryInitializeStationaryView());
+            Assert.Single(memory.VerticalWrites);
+        }
+
+        [Fact]
         public void FirstWDownAppliesMovementLockBeforeKeyAndWUpRestoresStationaryLock()
         {
             var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
             List<string> events = memory.Events;
             float yawBefore = memory.ReadCameraYaw();
-            var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
             var movement = new RecordingMovementSystem(memory.CreateService(), controller, events);
 
             Assert.True(InvokeBool(movement, "TryStartMoving"));
@@ -37,7 +53,7 @@ namespace DriverScanTester.Tests
         public void RepeatedWRequestsDoNotRepeatVerticalWrites()
         {
             var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
-            var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
             var movement = new RecordingMovementSystem(memory.CreateService(), controller, memory.Events);
 
             for (int i = 0; i < 100; i++)
@@ -45,13 +61,14 @@ namespace DriverScanTester.Tests
 
             Assert.Single(memory.VerticalWrites);
             Assert.Equal(new[] { $"Vertical:{BotConstants.Camera.MovementVerticalLock}" }, memory.VerticalWrites);
+            movement.ReleaseCameraOwnership();
         }
 
         [Fact]
         public void ForceStartMovingKeepsMovementViewAcrossItsInternalKeyGap()
         {
             var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
-            var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
             var movement = new RecordingMovementSystem(memory.CreateService(), controller, memory.Events);
             Assert.True(InvokeBool(movement, "TryStartMoving"));
             memory.Events.Clear();
@@ -69,7 +86,7 @@ namespace DriverScanTester.Tests
         public void RepeatedStopMovingDoesNotRepeatStationaryCameraWrite()
         {
             var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
-            var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
             var movement = new RecordingMovementSystem(memory.CreateService(), controller, memory.Events);
             Assert.True(InvokeBool(movement, "TryStartMoving"));
 
@@ -86,23 +103,29 @@ namespace DriverScanTester.Tests
         public void MultipleWOwnersAreIdempotentAndOnlyLastReleaseRestoresStationaryView()
         {
             var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
-            var controller = new WKeyCameraController(memory.CreateService(), _ => { });
-            WKeyCameraOwner first = controller.CreateOwner("waypoint movement");
-            WKeyCameraOwner second = controller.CreateOwner("position refresh");
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            WKeyCameraOwner first = controller.CreateOwner("waypoint movement", keyUp =>
+                memory.Events.Add(keyUp ? "first-W-up" : "first-W-down"));
+            WKeyCameraOwner second = controller.CreateOwner("position refresh", keyUp =>
+                memory.Events.Add(keyUp ? "second-W-up" : "second-W-down"));
 
             Assert.True(controller.TryAcquireW(first));
             Assert.True(controller.TryAcquireW(first));
             Assert.True(controller.TryAcquireW(second));
             Assert.Single(memory.VerticalWrites);
+            Assert.Equal(1, memory.Events.Count(e => e == "first-W-down"));
+            Assert.DoesNotContain("second-W-down", memory.Events);
 
             controller.ReleaseW(first);
             controller.ReleaseW(first);
             Assert.Equal(BotConstants.Camera.MovementVerticalLock, memory.ReadCameraVerticalLock());
             Assert.Single(memory.VerticalWrites);
+            Assert.DoesNotContain("first-W-up", memory.Events);
 
             controller.ReleaseW(second);
             Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.ReadCameraVerticalLock());
             Assert.Equal(2, memory.VerticalWrites.Count);
+            Assert.Equal(1, memory.Events.Count(e => e == "second-W-up"));
             Assert.Equal(0, controller.ActiveWOwnerCount);
         }
 
@@ -110,7 +133,7 @@ namespace DriverScanTester.Tests
         public void FailedMovementLockWritePreventsWDown()
         {
             var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock) { IgnoreVerticalWrites = true };
-            var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
             var movement = new RecordingMovementSystem(memory.CreateService(), controller, memory.Events);
 
             Assert.False(InvokeBool(movement, "TryStartMoving"));
@@ -123,7 +146,7 @@ namespace DriverScanTester.Tests
         public void FailedWDownReleasesCameraOwnershipAndRestoresStationaryView()
         {
             var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
-            var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
             var movement = new RecordingMovementSystem(memory.CreateService(), controller, memory.Events)
             {
                 ThrowOnWDown = true
@@ -139,7 +162,7 @@ namespace DriverScanTester.Tests
         public void KeyboardTurningWithoutWDoesNotChangeVerticalLock()
         {
             var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
-            var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
             var movement = new RecordingMovementSystem(memory.CreateService(), controller, memory.Events);
 
             InvokeVoid(movement, "ApplyKeyboardSteeringBearing", 30f, false);
@@ -153,7 +176,7 @@ namespace DriverScanTester.Tests
         public void AttackSkillThreeAloneDoesNotRequestMovementView()
         {
             var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
-            var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
             var movement = new RecordingMovementSystem(memory.CreateService(), controller, memory.Events);
 
             InvokeVoid(movement, "HoldSkillThree");
@@ -169,7 +192,7 @@ namespace DriverScanTester.Tests
         {
             var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
             float yawBefore = memory.ReadCameraYaw();
-            var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
             var movement = new RecordingMovementSystem(memory.CreateService(), controller, memory.Events);
             Assert.True(InvokeBool(movement, "TryStartMoving"));
             memory.VerticalWrites.Clear();
@@ -186,9 +209,9 @@ namespace DriverScanTester.Tests
         public void LootCameraOwnerAndMandatoryBarrierBlockUnauthorizedWRequests()
         {
             var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
-            var controller = new WKeyCameraController(memory.CreateService(), _ => { });
-            WKeyCameraOwner movementOwner = controller.CreateOwner("main movement");
-            WKeyCameraOwner auxiliaryOwner = controller.CreateOwner("auxiliary recovery path");
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            WKeyCameraOwner movementOwner = controller.CreateOwner("main movement", _ => { });
+            WKeyCameraOwner auxiliaryOwner = controller.CreateOwner("auxiliary recovery path", _ => { });
             object lootOwner = new();
             object sellerOwner = new();
 
@@ -210,24 +233,152 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void StaleControllerCleanupCannotChangeCurrentWorkflowCamera()
+        public void ActiveSessionRejectsASecondControllerUntilOwnershipIsReleased()
         {
             var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
-            var oldController = new WKeyCameraController(memory.CreateService(), _ => { });
-            WKeyCameraOwner oldOwner = oldController.CreateOwner("cancelled path");
-            Assert.True(oldController.TryAcquireW(oldOwner));
+            using var first = new WKeyCameraController(memory.CreateService(), _ => { });
+            WKeyCameraOwner firstOwner = first.CreateOwner("workflow W", _ => { });
+            Assert.True(first.TryAcquireW(firstOwner));
 
-            var currentController = new WKeyCameraController(memory.CreateService(), _ => { });
-            WKeyCameraOwner currentOwner = currentController.CreateOwner("new workflow");
-            Assert.True(currentController.TryAcquireW(currentOwner));
-            memory.Events.Clear();
+            Assert.Throws<InvalidOperationException>(
+                () => new WKeyCameraController(memory.CreateService(), _ => { }));
+
+            first.EndSession();
+            Assert.False(first.IsEnded);
+            first.ReleaseW(firstOwner);
+            Assert.True(first.IsEnded);
+            Assert.False(WKeyCameraController.HasActiveSession(Pid, ModuleBase));
+
+            using var second = new WKeyCameraController(memory.CreateService(), _ => { });
+            WKeyCameraOwner secondOwner = second.CreateOwner("new workflow W", _ => { });
+            Assert.True(second.TryAcquireW(secondOwner));
             memory.VerticalWrites.Clear();
 
-            oldController.ReleaseW(oldOwner);
+            // Releasing the old, already-ended owner must not touch the new session.
+            first.ReleaseW(firstOwner);
 
             Assert.Empty(memory.VerticalWrites);
             Assert.Equal(BotConstants.Camera.MovementVerticalLock, memory.ReadCameraVerticalLock());
-            currentController.ReleaseW(currentOwner);
+            Assert.Equal(1, second.ActiveWOwnerCount);
+            second.ReleaseW(secondOwner);
+        }
+
+        [Fact]
+        public void ExternalCameraReleaseWithoutRestoreDoesNotForceStationaryView()
+        {
+            var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            object diagnosticOwner = new();
+
+            Assert.True(controller.TryAcquireExternalCameraOwner(diagnosticOwner));
+            short capturedValue = 16400;
+            memory.Set(CameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset,
+                BitConverter.GetBytes(capturedValue));
+
+            controller.ReleaseExternalCameraOwner(diagnosticOwner, restoreStationary: false);
+
+            Assert.Equal(capturedValue, memory.ReadCameraVerticalLock());
+
+            object nextOwner = new();
+            Assert.True(controller.TryAcquireExternalCameraOwner(nextOwner));
+            controller.ReleaseExternalCameraOwner(nextOwner, restoreStationary: true);
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.ReadCameraVerticalLock());
+        }
+
+        [Fact]
+        public void FailedWUpIsReportedAndDoesNotLeaveLogicalOwnership()
+        {
+            var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
+            var logs = new List<string>();
+            using var controller = new WKeyCameraController(memory.CreateService(), logs.Add);
+            WKeyCameraOwner owner = controller.CreateOwner("W-up failure", keyUp =>
+            {
+                if (keyUp)
+                    throw new InvalidOperationException("test W-up failure");
+            });
+
+            Assert.True(controller.TryAcquireW(owner));
+            controller.ReleaseW(owner);
+
+            Assert.Equal(0, controller.ActiveWOwnerCount);
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.ReadCameraVerticalLock());
+            Assert.Contains(logs, line => line.Contains("Physical W-up failed", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void ForceStartMovingCannotInterruptAnotherActiveWOwner()
+        {
+            var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
+            var logs = new List<string>();
+            using var controller = new WKeyCameraController(memory.CreateService(), logs.Add);
+            var movement = new RecordingMovementSystem(memory.CreateService(), controller, memory.Events);
+            Assert.True(InvokeBool(movement, "TryStartMoving"));
+
+            var second = controller.CreateOwner("position refresh", keyUp =>
+                memory.Events.Add(keyUp ? "second-W-up" : "second-W-down"));
+            Assert.True(controller.TryAcquireW(second));
+            memory.Events.Clear();
+
+            InvokeVoid(movement, "ForceStartMoving");
+
+            Assert.Empty(memory.Events);
+            Assert.Equal(2, controller.ActiveWOwnerCount);
+            Assert.Equal(BotConstants.Camera.MovementVerticalLock, memory.ReadCameraVerticalLock());
+            Assert.Contains(logs, line => line.Contains("restart suppressed", StringComparison.Ordinal));
+
+            movement.StopMoving();
+            Assert.Equal(1, controller.ActiveWOwnerCount);
+            controller.ReleaseW(second);
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.ReadCameraVerticalLock());
+        }
+
+        [Fact]
+        public void TerminatingMovementInstanceClearsOnlyItsOwnMandatoryBarrierRegistration()
+        {
+            var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            var oldMovement = new RecordingMovementSystem(memory.CreateService(), controller, memory.Events);
+            var newMovement = new RecordingMovementSystem(memory.CreateService(), controller, memory.Events);
+
+            InvokeVoid(oldMovement, "SetLootNavigationBarrierHoldsInput", true);
+            Assert.False(InvokeBool(oldMovement, "TryStartMoving"));
+
+            oldMovement.ReleaseCameraOwnership();
+
+            Assert.True(InvokeBool(newMovement, "TryStartMoving"));
+            newMovement.ReleaseCameraOwnership();
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.ReadCameraVerticalLock());
+        }
+
+        [Fact]
+        public void StandaloneLootCameraWorksBeforeAndAfterAMovementSession()
+        {
+            var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
+            Assert.False(WKeyCameraController.HasActiveSession(Pid, ModuleBase));
+            AssertNormalLootCameraVerifies(memory);
+
+            using (var movementController = new WKeyCameraController(memory.CreateService(), _ => { }))
+            {
+                WKeyCameraOwner owner = movementController.CreateOwner("temporary movement", _ => { });
+                Assert.True(movementController.TryAcquireW(owner));
+                movementController.ReleaseW(owner);
+            }
+
+            Assert.False(WKeyCameraController.HasActiveSession(Pid, ModuleBase));
+            AssertNormalLootCameraVerifies(memory);
+        }
+
+        private static void AssertNormalLootCameraVerifies(MemoryFixture memory)
+        {
+            using var loot = new LootSystem(memory.CreateService(), _ => { }, wKeyCameraController: null);
+            MethodInfo ensure = typeof(LootSystem).GetMethod("EnsureLootScanCamera", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("EnsureLootScanCamera was not found.");
+            object?[] arguments = { null };
+            Assert.True((bool)(ensure.Invoke(loot, arguments) ?? false));
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.ReadCameraVerticalLock());
+            MethodInfo release = typeof(LootSystem).GetMethod("ReleaseLootScanCameraLocked", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("ReleaseLootScanCameraLocked was not found.");
+            release.Invoke(loot, new object[] { "test complete" });
         }
 
         private static bool InvokeBool(object target, string name, params object[] args)
