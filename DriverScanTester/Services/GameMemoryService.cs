@@ -33,6 +33,8 @@ namespace DriverScanTester.Services
         private readonly int _pointerSize;
         private readonly Action<string> _log;
 
+        internal (uint ProcessId, ulong ModuleBase) CameraSessionIdentity => (_pid, _moduleBase);
+
         // --- Offsets from MovementSystem ---
         private const ulong PlayerPtrOffset = BotConstants.MemoryOffsets.PlayerPtr;
         private const ulong XOffset = BotConstants.MemoryOffsets.X;
@@ -564,9 +566,8 @@ namespace DriverScanTester.Services
             => TrySetCameraShort(CameraDistanceOffset, distance);
 
         /// <summary>
-        /// Reads the current camera vertical lock (16-bit, +0x1BE). Used by the manual
-        /// loot diagnostic so it can restore the user's view after applying the same
-        /// vertical lock the movement system uses during normal bot operation.
+        /// Reads the current camera vertical lock (16-bit, +0x1BE). Used by the W-key
+        /// camera controller and loot-camera verification before and after a write.
         /// </summary>
         public bool TryGetCameraVerticalLock(out short verticalLock)
         {

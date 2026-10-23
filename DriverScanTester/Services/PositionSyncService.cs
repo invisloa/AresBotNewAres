@@ -158,6 +158,8 @@ namespace DriverScanTester.Services
         private readonly Func<CancellationToken, Task> _wRefreshAsync;
         private readonly Action<byte, byte, uint> _keyEvent;
         private readonly PositionSyncOptions _options;
+        private readonly WKeyCameraController? _wKeyCameraController;
+        private readonly WKeyCameraOwner? _wKeyCameraOwner;
 
         private readonly object _lock = new();
         private readonly SemaphoreSlim _syncGate = new(1, 1);
@@ -184,7 +186,8 @@ namespace DriverScanTester.Services
             Action focusGameWindow,
             Func<CancellationToken, Task>? wRefreshAsync = null,
             PositionSyncOptions? options = null,
-            Action<byte, byte, uint>? keyEvent = null)
+            Action<byte, byte, uint>? keyEvent = null,
+            WKeyCameraController? wKeyCameraController = null)
         {
             _memory = memory ?? throw new ArgumentNullException(nameof(memory));
             _log = log ?? throw new ArgumentNullException(nameof(log));
@@ -192,6 +195,8 @@ namespace DriverScanTester.Services
             _wRefreshAsync = wRefreshAsync ?? PressWRefreshAsync;
             _options = options ?? new PositionSyncOptions();
             _keyEvent = keyEvent ?? ((vk, scan, flags) => GameInput.keybd_event(vk, scan, flags, 0));
+            _wKeyCameraController = wKeyCameraController;
+            _wKeyCameraOwner = wKeyCameraController?.CreateOwner("PositionSync W refresh");
         }
 
         /// <summary>Current state of the transition/position lifecycle.</summary>
@@ -497,15 +502,32 @@ namespace DriverScanTester.Services
             _focusGameWindow();
             _log($"[PositionSync] Tapping W for {_options.NudgeKeyDownMs} ms (bounded mini-W refresh)...");
 
-            _keyEvent(GameInput.VK_W, GameInput.SCAN_W, 0);
+            bool cameraOwnerAcquired = false;
+            if (_wKeyCameraController != null && _wKeyCameraOwner != null)
+            {
+                if (!_wKeyCameraController.TryAcquireW(_wKeyCameraOwner))
+                    throw new InvalidOperationException("W refresh was blocked because the movement camera lock could not be verified or the camera is owned by another operation.");
+                cameraOwnerAcquired = true;
+            }
+
             try
             {
+                // Apply the movement view immediately before the bounded W-down.
+                _keyEvent(GameInput.VK_W, GameInput.SCAN_W, 0);
                 await Task.Delay(_options.NudgeKeyDownMs, token);
             }
             finally
             {
-                _keyEvent(GameInput.VK_W, GameInput.SCAN_W, (uint)GameInput.KEYEVENTF_KEYUP);
-                _log("[PositionSync] W refresh completed: KeyReleased=True.");
+                try
+                {
+                    _keyEvent(GameInput.VK_W, GameInput.SCAN_W, (uint)GameInput.KEYEVENTF_KEYUP);
+                    _log("[PositionSync] W refresh completed: KeyReleased=True.");
+                }
+                finally
+                {
+                    if (cameraOwnerAcquired && _wKeyCameraController != null && _wKeyCameraOwner != null)
+                        _wKeyCameraController.ReleaseW(_wKeyCameraOwner);
+                }
             }
         }
 

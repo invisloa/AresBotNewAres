@@ -13,11 +13,14 @@ namespace DriverScanTester.Services
         private readonly Action<string> _log;
         private readonly ItemSellerService _itemSeller;
 
-        public RepotSystem(GameMemoryService memoryService, Action<string> log)
+        public RepotSystem(
+            GameMemoryService memoryService,
+            Action<string> log,
+            WKeyCameraController? wKeyCameraController = null)
         {
             _memoryService = memoryService;
             _log = log;
-            _itemSeller = new ItemSellerService(memoryService, log);
+            _itemSeller = new ItemSellerService(memoryService, log, wKeyCameraController);
         }
 
         // --- Potion buy targets (can be overridden per-profile) ---

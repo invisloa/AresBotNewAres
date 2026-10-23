@@ -28,6 +28,7 @@ namespace DriverScanTester.Services
     {
         private readonly GameMemoryService _memory;
         private readonly Action<string> _log;
+        private readonly WKeyCameraController? _wKeyCameraController;
         private int _howManyTries;
 
         public const int MapHershal = 17;
@@ -76,10 +77,14 @@ namespace DriverScanTester.Services
         private const int MemorySlotOffsetFromRealSlot = 0;
         private const int TotalSellableInventoryMemorySlots = 72; // real 0..71 -> memory 0..71
 
-        public ItemSellerService(GameMemoryService memory, Action<string> log)
+        public ItemSellerService(
+            GameMemoryService memory,
+            Action<string> log,
+            WKeyCameraController? wKeyCameraController = null)
         {
             _memory = memory;
             _log = log;
+            _wKeyCameraController = wKeyCameraController;
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -98,23 +103,33 @@ namespace DriverScanTester.Services
         /// </summary>
         public bool OpenSellerDialog()
         {
-            SetSellCameraView();
+            if (!TryAcquireSellerCamera(out object? cameraOwner))
+                return false;
 
-            if (_memory.IsShopOpen())
+            try
             {
-                _log("ItemSeller: Seller dialog already open.");
-                return true;
-            }
+                SetSellCameraView();
 
-            if (TryOpenSellerDialogByScanning())
+                if (_memory.IsShopOpen())
+                {
+                    _log("ItemSeller: Seller dialog already open.");
+                    return true;
+                }
+
+                if (TryOpenSellerDialogByScanning())
+                {
+                    _log("ItemSeller: Seller dialog opened via mouseover scan.");
+                    return true;
+                }
+
+                CaptureSellFailureScreenshot();
+                _log("ItemSeller: Seller mouseover (S_IsSellerPointed == 143850200) not found after scanning. Seller dialog NOT opened.");
+                return false;
+            }
+            finally
             {
-                _log("ItemSeller: Seller dialog opened via mouseover scan.");
-                return true;
+                ReleaseSellerCamera(cameraOwner);
             }
-
-            CaptureSellFailureScreenshot();
-            _log("ItemSeller: Seller mouseover (S_IsSellerPointed == 143850200) not found after scanning. Seller dialog NOT opened.");
-            return false;
         }
 
         /// <summary>
@@ -130,18 +145,43 @@ namespace DriverScanTester.Services
         /// </param>
         public bool ScanAndRightClickNpc(int maxFullScans = SellerMaxFullScans)
         {
-            SetSellCameraView();
+            if (!TryAcquireSellerCamera(out object? cameraOwner))
+                return false;
 
-            if (_memory.IsShopOpen())
+            try
             {
-                _log("ItemSeller: NPC dialog already open — skipping scan.");
-                return true;
-            }
+                SetSellCameraView();
 
-            return TryOpenSellerDialogByScanning(clickShopOption: false, maxFullScans: maxFullScans);
+                if (_memory.IsShopOpen())
+                {
+                    _log("ItemSeller: NPC dialog already open — skipping scan.");
+                    return true;
+                }
+
+                return TryOpenSellerDialogByScanning(clickShopOption: false, maxFullScans: maxFullScans);
+            }
+            finally
+            {
+                ReleaseSellerCamera(cameraOwner);
+            }
         }
 
         public void SellItemsByMouseMove()
+        {
+            if (!TryAcquireSellerCamera(out object? cameraOwner))
+                return;
+
+            try
+            {
+                SellItemsByMouseMoveCore();
+            }
+            finally
+            {
+                ReleaseSellerCamera(cameraOwner);
+            }
+        }
+
+        private void SellItemsByMouseMoveCore()
         {
             AssignWeight();
 
@@ -1145,18 +1185,44 @@ namespace DriverScanTester.Services
         /// scan stays fast. If the NPC is ever missed, raise this value.</summary>
         private const int SellerScanPointDelayMs = 4;
 
+        private bool TryAcquireSellerCamera(out object? owner)
+        {
+            owner = null;
+            if (_wKeyCameraController == null)
+                return true;
+
+            object candidate = new();
+            if (!_wKeyCameraController.TryAcquireExternalCameraOwner(candidate))
+            {
+                _log("ItemSeller: Camera scan blocked while another bot input owns the camera.");
+                return false;
+            }
+
+            owner = candidate;
+            return true;
+        }
+
+        private void ReleaseSellerCamera(object? owner)
+        {
+            if (owner != null)
+                _wKeyCameraController?.ReleaseExternalCameraOwner(owner, restoreStationary: true);
+        }
+
         /// <summary>
-        /// Forces the camera to the known sell view: distance 16720 and vertical 16160.
-        /// This makes the seller NPC appear at its expected on-screen position so the
-        /// center-outward scan can find it.
+        /// Applies the known temporary sell view: distance 16720 and vertical 16160.
+        /// The caller holds the shared external camera lease so no W input can overlap
+        /// this seller-specific calibration; releasing that lease restores stationary view.
         /// </summary>
         private void SetSellCameraView()
         {
             const short sellCameraDistance = 16720;
 
-            _log($"ItemSeller: Setting sell-view camera (distance={sellCameraDistance}, vertical={BotConstants.Camera.DefaultVerticalLock}).");
+            short sellVerticalLock = BotConstants.Camera.DefaultVerticalLock;
+            _log($"ItemSeller: Setting sell-view camera (distance={sellCameraDistance}, vertical={sellVerticalLock}).");
             _memory.SetCameraDistance(sellCameraDistance);
-            _memory.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+            if (!_memory.TryGetCameraVerticalLock(out short currentVerticalLock) ||
+                currentVerticalLock != sellVerticalLock)
+                _memory.SetCameraVerticalLock(sellVerticalLock);
         }
 
         /// <summary>

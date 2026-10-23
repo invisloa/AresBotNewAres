@@ -25,7 +25,8 @@ namespace DriverScanTester.Services
             BotProfile profile,
             Action<string> log,
             Action focusGameWindow,
-            PositionSyncService? positionSync = null)
+            PositionSyncService? positionSync = null,
+            WKeyCameraController? wKeyCameraController = null)
         {
             if (memoryService == null) throw new ArgumentNullException(nameof(memoryService));
             _pathLoader = pathLoader ?? throw new ArgumentNullException(nameof(pathLoader));
@@ -35,7 +36,8 @@ namespace DriverScanTester.Services
                 memoryService,
                 log,
                 enableWaypointSpecialRecoveries: false,
-                steeringMode: MovementSteeringMode.DirectCamera);
+                steeringMode: MovementSteeringMode.DirectCamera,
+                wKeyCameraController: wKeyCameraController);
 
             var context = new OperationContext(
                 memoryService,
@@ -44,7 +46,8 @@ namespace DriverScanTester.Services
                 profile ?? throw new ArgumentNullException(nameof(profile)),
                 log,
                 focusGameWindow ?? throw new ArgumentNullException(nameof(focusGameWindow)),
-                positionSync);
+                positionSync,
+                wKeyCameraController);
             _operationRunner = new OperationRunnerService(context, log);
         }
 

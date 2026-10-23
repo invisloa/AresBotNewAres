@@ -165,6 +165,8 @@ namespace DriverScanTester.Services
         private const int MaxDiagnosticPinkComponentDetails = 8;
         private readonly GameMemoryService _memoryService;
         private readonly Action<string> _log;
+        private readonly WKeyCameraController? _wKeyCameraController;
+        private readonly object _wKeyCameraOwner = new();
 
         // Pixel Scan Constants
         private static readonly int[] smallX = BotConstants.Loot.SmallScanX;
@@ -289,6 +291,7 @@ namespace DriverScanTester.Services
         private volatile bool _lootScanCameraOwned;
         private bool _lootCameraReady;
         private DateTime _lootCameraSettledAtUtc = DateTime.MinValue;
+        private bool _wKeyCameraOwnerHeld;
 
         // ── Passive moving pre-scan (MoveAndAttackAndLoot travel) ──
         // This is a lightweight candidate detector, never a collection operation. It
@@ -923,10 +926,14 @@ namespace DriverScanTester.Services
         /// <summary>Startup time — skip scans for the first 5s so loot doesn't run before movement.</summary>
         private readonly DateTime _createdAt = DateTime.UtcNow;
 
-        public LootSystem(GameMemoryService memoryService, Action<string> log)
+        public LootSystem(
+            GameMemoryService memoryService,
+            Action<string> log,
+            WKeyCameraController? wKeyCameraController = null)
         {
             _memoryService = memoryService;
             _log = log;
+            _wKeyCameraController = wKeyCameraController;
 
             // Bitmap will be created with actual client dimensions once ResolveClientOrigin succeeds.
             _clientWidth = 0;
@@ -1232,6 +1239,19 @@ namespace DriverScanTester.Services
                 return BuildDiagnosticResult(mode, LootDiagnosticOutcome.Busy, 0, 0,
                     "Another diagnostic loot scan is already running.");
 
+            bool diagnosticCameraOwnerHeld = false;
+            object diagnosticCameraOwner = new();
+            if (_wKeyCameraController != null)
+            {
+                if (!_wKeyCameraController.TryAcquireExternalCameraOwner(diagnosticCameraOwner))
+                {
+                    Interlocked.Exchange(ref _diagnosticScanActive, 0);
+                    return BuildDiagnosticResult(mode, LootDiagnosticOutcome.Busy, 0, 0,
+                        "A bot W input currently owns the camera.");
+                }
+                diagnosticCameraOwnerHeld = true;
+            }
+
             bool previousPinkMode = _pinkLootOnlyMode;
             bool previousCaptureEnabled = ScreenshotService.LootScanCaptureEnabled;
             bool previousProjectScreenshotCapture = ScreenshotService.LootScanCaptureToProjectScreenshots;
@@ -1241,17 +1261,17 @@ namespace DriverScanTester.Services
             else
                 _log("[LootTest] Previous camera distance unreadable; the default lock will be restored after the test.");
 
-            short previousVerticalLock = BotConstants.Camera.DefaultVerticalLock;
+            short previousVerticalLock = BotConstants.Camera.StationaryVerticalLock;
             bool havePreviousVerticalLock = _memoryService.TryGetCameraVerticalLock(out short readVerticalLock);
             if (havePreviousVerticalLock)
                 previousVerticalLock = readVerticalLock;
             else
-                _log($"[LootTest] Previous camera vertical lock unreadable; normal loot view {BotConstants.Camera.DefaultVerticalLock} will be left in place.");
+                _log($"[LootTest] Previous camera vertical lock unreadable; normal loot view {BotConstants.Camera.StationaryVerticalLock} will be left in place.");
 
             short scanCamera = pinkOnly
                 ? BotConstants.Camera.SodSopLootScanDistance
                 : BotConstants.Camera.LootScanDistance;
-            short scanVerticalLock = BotConstants.Camera.DefaultVerticalLock;
+            short scanVerticalLock = BotConstants.Camera.StationaryVerticalLock;
             bool cameraSet = false;
             bool cursorSaved = MouseOperations.TryGetCursorPosition(out int cursorX, out int cursorY);
             int items = 0;
@@ -1288,10 +1308,8 @@ namespace DriverScanTester.Services
                          : ")."));
                 _log($"[LootTest] Diagnostic screenshots will be saved to: {ScreenshotService.GetDiagnosticLootScanOutputDirectory()}");
 
-                // Match normal bot loot conditions exactly: the movement system always
-                // applies the waypoint camera distance together with this vertical lock.
-                // The old diagnostic only changed the distance, so the captured view
-                // could differ from what the running loot machine actually sees.
+                // Match the verified stationary loot view exactly. Waypoint distance
+                // updates no longer change the vertical lock while W is held.
                 _memoryService.SetCameraDistance(scanCamera);
                 _memoryService.SetCameraVerticalLock(scanVerticalLock);
                 cameraSet = true;
@@ -1397,6 +1415,8 @@ namespace DriverScanTester.Services
                 ScreenshotService.LootScanCaptureEnabled = previousCaptureEnabled;
                 ScreenshotService.LootScanCaptureToProjectScreenshots = previousProjectScreenshotCapture;
                 _scanToken = default;
+                if (diagnosticCameraOwnerHeld && _wKeyCameraController != null)
+                    _wKeyCameraController.ReleaseExternalCameraOwner(diagnosticCameraOwner, restoreStationary: false);
                 Interlocked.Exchange(ref _diagnosticScanActive, 0);
             }
         }
@@ -2699,7 +2719,7 @@ namespace DriverScanTester.Services
                 _log($"[LootCamera] Verification failed: {detail}");
         }
 
-        /// <summary>The normal white-loot scan always uses the configured constant.</summary>
+        /// <summary>The normal white-loot scan always uses the configured stationary view.</summary>
         internal static short NormalLootScanDistance => BotConstants.Camera.LootScanDistance;
 
         /// <summary>
@@ -2751,12 +2771,23 @@ namespace DriverScanTester.Services
         private bool EnsureLootScanCamera(out string detail)
         {
             short requestedDistance = NormalLootScanDistance;
-            short requestedVerticalLock = BotConstants.Camera.DefaultVerticalLock;
+            short requestedVerticalLock = BotConstants.Camera.StationaryVerticalLock;
             detail = string.Empty;
 
             long requestId = _activeMandatoryLootRequest?.Id ?? 0;
             lock (_cameraCursorOwnershipGate)
             {
+                if (!_lootScanCameraOwned && _wKeyCameraController != null)
+                {
+                    if (!_wKeyCameraController.TryAcquireExternalCameraOwner(_wKeyCameraOwner))
+                    {
+                        detail = "camera is currently owned by a bot W input";
+                        _log($"[LootCamera] Camera acquisition blocked request={requestId}: {detail}.");
+                        return false;
+                    }
+                    _wKeyCameraOwnerHeld = true;
+                }
+
                 if (!_lootScanCameraOwned)
                     _log($"[LootCamera] Acquiring camera for loot scan (request={requestId}).");
                 _lootScanCameraOwned = true;
@@ -2773,7 +2804,9 @@ namespace DriverScanTester.Services
                 lock (_cameraCursorOwnershipGate)
                 {
                     _memoryService.SetCameraDistance(requestedDistance);
-                    _memoryService.SetCameraVerticalLock(requestedVerticalLock);
+                    if (!_memoryService.TryGetCameraVerticalLock(out short currentVerticalLock) ||
+                        currentVerticalLock != requestedVerticalLock)
+                        _memoryService.SetCameraVerticalLock(requestedVerticalLock);
                 }
 
                 bool distanceRead = _memoryService.TryGetCameraDistance(out actualDistance);
@@ -2838,7 +2871,7 @@ namespace DriverScanTester.Services
             out string detail)
         {
             short requestedDistance = NormalLootScanDistance;
-            short requestedVerticalLock = BotConstants.Camera.DefaultVerticalLock;
+            short requestedVerticalLock = BotConstants.Camera.StationaryVerticalLock;
 
             bool distanceRead = _memoryService.TryGetCameraDistance(out actualDistance);
             bool lockRead = _memoryService.TryGetCameraVerticalLock(out actualVerticalLock);
@@ -2868,12 +2901,17 @@ namespace DriverScanTester.Services
 
         private void ReleaseLootScanCameraLocked(string reason)
         {
-            if (!_lootScanCameraOwned && !_lootCameraReady)
+            if (!_lootScanCameraOwned && !_lootCameraReady && !_wKeyCameraOwnerHeld)
                 return;
 
             _lootScanCameraOwned = false;
             _lootCameraReady = false;
             _lootCameraSettledAtUtc = DateTime.MinValue;
+            if (_wKeyCameraOwnerHeld && _wKeyCameraController != null)
+            {
+                _wKeyCameraOwnerHeld = false;
+                _wKeyCameraController.ReleaseExternalCameraOwner(_wKeyCameraOwner, restoreStationary: true);
+            }
             _log($"[LootCamera] Camera ownership released — {reason}.");
         }
 

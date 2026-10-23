@@ -37,6 +37,14 @@ namespace DriverScanTester.Services
         /// </summary>
         public PositionSyncService? PositionSync { get; }
 
+        /// <summary>Shared W-camera owner for direct W input issued by bot operations.</summary>
+        public WKeyCameraController? WCameraController { get; }
+
+        private readonly Action<bool> _sendWKeyEvent;
+
+        /// <summary>Sends a W key-up/down event through the configured input path.</summary>
+        public void SendWKeyEvent(bool keyUp) => _sendWKeyEvent(keyUp);
+
         public OperationContext(
             GameMemoryService memory,
             PathRunnerService pathRunner,
@@ -44,7 +52,9 @@ namespace DriverScanTester.Services
             BotProfile profile,
             Action<string> log,
             Action focusGameWindow,
-            PositionSyncService? positionSync = null)
+            PositionSyncService? positionSync = null,
+            WKeyCameraController? wKeyCameraController = null,
+            Action<bool>? sendWKeyEvent = null)
         {
             Memory = memory;
             PathRunner = pathRunner;
@@ -53,6 +63,12 @@ namespace DriverScanTester.Services
             Log = log;
             FocusGameWindow = focusGameWindow;
             PositionSync = positionSync;
+            WCameraController = wKeyCameraController;
+            _sendWKeyEvent = sendWKeyEvent ?? (keyUp => GameInput.keybd_event(
+                GameInput.VK_W,
+                GameInput.SCAN_W,
+                keyUp ? (uint)GameInput.KEYEVENTF_KEYUP : 0u,
+                0));
         }
     }
 }

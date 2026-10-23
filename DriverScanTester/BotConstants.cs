@@ -49,8 +49,14 @@ namespace DriverScanTester
             /// <summary>Camera distance used only during SOD/SOP pink-pixel loot scans.</summary>
             public const short SodSopLootScanDistance = 17050;
 
-            /// <summary>Default camera vertical lock value, matching the sell-view vertical (16160).</summary>
+            /// <summary>Default camera vertical lock value currently used by the existing sell view (16160).</summary>
             public const short DefaultVerticalLock = 16160;
+
+            /// <summary>Stationary vertical camera lock restored whenever no bot W input owns movement view.</summary>
+            public const short StationaryVerticalLock = 16320;
+
+            /// <summary>Vertical camera lock used only while a bot-owned W input is held.</summary>
+            public const short MovementVerticalLock = DefaultVerticalLock;
 
             /// <summary>Very low (closest) camera distance used during combat retarget very-low-search phase.</summary>
             public const short CombatRetargetVeryLowDistance = 16880;

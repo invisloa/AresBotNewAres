@@ -53,6 +53,38 @@ namespace DriverScanTester.Tests
             };
         }
 
+        [Fact]
+        public void AuxiliaryRecoveryRunnerUsesSharedWCameraControllerAndDirectCameraSteering()
+        {
+            var log = new List<string>();
+            GameMemoryService memory = CreateStubMemory(log.Add);
+            var cameraController = new WKeyCameraController(memory, log.Add);
+            var pathLoader = new SavedPathLoader(log.Add);
+            var itemSeller = new ItemSellerService(memory, log.Add, cameraController);
+            var positionSync = new PositionSyncService(
+                memory, log.Add, () => { }, wKeyCameraController: cameraController);
+            var recovery = new WaypointRecoveryExecutor(
+                memory,
+                pathLoader,
+                itemSeller,
+                new BotProfile(),
+                log.Add,
+                () => { },
+                positionSync,
+                cameraController);
+
+            FieldInfo field = typeof(WaypointRecoveryExecutor).GetField(
+                "_auxiliaryPathRunner", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("Auxiliary PathRunner field was not found.");
+            var auxiliary = Assert.IsType<PathRunnerService>(field.GetValue(recovery));
+            FieldInfo steeringField = typeof(PathRunnerService).GetField(
+                "_steeringMode", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("PathRunner steering field was not found.");
+
+            Assert.Same(cameraController, auxiliary.WCameraController);
+            Assert.Equal(MovementSteeringMode.DirectCamera, steeringField.GetValue(auxiliary));
+        }
+
         private static async Task DispatchAsync(
             MovementSystem movement,
             Waypoint target,

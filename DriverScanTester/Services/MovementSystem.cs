@@ -1037,6 +1037,8 @@ namespace DriverScanTester.Services
 
         // Input
         private readonly object _inputLock = new object();
+        private readonly WKeyCameraController? _wKeyCameraController;
+        private readonly WKeyCameraOwner? _wKeyCameraOwner;
 
         private int _tickCount = 0;
         private int _stateLogInterval = 5; // Log periodic state every N ticks
@@ -1094,10 +1096,13 @@ namespace DriverScanTester.Services
             bool loopPath = false,
             bool enableWaypointSpecialRecoveries = true,
             WaypointRecoveryExecutor? waypointRecoveryExecutor = null,
-            MovementSteeringMode steeringMode = MovementSteeringMode.KeyboardTurn)
+            MovementSteeringMode steeringMode = MovementSteeringMode.KeyboardTurn,
+            WKeyCameraController? wKeyCameraController = null)
         {
             _memoryService = memoryService;
             _log = log;
+            _wKeyCameraController = wKeyCameraController;
+            _wKeyCameraOwner = wKeyCameraController?.CreateOwner("MovementSystem");
             _combatHandler = new CombatHandler(log);
             _mobMarkerDetector = new MobMarkerDetector(log);
             _mobGroupingController = new MobGroupingController(log);
@@ -1189,7 +1194,7 @@ namespace DriverScanTester.Services
             LootSystem? loot = LootSystemRef;
             if (loot == null)
             {
-                _lootNavigationBarrierHoldsInput = true;
+                SetLootNavigationBarrierHoldsInput(true);
                 _lootBarrier.Fail("MoveAndAttackAndLoot has no loot system attached");
                 StopMoving();
                 ReleaseSkillThree();
@@ -1205,7 +1210,7 @@ namespace DriverScanTester.Services
             long requestId = loot.BeginMandatoryLootRequest(reason);
             if (requestId <= 0)
             {
-                _lootNavigationBarrierHoldsInput = true;
+                SetLootNavigationBarrierHoldsInput(true);
                 _lootBarrier.Fail("loot system did not return a request id");
                 StopMoving();
                 ReleaseSkillThree();
@@ -1225,7 +1230,7 @@ namespace DriverScanTester.Services
             }
 
             _lootBarrier.Arm(requestId, reason);
-            _lootNavigationBarrierHoldsInput = true;
+            SetLootNavigationBarrierHoldsInput(true);
             StopMoving();
             ReleaseSkillThree();
             loot.NotifyNavigationHeld(requestId);
@@ -1239,6 +1244,13 @@ namespace DriverScanTester.Services
             {
                 _log($"[LootBarrier] Obligation preserved request={requestId} reason={reason} state={_lootBarrier.Phase}.");
             }
+        }
+
+        private void SetLootNavigationBarrierHoldsInput(bool holdsInput)
+        {
+            _lootNavigationBarrierHoldsInput = holdsInput;
+            if (_wKeyCameraController != null && _wKeyCameraOwner != null)
+                _wKeyCameraController.SetMandatoryLootNavigationBlock(_wKeyCameraOwner, holdsInput);
         }
 
         /// <summary>
@@ -1259,7 +1271,7 @@ namespace DriverScanTester.Services
                     if (_lootBarrier.TryGetRequestId(out long cancelledId))
                         LootSystemRef?.CancelMandatoryLootRequest(cancelledId, $"mode changed to {CurrentMode}");
                     _lootBarrier.Abandon($"mode changed to {CurrentMode}");
-                    _lootNavigationBarrierHoldsInput = false;
+                    SetLootNavigationBarrierHoldsInput(false);
                     _log($"[LootBarrier] Released — mode changed to {CurrentMode}; no mandatory loot applies.");
                 }
                 return;
@@ -1273,7 +1285,7 @@ namespace DriverScanTester.Services
                     loot.TryGetActiveMandatoryLootRequest(out long pendingId, out LootBarrierReason pendingReason))
                 {
                     _lootBarrier.Arm(pendingId, pendingReason);
-                    _lootNavigationBarrierHoldsInput = true;
+                    SetLootNavigationBarrierHoldsInput(true);
                     _lootBarrierBlockedLogged = false;
                     _lootBarrierFailureLogged = false;
                     StopMoving();
@@ -1289,14 +1301,14 @@ namespace DriverScanTester.Services
 
             if (loot == null)
             {
-                _lootNavigationBarrierHoldsInput = true;
+                SetLootNavigationBarrierHoldsInput(true);
                 _lootBarrier.Fail("loot system disappeared while the obligation was pending");
                 return;
             }
 
             if (!loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus status))
             {
-                _lootNavigationBarrierHoldsInput = true;
+                SetLootNavigationBarrierHoldsInput(true);
                 _lootBarrier.Fail($"request {requestId} status unavailable");
                 return;
             }
@@ -1305,21 +1317,21 @@ namespace DriverScanTester.Services
             LootBarrierPhase phase = _lootBarrier.ApplyStatus(status);
             if (phase == LootBarrierPhase.Completed)
             {
-                _lootNavigationBarrierHoldsInput = false;
+                SetLootNavigationBarrierHoldsInput(false);
                 _lootBarrierBlockedLogged = false;
                 _log($"[LootBarrier] Completed request={requestId} items={status.ItemsCollected}; " +
                      $"Navigation released — resuming waypoint {DescribeCurrentWaypoint()}.");
             }
             else if (phase == LootBarrierPhase.Unavailable)
             {
-                _lootNavigationBarrierHoldsInput = false;
+                SetLootNavigationBarrierHoldsInput(false);
                 _lootBarrierBlockedLogged = false;
                 _log($"[LootBarrier] Travel verification unavailable request={requestId}; " +
                      $"navigation released — resuming waypoint {DescribeCurrentWaypoint()}.");
             }
             else if (phase == LootBarrierPhase.Failed || phase == LootBarrierPhase.Cancelled)
             {
-                _lootNavigationBarrierHoldsInput = true;
+                SetLootNavigationBarrierHoldsInput(true);
                 StopMoving();
                 ReleaseSkillThree();
                 if (!_lootBarrierFailureLogged)
@@ -1331,7 +1343,7 @@ namespace DriverScanTester.Services
             }
             else if (phase != previousPhase)
             {
-                _lootNavigationBarrierHoldsInput = true;
+                SetLootNavigationBarrierHoldsInput(true);
                 _log($"[LootBarrier] request={requestId} state={phase}; navigation remains blocked.");
             }
         }
@@ -1345,7 +1357,7 @@ namespace DriverScanTester.Services
             if (!_lootBarrier.IsBlockingNavigation)
                 return false;
 
-            _lootNavigationBarrierHoldsInput = true;
+            SetLootNavigationBarrierHoldsInput(true);
 
             // An authorized combat-owned recovery currently owns W/camera. The hold must not
             // release the key the recovery is using, and the loot system was already handed
@@ -3545,11 +3557,7 @@ namespace DriverScanTester.Services
             if (_lootNavigationBarrierHoldsInput)
                 return false;
 
-            void Apply()
-            {
-                _memoryService.SetCameraDistance(distance);
-                _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
-            }
+            void Apply() => _memoryService.SetCameraDistance(distance);
 
             LootSystem? loot = LootSystemRef;
             if (loot == null)
@@ -4050,9 +4058,9 @@ namespace DriverScanTester.Services
                     return false;
 
                 if (release != TurnKeyState.None)
-                    SendTurnKey(release, keyUp: true);
+                    SendTurnKeyEvent(release == TurnKeyState.LeftA, keyUp: true);
                 if (press != TurnKeyState.None)
-                    SendTurnKey(press, keyUp: false);
+                    SendTurnKeyEvent(press == TurnKeyState.LeftA, keyUp: false);
 
                 _heldTurnKey = desired;
 
@@ -4074,10 +4082,10 @@ namespace DriverScanTester.Services
             _ => "None"
         };
 
-        private static void SendTurnKey(TurnKeyState key, bool keyUp)
+        protected virtual void SendTurnKeyEvent(bool leftA, bool keyUp)
         {
-            byte vk = key == TurnKeyState.LeftA ? GameInput.VK_A : GameInput.VK_D;
-            byte scan = key == TurnKeyState.LeftA ? GameInput.SCAN_A : GameInput.SCAN_D;
+            byte vk = leftA ? GameInput.VK_A : GameInput.VK_D;
+            byte scan = leftA ? GameInput.SCAN_A : GameInput.SCAN_D;
             uint flags = keyUp ? (uint)GameInput.KEYEVENTF_KEYUP : 0u;
             GameInput.keybd_event(vk, scan, flags, 0);
         }
@@ -4690,7 +4698,10 @@ namespace DriverScanTester.Services
                     StopMoving,
                     HoldSkillThree,
                     ReleaseSkillThree,
-                    () => _lootNavigationBarrierHoldsInput);
+                    () => _lootNavigationBarrierHoldsInput,
+                    _wKeyCameraController == null
+                        ? null
+                        : () => _wKeyCameraController.TrySetStationaryWhenIdle("waypoint mob recovery"));
                 _waypointMobRecovery.Start(currX, currY, target.StuckRecoveryMobCameraDistance);
                 return;
             }
@@ -5225,7 +5236,9 @@ namespace DriverScanTester.Services
         {
             lock (_inputLock)
             {
-                if (_lootNavigationBarrierHoldsInput && !IsCombatRecoveryMovementStillValid())
+                bool combatRecoveryBarrierAuthorization =
+                    _lootNavigationBarrierHoldsInput && IsCombatRecoveryMovementStillValid();
+                if (_lootNavigationBarrierHoldsInput && !combatRecoveryBarrierAuthorization)
                 {
                     if (!_lootMoveSuppressedLogged)
                     {
@@ -5240,14 +5253,48 @@ namespace DriverScanTester.Services
                     return true;
                 }
 
+                bool cameraOwnerAcquired = false;
+                if (_wKeyCameraController != null && _wKeyCameraOwner != null)
+                {
+                    if (!_wKeyCameraController.TryAcquireW(
+                        _wKeyCameraOwner,
+                        authorizedDuringLootBarrier: combatRecoveryBarrierAuthorization))
+                    {
+                        _log("[WCamera] StartMoving suppressed — movement vertical lock was not verified or the camera is owned by another operation.");
+                        return false;
+                    }
+                    cameraOwnerAcquired = true;
+                }
+
+                _log($"[Input] W down (StartMoving) — call #{_startMoveCount + 1}. Tick:{_tickCount}");
+
+                try
+                {
+                    // The verified movement lock is applied by TryAcquireW above,
+                    // immediately before this first physical W-down.
+                    SendSyntheticForwardKeyEvent(keyUp: false);
+                }
+                catch (Exception ex)
+                {
+                    try { SendSyntheticForwardKeyEvent(keyUp: true); }
+                    catch (Exception cleanupEx)
+                    {
+                        _log($"[Input] W-up cleanup after failed StartMoving also failed: {cleanupEx.Message}");
+                    }
+                    finally
+                    {
+                        if (cameraOwnerAcquired && _wKeyCameraController != null && _wKeyCameraOwner != null)
+                            _wKeyCameraController.ReleaseW(_wKeyCameraOwner);
+                    }
+
+                    _log($"[Input] W down (StartMoving) failed: {ex.Message}");
+                    return false;
+                }
+
                 _isMovingForward = true;
                 _startMoveCount++;
                 _lootMoveSuppressedLogged = false;
                 _ignoreStuckUntil = DateTime.Now.AddSeconds(STUCK_GRACE_AFTER_START_SECONDS);
-
-                _log($"[Input] W down (StartMoving) — call #{_startMoveCount}. Tick:{_tickCount}");
-
-                SendSyntheticForwardKeyEvent(keyUp: false);
                 return true;
             }
         }
@@ -5274,19 +5321,48 @@ namespace DriverScanTester.Services
                     return;
                 }
 
+                bool cameraOwnerAcquired = false;
+                bool cameraOwnershipWasAlreadyHeld = _isMovingForward;
+                if (_wKeyCameraController != null && _wKeyCameraOwner != null)
+                {
+                    if (!_wKeyCameraController.TryAcquireW(_wKeyCameraOwner))
+                    {
+                        _log("[WCamera] ForceStartMoving suppressed — movement vertical lock was not verified or the camera is owned by another operation.");
+                        return;
+                    }
+                    cameraOwnerAcquired = !_isMovingForward;
+                }
+
                 _lastForceStartMovingAt = DateTime.Now;
                 _log($"[Input] ForceStartMoving — releasing W key (call #{_startMoveCount + 1}). Tick:{_tickCount}");
-                GameInput.keybd_event(GameInput.VK_W, GameInput.SCAN_W, (uint)GameInput.KEYEVENTF_KEYUP, 0);
-                Thread.Sleep(BotConstants.Delays.ForceStartReleaseGapMs);
+                try
+                {
+                    // Keep this one logical W ownership across the physical up/down gap.
+                    // Releasing the camera owner here would flash stationary view.
+                    SendSyntheticForwardKeyEvent(keyUp: true);
+                    Thread.Sleep(BotConstants.Delays.ForceStartReleaseGapMs);
 
-                _isMovingForward = true;
-                _startMoveCount++;
-                _lootMoveSuppressedLogged = false;
-                _ignoreStuckUntil = DateTime.Now.AddSeconds(STUCK_GRACE_AFTER_START_SECONDS);
+                    _log($"[Input] W down (ForceStartMoving) — call #{_startMoveCount + 1}. Tick:{_tickCount}");
+                    SendSyntheticForwardKeyEvent(keyUp: false);
 
-                _log($"[Input] W down (ForceStartMoving) — call #{_startMoveCount}. Tick:{_tickCount}");
-
-                GameInput.keybd_event(GameInput.VK_W, GameInput.SCAN_W, 0, 0);
+                    _isMovingForward = true;
+                    _startMoveCount++;
+                    _lootMoveSuppressedLogged = false;
+                    _ignoreStuckUntil = DateTime.Now.AddSeconds(STUCK_GRACE_AFTER_START_SECONDS);
+                }
+                catch (Exception ex)
+                {
+                    try { SendSyntheticForwardKeyEvent(keyUp: true); }
+                    catch (Exception cleanupEx)
+                    {
+                        _log($"[Input] W-up cleanup after failed ForceStartMoving also failed: {cleanupEx.Message}");
+                    }
+                    _isMovingForward = false;
+                    if (_wKeyCameraController != null && _wKeyCameraOwner != null &&
+                        (cameraOwnerAcquired || cameraOwnershipWasAlreadyHeld))
+                        _wKeyCameraController.ReleaseW(_wKeyCameraOwner);
+                    _log($"[Input] ForceStartMoving failed: {ex.Message}");
+                }
             }
         }
 
@@ -5307,19 +5383,29 @@ namespace DriverScanTester.Services
                 // even if one of the native KEYUP calls fails.
                 try
                 {
-                    SendSyntheticForwardKeyEvent(keyUp: true);
+                    try
+                    {
+                        SendSyntheticForwardKeyEvent(keyUp: true);
+                    }
+                    finally
+                    {
+                        // W is physically released before the last owner restores the
+                        // stationary camera view. Repeated StopMoving remains idempotent.
+                        if (_wKeyCameraController != null && _wKeyCameraOwner != null)
+                            _wKeyCameraController.ReleaseW(_wKeyCameraOwner);
+                    }
                 }
                 finally
                 {
                     try
                     {
-                        GameInput.keybd_event(GameInput.VK_A, GameInput.SCAN_A, (uint)GameInput.KEYEVENTF_KEYUP, 0);
+                        SendTurnKeyEvent(leftA: true, keyUp: true);
                     }
                     finally
                     {
                         try
                         {
-                            GameInput.keybd_event(GameInput.VK_D, GameInput.SCAN_D, (uint)GameInput.KEYEVENTF_KEYUP, 0);
+                            SendTurnKeyEvent(leftA: false, keyUp: true);
                         }
                         finally
                         {
@@ -5370,7 +5456,7 @@ namespace DriverScanTester.Services
                 return;
 
             _log("[Key] 3 hold (attack skill)");
-            GameInput.keybd_event(GameInput.VK_3, GameInput.SCAN_3, 0, 0);
+            SendSkillThreeKeyEvent(keyUp: false);
             _isSkillThreeHeld = true;
         }
 
@@ -5379,10 +5465,14 @@ namespace DriverScanTester.Services
             if (_isSkillThreeHeld)
             {
                 _log("[Key] 3 up");
-                GameInput.keybd_event(GameInput.VK_3, GameInput.SCAN_3, (uint)GameInput.KEYEVENTF_KEYUP, 0);
+                SendSkillThreeKeyEvent(keyUp: true);
                 _isSkillThreeHeld = false;
             }
         }
+
+        protected virtual void SendSkillThreeKeyEvent(bool keyUp)
+            => GameInput.keybd_event(GameInput.VK_3, GameInput.SCAN_3,
+                keyUp ? (uint)GameInput.KEYEVENTF_KEYUP : 0u, 0);
 
         private void StartCombatRetargetSearch()
         {

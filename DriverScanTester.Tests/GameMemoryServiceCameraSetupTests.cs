@@ -13,6 +13,14 @@ namespace DriverScanTester.Tests
         private const ulong CameraBase = 0x23456000;
 
         [Fact]
+        public void WKeyCameraSettingsKeepMovementAndStationaryValuesDistinct()
+        {
+            Assert.Equal((short)16160, BotConstants.Camera.MovementVerticalLock);
+            Assert.Equal((short)16320, BotConstants.Camera.StationaryVerticalLock);
+            Assert.Equal((ulong)0x1BE, BotConstants.MemoryOffsets.CameraVerticalLockOffset);
+        }
+
+        [Fact]
         public void TrySetCameraScanViewWritesAndVerifiesDistanceAndVerticalLock()
         {
             var memory = new MemoryFixture();
@@ -21,10 +29,10 @@ namespace DriverScanTester.Tests
 
             Assert.Equal(16950, BotConstants.Camera.OtherPlayerMarkerScanDistance);
             Assert.True(service.TrySetCameraDistance(BotConstants.Camera.OtherPlayerMarkerScanDistance));
-            Assert.True(service.TrySetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock));
+            Assert.True(service.TrySetCameraVerticalLock(BotConstants.Camera.StationaryVerticalLock));
             Assert.Equal(BotConstants.Camera.OtherPlayerMarkerScanDistance,
                 memory.ReadShort(CameraBase + BotConstants.MemoryOffsets.CameraDistance));
-            Assert.Equal(BotConstants.Camera.DefaultVerticalLock,
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock,
                 memory.ReadShort(CameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset));
         }
 
@@ -80,7 +88,7 @@ namespace DriverScanTester.Tests
             GameMemoryService service = memory.CreateService();
 
             Assert.False(service.TrySetCameraDistance(BotConstants.Camera.LootScanDistance));
-            Assert.False(service.TrySetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock));
+            Assert.False(service.TrySetCameraVerticalLock(BotConstants.Camera.StationaryVerticalLock));
         }
 
         private sealed class MemoryFixture

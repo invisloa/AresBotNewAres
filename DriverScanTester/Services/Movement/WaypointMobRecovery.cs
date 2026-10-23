@@ -29,6 +29,7 @@ namespace DriverScanTester.Services
         private readonly Action _holdSkillThree;
         private readonly Action _releaseSkillThree;
         private readonly Func<bool>? _cameraControlBlocked;
+        private readonly Func<bool>? _applyStationaryCameraLock;
 
         private RecoveryStage _stage;
         private DateTime _startedAt;
@@ -45,7 +46,8 @@ namespace DriverScanTester.Services
             Action stopMoving,
             Action holdSkillThree,
             Action releaseSkillThree,
-            Func<bool>? cameraControlBlocked = null)
+            Func<bool>? cameraControlBlocked = null,
+            Func<bool>? applyStationaryCameraLock = null)
         {
             _memoryService = memoryService ?? throw new ArgumentNullException(nameof(memoryService));
             _log = log ?? throw new ArgumentNullException(nameof(log));
@@ -53,6 +55,7 @@ namespace DriverScanTester.Services
             _holdSkillThree = holdSkillThree ?? throw new ArgumentNullException(nameof(holdSkillThree));
             _releaseSkillThree = releaseSkillThree ?? throw new ArgumentNullException(nameof(releaseSkillThree));
             _cameraControlBlocked = cameraControlBlocked;
+            _applyStationaryCameraLock = applyStationaryCameraLock;
         }
 
         public void Start(float currX, float currY, short cameraDistance)
@@ -73,7 +76,10 @@ namespace DriverScanTester.Services
             else
             {
                 _memoryService.SetCameraDistance(cameraDistance);
-                _memoryService.SetCameraVerticalLock(BotConstants.Camera.DefaultVerticalLock);
+                bool cameraApplied = _applyStationaryCameraLock?.Invoke() ??
+                    _memoryService.TrySetCameraVerticalLock(BotConstants.Camera.StationaryVerticalLock);
+                if (!cameraApplied)
+                    _log("[WaypointRecovery] Stationary camera lock was not changed because camera ownership or verification blocked it.");
             }
             _log($"[WaypointRecovery] AttackMob started. CameraDistance={cameraDistance}.");
         }

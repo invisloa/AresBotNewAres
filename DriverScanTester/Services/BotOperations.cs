@@ -296,14 +296,35 @@ namespace DriverScanTester.Services
             // 2. Walk forward for 2 seconds. W is released in the finally block so
             //    the key can never get stuck down on cancel/timeout.
             ctx.Log("[Operation] EtanaRepotUnstuck: walking forward for 2s (W down). ");
-            GameInput.keybd_event(GameInput.VK_W, GameInput.SCAN_W, 0, 0);
+            WKeyCameraController? cameraController = ctx.WCameraController;
+            if (cameraController == null)
+            {
+                ctx.Log("[Operation] EtanaRepotUnstuck: W input blocked because no shared W-camera controller is configured.");
+                return false;
+            }
+
+            WKeyCameraOwner cameraOwner = cameraController.CreateOwner("EtanaRepotUnstuck");
+            if (!cameraController.TryAcquireW(cameraOwner))
+            {
+                ctx.Log("[Operation] EtanaRepotUnstuck: W input blocked because the movement camera lock was not verified or another operation owns the camera.");
+                return false;
+            }
+
             try
             {
+                ctx.SendWKeyEvent(keyUp: false);
                 await Task.Delay(2400, token);
             }
             finally
             {
-                GameInput.keybd_event(GameInput.VK_W, GameInput.SCAN_W, (uint)GameInput.KEYEVENTF_KEYUP, 0);
+                try
+                {
+                    ctx.SendWKeyEvent(keyUp: true);
+                }
+                finally
+                {
+                    cameraController.ReleaseW(cameraOwner);
+                }
             }
 
             ctx.Log("[Operation] EtanaRepotUnstuck: done (W up). ");

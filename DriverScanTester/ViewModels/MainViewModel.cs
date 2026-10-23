@@ -657,16 +657,18 @@ namespace DriverScanTester.ViewModels
             var initialMode = path.Count > 0 ? path[0].Mode : Services.BotMode.OnlyMove;
 
             var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
+            _wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
             var pathLoader = new SavedPathLoader(AppendBotLog);
             var profile = _workflowCoordinator?.ActiveProfile ?? new BotProfile();
-            var itemSeller = new ItemSellerService(memoryService, AppendBotLog);
+            var itemSeller = new ItemSellerService(memoryService, AppendBotLog, _wKeyCameraController);
             var waypointRecoveryExecutor = new WaypointRecoveryExecutor(
                 memoryService,
                 pathLoader,
                 itemSeller,
                 profile,
                 AppendBotLog,
-                FocusGameWindow);
+                FocusGameWindow,
+                wKeyCameraController: _wKeyCameraController);
             Interlocked.Exchange(ref _gameFailureStopHandled, 0);
             _movementSystem = new MovementSystem(
                 memoryService,
@@ -677,7 +679,8 @@ namespace DriverScanTester.ViewModels
                 path,
                 initialMode,
                 loop,
-                waypointRecoveryExecutor: waypointRecoveryExecutor)
+                waypointRecoveryExecutor: waypointRecoveryExecutor,
+                wKeyCameraController: _wKeyCameraController)
             {
                 MobGroupingPausePredicate = () => PauseController.IsPaused,
                 OnGameUnresponsiveDetected = HandleGameConnectionFailure
@@ -687,8 +690,9 @@ namespace DriverScanTester.ViewModels
             _isMovementBotRunning = true;
             var token = _movementBotCts.Token;
             MovementSystem movementForTask = _movementSystem!;
+            WKeyCameraController cameraControllerForTask = _wKeyCameraController!;
 
-            Task.Run(() => MovementBotLoop(token, movementForTask), token);
+            Task.Run(() => MovementBotLoop(token, movementForTask, cameraControllerForTask), token);
             AppendBotLog($"Bot started with Custom Route ({path.Count} points). Loop: {loop}");
 
             // 4. Start Heal/Mana using the values initialized for the Bot Window.
@@ -715,7 +719,7 @@ namespace DriverScanTester.ViewModels
             }
             else if (!_isLootBotRunning)
             {
-                _lootSystem = new LootSystem(memoryService, AppendBotLog);
+                _lootSystem = new LootSystem(memoryService, AppendBotLog, _wKeyCameraController);
                 _lootSystem.ShouldStopOnOtherPlayerMarker = () => StopOnOtherPlayerDetected;
                 Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 0);
                 _lootSystem.OtherPlayerMarkerDetected =
@@ -851,7 +855,7 @@ namespace DriverScanTester.ViewModels
                 PixelDetectionTestKind.OtherPlayerMarkers => BotConstants.Camera.OtherPlayerMarkerScanDistance,
                 _ => BotConstants.Camera.SodSopLootScanDistance
             };
-            short verticalLock = BotConstants.Camera.DefaultVerticalLock;
+            short verticalLock = BotConstants.Camera.StationaryVerticalLock;
 
             var memoryService = new GameMemoryService(
                 _attachedPid,
@@ -861,7 +865,9 @@ namespace DriverScanTester.ViewModels
                 GetPointerSize(),
                 AppendBotLog);
             bool distanceSet = memoryService.TrySetCameraDistance(cameraDistance);
-            bool verticalLockSet = memoryService.TrySetCameraVerticalLock(verticalLock);
+            bool verticalLockSet = _wKeyCameraController != null
+                ? _wKeyCameraController.TrySetStationaryWhenIdle("manual pixel-detection camera setup")
+                : memoryService.TrySetCameraVerticalLock(verticalLock);
             if (!distanceSet || !verticalLockSet)
                 throw new InvalidOperationException(
                     $"Camera setup did not verify (distance={distanceSet}, vertical lock={verticalLockSet}).");
@@ -3127,6 +3133,7 @@ namespace DriverScanTester.ViewModels
         private int _standalonePlayerMarkerStopHandled;
         private CancellationTokenSource? _lootBotCts;
         private MovementSystem? _movementSystem;
+        private WKeyCameraController? _wKeyCameraController;
         private HealManaSystem? _healManaSystem;
         private LootSystem? _lootSystem;
 
@@ -3289,16 +3296,22 @@ namespace DriverScanTester.ViewModels
             }
 
             var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
-            var repotSystem = new RepotSystem(memoryService, AppendBotLog);
+            _wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
+            var repotSystem = new RepotSystem(memoryService, AppendBotLog, _wKeyCameraController);
             var repotDetector = new RepotDetectorService(AppendBotLog);
             var pathLoader = new SavedPathLoader(AppendBotLog);
             Interlocked.Exchange(ref _gameFailureStopHandled, 0);
-            var pathRunner = new PathRunnerService(memoryService, AppendBotLog)
+            var pathRunner = new PathRunnerService(
+                memoryService,
+                AppendBotLog,
+                wKeyCameraController: _wKeyCameraController)
             {
                 OnGameUnresponsiveDetected = HandleGameConnectionFailure
             };
-            var itemSeller = new ItemSellerService(memoryService, AppendBotLog);
-            var positionSync = new PositionSyncService(memoryService, AppendBotLog, FocusGameWindow);
+            var itemSeller = new ItemSellerService(memoryService, AppendBotLog, _wKeyCameraController);
+            var positionSync = new PositionSyncService(
+                memoryService, AppendBotLog, FocusGameWindow,
+                wKeyCameraController: _wKeyCameraController);
             var waypointRecoveryExecutor = new WaypointRecoveryExecutor(
                 memoryService,
                 pathLoader,
@@ -3306,7 +3319,8 @@ namespace DriverScanTester.ViewModels
                 profile,
                 AppendBotLog,
                 FocusGameWindow,
-                positionSync);
+                positionSync,
+                _wKeyCameraController);
             pathRunner.WaypointRecoveryExecutor = waypointRecoveryExecutor;
 
             var operationContext = new OperationContext(
@@ -3316,7 +3330,8 @@ namespace DriverScanTester.ViewModels
                 profile,
                 AppendBotLog,
                 FocusGameWindow,
-                positionSync);
+                positionSync,
+                _wKeyCameraController);
             var operationRunner = new OperationRunnerService(operationContext, AppendBotLog);
 
             _workflowCoordinator = new BotWorkflowCoordinator(
@@ -3658,21 +3673,36 @@ namespace DriverScanTester.ViewModels
             }
 
             var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
-            var pathRunner = new PathRunnerService(memoryService, AppendBotLog);
+            var wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
+            var pathRunner = new PathRunnerService(
+                memoryService, AppendBotLog,
+                wKeyCameraController: wKeyCameraController);
             var profile = _workflowCoordinator?.ActiveProfile ?? new BotProfile();
-            var positionSync = new PositionSyncService(memoryService, AppendBotLog, FocusGameWindow);
+            var positionSync = new PositionSyncService(
+                memoryService, AppendBotLog, FocusGameWindow,
+                wKeyCameraController: wKeyCameraController);
             var operationContext = new OperationContext(
                 memoryService,
                 pathRunner,
-                new ItemSellerService(memoryService, AppendBotLog),
+                new ItemSellerService(memoryService, AppendBotLog, wKeyCameraController),
                 profile,
                 AppendBotLog,
                 FocusGameWindow,
-                positionSync);
+                positionSync,
+                wKeyCameraController);
             var operationRunner = new OperationRunnerService(operationContext, AppendBotLog);
 
             using var cts = new CancellationTokenSource();
-            bool ok = await operationRunner.RunOnceAsync(operationName, cts.Token);
+            bool ok;
+            try
+            {
+                ok = await operationRunner.RunOnceAsync(operationName, cts.Token);
+            }
+            finally
+            {
+                pathRunner.Stop();
+                wKeyCameraController.EndSession();
+            }
             AppendBotLog(ok
                 ? $"[Operation Test] '{operationName}' succeeded."
                 : $"[Operation Test] '{operationName}' failed.");
@@ -4139,8 +4169,11 @@ namespace DriverScanTester.ViewModels
                             baseAddr = FindModuleInScanner("Ares.exe", true);
                         }
                         var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
+                        _wKeyCameraController = new WKeyCameraController(memoryService, AppendBotLog);
                         Interlocked.Exchange(ref _gameFailureStopHandled, 0);
-                        _movementSystem = new MovementSystem(memoryService, AppendBotLog, tx, ty, SelectedPrecision, null, SelectedBotMode)
+                        _movementSystem = new MovementSystem(
+                            memoryService, AppendBotLog, tx, ty, SelectedPrecision, null, SelectedBotMode,
+                            wKeyCameraController: _wKeyCameraController)
                         {
                             MobGroupingPausePredicate = () => PauseController.IsPaused,
                             OnGameUnresponsiveDetected = HandleGameConnectionFailure
@@ -4150,7 +4183,10 @@ namespace DriverScanTester.ViewModels
                         _isMovementBotRunning = true;
                         var movementToken = _movementBotCts.Token;
                         MovementSystem movementForTask = _movementSystem!;
-                        Task.Run(() => MovementBotLoop(movementToken, movementForTask), movementToken);
+                        WKeyCameraController cameraControllerForTask = _wKeyCameraController!;
+                        Task.Run(
+                            () => MovementBotLoop(movementToken, movementForTask, cameraControllerForTask),
+                            movementToken);
                         AppendBotLog("Movement Bot started.");
 
                         // Auto-start loot bot when movement starts — except for OnlyMove
@@ -4240,7 +4276,7 @@ namespace DriverScanTester.ViewModels
                         if (!_isMovementBotRunning && !_isHealManaBotRunning && !_isLootBotRunning &&
                             _workflowCoordinator?.IsRunning != true)
                             Interlocked.Exchange(ref _gameFailureStopHandled, 0);
-                        _lootSystem = new LootSystem(memoryService, AppendBotLog);
+                        _lootSystem = new LootSystem(memoryService, AppendBotLog, _wKeyCameraController);
                         _lootSystem.ShouldStopOnOtherPlayerMarker = () => StopOnOtherPlayerDetected;
                         Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 0);
                         _lootSystem.OtherPlayerMarkerDetected =
@@ -4257,7 +4293,10 @@ namespace DriverScanTester.ViewModels
                     }
                 }
         
-                private async Task MovementBotLoop(CancellationToken token, MovementSystem movementForTask)
+                private async Task MovementBotLoop(
+                    CancellationToken token,
+                    MovementSystem movementForTask,
+                    WKeyCameraController cameraControllerForTask)
                 {
                     try
                     {
@@ -4328,6 +4367,7 @@ namespace DriverScanTester.ViewModels
                         movementForTask.ReleaseCombatKeys();
                         movementForTask.StopMoving();
                         movementForTask.DisposeMobGroupingDetector();
+                        cameraControllerForTask.EndSession();
                         StopGameConnectionMonitorIfIdle();
                     }
                 }

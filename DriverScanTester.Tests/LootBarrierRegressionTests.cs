@@ -454,7 +454,7 @@ namespace DriverScanTester.Tests
             Assert.Equal(BotConstants.Camera.LootScanDistance, LootSystem.NormalLootScanDistance);
 
             short distance = LootSystem.NormalLootScanDistance;
-            short lockValue = BotConstants.Camera.DefaultVerticalLock;
+            short lockValue = BotConstants.Camera.StationaryVerticalLock;
 
             Assert.True(LootSystem.IsLootCaptureAuthorized(
                 distance, distance, lockValue, lockValue,
@@ -472,6 +472,62 @@ namespace DriverScanTester.Tests
             Assert.False(LootSystem.IsLootCaptureAuthorized(
                 distance, distance, lockValue, lockValue,
                 stabilizationElapsed: true, ownershipHeld: false));
+        }
+
+        [Fact]
+        public void VerifiedLootScanUsesStationaryLockAndBlocksWCameraWritesUntilRelease()
+        {
+            const uint pid = 909;
+            const ulong moduleBase = 0x710000;
+            const ulong cameraBase = 0x3700000;
+            var memoryBytes = new Dictionary<ulong, byte[]>
+            {
+                [moduleBase + BotConstants.MemoryOffsets.CameraPtr] = BitConverter.GetBytes(cameraBase),
+                [cameraBase + BotConstants.MemoryOffsets.CameraDistance] = BitConverter.GetBytes((short)17000),
+                [cameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset] =
+                    BitConverter.GetBytes(BotConstants.Camera.StationaryVerticalLock)
+            };
+
+            GameMemoryService.ReadMemoryDelegate read =
+                (uint readPid, ulong address, byte[] buffer, out uint bytesRead) =>
+                {
+                    bytesRead = 0;
+                    if (!memoryBytes.TryGetValue(address, out byte[]? data) || data.Length < buffer.Length)
+                        return false;
+                    Buffer.BlockCopy(data, 0, buffer, 0, buffer.Length);
+                    bytesRead = (uint)buffer.Length;
+                    return true;
+                };
+            GameMemoryService.WriteMemoryDelegate write =
+                (uint writePid, ulong address, byte[] buffer, out uint bytesWritten) =>
+                {
+                    memoryBytes[address] = (byte[])buffer.Clone();
+                    bytesWritten = (uint)buffer.Length;
+                    return true;
+                };
+
+            var memory = new GameMemoryService(pid, read, write, moduleBase, 8, _ => { });
+            var controller = new WKeyCameraController(memory, _ => { });
+            using var loot = new LootSystem(memory, _ => { }, controller);
+            MethodInfo ensure = typeof(LootSystem).GetMethod("EnsureLootScanCamera", PrivateInstance)
+                ?? throw new InvalidOperationException("EnsureLootScanCamera was not found.");
+            object?[] arguments = { null };
+
+            Assert.True((bool)(ensure.Invoke(loot, arguments) ?? false));
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock,
+                BitConverter.ToInt16(memoryBytes[cameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset], 0));
+
+            WKeyCameraOwner movementOwner = controller.CreateOwner("loot scan race regression");
+            Assert.False(controller.TryAcquireW(movementOwner));
+
+            MethodInfo release = typeof(LootSystem).GetMethod("ReleaseLootScanCameraLocked", PrivateInstance)
+                ?? throw new InvalidOperationException("ReleaseLootScanCameraLocked was not found.");
+            release.Invoke(loot, new object[] { "test scan complete" });
+
+            Assert.True(controller.TryAcquireW(movementOwner));
+            controller.ReleaseW(movementOwner);
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock,
+                BitConverter.ToInt16(memoryBytes[cameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset], 0));
         }
 
         [Fact]

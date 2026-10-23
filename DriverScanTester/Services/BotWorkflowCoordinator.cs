@@ -273,7 +273,9 @@ namespace DriverScanTester.Services
             _profile = profile;
             _log = log;
             _focusGameWindow = focusGameWindow;
-            _positionSync = positionSync ?? new PositionSyncService(memoryService, log, focusGameWindow);
+            _positionSync = positionSync ?? new PositionSyncService(
+                memoryService, log, focusGameWindow,
+                wKeyCameraController: pathRunner.WCameraController);
 
             // Apply profile thresholds to detector
             _repotDetector.MinHpPotions = profile.MinHpPotions;
@@ -405,6 +407,7 @@ namespace DriverScanTester.Services
                     }
                     catch (OperationCanceledException) { }
                 }
+                _pathRunner.WCameraController?.EndSession();
                 _isRunning = false;
                 if (CurrentPhase != BotPhase.Failed && CurrentPhase != BotPhase.Stopping)
                     CurrentPhase = BotPhase.Idle;
@@ -422,6 +425,7 @@ namespace DriverScanTester.Services
             CurrentPhase = BotPhase.Stopping;
             _cts?.Cancel();
             _pathRunner.Stop();
+            _pathRunner.WCameraController?.EndSession();
         }
 
         private void LogFlowPlan()
@@ -918,7 +922,7 @@ namespace DriverScanTester.Services
             bool hasAttackOnlyRoute = waypoints.Any(w => w.Mode == BotMode.MoveAndAttack);
             if (hasAttackLootRoute || hasAttackOnlyRoute)
             {
-                lootSystem = new LootSystem(_memoryService, _log)
+                lootSystem = new LootSystem(_memoryService, _log, _pathRunner.WCameraController)
                 {
                     LootPriorityMode = _profile.LootPriority,
                     PinkLootOnlyMode = !hasAttackLootRoute && hasAttackOnlyRoute,

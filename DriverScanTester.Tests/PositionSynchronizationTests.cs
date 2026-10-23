@@ -886,6 +886,40 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public async Task CancelledWPressRestoresStationaryCameraAfterKeyUp()
+        {
+            var memory = new SyncMemory { VerticalLock = BotConstants.Camera.StationaryVerticalLock };
+            var events = memory.Events;
+            var controller = new WKeyCameraController(memory.CreateMemory(_ => { }), _ => { });
+            var options = FastOptions();
+            options.NudgeKeyDownMs = 5000;
+            var service = new PositionSyncService(
+                memory.CreateMemory(_ => { }),
+                _ => { },
+                () => { },
+                wRefreshAsync: null,
+                options,
+                (vk, scan, flags) => events.Add(flags == 0 ? "W-down" : "W-up"),
+                wKeyCameraController: controller);
+
+            using var cts = new CancellationTokenSource(100);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => service.PressWRefreshAsync(cts.Token));
+
+            Assert.Equal(
+                new[]
+                {
+                    $"Vertical:{BotConstants.Camera.MovementVerticalLock}",
+                    "W-down",
+                    "W-up",
+                    $"Vertical:{BotConstants.Camera.StationaryVerticalLock}"
+                },
+                events);
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.VerticalLock);
+            Assert.Equal(0, controller.ActiveWOwnerCount);
+        }
+
+        [Fact]
         public void CoherentSnapshotReadsThePointerOnce()
         {
             const ulong moduleBase = 0x100000;
@@ -1064,6 +1098,7 @@ namespace DriverScanTester.Tests
         {
             public const ulong ModuleBase = 0x100000;
             public const ulong PlayerBase = 0x200000;
+            public const ulong CameraBase = 0x300000;
 
             public int Map = 35;
             public short X = 100;
@@ -1072,9 +1107,11 @@ namespace DriverScanTester.Tests
             public DateTime? FreshAt;
             public short FreshX = 100;
             public short FreshY = 100;
+            public short VerticalLock = BotConstants.Camera.StationaryVerticalLock;
             public bool FailPointer;
             public bool FailMap;
             public bool FailPosition;
+            public List<string> Events { get; } = new();
 
             public GameMemoryService CreateMemory(Action<string> log)
                 => new(0, Read, Write, ModuleBase, 8, log);
@@ -1108,6 +1145,12 @@ namespace DriverScanTester.Tests
                     return Copy(buffer, BitConverter.GetBytes(PlayerBase), out bytesRead);
                 }
 
+                if (address == ModuleBase + BotConstants.MemoryOffsets.CameraPtr)
+                    return Copy(buffer, BitConverter.GetBytes(CameraBase), out bytesRead);
+
+                if (address == CameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset)
+                    return Copy(buffer, BitConverter.GetBytes(VerticalLock), out bytesRead);
+
                 if (address >= PlayerBase && address < PlayerBase + 0x2000)
                 {
                     ulong offset = address - PlayerBase;
@@ -1135,6 +1178,13 @@ namespace DriverScanTester.Tests
             private bool Write(uint pid, ulong address, byte[] buffer, out uint bytesWritten)
             {
                 bytesWritten = 0;
+                if (address == CameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset && buffer.Length >= 2)
+                {
+                    VerticalLock = BitConverter.ToInt16(buffer, 0);
+                    Events.Add($"Vertical:{VerticalLock}");
+                    bytesWritten = 2;
+                    return true;
+                }
                 return false;
             }
         }

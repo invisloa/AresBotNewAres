@@ -48,6 +48,7 @@ namespace DriverScanTester.Services
         public BotPauseController? PauseController { get; set; }
 
         public MovementSystem? CurrentMovement => _movementSystem;
+        public WKeyCameraController? WCameraController { get; }
         public WaypointRecoveryExecutor? WaypointRecoveryExecutor { get; set; }
         public Action<string>? OnGameUnresponsiveDetected { get; set; }
         public PathRunStopReason LastStopReason { get; private set; } = PathRunStopReason.None;
@@ -56,12 +57,14 @@ namespace DriverScanTester.Services
             GameMemoryService memoryService,
             Action<string> log,
             bool enableWaypointSpecialRecoveries = true,
-            MovementSteeringMode steeringMode = MovementSteeringMode.KeyboardTurn)
+            MovementSteeringMode steeringMode = MovementSteeringMode.KeyboardTurn,
+            WKeyCameraController? wKeyCameraController = null)
         {
             _memoryService = memoryService;
             _log = log;
             _enableWaypointSpecialRecoveries = enableWaypointSpecialRecoveries;
             _steeringMode = steeringMode;
+            WCameraController = wKeyCameraController;
         }
 
         /// <summary>
@@ -103,7 +106,8 @@ namespace DriverScanTester.Services
                 initialMode: initialMode,
                 loopPath: loop,
                 enableWaypointSpecialRecoveries: _enableWaypointSpecialRecoveries,
-                steeringMode: _steeringMode)
+                steeringMode: _steeringMode,
+                wKeyCameraController: WCameraController)
             {
                 InternalRepotEnabled = false, // External coordinator handles repot
                 WaypointRecoveryExecutor = WaypointRecoveryExecutor,
