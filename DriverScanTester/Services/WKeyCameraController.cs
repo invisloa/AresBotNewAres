@@ -29,6 +29,10 @@ namespace DriverScanTester.Services
         private bool _stationaryRestorePending;
         private bool _closing;
         private bool _ended;
+        // Non-null while a physical W-up could not be confirmed. The owner token is kept
+        // even after logical ownership reaches zero so Stop/cleanup/session-end calls can
+        // retry the release without inventing a new physical key path.
+        private WKeyCameraOwner? _unresolvedWUpOwner;
 
         public short StationaryVerticalLock { get; }
         public short MovementVerticalLock { get; }
@@ -36,6 +40,16 @@ namespace DriverScanTester.Services
 
         /// <summary>True once this controller's session has fully terminated.</summary>
         public bool IsEnded { get { lock (_gate) return _ended; } }
+
+        /// <summary>
+        /// True while the physical W-up was attempted but not confirmed. The session stays
+        /// registered and no stationary-camera restore is performed until a later Stop,
+        /// cleanup or session-end call retries the W-up successfully.
+        /// </summary>
+        public bool HasUnresolvedPhysicalWRelease
+        {
+            get { lock (_gate) return _unresolvedWUpOwner != null; }
+        }
 
         /// <summary>
         /// True while this controller may still accept new W or external-camera work.
@@ -46,7 +60,7 @@ namespace DriverScanTester.Services
             get
             {
                 lock (_gate)
-                    return !_closing && !_ended && IsCurrentGeneration();
+                    return !_closing && !_ended && _unresolvedWUpOwner == null && IsCurrentGeneration();
             }
         }
 
@@ -106,6 +120,13 @@ namespace DriverScanTester.Services
                 if (!IsCurrentOwner(owner) || !IsCurrentGeneration() || _closing || _ended)
                     return false;
 
+                if (_unresolvedWUpOwner != null)
+                {
+                    _log($"[WCamera] W request from {owner.Source} blocked: the previous physical W-up is unresolved. " +
+                         "Retry Stop/session cleanup before continuing navigation.");
+                    return false;
+                }
+
                 if (_mandatoryLootBarrierOwners.Count != 0 &&
                     (!authorizedDuringLootBarrier || !_mandatoryLootBarrierOwners.Contains(owner)))
                 {
@@ -137,7 +158,14 @@ namespace DriverScanTester.Services
                     {
                         // Do not register logical ownership when the physical key-down
                         // was not delivered. Clean up any partial physical state.
-                        TrySendPhysicalW(owner, keyUp: true, "failed W-down cleanup");
+                        if (!TrySendPhysicalW(owner, keyUp: true, "failed W-down cleanup"))
+                        {
+                            _unresolvedWUpOwner = owner;
+                            _log("[WCamera] Physical W state is uncertain after the failed W-down cleanup. " +
+                                 "The session stays registered and the stationary camera is not restored until W-up succeeds.");
+                            return false;
+                        }
+
                         TryApplyLock(StationaryVerticalLock, "failed W-down cleanup");
                         return false;
                     }
@@ -178,32 +206,51 @@ namespace DriverScanTester.Services
         /// suppressed because a W-up would interrupt that owner's movement.
         /// </summary>
         /// <returns>
-        /// True when this owner still has valid logical/physical forward ownership after
-        /// the operation; false when ownership was released because W-down failed.
+        /// <see cref="WKeyRestartResult.Restarted"/> only when the physical W-up / gap /
+        /// W-down sequence completed. <see cref="WKeyRestartResult.Suppressed"/> when
+        /// another owner would be interrupted. <see cref="WKeyRestartResult.Failed"/> when
+        /// physical input or ownership state prevented a restart.
         /// </returns>
-        public bool TryRestartW(WKeyCameraOwner owner, int releaseGapMs)
+        public WKeyRestartResult TryRestartW(WKeyCameraOwner owner, int releaseGapMs)
         {
             lock (_gate)
             {
                 if (!IsCurrentOwner(owner) || !IsCurrentGeneration() || _closing || _ended)
-                    return false;
+                {
+                    _log($"[WCamera] ForceStartMoving restart failed for {owner.Source}: the camera session is no longer accepting work.");
+                    return WKeyRestartResult.Failed;
+                }
+
+                if (_unresolvedWUpOwner != null)
+                {
+                    _log($"[WCamera] ForceStartMoving restart failed for {owner.Source}: a previous physical W-up is still unresolved.");
+                    return WKeyRestartResult.Failed;
+                }
 
                 if (!_wOwners.Contains(owner))
-                    return false;
+                {
+                    _log($"[WCamera] ForceStartMoving restart failed for {owner.Source}: the owner no longer holds W.");
+                    return WKeyRestartResult.Failed;
+                }
 
                 if (_wOwners.Count != 1)
                 {
                     _log($"[WCamera] ForceStartMoving restart suppressed for {owner.Source}: " +
                          $"{_wOwners.Count} W owners are active; no W-up was sent.");
-                    return true;
+                    return WKeyRestartResult.Suppressed;
                 }
 
                 if (!TrySendPhysicalW(owner, keyUp: true, "ForceStartMoving W-up"))
                 {
-                    // The key may still be physically down and this owner still owns it.
-                    // Do not send a second W-down and do not pretend the restart happened.
-                    _log("[WCamera] ForceStartMoving restart aborted because W-up did not succeed; existing ownership preserved.");
-                    return true;
+                    // The key may still be physically down and this release could not be
+                    // confirmed. Treat it exactly like a failed final release: remove the
+                    // logical hold, keep the owner token for bounded retries, and do not send
+                    // a second W-down or restore the stationary camera.
+                    _wOwners.Remove(owner);
+                    _unresolvedWUpOwner = owner;
+                    _log("[WCamera] ForceStartMoving restart failed because W-up did not succeed. " +
+                         "Physical W state is unresolved; the session stays blocked until a later Stop/session cleanup releases W.");
+                    return WKeyRestartResult.Failed;
                 }
 
                 if (releaseGapMs > 0)
@@ -212,16 +259,27 @@ namespace DriverScanTester.Services
                 if (!TrySendPhysicalW(owner, keyUp: false, "ForceStartMoving W-down"))
                 {
                     _wOwners.Remove(owner);
-                    TrySendPhysicalW(owner, keyUp: true, "failed ForceStartMoving W-down cleanup");
-                    if (_externalCameraOwners.Count == 0)
+                    bool released = TrySendPhysicalW(owner, keyUp: true, "failed ForceStartMoving W-down cleanup");
+                    if (!released)
+                    {
+                        _unresolvedWUpOwner = owner;
+                        _log("[WCamera] ForceStartMoving W-down failed and its W-up cleanup could not be confirmed. " +
+                             "The session stays blocked until a later Stop/session cleanup releases W.");
+                    }
+                    else if (_externalCameraOwners.Count == 0)
+                    {
                         RestoreStationaryView("ForceStartMoving W-down failed");
+                    }
                     else
+                    {
                         _stationaryRestorePending = true;
+                    }
+
                     FinishClosingIfNeeded();
-                    return false;
+                    return WKeyRestartResult.Failed;
                 }
 
-                return true;
+                return WKeyRestartResult.Restarted;
             }
         }
 
@@ -235,7 +293,18 @@ namespace DriverScanTester.Services
         {
             lock (_gate)
             {
-                if (!IsCurrentOwner(owner) || !_wOwners.Remove(owner))
+                if (!IsCurrentOwner(owner))
+                    return;
+
+                // A repeated Stop/release call is the primary bounded retry path for a
+                // final W-up that previously failed. The owner token is retained for this.
+                if (ReferenceEquals(_unresolvedWUpOwner, owner))
+                {
+                    TryRetryUnresolvedWUp(owner, "repeated last owner release");
+                    return;
+                }
+
+                if (!_wOwners.Remove(owner))
                     return;
 
                 if (!IsCurrentGeneration())
@@ -248,7 +317,14 @@ namespace DriverScanTester.Services
                 }
 
                 // The physical key must be released before stationary camera restoration.
-                TrySendPhysicalW(owner, keyUp: true, "last W owner release");
+                if (!TrySendPhysicalW(owner, keyUp: true, "last W owner release"))
+                {
+                    _unresolvedWUpOwner = owner;
+                    _log($"[WCamera] Physical W-up for the last owner ({owner.Source}) remains unresolved. " +
+                         "Logical ownership is released, but the stationary camera is NOT restored and the camera session " +
+                         "stays registered. Retry Stop or session cleanup; the next W-up attempt will retry the release.");
+                    return;
+                }
 
                 if (_externalCameraOwners.Count != 0)
                 {
@@ -276,6 +352,12 @@ namespace DriverScanTester.Services
             {
                 if (!IsCurrentGeneration() || _closing || _ended)
                     return false;
+
+                if (_unresolvedWUpOwner != null)
+                {
+                    _log("[WCamera] Camera operation blocked while a physical W-up is still unresolved.");
+                    return false;
+                }
 
                 if (_externalCameraOwners.Contains(owner))
                     return true;
@@ -346,7 +428,8 @@ namespace DriverScanTester.Services
         {
             lock (_gate)
             {
-                if (!IsCurrentGeneration() || _closing || _ended || _wOwners.Count != 0 || _externalCameraOwners.Count != 0)
+                if (!IsCurrentGeneration() || _closing || _ended || _unresolvedWUpOwner != null ||
+                    _wOwners.Count != 0 || _externalCameraOwners.Count != 0)
                     return false;
 
                 return TryApplyLock(StationaryVerticalLock, reason ?? "idle camera setup");
@@ -361,7 +444,8 @@ namespace DriverScanTester.Services
         {
             lock (_gate)
             {
-                if (!IsCurrentGeneration() || _closing || _ended || _wOwners.Count != 0 || _externalCameraOwners.Count != 0)
+                if (!IsCurrentGeneration() || _closing || _ended || _unresolvedWUpOwner != null ||
+                    _wOwners.Count != 0 || _externalCameraOwners.Count != 0)
                     return false;
 
                 return TryApplyLock(StationaryVerticalLock, "session start");
@@ -386,6 +470,17 @@ namespace DriverScanTester.Services
                     _ended = true;
                     return;
                 }
+
+                // Session termination is an explicit retry opportunity for a W-up that
+                // failed on the final owner release. It is still a single bounded attempt.
+                if (_unresolvedWUpOwner != null &&
+                    !TryRetryUnresolvedWUp(_unresolvedWUpOwner, "session end W-up retry"))
+                {
+                    _log("[WCamera] Session end is blocked: physical W-up is still unresolved. " +
+                         "The session remains registered so no other camera controller can replace it; retry Stop or wait for input recovery.");
+                    return;
+                }
+
                 if (_wOwners.Count != 0 || _externalCameraOwners.Count != 0)
                     return;
 
@@ -425,11 +520,47 @@ namespace DriverScanTester.Services
 
         private void FinishClosingIfNeeded()
         {
-            if (!_closing || _ended)
+            if (!_closing || _ended || _unresolvedWUpOwner != null)
                 return;
 
             _ended = true;
             UnregisterSession();
+        }
+
+        /// <summary>
+        /// One bounded retry of an unconfirmed physical W-up. Success clears the pending
+        /// state, restores the stationary view only when no other owner exists, and lets a
+        /// closing session unregister. Failure leaves the session safely blocked.
+        /// </summary>
+        private bool TryRetryUnresolvedWUp(WKeyCameraOwner owner, string reason)
+        {
+            if (!ReferenceEquals(_unresolvedWUpOwner, owner))
+                return true;
+
+            if (!TrySendPhysicalW(owner, keyUp: true, reason))
+            {
+                _log($"[WCamera] Physical W-up retry failed ({reason}, {owner.Source}). " +
+                     "The camera session stays blocked and the stationary camera is not restored.");
+                return false;
+            }
+
+            _unresolvedWUpOwner = null;
+            _log($"[WCamera] Physical W-up callback completed on retry ({reason}, {owner.Source}).");
+
+            if (_wOwners.Count == 0 && _externalCameraOwners.Count == 0)
+            {
+                RestoreStationaryView(reason);
+                _stationaryRestorePending = false;
+                FinishClosingIfNeeded();
+            }
+            else
+            {
+                // Defensive: new owners are rejected while the release is unresolved, so
+                // this branch is not expected. Keep the movement view rather than racing it.
+                _stationaryRestorePending = true;
+            }
+
+            return true;
         }
 
         private void UnregisterSession()
@@ -480,6 +611,19 @@ namespace DriverScanTester.Services
 
             return true;
         }
+    }
+
+    /// <summary>Outcome of a ForceStartMoving W restart attempt.</summary>
+    public enum WKeyRestartResult
+    {
+        /// <summary>The W-up / release gap / W-down sequence completed.</summary>
+        Restarted,
+
+        /// <summary>A restart was intentionally skipped because another W owner is active.</summary>
+        Suppressed,
+
+        /// <summary>Physical input or ownership state prevented a restart.</summary>
+        Failed
     }
 
     /// <summary>Identity-based W ownership token scoped to one controller generation.</summary>

@@ -133,10 +133,11 @@ namespace DriverScanTester.Services
             int candidatePixelCount,
             int probeCount,
             Point? confirmedProbe,
-            string pixelLabel)
+            string pixelLabel,
+            int aquamarineCount = 0)
         {
-            string detectedDetail = pixelLabel == "white"
-                ? $" ({pixelLabel}: exact={exactWhiteCount}, shaded={shadedWhiteCount})"
+            string detectedDetail = pixelLabel is "white" or "normal"
+                ? $" ({pixelLabel}: exact={exactWhiteCount}, shaded={shadedWhiteCount}, aquamarine={aquamarineCount})"
                 : $" ({pixelLabel})";
             return $"{label} | {outcome} | detected={whiteCount}px{detectedDetail} | " +
                    $"candidates={candidateComponents} comps/{candidatePixelCount}px | probes={probeCount} | " +
@@ -212,6 +213,7 @@ namespace DriverScanTester.Services
             Point? confirmedProbe = null,
             int exactWhiteCount = 0,
             int shadedWhiteCount = 0,
+            int aquamarineCount = 0,
             int candidatePixelCount = 0,
             bool saveRawFrame = false,
             string rawMetadata = "")
@@ -284,7 +286,8 @@ namespace DriverScanTester.Services
                     int candidateCount = candidateBounds?.Count ?? 0;
                     string caption = BuildLootScanCaption(
                         label, outcome, whiteCount, exactWhiteCount, shadedWhiteCount,
-                        candidateCount, candidatePixelCount, probeCount, confirmedProbe, pixelLabel);
+                        candidateCount, candidatePixelCount, probeCount, confirmedProbe, pixelLabel,
+                        aquamarineCount);
                     using var font = new Font(FontFamily.GenericSansSerif, 16f, FontStyle.Bold);
                     SizeF captionSize = graphics.MeasureString(caption, font);
                     using var captionBg = new SolidBrush(Color.FromArgb(190, 0, 0, 0));

@@ -286,23 +286,142 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void FailedWUpIsReportedAndDoesNotLeaveLogicalOwnership()
+        public void FailedFinalWUpKeepsReleaseUnresolvedAndDoesNotRestoreStationaryView()
         {
             var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
             var logs = new List<string>();
             using var controller = new WKeyCameraController(memory.CreateService(), logs.Add);
+            bool failWUp = true;
+            int wUpAttempts = 0;
             WKeyCameraOwner owner = controller.CreateOwner("W-up failure", keyUp =>
             {
                 if (keyUp)
-                    throw new InvalidOperationException("test W-up failure");
+                {
+                    wUpAttempts++;
+                    if (failWUp)
+                        throw new InvalidOperationException("test W-up failure");
+                }
+                memory.Events.Add(keyUp ? "W-up" : "W-down");
             });
 
-            Assert.True(controller.TryAcquireW(owner));
-            controller.ReleaseW(owner);
+            try
+            {
+                Assert.True(controller.TryAcquireW(owner));
+                Assert.Equal(BotConstants.Camera.MovementVerticalLock, memory.ReadCameraVerticalLock());
 
-            Assert.Equal(0, controller.ActiveWOwnerCount);
+                controller.ReleaseW(owner);
+
+                Assert.Equal(0, controller.ActiveWOwnerCount);
+                Assert.True(controller.HasUnresolvedPhysicalWRelease);
+                Assert.False(controller.IsAcceptingOperations);
+                Assert.False(controller.IsEnded);
+                Assert.Equal(BotConstants.Camera.MovementVerticalLock, memory.ReadCameraVerticalLock());
+                Assert.Contains(logs, line => line.Contains("Physical W-up failed", StringComparison.Ordinal));
+                Assert.Contains(logs, line => line.Contains("remains unresolved", StringComparison.Ordinal));
+
+                controller.EndSession();
+
+                Assert.False(controller.IsEnded);
+                Assert.True(controller.HasUnresolvedPhysicalWRelease);
+                Assert.True(WKeyCameraController.HasActiveSession(Pid, ModuleBase));
+                Assert.Throws<InvalidOperationException>(
+                    () => new WKeyCameraController(memory.CreateService(), _ => { }));
+            }
+            finally
+            {
+                failWUp = false;
+                controller.ReleaseW(owner);
+            }
+
+            Assert.False(controller.HasUnresolvedPhysicalWRelease);
             Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.ReadCameraVerticalLock());
-            Assert.Contains(logs, line => line.Contains("Physical W-up failed", StringComparison.Ordinal));
+            Assert.True(controller.IsEnded);
+            Assert.False(WKeyCameraController.HasActiveSession(Pid, ModuleBase));
+
+            using var replacement = new WKeyCameraController(memory.CreateService(), _ => { });
+            Assert.True(replacement.IsAcceptingOperations);
+            Assert.True(wUpAttempts >= 2);
+        }
+
+        [Fact]
+        public void RepeatedCleanupRetriesUnresolvedWUpAndCompletesOnlyAfterSuccess()
+        {
+            var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            bool failWUp = true;
+            int wUpAttempts = 0;
+            WKeyCameraOwner owner = controller.CreateOwner("retry W-up", keyUp =>
+            {
+                if (keyUp)
+                {
+                    wUpAttempts++;
+                    if (failWUp)
+                        throw new InvalidOperationException("test W-up failure");
+                }
+            });
+
+            try
+            {
+                Assert.True(controller.TryAcquireW(owner));
+                controller.ReleaseW(owner);
+                Assert.Equal(1, wUpAttempts);
+                Assert.True(controller.HasUnresolvedPhysicalWRelease);
+
+                controller.EndSession();
+                Assert.Equal(2, wUpAttempts);
+                Assert.False(controller.IsEnded);
+
+                controller.ReleaseW(owner);
+                Assert.Equal(3, wUpAttempts);
+                Assert.True(controller.HasUnresolvedPhysicalWRelease);
+                Assert.Equal(BotConstants.Camera.MovementVerticalLock, memory.ReadCameraVerticalLock());
+
+                failWUp = false;
+                controller.EndSession();
+            }
+            finally
+            {
+                failWUp = false;
+                if (!controller.IsEnded)
+                    controller.ReleaseW(owner);
+            }
+
+            Assert.Equal(4, wUpAttempts);
+            Assert.False(controller.HasUnresolvedPhysicalWRelease);
+            Assert.True(controller.IsEnded);
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.ReadCameraVerticalLock());
+            Assert.False(WKeyCameraController.HasActiveSession(Pid, ModuleBase));
+        }
+
+        [Fact]
+        public void MultipleWOwnersSendOnlyOnePhysicalWDownAndOneWUp()
+        {
+            var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            int downCount = 0;
+            int upCount = 0;
+            WKeyCameraOwner first = controller.CreateOwner("first owner", keyUp =>
+            {
+                if (keyUp) upCount++; else downCount++;
+            });
+            WKeyCameraOwner second = controller.CreateOwner("second owner", keyUp =>
+            {
+                if (keyUp) upCount++; else downCount++;
+            });
+
+            Assert.True(controller.TryAcquireW(first));
+            Assert.True(controller.TryAcquireW(second));
+            Assert.Equal(1, downCount);
+
+            controller.ReleaseW(first);
+            Assert.Equal(0, upCount);
+            Assert.Equal(BotConstants.Camera.MovementVerticalLock, memory.ReadCameraVerticalLock());
+
+            controller.ReleaseW(second);
+            Assert.Equal(1, downCount);
+            Assert.Equal(1, upCount);
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.ReadCameraVerticalLock());
+            Assert.False(controller.HasUnresolvedPhysicalWRelease);
         }
 
         [Fact]
@@ -318,6 +437,9 @@ namespace DriverScanTester.Tests
                 memory.Events.Add(keyUp ? "second-W-up" : "second-W-down"));
             Assert.True(controller.TryAcquireW(second));
             memory.Events.Clear();
+            int countBefore = GetField<int>(movement, "_startMoveCount");
+            DateTime graceBefore = GetField<DateTime>(movement, "_ignoreStuckUntil");
+            DateTime lastRestartBefore = GetField<DateTime>(movement, "_lastForceStartMovingAt");
 
             InvokeVoid(movement, "ForceStartMoving");
 
@@ -325,10 +447,108 @@ namespace DriverScanTester.Tests
             Assert.Equal(2, controller.ActiveWOwnerCount);
             Assert.Equal(BotConstants.Camera.MovementVerticalLock, memory.ReadCameraVerticalLock());
             Assert.Contains(logs, line => line.Contains("restart suppressed", StringComparison.Ordinal));
+            Assert.Equal(countBefore, GetField<int>(movement, "_startMoveCount"));
+            Assert.Equal(graceBefore, GetField<DateTime>(movement, "_ignoreStuckUntil"));
+            Assert.Equal(lastRestartBefore, GetField<DateTime>(movement, "_lastForceStartMovingAt"));
 
             movement.StopMoving();
             Assert.Equal(1, controller.ActiveWOwnerCount);
             controller.ReleaseW(second);
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.ReadCameraVerticalLock());
+        }
+
+        [Fact]
+        public void SuccessfulForceStartMovingUpdatesCountersAndStuckGrace()
+        {
+            var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            var movement = new RecordingMovementSystem(memory.CreateService(), controller, memory.Events);
+            Assert.True(InvokeBool(movement, "TryStartMoving"));
+            int countBefore = GetField<int>(movement, "_startMoveCount");
+            DateTime graceBefore = GetField<DateTime>(movement, "_ignoreStuckUntil");
+            DateTime lastRestartBefore = GetField<DateTime>(movement, "_lastForceStartMovingAt");
+            memory.Events.Clear();
+
+            InvokeVoid(movement, "ForceStartMoving");
+
+            Assert.Equal(new[] { "W-up", "W-down" }, memory.Events);
+            Assert.Equal(countBefore + 1, GetField<int>(movement, "_startMoveCount"));
+            Assert.True(GetField<DateTime>(movement, "_ignoreStuckUntil") > graceBefore);
+            Assert.True(GetField<DateTime>(movement, "_lastForceStartMovingAt") > lastRestartBefore);
+            Assert.True(GetField<bool>(movement, "_isMovingForward"));
+            Assert.Equal(BotConstants.Camera.MovementVerticalLock, memory.ReadCameraVerticalLock());
+            movement.StopMoving();
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.ReadCameraVerticalLock());
+        }
+
+        [Fact]
+        public void ForceStartMovingWUpFailureReturnsFailedWithoutBookkeeping()
+        {
+            var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            var movement = new RecordingMovementSystem(memory.CreateService(), controller, memory.Events)
+            {
+                FailWUp = false
+            };
+            Assert.True(InvokeBool(movement, "TryStartMoving"));
+            int countBefore = GetField<int>(movement, "_startMoveCount");
+            DateTime graceBefore = GetField<DateTime>(movement, "_ignoreStuckUntil");
+            movement.FailWUp = true;
+            memory.Events.Clear();
+
+            try
+            {
+                InvokeVoid(movement, "ForceStartMoving");
+
+                Assert.Equal(countBefore, GetField<int>(movement, "_startMoveCount"));
+                Assert.Equal(graceBefore, GetField<DateTime>(movement, "_ignoreStuckUntil"));
+                Assert.False(GetField<bool>(movement, "_isMovingForward"));
+                Assert.Equal(0, controller.ActiveWOwnerCount);
+                Assert.True(controller.HasUnresolvedPhysicalWRelease);
+                Assert.False(controller.IsAcceptingOperations);
+                Assert.Equal(BotConstants.Camera.MovementVerticalLock, memory.ReadCameraVerticalLock());
+            }
+            finally
+            {
+                movement.FailWUp = false;
+                movement.StopMoving();
+            }
+
+            Assert.Equal(0, controller.ActiveWOwnerCount);
+            Assert.False(controller.HasUnresolvedPhysicalWRelease);
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.ReadCameraVerticalLock());
+        }
+
+        [Fact]
+        public void ForceStartMovingWDownFailureReturnsFailedAndPerformsSafeCleanup()
+        {
+            var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            var movement = new RecordingMovementSystem(memory.CreateService(), controller, memory.Events)
+            {
+                FailWDownAfterFirst = true
+            };
+            Assert.True(InvokeBool(movement, "TryStartMoving"));
+            int countBefore = GetField<int>(movement, "_startMoveCount");
+            DateTime graceBefore = GetField<DateTime>(movement, "_ignoreStuckUntil");
+            memory.Events.Clear();
+
+            InvokeVoid(movement, "ForceStartMoving");
+
+            Assert.Equal(
+                new[] { "W-up", "W-down", "W-up", $"Vertical:{BotConstants.Camera.StationaryVerticalLock}" },
+                memory.Events);
+            Assert.Equal(countBefore, GetField<int>(movement, "_startMoveCount"));
+            Assert.Equal(graceBefore, GetField<DateTime>(movement, "_ignoreStuckUntil"));
+            Assert.False(GetField<bool>(movement, "_isMovingForward"));
+            Assert.Equal(0, controller.ActiveWOwnerCount);
+            Assert.False(controller.HasUnresolvedPhysicalWRelease);
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.ReadCameraVerticalLock());
+
+            // Subsequent movement and Stop remain functional after the failed restart.
+            var nextMovement = new RecordingMovementSystem(memory.CreateService(), controller, memory.Events);
+            Assert.True(InvokeBool(nextMovement, "TryStartMoving"));
+            nextMovement.StopMoving();
             Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.ReadCameraVerticalLock());
         }
 
@@ -381,6 +601,13 @@ namespace DriverScanTester.Tests
             release.Invoke(loot, new object[] { "test complete" });
         }
 
+        private static T GetField<T>(object target, string name)
+        {
+            FieldInfo field = typeof(MovementSystem).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException($"{name} was not found.");
+            return (T)(field.GetValue(target) ?? throw new InvalidOperationException($"{name} was null."));
+        }
+
         private static bool InvokeBool(object target, string name, params object[] args)
         {
             Type type = target is MovementSystem ? typeof(MovementSystem) : target.GetType();
@@ -400,7 +627,10 @@ namespace DriverScanTester.Tests
         private sealed class RecordingMovementSystem : MovementSystem
         {
             private readonly List<string> _events;
+            private int _wDownCount;
             public bool ThrowOnWDown { get; init; }
+            public bool FailWDownAfterFirst { get; init; }
+            public bool FailWUp { get; set; }
 
             public RecordingMovementSystem(
                 GameMemoryService memory,
@@ -420,8 +650,16 @@ namespace DriverScanTester.Tests
             protected override void SendSyntheticForwardKeyEvent(bool keyUp)
             {
                 _events.Add(keyUp ? "W-up" : "W-down");
-                if (!keyUp && ThrowOnWDown)
-                    throw new InvalidOperationException("test W-down failure");
+                if (!keyUp)
+                {
+                    _wDownCount++;
+                    if (ThrowOnWDown || (FailWDownAfterFirst && _wDownCount > 1))
+                        throw new InvalidOperationException("test W-down failure");
+                }
+                else if (FailWUp)
+                {
+                    throw new InvalidOperationException("test W-up failure");
+                }
             }
 
             protected override void SendTurnKeyEvent(bool leftA, bool keyUp)

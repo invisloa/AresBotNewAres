@@ -104,7 +104,7 @@ namespace DriverScanTester.ViewModels
                      !_main.MovementDiagnostic.BlocksOtherRuntimes &&
                      !IsMovementBotRunning && !IsLootBotRunning && !IsWorkflowRunning);
             TestLootWhiteCommand = new RelayCommand(
-                _ => RunLootScanTest(LootSystem.LootDiagnosticMode.NormalWhite),
+                _ => RunLootScanTest(LootSystem.LootDiagnosticMode.NormalLoot),
                 _ => _main.IsAttached && !IsLootScanTestRunning &&
                      !_main.MovementDiagnostic.BlocksOtherRuntimes &&
                      !IsMovementBotRunning && !IsLootBotRunning && !IsWorkflowRunning);
@@ -1015,7 +1015,7 @@ namespace DriverScanTester.ViewModels
                 return;
             }
 
-            string label = mode == LootSystem.LootDiagnosticMode.SodSopPink ? "SOD/SOP" : "white";
+            string label = mode == LootSystem.LootDiagnosticMode.SodSopPink ? "SOD/SOP" : "normal";
             IsLootScanTestRunning = true;
             LootScanTestStatus = "Running...";
             AppendBotLog($"[Loot Test] Starting {label} loot scan...");
@@ -1038,7 +1038,7 @@ namespace DriverScanTester.ViewModels
 
         private static string DescribeLootScanResult(LootSystem.LootDiagnosticResult result)
         {
-            string label = result.Mode == LootSystem.LootDiagnosticMode.SodSopPink ? "SOD/SOP" : "White";
+            string label = result.Mode == LootSystem.LootDiagnosticMode.SodSopPink ? "SOD/SOP" : "Normal";
             return result.Outcome switch
             {
                 LootSystem.LootDiagnosticOutcome.Collected => $"{label}: collected {result.ItemsCollected}",

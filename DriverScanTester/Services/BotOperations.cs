@@ -311,6 +311,7 @@ namespace DriverScanTester.Services
                 return false;
             }
 
+            bool releaseResolved = true;
             try
             {
                 // The shared controller owns the physical W transition as well as the
@@ -320,9 +321,17 @@ namespace DriverScanTester.Services
             finally
             {
                 cameraController.ReleaseW(cameraOwner);
+                releaseResolved = !cameraController.HasUnresolvedPhysicalWRelease;
             }
 
-            ctx.Log("[Operation] EtanaRepotUnstuck: done (W up). ");
+            if (!releaseResolved)
+            {
+                ctx.Log("[Operation] EtanaRepotUnstuck: physical W-up is unresolved; " +
+                        "the operation cannot continue with an uncertain W state.");
+                return false;
+            }
+
+            ctx.Log("[Operation] EtanaRepotUnstuck: done (W-up callback completed; game-side release not independently verified). ");
             return true;
         }
 

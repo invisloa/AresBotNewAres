@@ -27,7 +27,7 @@ namespace DriverScanTester
             /// <summary>Default camera distance lock for waypoints and movement.</summary>
             public const short DefaultDistanceLock = 17020;
 
-            /// <summary>Camera distance used during normal white-loot pixel scans.</summary>
+            /// <summary>Camera distance used during normal white/aquamarine loot pixel scans.</summary>
             public const short LootScanDistance = 17000;
 
             /// <summary>Camera distance used by the other-player marker detector.</summary>
@@ -980,7 +980,7 @@ namespace DriverScanTester
             public const int SodSopMouseOverSettleMs = 5;
 
             /// <summary>
-            /// Minimum mouseover settle time (ms) for normal white-loot probes. The game
+            /// Minimum mouseover settle time (ms) for normal white/aquamarine loot probes. The game
             /// updates its loot-under-cursor memory asynchronously after the cursor moves;
             /// the previous 1 ms wait regularly read the state before the update landed.
             /// Kept short enough that a bounded spatial-coverage sweep stays fast.
@@ -1356,6 +1356,19 @@ namespace DriverScanTester
 
             /// <summary>SOD/SOP ground-drop pink detection: EXACT blue channel (147).</summary>
             public const int PinkPixelB = 147;
+
+            /// <summary>Selected G9 ground-drop texture: exact painted red channel (0).
+            /// The client mod paints the private bundle solid aquamarine #00FFAA
+            /// (BGRA(170, 255, 0, 255) → RGB(0, 255, 170)); the live classifier
+            /// accepts the shaded family because scene lighting and distance fog
+            /// modulate the texture.</summary>
+            public const int AquamarinePixelR = 0;
+
+            /// <summary>Selected G9 ground-drop texture: exact painted green channel (255).</summary>
+            public const int AquamarinePixelG = 255;
+
+            /// <summary>Selected G9 ground-drop texture: exact painted blue channel (170).</summary>
+            public const int AquamarinePixelB = 170;
 
             /// <summary>Minimum width (px) a connected pink blob must have to be probed as a
             /// SOD/SOP drop. The painted loot square is at least 10x10 px; smaller pink

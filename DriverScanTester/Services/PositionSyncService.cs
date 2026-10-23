@@ -515,6 +515,7 @@ namespace DriverScanTester.Services
                 cameraOwnerAcquired = true;
             }
 
+            bool releaseUnresolved = false;
             try
             {
                 // The shared controller applies the movement view and performs the
@@ -527,11 +528,25 @@ namespace DriverScanTester.Services
             finally
             {
                 if (cameraOwnerAcquired && _wKeyCameraController != null && _wKeyCameraOwner != null)
+                {
                     _wKeyCameraController.ReleaseW(_wKeyCameraOwner);
+                    releaseUnresolved = _wKeyCameraController.HasUnresolvedPhysicalWRelease;
+                }
                 else
+                {
                     _keyEvent(GameInput.VK_W, GameInput.SCAN_W, (uint)GameInput.KEYEVENTF_KEYUP);
-                _log("[PositionSync] W refresh completed: KeyReleased=True.");
+                }
             }
+
+            if (releaseUnresolved)
+            {
+                _log("[PositionSync] W refresh failed: physical W-up is unresolved. " +
+                     "The camera session is blocked until Stop/cleanup retries the release.");
+                throw new InvalidOperationException(
+                    "W refresh could not confirm the physical W-up; the camera session is blocked.");
+            }
+
+            _log("[PositionSync] W refresh completed: KeyUpCallbackCompleted=True (game-side release not independently verified).");
         }
 
         private async Task<PositionSyncResult> SynchronizeInternalAsync(
@@ -947,6 +962,18 @@ namespace DriverScanTester.Services
                 catch (Exception ex)
                 {
                     _log($"[PositionSync] W refresh failed: {ex.Message}");
+                    if (_wKeyCameraController?.HasUnresolvedPhysicalWRelease == true)
+                    {
+                        lock (_lock)
+                            _state = PositionSyncState.PositionSynchronizationFailed;
+                        _log($"[PositionSync] Result=Unconfirmed TransitionId={transitionId} " +
+                             "Message=physical W-up is unresolved; synchronization aborted until Stop/cleanup releases W.");
+                        return new PositionSyncResult(
+                            PositionSyncResultKind.Unconfirmed,
+                            before,
+                            transitionId,
+                            "Physical W-up is unresolved; synchronization aborted until the release is retried.");
+                    }
                 }
 
                 PlayerStateSnapshot after = before;

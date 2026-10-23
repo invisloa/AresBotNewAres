@@ -237,11 +237,13 @@ namespace DriverScanTester.Tests
                 candidatePixelCount: 400,
                 probeCount: 8,
                 confirmedProbe: null,
-                pixelLabel: "white");
+                pixelLabel: "white",
+                aquamarineCount: 50);
 
             Assert.Contains("detected=400px", caption, StringComparison.Ordinal);
             Assert.Contains("exact=300", caption, StringComparison.Ordinal);
             Assert.Contains("shaded=100", caption, StringComparison.Ordinal);
+            Assert.Contains("aquamarine=50", caption, StringComparison.Ordinal);
             Assert.Contains("candidates=1 comps/400px", caption, StringComparison.Ordinal);
             Assert.Contains("probes=8", caption, StringComparison.Ordinal);
             Assert.DoesNotContain("detected=8px", caption, StringComparison.Ordinal);

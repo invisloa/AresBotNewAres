@@ -920,6 +920,52 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public async Task FailedWUpDuringRefreshAbortsAndKeepsTheSessionBlocked()
+        {
+            var memory = new SyncMemory { VerticalLock = BotConstants.Camera.StationaryVerticalLock };
+            var wEvents = new List<string>();
+            using var controller = new WKeyCameraController(memory.CreateMemory(_ => { }), _ => { });
+            var options = FastOptions();
+            options.NudgeKeyDownMs = 1;
+            bool failWUp = true;
+            var service = new PositionSyncService(
+                memory.CreateMemory(_ => { }),
+                _ => { },
+                () => { },
+                wRefreshAsync: null,
+                options,
+                (vk, scan, flags) =>
+                {
+                    if (flags != 0 && failWUp)
+                        throw new InvalidOperationException("test W-up failure");
+                    wEvents.Add(flags == 0 ? "W-down" : "W-up");
+                },
+                wKeyCameraController: controller);
+
+            try
+            {
+                await Assert.ThrowsAsync<InvalidOperationException>(
+                    () => service.PressWRefreshAsync(CancellationToken.None));
+
+                Assert.True(controller.HasUnresolvedPhysicalWRelease);
+                Assert.False(controller.IsEnded);
+                Assert.False(controller.IsAcceptingOperations);
+                Assert.Equal(BotConstants.Camera.MovementVerticalLock, memory.VerticalLock);
+                Assert.Equal(new[] { "W-down" }, wEvents);
+            }
+            finally
+            {
+                failWUp = false;
+                controller.EndSession();
+            }
+
+            Assert.False(controller.HasUnresolvedPhysicalWRelease);
+            Assert.True(controller.IsEnded);
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock, memory.VerticalLock);
+            Assert.Equal(new[] { "W-down", "W-up" }, wEvents);
+        }
+
+        [Fact]
         public void CoherentSnapshotReadsThePointerOnce()
         {
             const ulong moduleBase = 0x100000;

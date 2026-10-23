@@ -5310,9 +5310,11 @@ namespace DriverScanTester.Services
                     return;
                 }
 
-                // Rate-limit: prevent spam ForceStartMoving (only allowed every FORCE_START_MIN_INTERVAL_MS)
+                // Rate-limit: prevent spam ForceStartMoving attempts (only allowed every FORCE_START_MIN_INTERVAL_MS).
+                // Failed attempts also update the attempt timestamp, so a failed restart cannot
+                // immediately flood W-down attempts; suppressed attempts deliberately do not.
                 double msSinceLast = (DateTime.Now - _lastForceStartMovingAt).TotalMilliseconds;
-                if (msSinceLast < FORCE_START_MIN_INTERVAL_MS && _isMovingForward)
+                if (msSinceLast < FORCE_START_MIN_INTERVAL_MS)
                 {
                     _log($"[Input] ForceStartMoving suppressed — rate-limit {msSinceLast:F0}ms/{FORCE_START_MIN_INTERVAL_MS:F0}ms");
                     return;
@@ -5325,29 +5327,39 @@ namespace DriverScanTester.Services
                         _log("[WCamera] ForceStartMoving suppressed — movement vertical lock was not verified or the camera is owned by another operation.");
                         return;
                     }
+
+                    // The controller keeps the movement camera across the internal
+                    // up/down gap and reports whether the restart actually happened.
+                    _log($"[Input] ForceStartMoving — restarting W (call #{_startMoveCount + 1}). Tick:{_tickCount}");
+                    WKeyRestartResult restartResult = _wKeyCameraController.TryRestartW(
+                        _wKeyCameraOwner, BotConstants.Delays.ForceStartReleaseGapMs);
+                    switch (restartResult)
+                    {
+                        case WKeyRestartResult.Restarted:
+                            _lastForceStartMovingAt = DateTime.Now;
+                            _isMovingForward = true;
+                            _startMoveCount++;
+                            _lootMoveSuppressedLogged = false;
+                            _ignoreStuckUntil = DateTime.Now.AddSeconds(STUCK_GRACE_AFTER_START_SECONDS);
+                            return;
+
+                        case WKeyRestartResult.Suppressed:
+                            // Do not update the successful-restart timestamp, counters or
+                            // stuck grace: no corrective W transition was performed.
+                            _log("[Input] ForceStartMoving suppressed — another W owner is active; stuck grace was not reset.");
+                            return;
+
+                        default:
+                            // The controller records any unresolved physical W release for a
+                            // later Stop/cleanup retry, but this attempt did not restore motion.
+                            _lastForceStartMovingAt = DateTime.Now;
+                            _isMovingForward = false;
+                            _log("[Input] ForceStartMoving failed — W restart did not complete; restart counters and stuck grace were not updated.");
+                            return;
+                    }
                 }
 
                 _lastForceStartMovingAt = DateTime.Now;
-
-                if (_wKeyCameraController != null && _wKeyCameraOwner != null)
-                {
-                    // The controller keeps the movement camera across the internal
-                    // up/down gap and suppresses the restart if another W owner exists.
-                    _log($"[Input] ForceStartMoving — restarting W (call #{_startMoveCount + 1}). Tick:{_tickCount}");
-                    if (!_wKeyCameraController.TryRestartW(
-                        _wKeyCameraOwner, BotConstants.Delays.ForceStartReleaseGapMs))
-                    {
-                        _isMovingForward = false;
-                        _log("[Input] ForceStartMoving failed: W ownership was not available after the restart attempt.");
-                        return;
-                    }
-
-                    _isMovingForward = true;
-                    _startMoveCount++;
-                    _lootMoveSuppressedLogged = false;
-                    _ignoreStuckUntil = DateTime.Now.AddSeconds(STUCK_GRACE_AFTER_START_SECONDS);
-                    return;
-                }
 
                 _log($"[Input] ForceStartMoving — releasing W key (call #{_startMoveCount + 1}). Tick:{_tickCount}");
                 try

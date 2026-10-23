@@ -77,7 +77,8 @@ namespace DriverScanTester.Services
             /// <summary>Nothing loot-like was visible; navigation must continue.</summary>
             NoCandidate,
 
-            /// <summary>Plausible white-loot pixels were found; verify with the loot camera.</summary>
+            /// <summary>Plausible normal-loot (white or aquamarine) pixels were found;
+            /// verify with the loot camera.</summary>
             PotentialCandidate,
 
             /// <summary>The frame could not be captured/analyzed; never treated as a candidate.</summary>
@@ -97,7 +98,7 @@ namespace DriverScanTester.Services
             string Detail);
 
         /// <summary>Loot operation exercised by the Tools tab diagnostics.</summary>
-        public enum LootDiagnosticMode { SodSopPink, NormalWhite }
+        public enum LootDiagnosticMode { SodSopPink, NormalLoot }
 
         /// <summary>Outcome of one manual diagnostic loot run.</summary>
         public enum LootDiagnosticOutcome
@@ -1301,7 +1302,7 @@ namespace DriverScanTester.Services
                 int mouseOverCalibration = BotConstants.GameMagicValues.LootMouseOverValue;
                 _log($"[LootTest] {DiagnosticModeName(mode)}: manual scan starting " +
                      $"(client {_clientWidth}x{_clientHeight}, camera {scanCamera}, verticalLock {scanVerticalLock}, " +
-                     $"mode={(pinkOnly ? "pink-only" : "white-loot")}, " +
+                     $"mode={(pinkOnly ? "pink-only" : "normal-loot")}, " +
                      $"item mouseover calibration={mouseOverCalibration} (0x{(uint)mouseOverCalibration:X8})" +
                      (mouseOverCalibration == 0
                          ? " — CAPTURE IT with 'Capture Item Mouseover' or no probe can ever confirm a pickup)."
@@ -2301,6 +2302,7 @@ namespace DriverScanTester.Services
 
             var exactWhitePoints = new List<Point>();
             var shadedWhitePoints = new List<Point>();
+            var aquamarinePoints = new List<Point>();
 
             CollectBitmapTargetPoints(
                 bitmap, xStart, xEnd, yStart, yEnd,
@@ -2310,8 +2312,12 @@ namespace DriverScanTester.Services
                 bitmap, xStart, xEnd, yStart, yEnd,
                 pinkOnly: false, shadedWhitePoints, ref reusableBuffer, out _, out _,
                 shadedWhiteOnly: true);
+            CollectBitmapTargetPoints(
+                bitmap, xStart, xEnd, yStart, yEnd,
+                pinkOnly: false, aquamarinePoints, ref reusableBuffer, out _, out _,
+                aquamarineOnly: true);
 
-            int whitePixels = exactWhitePoints.Count + shadedWhitePoints.Count;
+            int whitePixels = exactWhitePoints.Count + shadedWhitePoints.Count + aquamarinePoints.Count;
             var candidates = new List<WhiteComponent>();
             foreach (WhiteComponent component in LabelWhiteComponents(exactWhitePoints))
             {
@@ -2319,6 +2325,11 @@ namespace DriverScanTester.Services
                     candidates.Add(component);
             }
             foreach (WhiteComponent component in LabelWhiteComponents(shadedWhitePoints))
+            {
+                if (IsShadedWhiteLootCandidate(component))
+                    candidates.Add(component);
+            }
+            foreach (WhiteComponent component in LabelWhiteComponents(aquamarinePoints))
             {
                 if (IsShadedWhiteLootCandidate(component))
                     candidates.Add(component);
@@ -2350,7 +2361,7 @@ namespace DriverScanTester.Services
 
             return new LootPreScanResult(
                 LootPreScanOutcome.PotentialCandidate, candidates.Count, whitePixels, bounds,
-                "plausible white-loot candidates");
+                "plausible normal-loot candidates");
         }
 
         private (float X, float Y) GetPlayerPositionForSuppression()
@@ -3126,6 +3137,31 @@ namespace DriverScanTester.Services
             return min >= WhiteLootMinChannel && max - min <= WhiteLootMaxChannelSpread;
         }
 
+        // The selected G9 ground bundle is painted solid aquamarine (#00FFAA).
+        // Scene lighting and distance fog modulate the texture, so accept the
+        // saturated cyan-green family rather than one literal RGB value: low red,
+        // strong green, and blue clearly above red but below green. Pure green,
+        // pure cyan, pink and neutral white/gray all fail these tests.
+        private const int AquamarineMinGreen = 120;
+        private const int AquamarineMaxRed = 130;
+        private const int AquamarineMinBlue = 80;
+        private const int AquamarineMinGreenOverRed = 55;
+        private const int AquamarineMinBlueOverRed = 35;
+        private const int AquamarineMinGreenOverBlue = 20;
+
+        internal static bool IsAquamarineLootPixel(Color pixelColor)
+            => IsAquamarineLootPixel(pixelColor.R, pixelColor.G, pixelColor.B);
+
+        internal static bool IsAquamarineLootPixel(int r, int g, int b)
+        {
+            return g >= AquamarineMinGreen &&
+                   r <= AquamarineMaxRed &&
+                   b >= AquamarineMinBlue &&
+                   g - r >= AquamarineMinGreenOverRed &&
+                   b - r >= AquamarineMinBlueOverRed &&
+                   g - b >= AquamarineMinGreenOverBlue;
+        }
+
         /// <summary>
         /// Analyzes a supplied frame with the exact Phase A reader, pink mask, connected
         /// component labeler and production candidate filters. It performs no game input.
@@ -3260,10 +3296,10 @@ namespace DriverScanTester.Services
 
         private LootScanPassResult ScanRegion(
             int[] xRange, int[] yRange, string regionName,
-            bool pinkOnly = false, string scanReason = "white-loot",
+            bool pinkOnly = false, string scanReason = "normal-loot",
             bool verifyLootCamera = false)
         {
-            string pixelNoun = pinkOnly ? "pink" : "white";
+            string pixelNoun = pinkOnly ? "pink" : "normal";
 
             // ── Loot diagnostics ──
             // Clone the exact frame that is scanned and save it (annotated) to
@@ -3284,6 +3320,7 @@ namespace DriverScanTester.Services
             int diagnosticWhiteCount = 0;
             int diagnosticExactWhiteCount = 0;
             int diagnosticShadedWhiteCount = 0;
+            int diagnosticAquamarineCount = 0;
             int diagnosticCandidatePixelCount = 0;
             int diagnosticComponentCount = 0;
             int diagnosticCandidateCount = 0;
@@ -3389,13 +3426,14 @@ namespace DriverScanTester.Services
                 }
 
                 // ── Phase A: collect pixels without moving the cursor. Normal loot
-                //    keeps its exact-white sparkle mask and adds a separate shaded-white
-                //    mask; SOD/SOP keeps the existing pink-family mask with artificial
-                //    marker magenta removed before labeling. Both normal masks are read
-                //    from this captured frame; only concentrated shade components become
-                //    new candidates. ──
+                //    keeps its exact-white sparkle mask and adds separate shaded-white
+                //    and aquamarine masks; SOD/SOP keeps the existing pink-family mask
+                //    with artificial marker magenta removed before labeling. All normal
+                //    masks are read from this captured frame; only concentrated color
+                //    components become new candidates. ──
                 var targetPoints = new List<Point>();
                 List<Point>? shadedWhitePoints = pinkOnly ? null : new List<Point>();
+                List<Point>? aquamarinePoints = pinkOnly ? null : new List<Point>();
                 pixelStats = CollectScanTargetPoints(
                     xStart, xEnd, yStart, yEnd,
                     pinkOnly, targetPoints,
@@ -3409,19 +3447,28 @@ namespace DriverScanTester.Services
                         xStart, xEnd, yStart, yEnd,
                         false, shadedWhitePoints!,
                         out _, out _, shadedWhiteOnly: true);
+                    CollectScanTargetPoints(
+                        xStart, xEnd, yStart, yEnd,
+                        false, aquamarinePoints!,
+                        out _, out _, aquamarineOnly: true);
                     diagnosticShadedWhiteCount = shadedWhitePoints!.Count;
-                    diagnosticWhiteCount = diagnosticExactWhiteCount + diagnosticShadedWhiteCount;
+                    diagnosticAquamarineCount = aquamarinePoints!.Count;
+                    diagnosticWhiteCount = diagnosticExactWhiteCount
+                        + diagnosticShadedWhiteCount
+                        + diagnosticAquamarineCount;
 
                     if (ScreenshotService.LootScanCaptureEnabled)
                     {
                         diagnosticDetectedWhitePixels.AddRange(targetPoints);
                         diagnosticDetectedWhitePixels.AddRange(shadedWhitePoints!);
+                        diagnosticDetectedWhitePixels.AddRange(aquamarinePoints!);
                     }
                 }
 
                 // ── Phase B: label 8-connected components and keep loot-shaped
                 //    blobs. White mode preserves compact sparkles and adds dense large
-                //    candidates; pink mode shares the AnalyzePinkFrame production path. ──
+                //    white and aquamarine candidates; pink mode shares the
+                //    AnalyzePinkFrame production path. ──
                 List<WhiteComponent> components;
                 var candidates = new List<WhiteComponent>();
                 int filteredComponents;
@@ -3454,7 +3501,11 @@ namespace DriverScanTester.Services
                 {
                     List<WhiteComponent> exactWhiteComponents = LabelWhiteComponents(targetPoints);
                     List<WhiteComponent> shadedWhiteComponents = LabelWhiteComponents(shadedWhitePoints!);
-                    components = exactWhiteComponents.Concat(shadedWhiteComponents).ToList();
+                    List<WhiteComponent> aquamarineComponents = LabelWhiteComponents(aquamarinePoints!);
+                    components = exactWhiteComponents
+                        .Concat(shadedWhiteComponents)
+                        .Concat(aquamarineComponents)
+                        .ToList();
                     filteredComponents = 0;
                     tinyPinkComponents = 0;
                     mobMarkerComponents = 0;
@@ -3466,6 +3517,13 @@ namespace DriverScanTester.Services
                             filteredComponents++;
                     }
                     foreach (WhiteComponent component in shadedWhiteComponents)
+                    {
+                        if (IsShadedWhiteLootCandidate(component))
+                            candidates.Add(component);
+                        else
+                            filteredComponents++;
+                    }
+                    foreach (WhiteComponent component in aquamarineComponents)
                     {
                         if (IsShadedWhiteLootCandidate(component))
                             candidates.Add(component);
@@ -3622,7 +3680,7 @@ namespace DriverScanTester.Services
                         : "";
                     string whiteDetail = pinkOnly
                         ? ""
-                        : $", exact-white={diagnosticExactWhiteCount}px, shaded-white={diagnosticShadedWhiteCount}px";
+                        : $", exact-white={diagnosticExactWhiteCount}px, shaded-white={diagnosticShadedWhiteCount}px, aquamarine={diagnosticAquamarineCount}px";
                     _log($"[Loot] {regionName}: scanned {scanPixels} px, {diagnosticWhiteCount} {pixelNoun} px in {components.Count} components{whiteDetail} — " +
                          $"{filteredComponents} filtered (shape/size; mob-marker rings={mobMarkerComponents}){pinkNote}, {textGlyphs.Count} text glyphs skipped, " +
                          $"{candidates.Count} loot candidates ({diagnosticCandidatePixelCount} candidate px), " +
@@ -3690,10 +3748,11 @@ namespace DriverScanTester.Services
                               $"client={diagnosticGeometry.Value.ClientSize.Width}x{diagnosticGeometry.Value.ClientSize.Height}"
                             : "geometry=unavailable";
                         string rawMetadata =
-                            $"timestampUtc={scanStartedUtc:O}; reason=white-loot; region={regionName}; " +
+                            $"timestampUtc={scanStartedUtc:O}; reason=normal-loot; region={regionName}; " +
                             $"captureStatus={_lastCaptureResult.Status}; outcome={diagnosticOutcome}; {geometryText}; " +
                             $"scanRegion={FormatRectangle(diagnosticScanRegion)}; " +
                             $"exactWhite={diagnosticExactWhiteCount}; shadedWhite={diagnosticShadedWhiteCount}; " +
+                            $"aquamarine={diagnosticAquamarineCount}; " +
                             $"components={diagnosticComponentCount}; candidates={diagnosticCandidateCount}; " +
                             $"candidatePixels={diagnosticCandidatePixelCount}; probes={actualCursorProbes}";
                         ScreenshotService.SaveLootScanFrame(
@@ -3706,6 +3765,7 @@ namespace DriverScanTester.Services
                             confirmedProbe: diagnosticSuccessProbe,
                             exactWhiteCount: diagnosticExactWhiteCount,
                             shadedWhiteCount: diagnosticShadedWhiteCount,
+                            aquamarineCount: diagnosticAquamarineCount,
                             candidatePixelCount: diagnosticCandidatePixelCount,
                             saveRawFrame: true,
                             rawMetadata: rawMetadata);
@@ -4067,20 +4127,21 @@ namespace DriverScanTester.Services
             bool pinkOnly, List<Point> targetPoints,
             out PixelFormat sourcePixelFormat,
             out int sourceStride,
-            bool shadedWhiteOnly = false)
+            bool shadedWhiteOnly = false,
+            bool aquamarineOnly = false)
             => CollectBitmapTargetPoints(
                 _bitmap, xStart, xEnd, yStart, yEnd,
                 pinkOnly, targetPoints, ref _scanBuffer,
-                out sourcePixelFormat, out sourceStride, shadedWhiteOnly);
+                out sourcePixelFormat, out sourceStride, shadedWhiteOnly, aquamarineOnly);
 
         internal static PixelCollectionStats CollectTargetPointsFromBitmap(
             Bitmap bitmap, bool pinkOnly, List<Point> targetPoints,
-            bool shadedWhiteOnly = false)
+            bool shadedWhiteOnly = false, bool aquamarineOnly = false)
         {
             byte[] reusableBuffer = Array.Empty<byte>();
             return CollectBitmapTargetPoints(
                 bitmap, 0, bitmap.Width, 0, bitmap.Height,
-                pinkOnly, targetPoints, ref reusableBuffer, out _, out _, shadedWhiteOnly);
+                pinkOnly, targetPoints, ref reusableBuffer, out _, out _, shadedWhiteOnly, aquamarineOnly);
         }
 
         private static PixelCollectionStats CollectBitmapTargetPoints(
@@ -4090,7 +4151,8 @@ namespace DriverScanTester.Services
             ref byte[] reusableBuffer,
             out PixelFormat sourcePixelFormat,
             out int sourceStride,
-            bool shadedWhiteOnly)
+            bool shadedWhiteOnly = false,
+            bool aquamarineOnly = false)
         {
             ArgumentNullException.ThrowIfNull(bitmap);
             ArgumentNullException.ThrowIfNull(targetPoints);
@@ -4134,7 +4196,7 @@ namespace DriverScanTester.Services
                 return CollectTargetPointsFromBuffer(
                     reusableBuffer, rowBytes, scanBitmap.Height,
                     xStart, xEnd, yStart, yEnd,
-                    pinkOnly, targetPoints, shadedWhiteOnly);
+                    pinkOnly, targetPoints, shadedWhiteOnly, aquamarineOnly);
             }
             catch
             {
@@ -4156,7 +4218,7 @@ namespace DriverScanTester.Services
                 sourceStride = 0;
                 return CollectTargetPointsFromBitmapReference(
                     bitmap, xStart, xEnd, yStart, yEnd,
-                    pinkOnly, targetPoints, shadedWhiteOnly);
+                    pinkOnly, targetPoints, shadedWhiteOnly, aquamarineOnly);
             }
 
             return default;
@@ -4169,7 +4231,8 @@ namespace DriverScanTester.Services
         internal static PixelCollectionStats CollectTargetPointsFromBitmapReference(
             Bitmap bitmap,
             int xStart, int xEnd, int yStart, int yEnd,
-            bool pinkOnly, List<Point> targetPoints, bool shadedWhiteOnly = false)
+            bool pinkOnly, List<Point> targetPoints, bool shadedWhiteOnly = false,
+            bool aquamarineOnly = false)
         {
             ArgumentNullException.ThrowIfNull(bitmap);
             ArgumentNullException.ThrowIfNull(targetPoints);
@@ -4195,6 +4258,10 @@ namespace DriverScanTester.Services
                     {
                         isTarget = IsShadedWhiteLootPixel(color);
                     }
+                    else if (aquamarineOnly)
+                    {
+                        isTarget = IsAquamarineLootPixel(color);
+                    }
                     else
                     {
                         isTarget = color.R == 255 && color.G == 255 && color.B == 255;
@@ -4216,7 +4283,8 @@ namespace DriverScanTester.Services
         internal static PixelCollectionStats CollectTargetPointsFromBuffer(
             byte[] buffer, int stride, int bitmapHeight,
             int xStart, int xEnd, int yStart, int yEnd,
-            bool pinkOnly, List<Point> targetPoints, bool shadedWhiteOnly = false)
+            bool pinkOnly, List<Point> targetPoints, bool shadedWhiteOnly = false,
+            bool aquamarineOnly = false)
         {
             ArgumentNullException.ThrowIfNull(buffer);
             ArgumentNullException.ThrowIfNull(targetPoints);
@@ -4258,6 +4326,10 @@ namespace DriverScanTester.Services
                     else if (shadedWhiteOnly)
                     {
                         isTarget = IsShadedWhiteLootPixel(r, g, b);
+                    }
+                    else if (aquamarineOnly)
+                    {
+                        isTarget = IsAquamarineLootPixel(r, g, b);
                     }
                     else
                     {
