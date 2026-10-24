@@ -3343,7 +3343,7 @@ namespace DriverScanTester.ViewModels
             ? _movementSystem.MobGroupingStatus
             : _workflowCoordinator?.IsRunning == true
                 ? _workflowCoordinator.MobGroupingStatus
-                : "Waiting for MoveAndAttack";
+                : "Waiting for combat";
 
         /// <summary>
         /// User-friendly text for the current workflow stage (no raw phase enum names).

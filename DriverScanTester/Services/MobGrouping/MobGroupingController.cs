@@ -22,7 +22,8 @@ namespace DriverScanTester.Services
         bool HasGatherNavigationTarget = true,
         float GatherTargetX = 0f,
         float GatherTargetY = 0f,
-        MovementSteeringMode GatherSteeringMode = MovementSteeringMode.KeyboardTurn);
+        MovementSteeringMode GatherSteeringMode = MovementSteeringMode.KeyboardTurn,
+        bool IsMandatoryLootBarrierActive = false);
 
     /// <summary>
     /// Tick-driven, deterministic grouping state machine. It has no image, combat, keyboard,
@@ -30,6 +31,13 @@ namespace DriverScanTester.Services
     /// </summary>
     public sealed class MobGroupingController
     {
+        /// <summary>
+        /// Block/cancel reason used when the mandatory MoveAndAttackAndLoot loot
+        /// obligation (including a Deferred request that owns movement without an
+        /// active collection) still holds navigation.
+        /// </summary>
+        internal const string LootBarrierBlockReason = "mandatory loot barrier owns control";
+
         private readonly Action<string> _log;
         private int _state = (int)MobGroupingState.Idle;
         private DateTime _combatSince = DateTime.MinValue;
@@ -46,6 +54,8 @@ namespace DriverScanTester.Services
         private DateTime _combatAbsentSince = DateTime.MinValue;
         private bool _quietResetLogged;
         private bool _encounterLimitLogged;
+        /// <summary>One-shot log guard for "blocked by the mandatory loot barrier".</summary>
+        private bool _lootBarrierBlockLogged;
         private int _movesStarted;
         private int _groupingsThisEncounter;
         private float _moveStartX;
@@ -58,6 +68,15 @@ namespace DriverScanTester.Services
             _log = log ?? (_ => { });
             _random = random ?? Random.Shared;
         }
+
+        /// <summary>
+        /// Single source of truth for the combat modes that may run mob grouping: both
+        /// attack modes share the same algorithm, thresholds and configuration. OnlyMove
+        /// never groups. MovementSystem applies the same predicate to both the effective
+        /// waypoint mode and CurrentMode so no grouping decision can disagree with it.
+        /// </summary>
+        internal static bool IsSupportedCombatMode(BotMode mode) =>
+            mode == BotMode.MoveAndAttack || mode == BotMode.MoveAndAttackAndLoot;
 
         public MobGroupingState State => (MobGroupingState)Volatile.Read(ref _state);
         public int GroupingsThisEncounter => Volatile.Read(ref _groupingsThisEncounter);
@@ -81,6 +100,15 @@ namespace DriverScanTester.Services
         {
             bool active = IsSequenceActive;
             string? blockReason = GetBlockReason(input);
+
+            // Event-driven diagnostic: a scattered formation that grouping would chase is
+            // currently held back by the mandatory loot obligation. Logged once per
+            // barrier period, never per tick.
+            if (blockReason == LootBarrierBlockReason)
+                LogLootBarrierBlock(input);
+            else
+                _lootBarrierBlockLogged = false;
+
             if (active && blockReason != null)
                 return CancelSequence(input.NowUtc, blockReason);
 
@@ -105,9 +133,9 @@ namespace DriverScanTester.Services
                 return default;
             }
 
-            if (input.CurrentMode != BotMode.MoveAndAttack)
+            if (!IsSupportedCombatMode(input.CurrentMode))
             {
-                ClearCandidate("mode is not MoveAndAttack");
+                ClearCandidate($"mode {input.CurrentMode} does not support grouping");
                 _combatSince = DateTime.MinValue;
                 if (!IsSequenceActive && State != MobGroupingState.Cooldown)
                     SetState(MobGroupingState.Idle);
@@ -308,7 +336,7 @@ namespace DriverScanTester.Services
             _nextGatherRescanAt = input.NowUtc.AddMilliseconds(
                 BotConstants.MobGrouping.GatherRescanIntervalMs);
             SetState(MobGroupingState.GroupingMove);
-            _log($"[MobGrouping] gather started: mobs={triggerAnalysis.DetectedMobCount}, avg={triggerAnalysis.AverageSpread:F1}, max={triggerAnalysis.MaximumSpread:F1}, attackReadyCluster={triggerAnalysis.HasAttackReadyCluster}, waypoint=({input.GatherTargetX:F1},{input.GatherTargetY:F1}), steering={input.GatherSteeringMode}, duration={gatherDurationMs}ms, rescan={BotConstants.MobGrouping.GatherRescanIntervalMs}ms.");
+            _log($"[MobGrouping] gather started: mobs={triggerAnalysis.DetectedMobCount}, avg={triggerAnalysis.AverageSpread:F1}, max={triggerAnalysis.MaximumSpread:F1}, attackReadyCluster={triggerAnalysis.HasAttackReadyCluster}, waypoint=({input.GatherTargetX:F1},{input.GatherTargetY:F1}), steering={input.GatherSteeringMode}, duration={gatherDurationMs}ms, rescan={BotConstants.MobGrouping.GatherRescanIntervalMs}ms, mode={input.CurrentMode}.");
             return new MobGroupingDecision(
                 MobGroupingDirective.StartMove,
                 triggerAnalysis.RecommendedEscapeDirection,
@@ -395,8 +423,8 @@ namespace DriverScanTester.Services
         /// <summary>
         /// Time-based combat-absence lifecycle for the encounter grouping count. It runs
         /// on every controller tick, before the enabled/mode gates, so the reset works
-        /// even when detection is not running (feature disabled, mode not MoveAndAttack,
-        /// still in MoveAndAttack but no target). A single missed frame only starts the
+        /// even when detection is not running (feature disabled, a non-grouping mode,
+        /// still an attack mode but no target). A single missed frame only starts the
         /// absence window; the count resets only after EncounterQuietResetMs of
         /// CONTINUOUS combat-context absence. No mob identity tracking is involved.
         /// The bad-detection grace (BadFormationGraceMs) remains independent.
@@ -434,14 +462,38 @@ namespace DriverScanTester.Services
             _candidateAnalysis = null;
         }
 
+        /// <summary>
+        /// Logs once per barrier period when a scattered formation is waiting for the
+        /// mandatory loot obligation to finish. It never starts a gather movement: the
+        /// loot hold always outranks grouping.
+        /// </summary>
+        private void LogLootBarrierBlock(in MobGroupingTickInput input)
+        {
+            if (_lootBarrierBlockLogged || !input.DetectionCaptured)
+                return;
+
+            if (input.Analysis is not { IsValid: true } analysis)
+                return;
+
+            if (!analysis.IsScattered ||
+                analysis.DetectedMobCount < BotConstants.MobGrouping.MinimumMobs ||
+                analysis.HasAttackReadyCluster)
+                return;
+
+            _lootBarrierBlockLogged = true;
+            _log("[MobGrouping] gather blocked: mandatory loot obligation owns movement - " +
+                 "grouping waits for the verified loot completion.");
+        }
+
         private static string? GetBlockReason(MobGroupingTickInput input)
         {
             if (!input.Enabled) return "feature disabled";
-            if (input.CurrentMode != BotMode.MoveAndAttack) return $"mode changed to {input.CurrentMode}";
+            if (!IsSupportedCombatMode(input.CurrentMode)) return $"mode changed to {input.CurrentMode}";
             if (input.IsPaused) return "bot paused";
             if (input.IsStopping) return "bot stopping";
             if (input.IsTransitioning) return "Repot/teleport transition";
             if (input.IsRecoveryActive) return "unstuck or waypoint recovery owns control";
+            if (input.IsMandatoryLootBarrierActive) return LootBarrierBlockReason;
             if (input.IsLootHoldActive) return "loot hold owns control";
             if (!input.IsGameWindowValid) return "game window unavailable or unfocused";
             return null;

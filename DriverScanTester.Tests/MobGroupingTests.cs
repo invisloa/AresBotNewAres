@@ -6,11 +6,13 @@ using System.Linq;
 using System.Reflection;
 using DriverScanTester.Services;
 using Xunit;
+using static DriverScanTester.Services.LootSystem;
 
 namespace DriverScanTester.Tests
 {
     public sealed class MobGroupingTests
     {
+        private const BindingFlags PrivateInstance = BindingFlags.Instance | BindingFlags.NonPublic;
         private static readonly MobPoint Player = new(100, 60);
         private static readonly MobPoint[] ScatteredPoints =
         {
@@ -58,10 +60,11 @@ namespace DriverScanTester.Tests
             bool gatherNav = true,
             float gatherTargetX = 0,
             float gatherTargetY = 0,
-            MovementSteeringMode gatherSteering = MovementSteeringMode.KeyboardTurn)
+            MovementSteeringMode gatherSteering = MovementSteeringMode.KeyboardTurn,
+            bool lootBarrier = false)
             => new(now, enabled, mode, combat, paused, stopping, transition, recovery,
                 lootHold, window, sample, analysis, positionValid, playerX, playerY, gatherNav,
-                gatherTargetX, gatherTargetY, gatherSteering);
+                gatherTargetX, gatherTargetY, gatherSteering, lootBarrier);
 
         private static DateTime Utc(int milliseconds = 0) =>
             new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(milliseconds);
@@ -91,6 +94,31 @@ namespace DriverScanTester.Tests
             foreach (int offset in new[] { 0, 225, 450, 675, 900, 1200 })
                 decision = controller.Tick(Input(start.AddMilliseconds(offset), Analyze(points), sample: true));
             return decision;
+        }
+
+        /// <summary>Deterministic gather trigger for one explicit combat mode.</summary>
+        private static MobGroupingDecision TriggerInMode(
+            MobGroupingController controller, DateTime start, BotMode mode, bool lootBarrier = false)
+        {
+            MobGroupingDecision decision = default;
+            foreach (int offset in new[] { 0, 225, 450, 675, 900, 1200 })
+                decision = controller.Tick(Input(start.AddMilliseconds(offset),
+                    Analyze(ScatteredPoints), sample: true, mode: mode, lootBarrier: lootBarrier));
+            return decision;
+        }
+
+        /// <summary>Returns the first StartMove directive observed from <paramref name="start"/>.</summary>
+        private static MobGroupingDecision? FindStartMove(
+            MobGroupingController controller, DateTime start, BotMode mode)
+        {
+            foreach (int offset in new[] { 0, 225, 450, 675, 900, 1200, 1425, 1650, 1875 })
+            {
+                MobGroupingDecision decision = controller.Tick(Input(
+                    start.AddMilliseconds(offset), Analyze(ScatteredPoints), sample: true, mode: mode));
+                if (decision.Directive == MobGroupingDirective.StartMove)
+                    return decision;
+            }
+            return null;
         }
 
         private static MobGroupingController MakeController(int gatherDurationMs)
@@ -135,17 +163,74 @@ namespace DriverScanTester.Tests
             Assert.Equal(MobGroupingState.Idle, controller.State);
         }
 
-        [Theory]
-        [InlineData(BotMode.OnlyMove)]
-        [InlineData(BotMode.MoveAndAttackAndLoot)]
-        public void ForbiddenModes_NeverGroup(BotMode mode)
+        [Fact]
+        public void OnlyMoveNeverGroups()
         {
             var controller = new MobGroupingController();
             MobGroupingDecision decision = controller.Tick(Input(
-                Utc(), Analyze(ScatteredPoints), sample: true, mode: mode));
+                Utc(), Analyze(ScatteredPoints), sample: true, mode: BotMode.OnlyMove));
 
             Assert.Equal(MobGroupingDirective.None, decision.Directive);
             Assert.NotEqual(MobGroupingState.GroupingMove, controller.State);
+        }
+
+        [Theory]
+        [InlineData(BotMode.MoveAndAttack)]
+        [InlineData(BotMode.MoveAndAttackAndLoot)]
+        public void BothCombatModesTriggerTheSameGatherSequence(BotMode mode)
+        {
+            var controller = MakeController(2000);
+
+            Assert.Equal(MobGroupingDirective.StartMove,
+                TriggerInMode(controller, Utc(), mode).Directive);
+            Assert.Equal(MobGroupingState.GroupingMove, controller.State);
+            Assert.Equal(1, controller.GroupingsThisEncounter);
+            Assert.Equal(1, controller.MovesStarted);
+        }
+
+        [Theory]
+        [InlineData(BotMode.MoveAndAttack)]
+        [InlineData(BotMode.MoveAndAttackAndLoot)]
+        public void BothCombatModesUseTheSameThresholdsAndPersistence(BotMode mode)
+        {
+            // Scattered mobs below the persistence/combat-minimum window must not trigger,
+            // and the trigger must land on exactly the same tick in both combat modes.
+            var controller = new MobGroupingController();
+            MobGroupingDecision early = default;
+            foreach (int offset in new[] { 0, 225, 450, 675, 900 })
+                early = controller.Tick(Input(Utc(offset), Analyze(ScatteredPoints),
+                    sample: true, mode: mode));
+            Assert.NotEqual(MobGroupingDirective.StartMove, early.Directive);
+
+            MobGroupingDecision atMinimum = controller.Tick(Input(
+                Utc(BotConstants.MobGrouping.MinimumCombatTimeMs), Analyze(ScatteredPoints),
+                sample: true, mode: mode));
+            Assert.Equal(MobGroupingDirective.StartMove, atMinimum.Directive);
+
+            // Already clustered mobs never need a gather walk in either mode.
+            var clustered = new MobGroupingController();
+            for (int i = 0; i < 10; i++)
+            {
+                Assert.NotEqual(MobGroupingDirective.StartMove, clustered.Tick(Input(
+                    Utc(i * 225), Analyze(ClusteredPoints), sample: true, mode: mode)).Directive);
+            }
+        }
+
+        [Theory]
+        [InlineData(BotMode.MoveAndAttack)]
+        [InlineData(BotMode.MoveAndAttackAndLoot)]
+        public void DisabledGroupingNeverStartsInEitherCombatMode(BotMode mode)
+        {
+            var controller = new MobGroupingController();
+            for (int i = 0; i < 10; i++)
+            {
+                Assert.NotEqual(MobGroupingDirective.StartMove, controller.Tick(Input(
+                    Utc(i * 225), Analyze(ScatteredPoints), sample: true,
+                    enabled: false, mode: mode)).Directive);
+            }
+
+            Assert.Equal(0, controller.GroupingsThisEncounter);
+            Assert.Equal(MobGroupingState.Idle, controller.State);
         }
 
         [Fact]
@@ -773,6 +858,153 @@ namespace DriverScanTester.Tests
             Trigger(controller, Utc());
             Assert.Equal(MobGroupingDirective.Cancelled,
                 controller.Tick(Input(Utc(1300), window: false)).Directive);
+        }
+
+        [Theory]
+        [InlineData(BotMode.MoveAndAttack)]
+        [InlineData(BotMode.MoveAndAttackAndLoot)]
+        public void CombatContextLossCancelsGatherInBothCombatModes(BotMode mode)
+        {
+            var controller = MakeController(2000);
+            Assert.Equal(MobGroupingDirective.StartMove,
+                TriggerInMode(controller, Utc(), mode).Directive);
+
+            MobGroupingDecision cancelled = controller.Tick(Input(
+                Utc(1300), Analyze(ScatteredPoints), sample: true, mode: mode, combat: false));
+
+            Assert.Equal(MobGroupingDirective.Cancelled, cancelled.Directive);
+            Assert.Equal("combat context ended", cancelled.Reason);
+            Assert.False(controller.IsSequenceActive);
+        }
+
+        [Theory]
+        [InlineData(BotMode.MoveAndAttack)]
+        [InlineData(BotMode.MoveAndAttackAndLoot)]
+        public void HigherPriorityOwnersCancelGatherInBothCombatModes(BotMode mode)
+        {
+            var owners = new[]
+            {
+                (Recovery: true, Paused: false, Stopping: false, LootHold: false),
+                (Recovery: false, Paused: true, Stopping: false, LootHold: false),
+                (Recovery: false, Paused: false, Stopping: true, LootHold: false),
+                (Recovery: false, Paused: false, Stopping: false, LootHold: true)
+            };
+
+            foreach (var owner in owners)
+            {
+                var controller = MakeController(2000);
+                Assert.Equal(MobGroupingDirective.StartMove,
+                    TriggerInMode(controller, Utc(), mode).Directive);
+
+                MobGroupingDecision cancelled = controller.Tick(Input(
+                    Utc(1300), Analyze(ScatteredPoints), sample: true, mode: mode,
+                    recovery: owner.Recovery, paused: owner.Paused,
+                    stopping: owner.Stopping, lootHold: owner.LootHold));
+
+                Assert.Equal(MobGroupingDirective.Cancelled, cancelled.Directive);
+                Assert.False(controller.IsSequenceActive);
+            }
+        }
+
+        // ── Loot integration ───────────────────────────────────────────────────
+
+        [Theory]
+        [InlineData(BotMode.MoveAndAttack)]
+        [InlineData(BotMode.MoveAndAttackAndLoot)]
+        public void ActiveLootCollectionHoldBlocksGatherStartInBothModes(BotMode mode)
+        {
+            var controller = new MobGroupingController();
+            for (int i = 0; i < 12; i++)
+            {
+                Assert.NotEqual(MobGroupingDirective.StartMove, controller.Tick(Input(
+                    Utc(i * 225), Analyze(ScatteredPoints), sample: true,
+                    mode: mode, lootHold: true)).Directive);
+            }
+
+            Assert.Equal(0, controller.GroupingsThisEncounter);
+            Assert.Equal(0, controller.MovesStarted);
+        }
+
+        [Fact]
+        public void MandatoryLootBarrierBlocksGatherStartWithoutConsumingAnEncounterAttempt()
+        {
+            var controller = new MobGroupingController();
+
+            // A full persistence/combat window with the barrier active: no group start and
+            // no consumed encounter attempt, because physical movement was prohibited.
+            for (int i = 0; i < 12; i++)
+            {
+                Assert.NotEqual(MobGroupingDirective.StartMove, controller.Tick(Input(
+                    Utc(i * 225), Analyze(ScatteredPoints), sample: true,
+                    mode: BotMode.MoveAndAttackAndLoot, lootBarrier: true)).Directive);
+            }
+
+            Assert.Equal(0, controller.GroupingsThisEncounter);
+            Assert.Equal(0, controller.MovesStarted);
+
+            // Once the verified obligation completes, the same formation groups normally
+            // through the ordinary conditions (persistence + minimum combat time).
+            Assert.NotNull(FindStartMove(controller, Utc(2700), BotMode.MoveAndAttackAndLoot));
+            Assert.Equal(1, controller.GroupingsThisEncounter);
+        }
+
+        [Fact]
+        public void MandatoryLootBarrierBlockLogIsEventDrivenNotPerTick()
+        {
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+
+            for (int i = 0; i < 12; i++)
+            {
+                controller.Tick(Input(Utc(i * 225), Analyze(ScatteredPoints), sample: true,
+                    mode: BotMode.MoveAndAttackAndLoot, lootBarrier: true));
+            }
+
+            Assert.Single(lines, line => line.Contains("gather blocked", StringComparison.Ordinal));
+
+            // Barrier released, then a new obligation arrives: one more log line.
+            controller.Tick(Input(Utc(2700), Analyze(ScatteredPoints), sample: true,
+                mode: BotMode.MoveAndAttackAndLoot));
+            controller.Tick(Input(Utc(2925), Analyze(ScatteredPoints), sample: true,
+                mode: BotMode.MoveAndAttackAndLoot, lootBarrier: true));
+
+            Assert.Equal(2, lines.Count(line =>
+                line.Contains("gather blocked", StringComparison.Ordinal)));
+        }
+
+        [Fact]
+        public void LootOwnershipDuringGatherCancelsTheSequenceAndReleasesMovement()
+        {
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add, new FixedDurationRandom(2000));
+            Assert.Equal(MobGroupingDirective.StartMove,
+                TriggerInMode(controller, Utc(), BotMode.MoveAndAttackAndLoot).Directive);
+
+            MobGroupingDecision cancelled = controller.Tick(Input(
+                Utc(1300), Analyze(ScatteredPoints), sample: true,
+                mode: BotMode.MoveAndAttackAndLoot, lootBarrier: true));
+
+            Assert.Equal(MobGroupingDirective.Cancelled, cancelled.Directive);
+            Assert.Equal(MobGroupingController.LootBarrierBlockReason, cancelled.Reason);
+            Assert.False(controller.IsSequenceActive);
+            Assert.Equal(MobGroupingState.Cooldown, controller.State);
+            Assert.Contains(lines, line => line.Contains(
+                "grouping cancelled: mandatory loot barrier", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void GroupingBecomesEligibleAgainAfterLootOwnershipEnds()
+        {
+            var controller = MakeController(2000);
+            Assert.Equal(MobGroupingDirective.StartMove,
+                TriggerInMode(controller, Utc(), BotMode.MoveAndAttackAndLoot).Directive);
+            Assert.Equal(MobGroupingDirective.Cancelled, controller.Tick(Input(
+                Utc(1300), Analyze(ScatteredPoints), sample: true,
+                mode: BotMode.MoveAndAttackAndLoot, lootBarrier: true)).Directive);
+
+            DateTime restart = Utc(1300 + BotConstants.MobGrouping.CooldownMs);
+            Assert.NotNull(FindStartMove(controller, restart, BotMode.MoveAndAttackAndLoot));
+            Assert.Equal(2, controller.GroupingsThisEncounter);
         }
 
         [Fact]
@@ -1529,6 +1761,373 @@ namespace DriverScanTester.Tests
             Assert.False((bool)typeof(MovementSystem).GetField("_mobGroupingOwnsMovement",
                 BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(movement)!);
             movement.DisposeMobGroupingDetector();
+        }
+
+        // ── MovementSystem loot ownership + combat lifecycle wiring ─────────────
+
+        /// <summary>
+        /// MovementSystem that records forward/attack key transitions instead of injecting
+        /// real input, following this project's existing test convention.
+        /// </summary>
+        private sealed class RecordingMovementSystem : MovementSystem
+        {
+            public RecordingMovementSystem(GameMemoryService memory, Action<string> log, IEnumerable<Waypoint> path)
+                : base(memory, log, 0, 0, customPath: path)
+            {
+            }
+
+            public int ForwardKeyDowns { get; private set; }
+            public int SkillThreeDowns { get; private set; }
+            public int SkillThreeUps { get; private set; }
+
+            protected override void SendSyntheticForwardKeyEvent(bool keyUp)
+            {
+                if (!keyUp)
+                    ForwardKeyDowns++;
+            }
+
+            protected override void SendSkillThreeKeyEvent(bool keyUp)
+            {
+                if (keyUp)
+                    SkillThreeUps++;
+                else
+                    SkillThreeDowns++;
+            }
+        }
+
+        /// <summary>
+        /// MoveAndAttackAndLoot movement with a real LootSystem attached, so grouping is
+        /// verified against the authoritative mandatory loot obligation rather than a flag.
+        /// </summary>
+        private sealed class GroupingLootFixture : IDisposable
+        {
+            public List<string> Lines { get; } = new();
+            public LootSystem Loot { get; }
+            public RecordingMovementSystem Movement { get; }
+
+            public GroupingLootFixture(
+                BotMode mode = BotMode.MoveAndAttackAndLoot,
+                MovementSteeringMode? steering = MovementSteeringMode.DirectCamera)
+            {
+                GameMemoryService memory = CreateStubMemory();
+                Loot = new LootSystem(memory, Lines.Add);
+                var path = new List<Waypoint>
+                {
+                    new(5000, 5000, MovementPrecision.Medium, mode, steeringMode: steering)
+                };
+                Movement = new RecordingMovementSystem(memory, Lines.Add, path)
+                {
+                    LootSystemRef = Loot,
+                    InternalRepotEnabled = false
+                };
+            }
+
+            /// <summary>Arms a real post-kill obligation through the production entry point.</summary>
+            public long ArmPostKill()
+            {
+                InvokePrivate(Movement, "ArmMandatoryLootBarrier", LootBarrierReason.PostKill);
+                return Movement.LootBarrier.RequestId;
+            }
+
+            public void RefreshBarrier() => InvokePrivate(Movement, "RefreshLootBarrier");
+
+            /// <summary>Runs the real mandatory service and finishes it with a verified empty pass.</summary>
+            public void RunAndCompleteMandatoryLoot()
+            {
+                long requestId = Movement.LootBarrier.RequestId;
+                Loot.NotifyNavigationHeld(requestId);
+                InvokePrivate(Loot, "ServiceMandatoryLootRequest", false);
+                Assert.True(Loot.IsLootCycleActive);
+                InvokePrivate(Loot, "CompleteMandatoryLootRequest", requestId,
+                    new LootScanPassOutcome(LootScanPassResult.NoItem, LootScanPassResult.NoItem,
+                        LootScanPassResult.NoItem, CameraVerified: true, "test empty pass"));
+                RefreshBarrier();
+            }
+
+            public void Dispose()
+            {
+                Movement.DisposeMobGroupingDetector();
+                Loot.Dispose();
+            }
+        }
+
+        private static object? InvokePrivate(object target, string method, params object?[] args)
+        {
+            Type type = target is MovementSystem ? typeof(MovementSystem) : target.GetType();
+            MethodInfo info = type.GetMethod(method, PrivateInstance)
+                ?? throw new InvalidOperationException($"Method {method} not found on {type.Name}.");
+            return info.Invoke(target, args);
+        }
+
+        private static object Controller(MovementSystem movement) =>
+            typeof(MovementSystem).GetField("_mobGroupingController", PrivateInstance)!
+                .GetValue(movement)!;
+
+        private static void SetGroupingState(MovementSystem movement, MobGroupingState state) =>
+            typeof(MobGroupingController).GetField("_state", PrivateInstance)!
+                .SetValue(Controller(movement), (int)state);
+
+        private static bool IsMovingForward(MovementSystem movement) =>
+            (bool)typeof(MovementSystem).GetField("_isMovingForward", PrivateInstance)!
+                .GetValue(movement)!;
+
+        private static bool CombatSuspended(MovementSystem movement)
+        {
+            object handler = typeof(MovementSystem).GetField("_combatHandler", PrivateInstance)!
+                .GetValue(movement)!;
+            return (bool)typeof(CombatHandler).GetField("_externallySuspended", PrivateInstance)!
+                .GetValue(handler)!;
+        }
+
+        /// <summary>Skips the first-step in-place turn so a gather step reaches forward input.</summary>
+        private static void AllowGatherStep(MovementSystem movement) =>
+            typeof(MovementSystem).GetField("_initialHeadingAlignmentPending", PrivateInstance)!
+                .SetValue(movement, false);
+
+        [Fact]
+        public void MandatoryLootBarrierIsTheAuthoritativeGroupingLootHold()
+        {
+            using var fixture = new GroupingLootFixture();
+            long requestId = fixture.ArmPostKill();
+
+            Assert.True(requestId > 0);
+            Assert.True(fixture.Movement.IsLootNavigationBlocked);
+            Assert.True(fixture.Movement.IsMandatoryLootBarrierActive);
+            Assert.True(fixture.Movement.IsMobGroupingLootHoldActive);
+
+            // The combat-owned recovery authorization is never general permission for
+            // grouping movement: the obligation still owns the input.
+            typeof(MovementSystem).GetField("_combatRecoveryMovementAuthorized", PrivateInstance)!
+                .SetValue(fixture.Movement, true);
+            Assert.True(fixture.Movement.IsMobGroupingLootHoldActive);
+            typeof(MovementSystem).GetField("_combatRecoveryMovementAuthorized", PrivateInstance)!
+                .SetValue(fixture.Movement, false);
+
+            fixture.RunAndCompleteMandatoryLoot();
+
+            Assert.False(fixture.Movement.IsLootNavigationBlocked);
+            Assert.False(fixture.Movement.IsMandatoryLootBarrierActive);
+            Assert.False(fixture.Movement.IsMobGroupingLootHoldActive);
+            Assert.True(fixture.Loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus status));
+            Assert.Equal(LootRequestState.Completed, status.State);
+            Assert.True(status.CameraVerified);
+        }
+
+        [Fact]
+        public void DeferredMandatoryObligationStillBlocksGroupingLootHold()
+        {
+            using var fixture = new GroupingLootFixture();
+            fixture.ArmPostKill();
+
+            // Combat holds the mob: the obligation defers and no loot cycle is running.
+            InvokePrivate(fixture.Loot, "ServiceMandatoryLootRequest", true);
+            fixture.RefreshBarrier();
+
+            Assert.Equal(LootBarrierPhase.Deferred, fixture.Movement.LootBarrier.Phase);
+            Assert.False(fixture.Loot.IsCollecting);
+            Assert.False(fixture.Loot.IsLootCycleActive);
+            Assert.True(fixture.Movement.IsMandatoryLootBarrierActive);
+            Assert.True(fixture.Movement.IsMobGroupingLootHoldActive);
+        }
+
+        [Fact]
+        public void LootRequestArmedByTheParallelLootTaskIsAdoptedForGroupingOwnership()
+        {
+            using var fixture = new GroupingLootFixture();
+
+            // The passive pre-scan arms the obligation from the parallel loot task; only
+            // MovementSystem's RefreshLootBarrier adopts it (the call the movement tick
+            // performs before the next gather step of an active sequence).
+            long requestId = fixture.Loot.BeginMandatoryLootRequest(
+                LootBarrierReason.TravelCandidateVerification);
+            Assert.True(requestId > 0);
+            Assert.False(fixture.Movement.IsMandatoryLootBarrierActive);
+
+            fixture.RefreshBarrier();
+
+            Assert.Equal(requestId, fixture.Movement.LootBarrier.RequestId);
+            Assert.True(fixture.Movement.IsMandatoryLootBarrierActive);
+            Assert.True(fixture.Movement.IsMobGroupingLootHoldActive);
+            Assert.True(fixture.Loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus status));
+            Assert.Equal(LootBarrierReason.TravelCandidateVerification, status.Reason);
+            Assert.Equal(LootRequestState.Pending, status.State);
+        }
+
+        [Fact]
+        public void MoveAndAttackKeepsTheActiveCollectionLootHold()
+        {
+            using var fixture = new GroupingLootFixture(BotMode.MoveAndAttack);
+
+            Assert.False(fixture.Movement.IsMandatoryLootBarrierActive);
+            Assert.False(fixture.Movement.IsMobGroupingLootHoldActive);
+
+            typeof(LootSystem).GetField("_isCollecting", PrivateInstance)!
+                .SetValue(fixture.Loot, true);
+
+            Assert.True(fixture.Movement.IsMobGroupingLootHoldActive);
+        }
+
+        [Fact]
+        public void GroupingCancellationNeverDiscardsOrCompletesTheLootObligation()
+        {
+            using var fixture = new GroupingLootFixture();
+            long requestId = fixture.ArmPostKill();
+
+            fixture.Movement.CancelMobGrouping("grouping test cancellation");
+
+            Assert.Equal(requestId, fixture.Movement.LootBarrier.RequestId);
+            Assert.True(fixture.Movement.IsMandatoryLootBarrierActive);
+            Assert.True(fixture.Loot.TryGetActiveMandatoryLootRequest(
+                out long activeId, out LootBarrierReason activeReason));
+            Assert.Equal(requestId, activeId);
+            Assert.Equal(LootBarrierReason.PostKill, activeReason);
+            Assert.True(fixture.Loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus status));
+            Assert.Equal(LootRequestState.Pending, status.State);
+        }
+
+        [Fact]
+        public void MandatoryLootBarrierSuppressesGatherMovementUntilVerifiedCompletion()
+        {
+            using var fixture = new GroupingLootFixture();
+            fixture.ArmPostKill();
+
+            // The live waypoint target is still resolved (steering unchanged), but the
+            // gather step must never press W while the obligation holds navigation.
+            Assert.True(fixture.Movement.TryGetGatherNavigationTarget(0, 0, out _, out _, out _));
+            AllowGatherStep(fixture.Movement);
+            Assert.True((bool)InvokePrivate(fixture.Movement, "ApplyGatherMovement", 0f, 0f)!);
+            Assert.Equal(0, fixture.Movement.ForwardKeyDowns);
+            Assert.False(IsMovingForward(fixture.Movement));
+
+            fixture.RunAndCompleteMandatoryLoot();
+
+            AllowGatherStep(fixture.Movement);
+            Assert.True((bool)InvokePrivate(fixture.Movement, "ApplyGatherMovement", 0f, 0f)!);
+            Assert.True(fixture.Movement.ForwardKeyDowns > 0);
+            Assert.True(IsMovingForward(fixture.Movement));
+        }
+
+        [Theory]
+        [InlineData(BotMode.MoveAndAttack)]
+        [InlineData(BotMode.MoveAndAttackAndLoot)]
+        public void GroupingLifecycleReleasesAndRestoresCombatInput(BotMode mode)
+        {
+            var path = new List<Waypoint>
+            {
+                new(5000, 5000, MovementPrecision.Medium, mode)
+            };
+            var movement = new RecordingMovementSystem(CreateStubMemory(), _ => { }, path);
+            try
+            {
+                typeof(MovementSystem).GetField("_isSkillThreeHeld", PrivateInstance)!
+                    .SetValue(movement, true);
+                typeof(MovementSystem).GetField("_isMovingForward", PrivateInstance)!
+                    .SetValue(movement, true);
+                SetGroupingState(movement, MobGroupingState.GroupingMove);
+
+                InvokePrivate(movement, "ApplyMobGroupingDecision",
+                    new MobGroupingDecision(MobGroupingDirective.StartMove, MobGroupingDirection.North, 1),
+                    Utc());
+
+                Assert.True((bool)typeof(MovementSystem).GetField(
+                    "_mobGroupingOwnsMovement", PrivateInstance)!.GetValue(movement)!);
+                Assert.False(movement.IsAttackKeyHeld);
+                Assert.Equal(1, movement.SkillThreeUps);
+                Assert.False(IsMovingForward(movement));
+                Assert.True(CombatSuspended(movement));
+
+                // Finish() publishes ResumeCombat before MovementSystem applies the directive.
+                SetGroupingState(movement, MobGroupingState.ResumeCombat);
+                InvokePrivate(movement, "ApplyMobGroupingDecision",
+                    new MobGroupingDecision(MobGroupingDirective.ResumeCombat, MoveNumber: 1, Reason: "complete"),
+                    Utc(2000));
+
+                Assert.False((bool)typeof(MovementSystem).GetField(
+                    "_mobGroupingOwnsMovement", PrivateInstance)!.GetValue(movement)!);
+                Assert.False(CombatSuspended(movement));
+                Assert.True((bool)typeof(MovementSystem).GetField(
+                    "_resumeCombatSkillAfterGrouping", PrivateInstance)!.GetValue(movement)!);
+                Assert.Equal(MobGroupingState.Cooldown, movement.CurrentMobGroupingState);
+
+                // The CombatWait branch reacquires the released hold through this production
+                // method; the recorded key event proves the attack skill is held again.
+                InvokePrivate(movement, "HoldSkillThree");
+                Assert.True(movement.IsAttackKeyHeld);
+                Assert.Equal(1, movement.SkillThreeDowns);
+            }
+            finally
+            {
+                movement.DisposeMobGroupingDetector();
+            }
+        }
+
+        [Fact]
+        public void CombatResumeIsNotScheduledForOnlyMove()
+        {
+            var path = new List<Waypoint>
+            {
+                new(5000, 5000, MovementPrecision.Medium, BotMode.OnlyMove)
+            };
+            var movement = new RecordingMovementSystem(CreateStubMemory(), _ => { }, path);
+            try
+            {
+                InvokePrivate(movement, "FinishMobGroupingOwnership", true, Utc());
+
+                Assert.False((bool)typeof(MovementSystem).GetField(
+                    "_resumeCombatSkillAfterGrouping", PrivateInstance)!.GetValue(movement)!);
+                Assert.False(movement.IsAttackKeyHeld);
+            }
+            finally
+            {
+                movement.DisposeMobGroupingDetector();
+            }
+        }
+
+        [Fact]
+        public void GroupingSuspensionDoesNotTripCombatWatchdogTimersInLootMode()
+        {
+            var path = new List<Waypoint>
+            {
+                new(5000, 5000, MovementPrecision.Medium, BotMode.MoveAndAttackAndLoot)
+            };
+            var movement = new RecordingMovementSystem(CreateStubMemory(), _ => { }, path);
+            try
+            {
+                object handler = typeof(MovementSystem).GetField("_combatHandler", PrivateInstance)!
+                    .GetValue(movement)!;
+                var timers = new[]
+                {
+                    "_lastNonIdleActionTime", "_lastMoveModeTabTime", "_lastAttackSpeedCheck",
+                    "_combatIdleStartTime", "_lastManaChangeAt", "_lastCombatPosChangeAt"
+                };
+                DateTime baseline = DateTime.Now.AddSeconds(-30);
+                foreach (string name in timers)
+                    typeof(CombatHandler).GetField(name, PrivateInstance)!.SetValue(handler, baseline);
+
+                InvokePrivate(movement, "ApplyMobGroupingDecision",
+                    new MobGroupingDecision(MobGroupingDirective.StartMove, MobGroupingDirection.North, 1),
+                    Utc());
+                Assert.True(CombatSuspended(movement));
+
+                // Simulate a 1500 ms grouping walk deterministically instead of sleeping.
+                typeof(CombatHandler).GetField("_externalSuspensionStartedAt", PrivateInstance)!
+                    .SetValue(handler, DateTime.Now.AddMilliseconds(-1500));
+                InvokePrivate(movement, "ApplyMobGroupingDecision",
+                    new MobGroupingDecision(MobGroupingDirective.ResumeCombat, MoveNumber: 1, Reason: "complete"),
+                    Utc(1500));
+
+                Assert.False(CombatSuspended(movement));
+                foreach (string name in timers)
+                {
+                    DateTime value = (DateTime)typeof(CombatHandler)
+                        .GetField(name, PrivateInstance)!.GetValue(handler)!;
+                    Assert.InRange((value - baseline).TotalMilliseconds, 1200, 1800);
+                }
+            }
+            finally
+            {
+                movement.DisposeMobGroupingDetector();
+            }
         }
 
         private static void SetGroupingsThisEncounter(MobGroupingController controller, int value)

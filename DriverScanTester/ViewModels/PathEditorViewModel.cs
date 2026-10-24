@@ -119,6 +119,21 @@ namespace DriverScanTester.ViewModels
             set => SetProperty(ref _loopRoute, value);
         }
 
+        /// <summary>Global runtime-only mob grouping toggle, shared with the main window.</summary>
+        public bool MobGroupingEnabled
+        {
+            get => MobGroupingRuntimeSettings.Enabled;
+            set
+            {
+                if (MobGroupingRuntimeSettings.Enabled == value)
+                    return;
+
+                MobGroupingRuntimeSettings.Enabled = value;
+                OnPropertyChanged();
+                _log($"[MobGrouping] global runtime setting {(value ? "enabled" : "disabled")} from Path Editor.");
+            }
+        }
+
         private string _statusText = "Ready";
         public string StatusText
         {

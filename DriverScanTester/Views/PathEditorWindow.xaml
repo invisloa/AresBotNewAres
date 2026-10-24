@@ -221,8 +221,16 @@
                             </Expander>
 
                             <GroupBox Header="Test" Margin="0,0,0,8" Padding="5">
-                                <Button Content="Run This Path" Command="{Binding RunCurrentSegmentCommand}"
-                                        Style="{StaticResource StartActionButtonStyle}"/>
+                                <StackPanel>
+                                    <CheckBox Content="Enable Mob Grouping"
+                                              IsChecked="{Binding MobGroupingEnabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                              Margin="2,2,2,5"
+                                              ToolTip="Global runtime setting shared with the main window. Grouping runs during active combat on MoveAndAttack and MoveAndAttackAndLoot points; it waits for any mandatory loot obligation and does not run on OnlyMove points."/>
+                                    <TextBlock Text="Set the point's Mode to MoveAndAttack or MoveAndAttackAndLoot to allow mob grouping during the test."
+                                               TextWrapping="Wrap" Foreground="Gray" FontSize="10" Margin="2,0,2,5"/>
+                                    <Button Content="Run This Path" Command="{Binding RunCurrentSegmentCommand}"
+                                            Style="{StaticResource StartActionButtonStyle}"/>
+                                </StackPanel>
                             </GroupBox>
                         </StackPanel>
                     </ScrollViewer>

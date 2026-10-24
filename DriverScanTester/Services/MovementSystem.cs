@@ -188,7 +188,7 @@ namespace DriverScanTester.Services
             ? "Off"
             : CurrentMobGroupingState switch
             {
-                MobGroupingState.Idle => "Waiting for MoveAndAttack",
+                MobGroupingState.Idle => "Waiting for combat",
                 MobGroupingState.Observing => "Observing",
                 MobGroupingState.GroupingMove => "Moving",
                 MobGroupingState.Settling => "Settling",
@@ -366,6 +366,25 @@ namespace DriverScanTester.Services
         /// <summary>Pure mode gate: mandatory loot applies only to MoveAndAttackAndLoot.</summary>
         internal static bool RequiresMandatoryLootBarrier(BotMode mode)
             => mode == BotMode.MoveAndAttackAndLoot;
+
+        /// <summary>
+        /// True while the mandatory MoveAndAttackAndLoot obligation still owns movement
+        /// (Pending/Running/Deferred, or a terminal failure that keeps navigation blocked).
+        /// Mob grouping treats this as authoritative loot ownership: a Deferred request
+        /// with no active collection still forbids grouping movement.
+        /// </summary>
+        internal bool IsMandatoryLootBarrierActive =>
+            RequiresMandatoryLootBarrier(CurrentMode) && _lootBarrier.IsBlockingNavigation;
+
+        /// <summary>
+        /// Authoritative "loot owns movement/camera" condition for mob grouping: an active
+        /// collection/pink scan, loot-priority looting, or the mandatory navigation barrier.
+        /// </summary>
+        internal bool IsMobGroupingLootHoldActive =>
+            IsMandatoryLootBarrierActive ||
+            (LootSystemRef != null &&
+             (LootSystemRef.IsCollecting || LootSystemRef.IsPinkScanPendingOrActive ||
+              (LootPriorityMode && LootSystemRef.IsLootingActive)));
 
         /// <summary>
         /// Detector instance for the attack-start player-pixel check. Separate from the
@@ -572,7 +591,8 @@ namespace DriverScanTester.Services
             }
             ReleaseSkillThree();
             _combatHandler.ResumeAfterExternalMovement();
-            _resumeCombatSkillAfterGrouping = resumeCombat && CurrentMode == BotMode.MoveAndAttack;
+            _resumeCombatSkillAfterGrouping =
+                resumeCombat && MobGroupingController.IsSupportedCombatMode(CurrentMode);
             if (resumeCombat)
                 _mobGroupingController.CompleteResume(nowUtc);
         }
@@ -592,12 +612,17 @@ namespace DriverScanTester.Services
                 return false;
 
             bool enabled = MobGroupingRuntimeSettings.Enabled;
-            bool eligible = enabled && CurrentMode == BotMode.MoveAndAttack && currentMode == BotMode.MoveAndAttack;
+            // Both attack modes are eligible; the mandatory MoveAndAttackAndLoot loot
+            // obligation is not excluded here because the controller receives it as an
+            // authoritative hold and cancels/blocks the gather instead of bypassing it.
+            bool eligible = enabled &&
+                MobGroupingController.IsSupportedCombatMode(CurrentMode) &&
+                MobGroupingController.IsSupportedCombatMode(currentMode);
 
-            // The controller is always ticked (even when disabled or outside MoveAndAttack)
-            // so its time-based combat-absence lifecycle can reset the encounter grouping
-            // count without depending on detection running. Detection stays gated: screen
-            // capture only happens while grouping may actually act.
+            // The controller is always ticked (even when disabled or outside an attack
+            // mode) so its time-based combat-absence lifecycle can reset the encounter
+            // grouping count without depending on detection running. Detection stays gated:
+            // screen capture only happens while grouping may actually act.
             DateTime now = DateTime.UtcNow;
             bool detectionCaptured = false;
             if (eligible && now >= _nextMobGroupingDetectionAt)
@@ -689,7 +714,7 @@ namespace DriverScanTester.Services
                     input.IsStopping || token.IsCancellationRequested,
                     input.IsTransitioning,
                     input.IsRecoveryActive,
-                    input.IsLootHoldActive,
+                    input.IsLootHoldActive || input.IsMandatoryLootBarrierActive,
                     windowValid);
             }
 
@@ -743,9 +768,8 @@ namespace DriverScanTester.Services
             try { paused = MobGroupingPausePredicate?.Invoke() == true; }
             catch { paused = true; }
 
-            bool lootHold = LootSystemRef != null &&
-                (LootSystemRef.IsCollecting || LootSystemRef.IsPinkScanPendingOrActive ||
-                 (LootPriorityMode && LootSystemRef.IsLootingActive));
+            bool lootHold = IsMobGroupingLootHoldActive;
+            bool mandatoryLootBarrier = IsMandatoryLootBarrierActive;
             bool transition = _repotHelper.IsReportAndGoBackActive || _waypointRepotRequested ||
                 DateTime.Now < _inCityStuckCooldownUntil;
             bool recovery = _isUnstuckRoutineActive || _reverseDiagonalRecovery.IsActive ||
@@ -777,7 +801,8 @@ namespace DriverScanTester.Services
                 hasGatherTarget,
                 gatherTargetX,
                 gatherTargetY,
-                gatherSteeringMode);
+                gatherSteeringMode,
+                mandatoryLootBarrier);
         }
 
         private void ApplyMobGroupingDecision(MobGroupingDecision decision, DateTime nowUtc)
@@ -2072,7 +2097,8 @@ namespace DriverScanTester.Services
                 currentMode = _finalStandbyMode == BotMode.MoveAndAttackAndLoot
                     ? BotMode.MoveAndAttack
                     : _finalStandbyMode;
-                if (IsMobGroupingSequenceActive && CurrentMode != BotMode.MoveAndAttack)
+                if (IsMobGroupingSequenceActive &&
+                    !MobGroupingController.IsSupportedCombatMode(CurrentMode))
                     CancelMobGrouping($"effective mode changed to {CurrentMode}");
                 goto RUN_COMBAT_ONLY;
             }
@@ -2105,7 +2131,8 @@ namespace DriverScanTester.Services
                 }
 
                 if (IsMobGroupingSequenceActive &&
-                    (CurrentMode != BotMode.MoveAndAttack || currentMode != BotMode.MoveAndAttack))
+                    (!MobGroupingController.IsSupportedCombatMode(CurrentMode) ||
+                     !MobGroupingController.IsSupportedCombatMode(currentMode)))
                     CancelMobGrouping($"effective combat mode changed to {CurrentMode}");
 
                 bool canUseCombatRetargetSearch = currentMode == BotMode.MoveAndAttack || currentMode == BotMode.MoveAndAttackAndLoot;
@@ -2269,15 +2296,27 @@ namespace DriverScanTester.Services
 
             // Single authoritative combat-context read for both the active-grouping
             // cancellation and the observation gate below. It is the same expression
-            // grouping has always used to decide whether a real combat encounter exists.
-            bool hasCombatContext = CurrentMode == BotMode.MoveAndAttack &&
-                currentMode == BotMode.MoveAndAttack && mobSelected && targetId > 0 &&
+            // grouping has always used to decide whether a real combat encounter exists,
+            // extended to both supported combat modes.
+            bool hasCombatContext =
+                MobGroupingController.IsSupportedCombatMode(CurrentMode) &&
+                MobGroupingController.IsSupportedCombatMode(currentMode) && mobSelected && targetId > 0 &&
                 GameMemoryService.IsMobTargetId(targetId) &&
                 _combatRetargetCameraStage == CombatRetargetCameraStage.None;
 
-            if (IsMobGroupingSequenceActive &&
-                !TickActiveMobGrouping(currentMode, hasCombatContext, currX, currY, success, token))
-                return;
+            if (IsMobGroupingSequenceActive)
+            {
+                // A gather walk returns before the ordinary RefreshLootBarrier below, so a
+                // mandatory obligation armed by the parallel loot task (or one that just
+                // completed) must be adopted/released here. The controller then sees the
+                // authoritative ownership and cancels the walk on THIS tick instead of
+                // taking another step under an active loot hold. Idempotent and a no-op
+                // outside MoveAndAttackAndLoot.
+                RefreshLootBarrier();
+
+                if (!TickActiveMobGrouping(currentMode, hasCombatContext, currX, currY, success, token))
+                    return;
+            }
 
             var combatAction = _combatHandler.EvaluateCombatAction(_memoryService, currentMode, _isUnstuckRoutineActive, currX, currY);
             if (combatAction == CombatAction.Unstuck || combatAction == CombatAction.RepositionAndRetry)
@@ -2409,7 +2448,10 @@ namespace DriverScanTester.Services
                 case CombatAction.CombatWait:
                     // A grouping walk released the existing combat-owned hold. Reacquire it
                     // here through MovementSystem once ordinary combat evaluation resumes.
-                    if (_resumeCombatSkillAfterGrouping && currentMode == BotMode.MoveAndAttack)
+                    // Both attack modes restore the skill; the mode check only excludes a
+                    // temporary OnlyMove override (attack disengage / standby downgrade).
+                    if (_resumeCombatSkillAfterGrouping &&
+                        MobGroupingController.IsSupportedCombatMode(currentMode))
                     {
                         HoldSkillThree();
                         _resumeCombatSkillAfterGrouping = false;
