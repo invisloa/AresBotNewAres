@@ -191,6 +191,37 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void ProductionMixedMaskPlannerAlwaysProbesSodSopBeforeAquamarine()
+        {
+            using var bitmap = new Bitmap(80, 60);
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+            {
+                graphics.Clear(Color.Black);
+                using var aquaBrush = new SolidBrush(Color.FromArgb(0, 255, 170));
+                using var pinkBrush = new SolidBrush(Color.FromArgb(220, 18, 127));
+                graphics.FillRectangle(aquaBrush, 5, 5, 12, 12);
+                graphics.FillRectangle(pinkBrush, 40, 20, 14, 16);
+            }
+
+            var aquamarinePoints = new List<Point>();
+            var pinkPoints = new List<Point>();
+            LootSystem.PixelCollectionStats stats = LootSystem.CollectTargetPointsFromBitmap(
+                bitmap, pinkOnly: false, aquamarinePoints, pinkPoints);
+            var pinkStats = new LootSystem.PixelCollectionStats(
+                stats.PixelsExamined, stats.RawPinkPixels, stats.MarkerPixelsRejected, pinkPoints.Count);
+            List<LootSystem.TypedLootCandidate> candidates = LootSystem.AnalyzeLootCandidateMasks(
+                bitmap, aquamarinePoints, pinkPoints, pinkStats, LootSystem.LootScanMode.NormalCombined,
+                out _, out _, out _, out _);
+            var planner = LootSystem.LootProbePlanner.CreateForCombined(candidates, alreadyProbed: null);
+
+            Assert.Equal(LootSystem.LootCandidateKind.SodSopPink, candidates[0].Kind);
+            Assert.Equal(LootSystem.LootCandidateKind.NormalAquamarine, candidates[1].Kind);
+            Assert.True(planner.TryNext(out int firstCandidateIndex, out Point firstProbe));
+            Assert.Equal(0, firstCandidateIndex);
+            Assert.Contains(firstProbe, candidates[0].Component.Points);
+        }
+
+        [Fact]
         public void CombinedPlannerExhaustsPinkFirstWithoutSpendingTheNormalProbeBudget()
         {
             LootSystem.LootComponent pink = MakeBlobAt(0, 0, 12, 11);

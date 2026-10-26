@@ -264,6 +264,9 @@ namespace DriverScanTester.Services
         /// </summary>
         public bool IsReportAndGoBackRequested => _repotHelper.IsReportAndGoBackActive;
 
+        /// <summary>True when repeated navigation failures require the workflow coordinator to return to town.</summary>
+        public bool IsNavigationFailureEscalationRequested => _navigationFailureEscalationRequested;
+
         // Obstacle
         private (float X, float Y) Waypoint2;
 
@@ -968,13 +971,25 @@ namespace DriverScanTester.Services
         // bot can still be unable to reach the same waypoint. The counter is reset only
         // when the waypoint is consumed, a genuinely different route target is activated
         // or a map/teleport invalidates the navigation context.
-        private const int STUCK_MAX_ATTEMPTS_OUTSIDE = 15;
+        private const int STUCK_MAX_ATTEMPTS_OUTSIDE = 3;
         private const int STUCK_MAX_ATTEMPTS_IN_CITY = 3;
+        private const double NAVIGATION_NO_PROGRESS_TIMEOUT_SECONDS = 15;
+        private const float NAVIGATION_PROGRESS_MIN_DISTANCE = BotConstants.Movement.NoProgressMinDistance;
         private int _consecutiveStuckAttempts = 0;
+        private bool _navigationFailureEscalationRequested;
+        private int _stopRequested;
 
         /// <summary>Player position when the last reverse-diagonal recovery started.
         /// Diagnostic only — physical displacement must never decide navigation success.</summary>
         private (float X, float Y)? _lastStuckAttemptPos = null;
+
+        // Best distance and deadline are scoped to the unresolved waypoint. ReverseDiagonal
+        // movement is deliberately excluded: backing away and re-approaching an obstacle is
+        // not navigation progress until ordinary route movement beats the previous best.
+        private string _navigationProgressWaypointId = "";
+        private float _bestWaypointDistance = float.MaxValue;
+        private DateTime _lastNavigationProgressTime = DateTime.MinValue;
+        private bool _awaitingNavigationRecoveryProof;
 
         // Position-based no-progress stuck detection (ghost-walk stuck spots): the walk
         // animation keeps playing while the player is actually pushing against an obstacle,

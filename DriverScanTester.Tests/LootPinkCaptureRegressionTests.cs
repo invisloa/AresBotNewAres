@@ -50,6 +50,34 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void DarkSodSopPixelsFromTheLootScanScreenshotPassCombinedAndPinkOnlyAnalysis()
+        {
+            using var frame = new Bitmap(64, 48, PixelFormat.Format32bppArgb);
+            int[] rowWidths = { 2, 4, 6, 8, 10, 12, 14, 14, 14, 14, 12, 10, 8, 6, 4, 3 };
+            for (int row = 0; row < rowWidths.Length; row++)
+            {
+                int width = rowWidths[row];
+                int startX = 10 + (14 - width) / 2;
+                for (int offset = 0; offset < width; offset++)
+                    frame.SetPixel(startX + offset, 10 + row, Color.FromArgb(220, 18, 127));
+            }
+
+            LootSystem.PinkFrameAnalysisResult pinkOnly = LootSystem.AnalyzePinkFrame(frame);
+            LootSystem.LootPreScanResult combined = LootSystem.AnalyzeNormalLootCandidates(
+                frame, new Rectangle(0, 0, frame.Width, frame.Height),
+                BotConstants.Loot.PassivePreScanMaxCandidateComponents);
+
+            LootSystem.LootComponent candidate = Assert.Single(pinkOnly.CandidateComponents);
+            Assert.Equal(141, candidate.Area);
+            Assert.Equal(new Rectangle(10, 10, 14, 16),
+                Rectangle.FromLTRB(candidate.XMin, candidate.YMin, candidate.XMax + 1, candidate.YMax + 1));
+            Assert.Equal(LootSystem.LootPreScanOutcome.PotentialCandidate, combined.Outcome);
+            Assert.Equal(new Rectangle(10, 10, 14, 16), combined.CandidateBounds);
+            Assert.Equal(LootSystem.LootCandidateKind.SodSopPink,
+                Assert.Single(combined.Candidates!).Kind);
+        }
+
+        [Fact]
         public void ValidPinkCandidateSurvivesArtificialMagentaMarkerPixels()
         {
             using Bitmap frame = CreateReportedCandidateFrame();

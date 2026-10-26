@@ -17,6 +17,7 @@
 
   <ItemGroup>
     <Folder Include="Logs\" />
+    <Folder Include="Screenshots\LootTest\" />
     <Folder Include="Screenshots\TownPortals\" />
     <Folder Include="LootSSFolder\" />
     <Folder Include="Services\" />

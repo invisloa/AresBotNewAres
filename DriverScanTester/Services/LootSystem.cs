@@ -2267,11 +2267,11 @@ namespace DriverScanTester.Services
             }
 
             var scanRegion = new Rectangle(xStart, yStart, xEnd - xStart, yEnd - yStart);
-            Bitmap? diagnosticFrame = ScreenshotService.CloneLootScanFrame(_bitmap);
-            LootPreScanResult result;
             try
             {
-                result = AnalyzeNormalLootCandidatesCore(
+                // Passive travel checks are candidate-only; saved screenshots are
+                // reserved for actual loot-scan passes.
+                return AnalyzeNormalLootCandidatesCore(
                     _bitmap,
                     scanRegion,
                     BotConstants.Loot.PassivePreScanMaxCandidateComponents,
@@ -2279,44 +2279,10 @@ namespace DriverScanTester.Services
             }
             catch (Exception ex)
             {
-                result = new LootPreScanResult(
+                return new LootPreScanResult(
                     LootPreScanOutcome.CaptureUnavailable, 0, 0, Rectangle.Empty,
                     $"analysis failed: {ex.Message}");
             }
-
-            if (diagnosticFrame != null)
-            {
-                IReadOnlyList<TypedLootCandidate> candidates =
-                    result.Candidates ?? Array.Empty<TypedLootCandidate>();
-                List<Point> validatedPixels = candidates
-                    .SelectMany(candidate => candidate.Component.Points)
-                    .ToList();
-                Rectangle[] candidateBounds = candidates
-                    .Select(candidate => Rectangle.FromLTRB(
-                        candidate.Component.XMin, candidate.Component.YMin,
-                        candidate.Component.XMax + 1, candidate.Component.YMax + 1))
-                    .ToArray();
-                int aquamarineCandidates = candidates.Count(candidate =>
-                    candidate.Kind == LootCandidateKind.NormalAquamarine);
-                int pinkCandidates = candidates.Count(candidate =>
-                    candidate.Kind == LootCandidateKind.SodSopPink);
-                string metadata = $"mode=NormalCombined; region=PassivePreScan; " +
-                    $"aquamarineCandidates={aquamarineCandidates}; pinkCandidates={pinkCandidates}; " +
-                    $"validatedCandidatePixels={validatedPixels.Count}; detail={result.Detail}";
-
-                ScreenshotService.SaveLootScanFrame(
-                    diagnosticFrame, "PassivePreScan", result.Outcome.ToString(), _log,
-                    lootCount: result.LootPixels,
-                    scanRegion: scanRegion,
-                    pixelLabel: "aquamarine+pink",
-                    candidatePixels: validatedPixels,
-                    candidateBounds: candidateBounds,
-                    candidatePixelCount: validatedPixels.Count,
-                    saveRawFrame: true,
-                    rawMetadata: metadata);
-            }
-
-            return result;
         }
 
         /// <summary>
@@ -3096,19 +3062,18 @@ namespace DriverScanTester.Services
         }
 
         // ── SOD/SOP hot-pink pixel classifier thresholds ──
-        // The custom SOD/SOP scroll texture is shaded/anti-aliased, so on screen it
-        // shows MANY pink shades (observed roughly R 239..255, G 21..109, B 148..255;
-        // typical centre ≈ 255,34,175), not one literal RGB value. These thresholds
-        // isolate that hot-pink/magenta color family: strong red, significant blue,
-        // substantially weaker green and clear pink/magenta dominance. The absolute
-        // minima let the darker shaded parts of the texture through; the
-        // channel-difference minima reject pale whites/greys.
+        // The SOD/SOP scroll is shaded and anti-aliased. Besides the usual bright
+        // pink shades, the live loot-camera frame rendered a darkened band around
+        // R 213..233, G 17..19, B 123..134. Keep the existing family limits for
+        // normal shades and admit this narrowly bounded low-green dark-render variant.
         private const int PinkMinR = 200;
         private const int PinkMinB = 120;
         private const int PinkMaxG = 150;
         private const int PinkMinRedOverGreen = 80;
         private const int PinkMinBlueOverGreen = 40;
         private const int PinkMinRedPlusBlue = 380;
+        private const int PinkDarkShadeMaxGreen = 25;
+        private const int PinkDarkShadeMinRedPlusBlue = 330;
 
         /// <summary>
         /// True when a pixel belongs to the SOD/SOP hot-pink color family. The
@@ -3129,21 +3094,23 @@ namespace DriverScanTester.Services
         /// </summary>
         internal static bool IsSodSopPinkPixel(int r, int g, int b)
         {
+            int redPlusBlue = r + b;
             return r >= PinkMinR &&
                    b >= PinkMinB &&
                    g <= PinkMaxG &&
                    r - g >= PinkMinRedOverGreen &&
                    b - g >= PinkMinBlueOverGreen &&
-                   r + b >= PinkMinRedPlusBlue;
+                   (redPlusBlue >= PinkMinRedPlusBlue ||
+                    (g <= PinkDarkShadeMaxGreen &&
+                     redPlusBlue >= PinkDarkShadeMinRedPlusBlue));
         }
 
         /// <summary>
         /// True when a pixel participates in the pink-only loot connected-component mask.
         /// The narrow artificial mob-marker magenta predicate is excluded FIRST, so a
         /// single marker ring, several touching rings or a wide merged/overlapping ring
-        /// structure can never become a pink-loot component. Every other SOD/SOP
-        /// hot-pink shade keeps the existing classifier behavior — SOD/SOP detection is
-        /// not weakened globally.
+        /// structure can never become a pink-loot component. The existing hot-pink family
+        /// and the narrow low-green dark-render variant both remain eligible.
         /// </summary>
         internal static bool IsPinkLootMaskPixel(Color pixelColor)
             => IsPinkLootMaskPixel(pixelColor.R, pixelColor.G, pixelColor.B);
@@ -3739,7 +3706,7 @@ namespace DriverScanTester.Services
                     {
                         _log($"[Loot] {regionName}: candidates {DescribeTypedLootCandidates(typedCandidates)}; " +
                              $"probe attempts {DescribeProbeAttempts(probePlanner, candidates.Count)}; " +
-                             $"previously examined={diagnosticPreviouslyProbedSkipped}px; remaining candidates={probePlanner.CandidatesWithRemainingProbes}.");
+                         $"previously examined={diagnosticPreviouslyProbedSkipped}px; remaining candidates={probePlanner.CandidatesWithRemainingProbes}.");
                     }
                 }
                 else
@@ -3785,30 +3752,9 @@ namespace DriverScanTester.Services
                 if (!pinkOnly && diagnosticOutcome != "probe-budget-exhausted")
                     ClearLootProbeProgress();
 
-                // Save every retained loot frame with candidate pixels annotated; the
-                // raw source is saved first from this same clone for side-by-side review.
+                // Write exactly one annotated image for this actual loot-scan pass.
                 if (diagnosticFrame != null)
                 {
-                    string geometryText = diagnosticGeometry.HasValue
-                        ? $"hwnd=0x{diagnosticGeometry.Value.WindowHandle.ToInt64():X}; " +
-                          $"window={FormatRectangle(diagnosticGeometry.Value.WindowRectangle)}; " +
-                          $"clientOrigin=({diagnosticGeometry.Value.ClientScreenOrigin.X},{diagnosticGeometry.Value.ClientScreenOrigin.Y}); " +
-                          $"client={diagnosticGeometry.Value.ClientSize.Width}x{diagnosticGeometry.Value.ClientSize.Height}"
-                        : "geometry=unavailable";
-                    string rawMetadata = pinkOnly && diagnosticGeometry.HasValue && pinkAnalysis != null
-                        ? BuildPinkFrameDiagnosticMetadata(
-                            scanStartedUtc, scanReason, diagnosticGeometry.Value,
-                            diagnosticPixelFormat, diagnosticStride, diagnosticScanRegion,
-                            pinkAnalysis, actualCursorProbes, diagnosticOutcome)
-                        : $"timestampUtc={scanStartedUtc:O}; reason={scanReason}; region={regionName}; mode={scanMode}; " +
-                          $"captureStatus={_lastCaptureResult.Status}; outcome={diagnosticOutcome}; {geometryText}; " +
-                          $"scanRegion={FormatRectangle(diagnosticScanRegion)}; " +
-                          $"aquamarinePixels={diagnosticAquamarineCount}; pinkPixels={diagnosticPinkCount}; " +
-                          $"aquamarineCandidates={diagnosticAquamarineCandidateCount}; pinkCandidates={diagnosticPinkCandidateCount}; " +
-                          $"components={diagnosticComponentCount}; candidates={diagnosticCandidateCount}; " +
-                          $"candidatePixels={diagnosticCandidatePixelCount}; " +
-                          $"aquamarineProbes={diagnosticAquamarineProbes}; pinkProbes={diagnosticPinkProbes}; " +
-                          $"probes={actualCursorProbes}";
                     ScreenshotService.SaveLootScanFrame(
                         diagnosticFrame, regionName, diagnosticOutcome, _log,
                         diagnosticLootCount, diagnosticScanRegion,
@@ -3818,9 +3764,7 @@ namespace DriverScanTester.Services
                         candidateBounds: diagnosticCandidateBounds,
                         confirmedProbe: diagnosticSuccessProbe,
                         aquamarineCount: diagnosticAquamarineCount,
-                        candidatePixelCount: diagnosticCandidatePixelCount,
-                        saveRawFrame: true,
-                        rawMetadata: rawMetadata);
+                        candidatePixelCount: diagnosticCandidatePixelCount);
                 }
             }
         }
@@ -5566,11 +5510,8 @@ namespace DriverScanTester.Services
             {
                 _log("[Loot] Fresh screen capture forced after click.");
 
-                // Loot diagnostics: also save the post-collection frame so the state the
-                // character ended up in (item gone / still on the ground / walked away)
-                // can be compared with the frame from the scan that clicked it.
-                ScreenshotService.SaveLootScanFrame(
-                    ScreenshotService.CloneLootScanFrame(_bitmap), "AfterClick", "post-click", _log);
+                // This refresh only avoids scanning a stale bitmap. Saved diagnostics
+                // come from actual loot-scan passes, not the post-click refresh.
             }
             else
             {

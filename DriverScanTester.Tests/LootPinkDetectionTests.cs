@@ -43,6 +43,7 @@ namespace DriverScanTester.Tests
         [InlineData(255, 0, 255, true)]    // pure magenta — same hot-pink family
         [InlineData(255, 105, 180, true)]  // hot pink
         [InlineData(200, 20, 180, true)]   // R/sum lower bounds exactly satisfied
+        [InlineData(220, 18, 127, true)]   // darkened SOD/SOP shade visible in the loot-scan screenshot
         // Boundary values just outside the family — must be rejected.
         [InlineData(199, 20, 180, false)]  // R below 200
         [InlineData(255, 151, 255, false)] // G above 150
@@ -50,6 +51,8 @@ namespace DriverScanTester.Tests
         [InlineData(229, 150, 255, false)] // R - G below 80
         [InlineData(255, 150, 189, false)] // B - G below 40
         [InlineData(200, 120, 179, false)] // R + B below 380
+        [InlineData(220, 26, 127, false)]  // dark-shade green limit exceeded
+        [InlineData(200, 25, 129, false)]  // below the dark-shade R+B minimum
         [InlineData(255, 192, 203, false)] // classic pink (green too strong)
         [InlineData(140, 10, 80, false)]   // DeepPink at ~55% ground-light brightness
         // Not pink / wrong hue — must be rejected.
