@@ -69,6 +69,7 @@ namespace DriverScanTester.Services
 
         private CancellationTokenSource? _cts;
         private bool _isRunning;
+        private volatile bool _stopRequested;
         private BotPhase _currentPhase = BotPhase.Idle;
 
         /// <summary>Index of the flow step currently being executed.</summary>
@@ -97,6 +98,13 @@ namespace DriverScanTester.Services
 
         /// <summary>Consecutive Path-step failures. After 3 the workflow fails visibly.</summary>
         private int _pathStepRetryCount;
+
+        /// <summary>
+        /// How long the workflow stops after the in-city unstuck limit (2 attempts) before it
+        /// resets the failure bookkeeping and restarts from the Repot step. Default 10 min;
+        /// tests override it to keep the regression suite fast.
+        /// </summary>
+        public int InCityStuckResetDelayMs { get; set; } = BotConstants.Repot.InCityStuckResetDelayMs;
 
         private int _teleportRetryCount;
 
@@ -311,6 +319,7 @@ namespace DriverScanTester.Services
             }
 
             _isRunning = true;
+            _stopRequested = false;
             _cts = new CancellationTokenSource();
             var token = _cts.Token;
             _flowIndex = 0;
@@ -409,7 +418,7 @@ namespace DriverScanTester.Services
                 }
                 _pathRunner.WCameraController?.EndSession();
                 _isRunning = false;
-                if (CurrentPhase != BotPhase.Failed && CurrentPhase != BotPhase.Stopping)
+                if (!_stopRequested && CurrentPhase != BotPhase.Failed && CurrentPhase != BotPhase.Stopping)
                     CurrentPhase = BotPhase.Idle;
                 _log("[Coordinator] Workflow stopped.");
                 OnStopped?.Invoke();
@@ -421,10 +430,15 @@ namespace DriverScanTester.Services
         /// </summary>
         public void Stop()
         {
-            _log("[Coordinator] Stopping...");
-            CurrentPhase = BotPhase.Stopping;
+            // Latch the workflow stop before cancelling; the runner's finally must not
+            // race the phase back to Idle while movement/input cleanup is underway.
+            _stopRequested = true;
+            // Cancel and latch movement before logging/phase notifications can hand
+            // control to another callback. Recovery input is unable to start after this point.
             _cts?.Cancel();
             _pathRunner.Stop();
+            CurrentPhase = BotPhase.Stopping;
+            _log("[Coordinator] Stopping...");
             _pathRunner.WCameraController?.EndSession();
         }
 
@@ -570,6 +584,18 @@ namespace DriverScanTester.Services
                         return false;
                     return false;
 
+                case TravelRouteRunResult.NavigationFailure:
+                    // In the city the unstuck limit is only 2 attempts: do not redirect into
+                    // back-to-back repot retries — stop, wait 10 min, reset and start again.
+                    if (_memoryService.GetIsInCity())
+                    {
+                        await WaitOutInCityStuckAndResetAsync("Path step", token);
+                        return false;
+                    }
+                    _log("[NavigationFailure] Route stopped after repeated failure to reach its waypoint; routing through the existing Repot step.");
+                    RedirectToRepotStep("navigation failure escalation");
+                    return false;
+
                 case TravelRouteRunResult.Incomplete:
                     _pathStepRetryCount++;
                     if (_pathStepRetryCount >= BotConstants.Repot.MaxMoveToRepotRetries)
@@ -611,36 +637,45 @@ namespace DriverScanTester.Services
             // A pending transition means a previous teleport/portal changed the map but
             // its coordinates were not validated yet. Never walk to the repot point with
             // data whose freshness is unproven.
-            if (!await EnsurePendingTransitionResolvedAsync("Repot step", token))
+            // A failed town-teleport attempt deliberately leaves PositionSync pending.
+            // On the bounded retry, do not spend the attempt validating the old pending
+            // transition before issuing the next teleport; TeleportToCity marks a fresh
+            // transition and validates that attempt before any repot-path movement.
+            if (_teleportRetryCount == 0 &&
+                !await EnsurePendingTransitionResolvedAsync("Repot step", token))
                 return false;
 
-            // 1. Ensure in city.
-            if (!_memoryService.GetIsInCity())
+            // 1. Ensure in city and that the prior town transition, if any, was
+            // position-validated. An InCity flag alone cannot release a pending sync.
+            bool retryingUnvalidatedTownArrival =
+                _teleportRetryCount > 0 && _positionSync.HasPendingTransition;
+            if (!_memoryService.GetIsInCity() || retryingUnvalidatedTownArrival)
             {
-                _log("[Repot] Not in city. Teleporting before repot.");
+                _log(retryingUnvalidatedTownArrival
+                    ? "[Repot] Town flag was seen but PositionSync is still pending; retrying town teleport/validation before any movement."
+                    : "[Repot] Not in city. Teleporting before repot.");
                 CaptureLowHpPotionsScreenshotIfNeeded();
                 bool teleportPositionReady = await TeleportToCity(token);
                 if (token.IsCancellationRequested)
                     return false;
-                if (!teleportPositionReady)
-                {
-                    _log("[Repot] Position synchronization after the town teleport did not complete — repot path movement is blocked. Failing this step.");
-                    CurrentPhase = BotPhase.Failed;
-                    return false;
-                }
-                if (!_memoryService.GetIsInCity())
+
+                bool arrivedInCity = teleportPositionReady && _memoryService.GetIsInCity();
+                _log($"[Teleport] Navigation recovery arrival result: PositionSyncReady={teleportPositionReady} InCity={_memoryService.GetIsInCity()}.");
+                if (!arrivedInCity)
                 {
                     _teleportRetryCount++;
                     if (_teleportRetryCount >= _profile.MaxTeleportRetries)
                     {
-                        _log($"[Repot] Failed to reach city after {_profile.MaxTeleportRetries} teleport attempts. Giving up.");
+                        _log($"[Repot] Town teleport/arrival validation failed after {_teleportRetryCount}/{_profile.MaxTeleportRetries} attempts. Giving up and stopping the workflow.");
                         _teleportRetryCount = 0;
                         CurrentPhase = BotPhase.Failed;
                         return false;
                     }
-                    _log($"[Repot] Not in city after teleport (attempt {_teleportRetryCount}/{_profile.MaxTeleportRetries}). Retrying.");
+                    _log($"[Repot] Town teleport not validated (PositionSyncReady={teleportPositionReady}, InCity={_memoryService.GetIsInCity()}); bounded retry {_teleportRetryCount}/{_profile.MaxTeleportRetries}.");
                     return false; // stay on this step and retry
                 }
+
+                _log("[NavigationFailure] Town arrival validated; continuing the existing Repot workflow.");
                 _teleportRetryCount = 0;
             }
 
@@ -675,6 +710,15 @@ namespace DriverScanTester.Services
 
             if (result != RouteRunResult.Completed)
             {
+                // In-city stuck escalation (or any route aborted by the in-city unstuck limit):
+                // never burn more back-to-back repot retries. Stop, wait 10 min, reset, repot again.
+                if ((result == RouteRunResult.CityStuck || result == RouteRunResult.NavigationFailure) &&
+                    _memoryService.GetIsInCity())
+                {
+                    await WaitOutInCityStuckAndResetAsync("Repot path", token);
+                    return false;
+                }
+
                 _moveToRepotRetryCount++;
                 if (_moveToRepotRetryCount >= BotConstants.Repot.MaxMoveToRepotRetries)
                 {
@@ -1018,6 +1062,7 @@ namespace DriverScanTester.Services
             bool cityDetected = false;
             bool waypointRepotRequested = false;
             bool reportAndGoBackDetected = false;
+            bool navigationFailureDetected = false;
             bool mapTransitionDetected = false;
             int inCityConsecutiveReads = 0;
             DateTime lastRepotCheckAt = DateTime.MinValue;
@@ -1038,6 +1083,12 @@ namespace DriverScanTester.Services
                         {
                             waypointRepotRequested = true;
                             _log("[WaypointRecovery] ExpLoop path completed for a waypoint Repot request.");
+                        }
+                        else if (_pathRunner.CurrentMovement?.IsNavigationFailureEscalationRequested == true ||
+                                 _pathRunner.LastStopReason == PathRunStopReason.NavigationFailure)
+                        {
+                            navigationFailureDetected = true;
+                            _log("[NavigationFailure] ExpLoop route aborted for a blocked waypoint — stopping loot and routing to the existing Repot workflow.");
                         }
                         else
                         {
@@ -1067,6 +1118,12 @@ namespace DriverScanTester.Services
                         {
                             waypointRepotRequested = true;
                             _log("[WaypointRecovery] ExpLoop path completed for a waypoint Repot request.");
+                        }
+                        else if (_pathRunner.CurrentMovement?.IsNavigationFailureEscalationRequested == true ||
+                                 _pathRunner.LastStopReason == PathRunStopReason.NavigationFailure)
+                        {
+                            navigationFailureDetected = true;
+                            _log("[NavigationFailure] ExpLoop route aborted for a blocked waypoint — stopping loot and routing to the existing Repot workflow.");
                         }
                         else
                         {
@@ -1226,6 +1283,24 @@ namespace DriverScanTester.Services
                 return false;
             }
 
+            if (navigationFailureDetected ||
+                _pathRunner.LastStopReason == PathRunStopReason.NavigationFailure)
+            {
+                AdvanceRoute(step, pool);
+
+                // Escalation inside the city means the in-city unstuck limit (2) is spent:
+                // stop, wait 10 min, reset and start again from the Repot step.
+                if (_memoryService.GetIsInCity())
+                {
+                    await WaitOutInCityStuckAndResetAsync("ExpLoop", token);
+                    return false;
+                }
+
+                _log("[NavigationFailure] Workflow decision: routing from the failed waypoint to Repot; the Repot step will perform and validate the existing town teleport if needed.");
+                RedirectToRepotStep("navigation failure escalation");
+                return false;
+            }
+
             // Teleport during Exp (ReportAndGoBack stuck-escalation or any city teleport):
             // the old Exp queue is dead. Never advance to the next flow step (e.g. an
             // Operation) — jump straight to Repot so it starts from its first command.
@@ -1293,8 +1368,10 @@ namespace DriverScanTester.Services
         private bool CheckExpPathTeleportAbort(System.Threading.Tasks.Task pathTask, out bool isWaypointRepot)
         {
             isWaypointRepot = false;
-            // Flag is set by MovementSystem the same tick the teleport key (6) is pressed —
-            // faster than waiting for PathRunner to return.
+            // Escalation is signalled by MovementSystem immediately and observed before
+            // waiting for PathRunner to unwind. A manual cancellation never sets this flag.
+            if (_pathRunner.CurrentMovement?.IsNavigationFailureEscalationRequested == true)
+                return true;
             if (_pathRunner.CurrentMovement?.IsReportAndGoBackRequested == true)
                 return true;
             if (pathTask == null || !pathTask.IsCompleted)
@@ -1304,7 +1381,8 @@ namespace DriverScanTester.Services
                 isWaypointRepot = true;
                 return true;
             }
-            if (_pathRunner.LastStopReason == PathRunStopReason.ReportAndGoBack)
+            if (_pathRunner.LastStopReason == PathRunStopReason.ReportAndGoBack ||
+                _pathRunner.LastStopReason == PathRunStopReason.NavigationFailure)
                 return true;
             return false;
         }
@@ -1361,6 +1439,49 @@ namespace DriverScanTester.Services
             return true;
         }
 
+        /// <summary>
+        /// In-city stuck reset. The MovementSystem stops a city route after
+        /// STUCK_MAX_ATTEMPTS_IN_CITY (2) unstuck attempts instead of hammering the same spot.
+        /// The workflow therefore stops, waits <see cref="InCityStuckResetDelayMs"/> (10 min),
+        /// clears the failure bookkeeping and restarts from the Repot step —
+        /// "stop, wait 10 min, reset, go repot and start again".
+        /// </summary>
+        /// <returns>True when the reset ran (the caller must yield the current step).</returns>
+        private async Task<bool> WaitOutInCityStuckAndResetAsync(string stage, CancellationToken token)
+        {
+            _log($"[Unstuck] {stage}: in-city unstuck limit reached — stopping the bot and waiting {InCityStuckResetDelayMs / 60000} min before resetting and starting again from the Repot step.");
+
+            // The route is already dead (PathRunner released W/A/D and combat keys).
+            // Stop again so an in-flight run can never survive the pause.
+            _pathRunner.Stop();
+
+            try
+            {
+                await PausableDelayAsync(InCityStuckResetDelayMs, token);
+            }
+            catch (OperationCanceledException)
+            {
+                return true;
+            }
+
+            if (token.IsCancellationRequested)
+                return true;
+
+            // Reset the failure bookkeeping so the restart gets a clean budget.
+            _moveToRepotRetryCount = 0;
+            _pathStepRetryCount = 0;
+            _teleportRetryCount = 0;
+            _postRepotVerifyRetryCount = 0;
+            _log("[Unstuck] Wait over — failure counters reset. Going to the Repot step and starting again.");
+
+            bool redirected = RedirectToRepotStep($"{stage}: in-city stuck reset");
+            if (!redirected)
+                return true;
+
+            _log("[Unstuck] In-city stuck reset complete — repot first, then the flow starts again.");
+            return true;
+        }
+
         private bool RedirectToRepotStep(string reason)
         {
             var steps = _profile.FlowSteps;
@@ -1392,6 +1513,8 @@ namespace DriverScanTester.Services
             Completed,
             MissingSegment,
             WaypointRepotRequested,
+            NavigationFailure,
+            CityStuck,
             Incomplete
         }
 
@@ -1400,6 +1523,7 @@ namespace DriverScanTester.Services
             Completed,
             MissingSegment,
             WaypointRepotRequested,
+            NavigationFailure,
             Incomplete,
             ExpectedMapNotReached,
             UnexpectedMapReached,
@@ -1537,6 +1661,10 @@ namespace DriverScanTester.Services
 
             if (!completed && _pathRunner.LastStopReason == PathRunStopReason.WaypointRepotRequested)
                 return RouteRunResult.WaypointRepotRequested;
+            if (!completed && _pathRunner.LastStopReason == PathRunStopReason.NavigationFailure)
+                return RouteRunResult.NavigationFailure;
+            if (!completed && _pathRunner.LastStopReason == PathRunStopReason.CityStuck)
+                return RouteRunResult.CityStuck;
 
             return completed ? RouteRunResult.Completed : RouteRunResult.Incomplete;
         }
@@ -1609,6 +1737,8 @@ namespace DriverScanTester.Services
 
                 if (!completed && _pathRunner.LastStopReason == PathRunStopReason.WaypointRepotRequested)
                     return TravelRouteRunResult.WaypointRepotRequested;
+                if (!completed && _pathRunner.LastStopReason == PathRunStopReason.NavigationFailure)
+                    return TravelRouteRunResult.NavigationFailure;
 
                 return completed ? TravelRouteRunResult.Completed : TravelRouteRunResult.Incomplete;
             }
@@ -1723,6 +1853,12 @@ namespace DriverScanTester.Services
                 _log("[WaypointRecovery] Portal route stopped for a waypoint Repot request; skipping portal grace period.");
                 _pathRunner.Stop();
                 return TravelRouteRunResult.WaypointRepotRequested;
+            }
+            if (_pathRunner.LastStopReason == PathRunStopReason.NavigationFailure)
+            {
+                _log("[NavigationFailure] Portal route stopped by navigation escalation; skipping portal grace period and routing to town.");
+                _pathRunner.Stop();
+                return TravelRouteRunResult.NavigationFailure;
             }
 
             _log($"[Path] Step {stepIndex}/{stepCount}: path finished before destination map confirmed. Waiting grace period for portal transition...");
@@ -2428,9 +2564,18 @@ namespace DriverScanTester.Services
 
                 _log($"[Teleport] Pressing key (vk={vk}) for town teleport...");
                 keybd_event(vk, scan, 0, 0);
-                await PausableDelayAsync(BotConstants.Delays.TeleportKeyDownMs, token);
-                keybd_event(vk, scan, KEYEVENTF_KEYUP, 0);
+                try
+                {
+                    await PausableDelayAsync(BotConstants.Delays.TeleportKeyDownMs, token);
+                }
+                finally
+                {
+                    // Stop/cancellation during the key-down interval must never leave the
+                    // teleport key physically held or allow another phase to inherit it.
+                    keybd_event(vk, scan, KEYEVENTF_KEYUP, 0);
+                }
 
+                token.ThrowIfCancellationRequested();
                 // Screenshot immediately after the teleport scroll is triggered — before the
                 // town starts loading — so the image shows the state at the moment of teleport.
                 ScreenshotService.CaptureFullScreen(ScreenshotService.TownPortalsFolder, _log, "[Teleport]");

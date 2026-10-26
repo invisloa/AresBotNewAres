@@ -797,6 +797,10 @@ namespace DriverScanTester
             public const byte VkD = 0x44;
             public const byte ScanD = 0x20;
 
+            // S key (backward movement)
+            public const byte VkS = 0x53;
+            public const byte ScanS = 0x1F;
+
             // Escape key
             public const byte VkEscape = 0x1B;
             public const byte ScanEscape = 0x01;
@@ -1303,6 +1307,15 @@ namespace DriverScanTester
             /// <summary>Maximum consecutive City → Repot route failures before the workflow
             /// fails visibly (player likely stuck in the city and unable to move).</summary>
             public const int MaxMoveToRepotRetries = 3;
+
+            /// <summary>
+            /// In-city stuck reset: the MovementSystem stops a city route after
+            /// STUCK_MAX_ATTEMPTS_IN_CITY (2) unstuck attempts. Instead of burning more
+            /// back-to-back retries, the coordinator waits this long (10 minutes), resets
+            /// the failure bookkeeping and restarts the flow from the Repot step
+            /// (go repot → start again).
+            /// </summary>
+            public const int InCityStuckResetDelayMs = 600_000;
 
             /// <summary>Maximum retries for opening shop window.</summary>
             public const int OpenShopRetries = 10;

@@ -145,15 +145,15 @@ namespace DriverScanTester.Tests
             public TestMovementSystem Movement { get; }
             public long RequestId { get; private set; }
 
-            public Scenario(BotMode mode = BotMode.MoveAndAttackAndLoot)
+            public Scenario(BotMode mode = BotMode.MoveAndAttackAndLoot, params Waypoint[] path)
             {
                 Stub = new CombatMemoryStub();
                 GameMemoryService memory = Stub.Create(Log.Add);
                 Loot = new LootSystem(memory, Log.Add);
-                Movement = new TestMovementSystem(memory, Log.Add, new[]
-                {
-                    new Waypoint(1000, 1000, MovementPrecision.Medium, mode)
-                })
+                Waypoint[] waypoints = path.Length > 0
+                    ? path
+                    : new[] { new Waypoint(1000, 1000, MovementPrecision.Medium, mode) };
+                Movement = new TestMovementSystem(memory, Log.Add, waypoints)
                 {
                     LootSystemRef = Loot,
                     InternalRepotEnabled = false
@@ -186,6 +186,36 @@ namespace DriverScanTester.Tests
 
             public void Dispose() => Loot.Dispose();
         }
+
+        private static Waypoint MediumWaypoint(float x, float y, BotMode mode = BotMode.MoveAndAttack)
+            => new(x, y, MovementPrecision.Medium, mode);
+
+        /// <summary>
+        /// Deterministic position source for the waypoint-aware reposition tests. The stub reads
+        /// X and Y separately, so one scripted sample is served per two reads.
+        /// </summary>
+        private sealed class PositionTrajectory
+        {
+            private readonly (short X, short Y)[] _samples;
+            private readonly List<(short X, short Y)> _observed = new();
+            private int _reads;
+
+            public PositionTrajectory(params (short X, short Y)[] samples) => _samples = samples;
+
+            public IReadOnlyList<(short X, short Y)> Observed => _observed;
+
+            public (short X, short Y) Next()
+            {
+                int index = Math.Min(_reads / 2, _samples.Length - 1);
+                if (_reads % 2 == 0)
+                    _observed.Add(_samples[index]);
+                _reads++;
+                return _samples[index];
+            }
+        }
+
+        private static float DistanceTo(float x, float y, float targetX, float targetY)
+            => (float)Math.Sqrt((x - targetX) * (x - targetX) + (y - targetY) * (y - targetY));
 
         private static object? InvokePrivate(object target, string method, params object?[] args)
         {
@@ -934,6 +964,302 @@ namespace DriverScanTester.Tests
             Assert.Null(LastRepositionPos(scenario.Movement));
             Assert.True(IsReverseDiagonalActive(scenario.Movement));
             Assert.True(IsUnstuckRoutineActive(scenario.Movement));
+        }
+
+        // ── 14. Waypoint-distance-aware movement termination ───────────────────
+
+        [Fact]
+        public async Task NearbyWaypointStopsForwardMovementAtItsReachThreshold()
+        {
+            using var scenario = new Scenario(BotMode.MoveAndAttack, MediumWaypoint(100, 100));
+
+            // Starts 8 units away from a Medium (5 unit) waypoint and walks straight at it.
+            var trajectory = new PositionTrajectory(
+                (92, 100), (93, 100), (94, 100), (95, 100), (96, 100), (97, 100));
+            scenario.Stub.Position = () => trajectory.Next();
+            SetWasAttacking(scenario.Movement, true);
+
+            var stopwatch = Stopwatch.StartNew();
+            await StartReposition(scenario.Movement, 92, 100, CancellationToken.None);
+            stopwatch.Stop();
+
+            Assert.True(stopwatch.ElapsedMilliseconds < BotConstants.Combat.CombatRepositionDurationMs / 2,
+                $"Entering the waypoint threshold must end the walk early (took {stopwatch.ElapsedMilliseconds} ms).");
+            Assert.True(scenario.Movement.ForwardKeyDowns > 0);
+            Assert.True(scenario.Movement.ForwardKeyUps > 0, "W must be released as soon as the waypoint is reached.");
+            Assert.False(IsMovingForward(scenario.Movement));
+            Assert.Contains(scenario.Log, l => l.Contains("termination=WaypointReached", StringComparison.Ordinal));
+            Assert.Contains(scenario.Log, l => l.Contains("Reposition confirmed by", StringComparison.Ordinal));
+            Assert.Equal(1, scenario.Movement.TargetCyclePresses);
+            Assert.False(GetWasAttacking(scenario.Movement), "A verified reposition resets the combat baseline.");
+        }
+
+        [Fact]
+        public async Task AlreadyInsideTheWaypointThresholdNeverPressesForwardOrRetabs()
+        {
+            using var scenario = new Scenario(BotMode.MoveAndAttack, MediumWaypoint(100, 100));
+
+            // 3 units away from a Medium (5 unit) waypoint: there is nothing to walk to.
+            scenario.Stub.Position = () => ((short)97, (short)100);
+            SetWasAttacking(scenario.Movement, true);
+
+            var stopwatch = Stopwatch.StartNew();
+            await StartReposition(scenario.Movement, 97, 100, CancellationToken.None);
+            stopwatch.Stop();
+
+            Assert.True(stopwatch.ElapsedMilliseconds < 500,
+                $"An already-reached waypoint must not spend the reposition budget (took {stopwatch.ElapsedMilliseconds} ms).");
+            Assert.Equal(0, scenario.Movement.ForwardKeyDowns);
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+            Assert.Contains(scenario.Log, l => l.Contains("Reposition skipped", StringComparison.Ordinal));
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("Reposition confirmed by", StringComparison.Ordinal));
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("Retrying attack", StringComparison.Ordinal));
+            Assert.True(GetWasAttacking(scenario.Movement), "Being nearby is not a reposition and must not reset combat.");
+            Assert.False(IsMovingForward(scenario.Movement));
+            // The failed attempt still counts, so the existing escalation stays in charge.
+            Assert.Equal(1, RepositionRetryCount(scenario.Movement));
+        }
+
+        [Fact]
+        public async Task FarWaypointKeepsTheFullBudgetAndProgressTowardItIsASuccess()
+        {
+            using var scenario = new Scenario(BotMode.MoveAndAttack, MediumWaypoint(1000, 1000));
+
+            int step = 0;
+            scenario.Stub.Position = () => ((short)(100 + (step += 1)), (short)100);
+
+            var stopwatch = Stopwatch.StartNew();
+            await StartReposition(scenario.Movement, 100, 100, CancellationToken.None);
+            stopwatch.Stop();
+
+            Assert.True(stopwatch.ElapsedMilliseconds >= BotConstants.Combat.CombatRepositionDurationMs - 250,
+                $"An unreached far waypoint must still use the whole budget (took {stopwatch.ElapsedMilliseconds} ms).");
+            Assert.Contains(scenario.Log, l => l.Contains("termination=DurationLimit", StringComparison.Ordinal));
+            Assert.Contains(scenario.Log, l => l.Contains("Reposition confirmed by", StringComparison.Ordinal));
+            Assert.Equal(1, scenario.Movement.TargetCyclePresses);
+        }
+
+        // ── 15. Overshoot regression: the logged (171,135) → (154,145) walk ────
+
+        [Fact]
+        public async Task WalkTowardTheLoggedWaypointStopsOnEntryInsteadOfOvershooting()
+        {
+            using var scenario = new Scenario(BotMode.MoveAndAttack, MediumWaypoint(164, 139));
+
+            // Reproduces the production log: the character walked through the waypoint and out
+            // to (154,145), back to (168,136) and away again to (158,143).
+            var trajectory = new PositionTrajectory(
+                (171, 135), (170, 136), (167, 137), (162, 140), (158, 143), (154, 145), (168, 136), (158, 143));
+            scenario.Stub.Position = () => trajectory.Next();
+
+            var stopwatch = Stopwatch.StartNew();
+            await StartReposition(scenario.Movement, 171, 135, CancellationToken.None);
+            stopwatch.Stop();
+
+            float initialDistance = DistanceTo(171, 135, 164, 139);
+            float maxObservedDistance = trajectory.Observed.Max(p => DistanceTo(p.X, p.Y, 164, 139));
+            (short lastX, short lastY) = trajectory.Observed[^1];
+
+            Assert.True(maxObservedDistance <= initialDistance + 0.01f,
+                $"The walk must never continue past the waypoint (max observed distance {maxObservedDistance:F2}, start {initialDistance:F2}).");
+            Assert.True(DistanceTo(lastX, lastY, 164, 139) <= BotConstants.WaypointThresholds.Medium,
+                $"Movement must end inside the waypoint reach threshold (ended at ({lastX},{lastY})).");
+            Assert.True(trajectory.Observed.Count <= 3,
+                $"No further position samples may be taken once the waypoint is reached (took {trajectory.Observed.Count}).");
+            Assert.True(stopwatch.ElapsedMilliseconds < 1000,
+                $"The walk must stop immediately, not after the 2500 ms budget (took {stopwatch.ElapsedMilliseconds} ms).");
+            Assert.Contains(scenario.Log, l => l.Contains("termination=WaypointReached", StringComparison.Ordinal));
+            Assert.Contains(scenario.Log, l => l.Contains("Reposition confirmed by", StringComparison.Ordinal));
+            Assert.False(IsMovingForward(scenario.Movement));
+        }
+
+        // ── 16. Movement that is not waypoint progress is not a reposition ─────
+
+        [Fact]
+        public async Task MovingAwayFromTheWaypointIsNeverASuccessfulReposition()
+        {
+            using var scenario = new Scenario(BotMode.MoveAndAttack, MediumWaypoint(100, 100));
+
+            // 10 units away from the waypoint, ends 20 units away: 10 units of displacement.
+            scenario.Stub.Position = () => ((short)120, (short)100);
+            SetWasAttacking(scenario.Movement, true);
+
+            await StartReposition(scenario.Movement, 110, 100, CancellationToken.None);
+
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+            Assert.Contains(scenario.Log, l => l.Contains("moved away from the waypoint", StringComparison.Ordinal));
+            Assert.Contains(scenario.Log, l => l.Contains("termination=DurationLimit", StringComparison.Ordinal));
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("Reposition confirmed by", StringComparison.Ordinal));
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("Retrying attack", StringComparison.Ordinal));
+            Assert.True(GetWasAttacking(scenario.Movement), "A failed reposition must not reset the combat baseline.");
+            Assert.False(IsMovingForward(scenario.Movement));
+            Assert.True(scenario.Movement.ForwardKeyUps > 0);
+        }
+
+        [Fact]
+        public async Task SidewaysMovementWithoutWaypointProgressIsNeverASuccessfulReposition()
+        {
+            using var scenario = new Scenario(BotMode.MoveAndAttack, MediumWaypoint(100, 100));
+
+            // 4.12 units of displacement, but only 0.15 units closer to the waypoint (< 0.50).
+            scenario.Stub.Position = () => ((short)109, (short)104);
+            SetWasAttacking(scenario.Movement, true);
+
+            await StartReposition(scenario.Movement, 110, 100, CancellationToken.None);
+
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+            Assert.Contains(scenario.Log, l => l.Contains("no meaningful progress toward the waypoint", StringComparison.Ordinal));
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("moved away from the waypoint", StringComparison.Ordinal));
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("Reposition confirmed by", StringComparison.Ordinal));
+            Assert.True(GetWasAttacking(scenario.Movement));
+            Assert.False(IsMovingForward(scenario.Movement));
+        }
+
+        [Fact]
+        public async Task WalkingOutAndBackToTheStartIsNotASuccessfulReposition()
+        {
+            using var scenario = new Scenario(BotMode.MoveAndAttack, MediumWaypoint(100, 100));
+
+            var stopwatch = Stopwatch.StartNew();
+            float maxMoved = 0f;
+            scenario.Stub.Position = () =>
+            {
+                // Walk 20 units away for the first second, then return to the start position.
+                bool away = stopwatch.ElapsedMilliseconds < 1000;
+                short x = away ? (short)130 : (short)110;
+                maxMoved = Math.Max(maxMoved, Math.Abs(x - 110f));
+                return (x, (short)100);
+            };
+            SetWasAttacking(scenario.Movement, true);
+
+            await StartReposition(scenario.Movement, 110, 100, CancellationToken.None);
+
+            Assert.True(maxMoved > BotConstants.ReverseDiagonal.SuccessDisplacement,
+                "the scenario must have walked beyond the displacement threshold before returning");
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+            Assert.Contains(scenario.Log, l => l.Contains("Reposition failed — moved only", StringComparison.Ordinal));
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("Reposition confirmed by", StringComparison.Ordinal));
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("Retrying attack", StringComparison.Ordinal));
+            Assert.True(GetWasAttacking(scenario.Movement));
+            Assert.False(IsMovingForward(scenario.Movement));
+        }
+
+        // ── 17. Retry escalation ignores movement away from the waypoint ───────
+
+        [Fact]
+        public async Task MovementAwayFromTheWaypointNeverResetsTheRepositionRetryCounter()
+        {
+            using var scenario = new Scenario(BotMode.MoveAndAttack, MediumWaypoint(100, 100));
+
+            // Attempt 1 walks from (110,100) to (120,100): away from the waypoint.
+            scenario.Stub.Position = () => ((short)120, (short)100);
+            await StartReposition(scenario.Movement, 110, 100, CancellationToken.None);
+            Assert.Equal(1, RepositionRetryCount(scenario.Movement));
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("Reposition confirmed by", StringComparison.Ordinal));
+
+            // Attempt 2 starts 10 units further away and moves 10 more units away. The old
+            // >3 unit displacement rule reset the counter here and postponed the escalation.
+            scenario.Stub.Position = () => ((short)130, (short)100);
+            await StartReposition(scenario.Movement, 120, 100, CancellationToken.None);
+            Assert.Equal(2, RepositionRetryCount(scenario.Movement));
+
+            // Attempt 3 accumulates the third failure.
+            scenario.Stub.Position = () => ((short)140, (short)100);
+            await StartReposition(scenario.Movement, 130, 100, CancellationToken.None);
+            Assert.Equal(3, RepositionRetryCount(scenario.Movement));
+
+            // Attempt 4 reaches the bounded escalation and starts the standard unstuck.
+            await StartReposition(scenario.Movement, 140, 100, CancellationToken.None);
+            Assert.Contains(scenario.Log, l => l.Contains("reposition attempts without escaping the broken target", StringComparison.Ordinal));
+            Assert.Equal(0, RepositionRetryCount(scenario.Movement));
+            Assert.Null(LastRepositionPos(scenario.Movement));
+            Assert.True(IsReverseDiagonalActive(scenario.Movement));
+        }
+
+        // ── 18. Authorized recovery finishing early keeps the loot obligation ──
+
+        [Fact]
+        public async Task AuthorizedRepositionReachingTheWaypointEarlyKeepsTheDeferredObligation()
+        {
+            using var scenario = new Scenario(
+                BotMode.MoveAndAttackAndLoot, MediumWaypoint(100, 100, BotMode.MoveAndAttackAndLoot));
+            scenario.ArmPostKill();
+            scenario.DeferForCombat();
+
+            // Starts 8 units away and the first poll already reports 4 units: W is released
+            // immediately and the authorization is handed back untouched.
+            scenario.Stub.Position = () => ((short)96, (short)100);
+
+            var stopwatch = Stopwatch.StartNew();
+            await StartReposition(scenario.Movement, 92, 100, CancellationToken.None);
+            stopwatch.Stop();
+
+            Assert.True(stopwatch.ElapsedMilliseconds < 1500,
+                $"Reaching the waypoint must not wait for the budget (took {stopwatch.ElapsedMilliseconds} ms).");
+            Assert.True(scenario.Movement.ForwardKeyDowns > 0);
+            Assert.True(scenario.Movement.ForwardKeyUps > 0);
+            Assert.False(IsMovingForward(scenario.Movement));
+            Assert.Contains(scenario.Log, l => l.Contains("Reposition confirmed by", StringComparison.Ordinal));
+            Assert.Contains(scenario.Log, l => l.Contains("termination=WaypointReached", StringComparison.Ordinal));
+            Assert.False(scenario.Movement.IsCombatRecoveryMovementAuthorized);
+            Assert.False(scenario.Loot.IsCombatRecoveryMovementActiveFor(scenario.RequestId));
+
+            // The preserved obligation is neither completed nor cancelled by the movement.
+            LootRequestStatus status = scenario.Status();
+            Assert.Equal(LootRequestState.Deferred, status.State);
+            Assert.Equal(scenario.RequestId, status.RequestId);
+            Assert.False(status.CameraVerified);
+            Assert.True(BarrierHoldsInput(scenario.Movement));
+        }
+
+        // ── 19. Cancellation / authorization loss during a waypoint walk ───────
+
+        [Fact]
+        public async Task CancellationWhileWalkingToANearbyWaypointReleasesForwardInput()
+        {
+            using var scenario = new Scenario(BotMode.MoveAndAttack, MediumWaypoint(100, 100));
+
+            // Stays 8 units away: the walk never reaches the 5 unit threshold on its own.
+            scenario.Stub.Position = () => ((short)92, (short)100);
+
+            using var cancellation = new CancellationTokenSource();
+            Task reposition = StartReposition(scenario.Movement, 92, 100, cancellation.Token);
+            await WaitUntilAsync(() => scenario.Movement.ForwardKeyDowns > 0, 1000);
+
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => reposition);
+
+            Assert.False(IsMovingForward(scenario.Movement));
+            Assert.True(scenario.Movement.ForwardKeyUps > 0);
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+            Assert.Contains(scenario.Log, l => l.Contains("termination=Cancelled", StringComparison.Ordinal));
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("Retrying attack", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public async Task AuthorizationLossWhileWalkingToANearbyWaypointReleasesForwardInput()
+        {
+            using var scenario = new Scenario(
+                BotMode.MoveAndAttackAndLoot, MediumWaypoint(100, 100, BotMode.MoveAndAttackAndLoot));
+            scenario.ArmPostKill();
+            scenario.DeferForCombat();
+            scenario.Stub.Position = () => ((short)92, (short)100);
+
+            Task reposition = StartReposition(scenario.Movement, 92, 100, CancellationToken.None);
+            await WaitUntilAsync(() => scenario.Movement.ForwardKeyDowns > 0, 1000);
+
+            scenario.Stub.TargetId = 0;
+            await reposition;
+
+            Assert.False(IsMovingForward(scenario.Movement));
+            Assert.True(scenario.Movement.ForwardKeyUps > 0);
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+            Assert.Contains(scenario.Log, l => l.Contains("Reposition aborted", StringComparison.Ordinal));
+            Assert.Contains(scenario.Log, l => l.Contains("termination=AuthorizationLost", StringComparison.Ordinal));
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("Retrying attack", StringComparison.Ordinal));
+            Assert.False(scenario.Movement.IsCombatRecoveryMovementAuthorized);
+            Assert.False(scenario.Loot.IsCombatRecoveryMovementActiveFor(scenario.RequestId));
+            Assert.Equal(LootRequestState.Deferred, scenario.Status().State);
         }
     }
 }

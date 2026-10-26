@@ -17,7 +17,11 @@
 
   <ItemGroup>
     <Folder Include="Logs\" />
+    <Folder Include="Screenshots\Dead\" />
     <Folder Include="Screenshots\LootTest\" />
+    <Folder Include="Screenshots\LowHpPotions\" />
+    <Folder Include="Screenshots\SellDialogScanFailed\" />
+    <Folder Include="Screenshots\Stuck\" />
     <Folder Include="Screenshots\TownPortals\" />
     <Folder Include="LootSSFolder\" />
     <Folder Include="Services\" />

@@ -35,6 +35,8 @@ namespace DriverScanTester.Services
         internal const byte SCAN_A = BotConstants.Keyboard.ScanA;
         internal const byte VK_D = BotConstants.Keyboard.VkD;
         internal const byte SCAN_D = BotConstants.Keyboard.ScanD;
+        internal const byte VK_S = BotConstants.Keyboard.VkS;
+        internal const byte SCAN_S = BotConstants.Keyboard.ScanS;
         internal const byte VK_ESCAPE = BotConstants.Keyboard.VkEscape;
         internal const byte SCAN_ESCAPE = BotConstants.Keyboard.ScanEscape;
         internal const byte VK_SPACE = BotConstants.Keyboard.VkSpace;

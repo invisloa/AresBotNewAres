@@ -14,6 +14,7 @@ namespace DriverScanTester.Services
         CityStuck,
         WaypointRepotRequested,
         ReportAndGoBack,
+        NavigationFailure,
 
         /// <summary>
         /// A confirmed unexpected map change invalidated the route's map invariant.
@@ -39,6 +40,8 @@ namespace DriverScanTester.Services
         private readonly bool _enableWaypointSpecialRecoveries;
         private readonly MovementSteeringMode _steeringMode;
         private MovementSystem? _movementSystem;
+        private readonly object _runLock = new();
+        private CancellationTokenSource? _activeRunCts;
 
         /// <summary>
         /// Shared pause switch. When set, the path loop suspends in place (inputs
@@ -93,40 +96,59 @@ namespace DriverScanTester.Services
                 return false;
             }
 
+            using var runCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+            CancellationToken runToken = runCts.Token;
+            lock (_runLock)
+                _activeRunCts = runCts;
+
             // Determine initial mode from first waypoint
             var initialMode = waypoints[0].Mode;
 
-            MovementSystem movementSystem = new MovementSystem(
-                _memoryService,
-                _log,
-                targetX: waypoints[^1].X,
-                targetY: waypoints[^1].Y,
-                precision: MovementPrecision.Medium,
-                customPath: waypoints,
-                initialMode: initialMode,
-                loopPath: loop,
-                enableWaypointSpecialRecoveries: _enableWaypointSpecialRecoveries,
-                steeringMode: _steeringMode,
-                wKeyCameraController: WCameraController)
+            MovementSystem movementSystem;
+            try
             {
-                InternalRepotEnabled = false, // External coordinator handles repot
-                WaypointRecoveryExecutor = WaypointRecoveryExecutor,
-                MobGroupingPausePredicate = () => PauseController?.IsPaused == true,
-                OnGameUnresponsiveDetected = reason => OnGameUnresponsiveDetected?.Invoke(reason),
-                // Route map invariant: a route with an expected map must never keep
-                // navigating old-map waypoints after the player leaves that map.
-                ExpectedMap = expectedMap,
-                RouteLabel = routeLabel
-            };
+                movementSystem = new MovementSystem(
+                    _memoryService,
+                    _log,
+                    targetX: waypoints[^1].X,
+                    targetY: waypoints[^1].Y,
+                    precision: MovementPrecision.Medium,
+                    customPath: waypoints,
+                    initialMode: initialMode,
+                    loopPath: loop,
+                    enableWaypointSpecialRecoveries: _enableWaypointSpecialRecoveries,
+                    steeringMode: _steeringMode,
+                    wKeyCameraController: WCameraController)
+                {
+                    InternalRepotEnabled = false, // External coordinator handles repot
+                    WaypointRecoveryExecutor = WaypointRecoveryExecutor,
+                    MobGroupingPausePredicate = () => PauseController?.IsPaused == true,
+                    OnGameUnresponsiveDetected = reason => OnGameUnresponsiveDetected?.Invoke(reason),
+                    // Route map invariant: a route with an expected map must never keep
+                    // navigating old-map waypoints after the player leaves that map.
+                    ExpectedMap = expectedMap,
+                    RouteLabel = routeLabel
+                };
+            }
+            catch
+            {
+                lock (_runLock)
+                {
+                    if (ReferenceEquals(_activeRunCts, runCts))
+                        _activeRunCts = null;
+                }
+                throw;
+            }
             _movementSystem = movementSystem;
 
+            using CancellationTokenRegistration stopRegistration = runToken.Register(movementSystem.Stop);
             _log($"[PathRunner] Started path with {waypoints.Count} points, loop={loop}.");
 
             try
             {
                 _log("[PathRunner] Entering main loop.");
                 bool pauseLogged = false;
-                while (!token.IsCancellationRequested)
+                while (!runToken.IsCancellationRequested)
                 {
                     // Pause checkpoint: hold the route in place. MovementSystem keeps its
                     // waypoint queue, so resume continues with the same waypoint.
@@ -140,14 +162,14 @@ namespace DriverScanTester.Services
                         movementSystem?.CancelMobGrouping("bot paused");
                         movementSystem?.StopMoving();
                         movementSystem?.ReleaseCombatKeys();
-                        await PauseController.WaitIfPausedAsync(token);
-                        if (token.IsCancellationRequested) break;
+                        await PauseController.WaitIfPausedAsync(runToken);
+                        if (runToken.IsCancellationRequested) break;
                         _log("[PathRunner] Resumed — continuing route.");
                         pauseLogged = false;
                         continue;
                     }
 
-                    await movementSystem.Update(token);
+                    await movementSystem.Update(runToken);
 
                     // A confirmed unexpected map change permanently invalidates the route.
                     // Abort before any recovery/combat/loot logic can act on old-map
@@ -169,6 +191,13 @@ namespace DriverScanTester.Services
                     {
                         LastStopReason = PathRunStopReason.ReportAndGoBack;
                         _log("[PathRunner] ReportAndGoBack teleport requested — aborting path (coordinator will start Repot from scratch).");
+                        return false;
+                    }
+
+                    if (movementSystem.IsNavigationFailureEscalationRequested)
+                    {
+                        LastStopReason = PathRunStopReason.NavigationFailure;
+                        _log("[PathRunner] Navigation failure escalation requested — aborting the blocked route for the coordinator's existing town/repot workflow.");
                         return false;
                     }
 
@@ -222,8 +251,8 @@ namespace DriverScanTester.Services
                     }
 
                     await (PauseController != null
-                        ? PauseController.PausableDelayAsync(BotConstants.Delays.PathRunnerTickMs, token)
-                        : Task.Delay(BotConstants.Delays.PathRunnerTickMs, token));
+                        ? PauseController.PausableDelayAsync(BotConstants.Delays.PathRunnerTickMs, runToken)
+                        : Task.Delay(BotConstants.Delays.PathRunnerTickMs, runToken));
                 }
                 _log("[PathRunner] Loop exited due to cancellation request.");
                 LastStopReason = PathRunStopReason.Cancelled;
@@ -242,6 +271,7 @@ namespace DriverScanTester.Services
             {
                 // Persist any pending stuck-cell data before stopping
                 movementSystem?.SaveLocalMap();
+                movementSystem?.Stop();
                 movementSystem?.CancelMobGrouping("path runner stopped");
                 movementSystem?.CancelWaypointSpecialRecovery();
                 // Centralized input cleanup for every termination path (normal
@@ -254,6 +284,11 @@ namespace DriverScanTester.Services
                 movementSystem?.ReleaseCombatKeys();
                 movementSystem?.ReleaseCameraOwnership();
                 movementSystem?.DisposeMobGroupingDetector();
+                lock (_runLock)
+                {
+                    if (ReferenceEquals(_activeRunCts, runCts))
+                        _activeRunCts = null;
+                }
                 _log($"[PathRunner] final stop reason={LastStopReason}.");
                 _log("[PathRunner] Path stopped.");
             }
@@ -269,7 +304,10 @@ namespace DriverScanTester.Services
         /// </summary>
         public void Stop()
         {
+            lock (_runLock)
+                _activeRunCts?.Cancel();
             _movementSystem?.SaveLocalMap();
+            _movementSystem?.Stop();
             _movementSystem?.CancelMobGrouping("path runner stop requested");
             _movementSystem?.CancelWaypointSpecialRecovery();
             _movementSystem?.ReleaseCombatKeys();

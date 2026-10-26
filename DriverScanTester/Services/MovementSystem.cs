@@ -144,11 +144,21 @@ namespace DriverScanTester.Services
     /// </summary>
     internal enum CombatRepositionResult
     {
-        /// <summary>Real final displacement was observed — the retry TAB/attack may proceed.</summary>
+        /// <summary>
+        /// Real final displacement was observed AND the walk ended closer to the waypoint —
+        /// the retry TAB/attack may proceed.
+        /// </summary>
         Moved,
 
         /// <summary>Forward input was accepted but the final position did not move enough.</summary>
         InsufficientDisplacement,
+
+        /// <summary>
+        /// The character did move, but not toward the waypoint: the final waypoint distance
+        /// increased (walked away) or improved by less than
+        /// <see cref="BotConstants.ReverseDiagonal.SuccessDistImprove"/> (walked sideways).
+        /// </summary>
+        NoWaypointProgress,
 
         /// <summary>The forward key-down was never accepted (a navigation hold or other owner blocks it).</summary>
         InputDenied,
@@ -158,6 +168,32 @@ namespace DriverScanTester.Services
 
         /// <summary>Combat-recovery authorization was lost mid-attempt (target/focus/request change).</summary>
         AuthorizationLost
+    }
+
+    /// <summary>
+    /// Why one combat reposition movement loop stopped. Logged only — it never decides success
+    /// on its own: reaching the waypoint still requires a verified physical displacement and a
+    /// positive result relative to the waypoint.
+    /// </summary>
+    internal enum CombatRepositionTermination
+    {
+        /// <summary>The waypoint's existing reach threshold was reached — W is released immediately.</summary>
+        WaypointReached,
+
+        /// <summary>The maximum movement budget expired before the waypoint was reached.</summary>
+        DurationLimit,
+
+        /// <summary>The forward key-down was never accepted.</summary>
+        InputDenied,
+
+        /// <summary>The caller cancelled the operation.</summary>
+        Cancelled,
+
+        /// <summary>Combat-recovery authorization was lost mid-attempt.</summary>
+        AuthorizationLost,
+
+        /// <summary>The position could not be read when the movement loop ended.</summary>
+        PositionUnreadable
     }
 
     public class MovementSystem
@@ -972,7 +1008,10 @@ namespace DriverScanTester.Services
         // when the waypoint is consumed, a genuinely different route target is activated
         // or a map/teleport invalidates the navigation context.
         private const int STUCK_MAX_ATTEMPTS_OUTSIDE = 3;
-        private const int STUCK_MAX_ATTEMPTS_IN_CITY = 3;
+        // In the city the unstuck must not hammer the same spot: after 2 failed attempts
+        // the route is stopped and the coordinator waits 10 minutes, resets and restarts
+        // from the Repot step (go repot → start again).
+        private const int STUCK_MAX_ATTEMPTS_IN_CITY = 2;
         private const double NAVIGATION_NO_PROGRESS_TIMEOUT_SECONDS = 15;
         private const float NAVIGATION_PROGRESS_MIN_DISTANCE = BotConstants.Movement.NoProgressMinDistance;
         private int _consecutiveStuckAttempts = 0;
@@ -987,7 +1026,11 @@ namespace DriverScanTester.Services
         // movement is deliberately excluded: backing away and re-approaching an obstacle is
         // not navigation progress until ordinary route movement beats the previous best.
         private string _navigationProgressWaypointId = "";
+        private float _navigationProgressTargetX = float.NaN;
+        private float _navigationProgressTargetY = float.NaN;
+        private int _navigationWaypointSequence;
         private float _bestWaypointDistance = float.MaxValue;
+        private float _lastNavigationProgressDistance = float.MaxValue;
         private DateTime _lastNavigationProgressTime = DateTime.MinValue;
         private bool _awaitingNavigationRecoveryProof;
 
@@ -1553,6 +1596,10 @@ namespace DriverScanTester.Services
             => GameInput.keybd_event(GameInput.VK_W, GameInput.SCAN_W,
                 keyUp ? (uint)GameInput.KEYEVENTF_KEYUP : 0u, 0);
 
+        protected virtual void SendSyntheticBackwardKeyEvent(bool keyUp)
+            => GameInput.keybd_event(GameInput.VK_S, GameInput.SCAN_S,
+                keyUp ? (uint)GameInput.KEYEVENTF_KEYUP : 0u, 0);
+
         /// <summary>
         /// Presses the target-cycle (TAB) key. Virtual so tests can record a retry TAB
         /// instead of injecting a real keystroke; production behaviour is unchanged.
@@ -1639,6 +1686,13 @@ namespace DriverScanTester.Services
 
         public async Task Update(CancellationToken token)
         {
+            token.ThrowIfCancellationRequested();
+            if (Volatile.Read(ref _stopRequested) != 0)
+            {
+                StopMoving();
+                return;
+            }
+
             if (_gameUnresponsiveDetected)
                 return;
 
@@ -1736,7 +1790,7 @@ namespace DriverScanTester.Services
             }
 
             // ── In-city stuck cooldown ──
-            // After 3 stuck attempts in city, bot presses 6 and waits 10 minutes.
+            // After the in-city stuck limit (2 attempts), the bot presses 6 and waits 10 minutes.
             if (DateTime.Now < _inCityStuckCooldownUntil)
             {
                 CancelMobGrouping("in-city teleport cooldown");
@@ -2686,6 +2740,8 @@ namespace DriverScanTester.Services
 
                 var target = _waypoints.Peek();
                 TryApplyMovementCameraDistance(target.CameraDistanceLock);
+                if (UpdateNavigationProgress(target, currX, currY, token))
+                    return;
                 float distNow = GeometryUtils.Distance(currX, currY, target.X, target.Y);
                 float thresholdNow = GetEffectiveWaypointReachThreshold(target);
 
@@ -2743,16 +2799,19 @@ namespace DriverScanTester.Services
                             }
                             _isUnstuckRoutineActive = false;
                             ReleaseRecoveryOwnership("ReverseDiagonal recovered");
-                            _log($"[ReverseDiagonal] recovered.");
+                            _log("[ReverseDiagonal] PhysicalRecoverySucceeded=True.");
                             // Physical success only means the escape maneuver worked. The
                             // navigation failure against the current waypoint is still
-                            // unresolved until that waypoint is consumed.
+                            // unresolved until ordinary route movement proves it can advance.
+                            _awaitingNavigationRecoveryProof = true;
+                            _log($"[Navigation] NavigationRecovered=False (awaiting route-directed progress) waypoint={_navigationProgressWaypointId} failures={_consecutiveStuckAttempts} bestDistance={_bestWaypointDistance:F2}.");
                             bool recoveredInCity = _memoryService.GetIsInCity();
                             int recoveredLimit = recoveredInCity ? STUCK_MAX_ATTEMPTS_IN_CITY : STUCK_MAX_ATTEMPTS_OUTSIDE;
                             float recoveredDisplacement = _lastStuckAttemptPos.HasValue
                                 ? GeometryUtils.Distance(currX, currY, _lastStuckAttemptPos.Value.X, _lastStuckAttemptPos.Value.Y)
                                 : 0f;
-                            _log($"[Unstuck] Physical recovery succeeded (moved {recoveredDisplacement:F1} units). Navigation failure count preserved: {_consecutiveStuckAttempts}/{recoveredLimit}.");
+                            _log($"[Unstuck] PhysicalRecoverySucceeded=True moved={recoveredDisplacement:F1} waypoint={_navigationProgressWaypointId} Attempt={_consecutiveStuckAttempts}/{recoveredLimit} bestDistance={_bestWaypointDistance:F2}.");
+                            _log($"[Unstuck] NavigationRecovered=False; navigation failure count preserved: {_consecutiveStuckAttempts}/{recoveredLimit}.");
                             ResetActionStuckTracking();
                             return;
                         case RecoveryResult.Failed:
@@ -2763,7 +2822,8 @@ namespace DriverScanTester.Services
                             _log($"[ActionStuck] Action={currentAction} while moving. Stuck confirmed by action.");
                             bool failedInCity = _memoryService.GetIsInCity();
                             int failedLimit = failedInCity ? STUCK_MAX_ATTEMPTS_IN_CITY : STUCK_MAX_ATTEMPTS_OUTSIDE;
-                            _log($"[Unstuck] Physical recovery failed. Navigation failure count preserved: {_consecutiveStuckAttempts}/{failedLimit}.");
+                            _awaitingNavigationRecoveryProof = false;
+                            _log($"[Unstuck] PhysicalRecoverySucceeded=False; NavigationRecovered=False; waypoint={_navigationProgressWaypointId} bestDistance={_bestWaypointDistance:F2} navigation failure count preserved: {_consecutiveStuckAttempts}/{failedLimit}.");
                             MarkObstacleFromActionStuck(currX, currY, target);
                             _localNavigationMap.SaveIfDirty();
                             return;
@@ -2989,6 +3049,7 @@ namespace DriverScanTester.Services
                 }
                 _consecutiveStuckAttempts = 0;
                 _lastStuckAttemptPos = null;
+                ResetNavigationProgressTracking();
                 ResetBearingState();
                 ResetActionStuckTracking();
                 ResetCombatStateForWaypointChange();
@@ -3203,6 +3264,12 @@ namespace DriverScanTester.Services
         /// </summary>
         private void ApplySteeringBearing(float bearingDeg, MovementSteeringMode steeringMode, bool moveForward = true)
         {
+            if (Volatile.Read(ref _stopRequested) != 0)
+            {
+                StopMoving();
+                return;
+            }
+
             if (_lootNavigationBarrierHoldsInput)
             {
                 StopMoving();
@@ -3224,6 +3291,12 @@ namespace DriverScanTester.Services
         /// </summary>
         private void ApplyDirectSteeringBearing(float bearingDeg, bool moveForward = true)
         {
+            if (Volatile.Read(ref _stopRequested) != 0)
+            {
+                StopMoving();
+                return;
+            }
+
             if (_lootNavigationBarrierHoldsInput)
             {
                 StopMoving();
@@ -3268,6 +3341,12 @@ namespace DriverScanTester.Services
         /// </summary>
         private void ApplyKeyboardSteeringBearing(float bearingDeg, bool moveForward = true)
         {
+            if (Volatile.Read(ref _stopRequested) != 0)
+            {
+                StopMoving();
+                return;
+            }
+
             float desiredBearingDeg = GeometryUtils.NormalizeBearingDeg(bearingDeg);
 
             // Keep the complete W + turn-key + mouse-edge ownership transition atomic with StopMoving.
@@ -4109,6 +4188,8 @@ namespace DriverScanTester.Services
         {
             lock (_inputLock)
             {
+                if (Volatile.Read(ref _stopRequested) != 0 && desired != TurnKeyState.None)
+                    desired = TurnKeyState.None;
                 TurnKeyState previous = _heldTurnKey;
                 (TurnKeyState release, TurnKeyState press) = GetTurnKeyTransition(previous, desired);
                 if (release == TurnKeyState.None && press == TurnKeyState.None)
@@ -4166,6 +4247,12 @@ namespace DriverScanTester.Services
         /// </summary>
         private void ApplyCameraBearing(float bearingDeg)
         {
+            if (Volatile.Read(ref _stopRequested) != 0)
+            {
+                StopMoving();
+                return;
+            }
+
             if (_lootNavigationBarrierHoldsInput && !IsCombatRecoveryMovementStillValid())
             {
                 StopMoving();
@@ -4447,6 +4534,8 @@ namespace DriverScanTester.Services
         /// </summary>
         public bool IsRecoveryInputOwnershipActive =>
             _recoveryOwnershipHeld ||
+            Volatile.Read(ref _stopRequested) != 0 ||
+            _navigationFailureEscalationRequested ||
             _isUnstuckRoutineActive ||
             _reverseDiagonalRecovery.IsActive ||
             _isWaypointSpecialRecoveryActive ||
@@ -4611,6 +4700,7 @@ namespace DriverScanTester.Services
             _isUnstuckRoutineActive = false;
             _consecutiveStuckAttempts = 0;
             _lastStuckAttemptPos = null;
+            ResetNavigationProgressTracking();
             ResetActionStuckTracking();
             _lastMoveProgressPos = null;
             _lastMoveProgressTime = DateTime.MinValue;
@@ -4688,6 +4778,143 @@ namespace DriverScanTester.Services
             ReleaseRecoveryOwnership($"special recovery finished ({target.X:F0},{target.Y:F0})");
         }
 
+        private void EnsureNavigationProgressWaypoint(Waypoint target, float currX, float currY)
+        {
+            if (_navigationProgressWaypointId.Length > 0 &&
+                Math.Abs(_navigationProgressTargetX - target.X) < 0.01f &&
+                Math.Abs(_navigationProgressTargetY - target.Y) < 0.01f)
+                return;
+
+            _navigationWaypointSequence++;
+            _navigationProgressTargetX = target.X;
+            _navigationProgressTargetY = target.Y;
+            _navigationProgressWaypointId = $"WP{_navigationWaypointSequence}({target.X:F1},{target.Y:F1})";
+            _bestWaypointDistance = GeometryUtils.Distance(currX, currY, target.X, target.Y);
+            _lastNavigationProgressDistance = _bestWaypointDistance;
+            _lastNavigationProgressTime = DateTime.MinValue;
+            _awaitingNavigationRecoveryProof = false;
+            _log($"[NavigationProgress] Tracking waypoint={_navigationProgressWaypointId} bestDistance={_bestWaypointDistance:F2}.");
+        }
+
+        private bool UpdateNavigationProgress(
+            Waypoint target,
+            float currX,
+            float currY,
+            CancellationToken token)
+        {
+            EnsureNavigationProgressWaypoint(target, currX, currY);
+            DateTime now = DateTime.UtcNow;
+            float distance = GeometryUtils.Distance(currX, currY, target.X, target.Y);
+
+            if (_consecutiveStuckAttempts > 0 && _lastNavigationProgressTime == DateTime.MinValue)
+                _lastNavigationProgressTime = now;
+
+            // Keep the best physical distance monotonically, but a smaller distance
+            // observed during ReverseDiagonal is not navigation progress and must not
+            // refresh the 15-second clock or prove route recovery. Ordinary route
+            // movement must beat this best value after the local maneuver has ended.
+            if (distance < _bestWaypointDistance - 0.01f)
+            {
+                _bestWaypointDistance = distance;
+                if (_reverseDiagonalRecovery.IsActive)
+                {
+                    // A recovery that happened to move toward the waypoint may improve
+                    // the best/reference distance, but it never refreshes the timer.
+                    _lastNavigationProgressDistance = distance;
+                    _log($"[NavigationProgress] waypoint={_navigationProgressWaypointId} bestDistance={_bestWaypointDistance:F2} observedDuringRecovery=True; navigation timer unchanged.");
+                }
+                else if (_consecutiveStuckAttempts > 0 &&
+                         distance <= _lastNavigationProgressDistance - NAVIGATION_PROGRESS_MIN_DISTANCE)
+                {
+                    _lastNavigationProgressDistance = distance;
+                    _lastNavigationProgressTime = now;
+                    if (_awaitingNavigationRecoveryProof)
+                    {
+                        _log($"[Navigation] NavigationRecovered=True waypoint={_navigationProgressWaypointId} bestDistance={_bestWaypointDistance:F2}; failure history preserved at {_consecutiveStuckAttempts}.");
+                        _awaitingNavigationRecoveryProof = false;
+                    }
+                    else
+                    {
+                        _log($"[NavigationProgress] waypoint={_navigationProgressWaypointId} bestDistance={_bestWaypointDistance:F2}; failures={_consecutiveStuckAttempts}.");
+                    }
+                }
+            }
+
+            if (_tickCount % _stateLogInterval == 0)
+            {
+                int maxAttempts = _memoryService.GetIsInCity()
+                    ? STUCK_MAX_ATTEMPTS_IN_CITY
+                    : STUCK_MAX_ATTEMPTS_OUTSIDE;
+                double noProgressSeconds = _lastNavigationProgressTime == DateTime.MinValue
+                    ? 0
+                    : (now - _lastNavigationProgressTime).TotalSeconds;
+                _log($"[NavigationProgress] waypoint={_navigationProgressWaypointId} failures={_consecutiveStuckAttempts}/{maxAttempts} bestDistance={_bestWaypointDistance:F2} noProgress={noProgressSeconds:F1}/{NAVIGATION_NO_PROGRESS_TIMEOUT_SECONDS:F0}s.");
+            }
+
+            if (_consecutiveStuckAttempts > 0 &&
+                _lastNavigationProgressTime != DateTime.MinValue)
+            {
+                double noProgressSeconds = (now - _lastNavigationProgressTime).TotalSeconds;
+                if (noProgressSeconds >= NAVIGATION_NO_PROGRESS_TIMEOUT_SECONDS)
+                {
+                    string reason = $"no genuine waypoint progress for {noProgressSeconds:F1}s (limit {NAVIGATION_NO_PROGRESS_TIMEOUT_SECONDS:F0}s)";
+                    return EscalateNavigationFailure(reason, token);
+                }
+            }
+
+            return false;
+        }
+
+        private bool EscalateNavigationFailure(string reason, CancellationToken token)
+        {
+            if (token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
+                return false;
+
+            int maxAttempts = _memoryService.GetIsInCity()
+                ? STUCK_MAX_ATTEMPTS_IN_CITY
+                : STUCK_MAX_ATTEMPTS_OUTSIDE;
+            double noProgressSeconds = _lastNavigationProgressTime == DateTime.MinValue
+                ? 0
+                : (DateTime.UtcNow - _lastNavigationProgressTime).TotalSeconds;
+            _log($"[NavigationFailure] Escalating to city workflow: reason={reason}; waypoint={_navigationProgressWaypointId}; failures={_consecutiveStuckAttempts}/{maxAttempts}; bestDistance={_bestWaypointDistance:F2}; noProgress={noProgressSeconds:F1}s.");
+
+            if (!InternalRepotEnabled)
+            {
+                _navigationFailureEscalationRequested = true;
+                LootSystemRef?.SuspendForRecovery("navigation failure escalation");
+                CancelMobGrouping("navigation failure escalation");
+                _reverseDiagonalRecovery.Stop();
+                EndCombatRecoveryMovement("navigation failure escalation");
+                _isUnstuckRoutineActive = false;
+                ReleaseRecoveryOwnership("navigation failure escalation");
+                Stop();
+                return true;
+            }
+
+            CancelMobGrouping("navigation failure escalation");
+            _reverseDiagonalRecovery.Stop();
+            EndCombatRecoveryMovement("navigation failure escalation");
+            _isUnstuckRoutineActive = false;
+            ReleaseRecoveryOwnership("navigation failure escalation");
+            StopMoving();
+            ReleaseCombatKeys();
+            if (token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
+                return true;
+            _repotHelper.ReportAndGoBack();
+            return true;
+        }
+
+        private void ResetNavigationProgressTracking()
+        {
+            _navigationProgressWaypointId = "";
+            _navigationProgressTargetX = float.NaN;
+            _navigationProgressTargetY = float.NaN;
+            _bestWaypointDistance = float.MaxValue;
+            _lastNavigationProgressDistance = float.MaxValue;
+            _lastNavigationProgressTime = DateTime.MinValue;
+            _awaitingNavigationRecoveryProof = false;
+        }
+
         private async Task HandleConfirmedNavigationStuckAsync(
             float currX,
             float currY,
@@ -4695,6 +4922,10 @@ namespace DriverScanTester.Services
             CancellationToken token,
             string source)
         {
+            token.ThrowIfCancellationRequested();
+            if (Volatile.Read(ref _stopRequested) != 0)
+                return;
+
             // Recovery owns movement/camera exclusively: quiesce any in-flight loot
             // scan first, and wait out a loot collection that is already walking the
             // character to an item. The stuck dispatch is retried next tick.
@@ -4711,14 +4942,14 @@ namespace DriverScanTester.Services
             if (!_enableWaypointSpecialRecoveries ||
                 target.StuckRecoveryType == WaypointStuckRecoveryType.Default)
             {
-                StartReverseDiagonalRecovery(currX, currY, target);
+                StartReverseDiagonalRecovery(currX, currY, target, token);
                 return;
             }
 
             if (_specialRecoveryAttempted)
             {
                 _log("[WaypointRecovery] Special recovery already attempted at this stuck location with no real progress — using standard unstuck.");
-                StartReverseDiagonalRecovery(currX, currY, target);
+                StartReverseDiagonalRecovery(currX, currY, target, token);
                 return;
             }
 
@@ -4734,7 +4965,8 @@ namespace DriverScanTester.Services
                 if (InternalRepotEnabled)
                 {
                     _log("[WaypointRecovery] Repot requested by waypoint (manual mode).");
-                    _repotHelper.ReportAndGoBack();
+                    if (!token.IsCancellationRequested && Volatile.Read(ref _stopRequested) == 0)
+                        _repotHelper.ReportAndGoBack();
                     FinishSpecialRecovery(target, succeeded: false);
                 }
                 else
@@ -4795,9 +5027,16 @@ namespace DriverScanTester.Services
                 return;
             }
 
+            token.ThrowIfCancellationRequested();
+            if (Volatile.Read(ref _stopRequested) != 0)
+            {
+                FinishSpecialRecovery(target, succeeded: false);
+                return;
+            }
+
             _log("[WaypointRecovery] Special recovery failed — falling back to standard unstuck.");
             FinishSpecialRecovery(target, succeeded: false);
-            StartReverseDiagonalRecovery(currX, currY, target);
+            StartReverseDiagonalRecovery(currX, currY, target, token);
         }
 
         private void TickWaypointMobRecovery(float currX, float currY)
@@ -4843,8 +5082,15 @@ namespace DriverScanTester.Services
         /// <summary>
         /// Starts ReverseDiagonalRecovery and applies the initial camera bearing + W key.
         /// </summary>
-        private void StartReverseDiagonalRecovery(float currX, float currY, Waypoint target)
+        private void StartReverseDiagonalRecovery(
+            float currX,
+            float currY,
+            Waypoint target,
+            CancellationToken token = default)
         {
+            if (token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
+                return;
+
             // A failed workflow route must never start another recovery. This also makes
             // the fatal state robust against a late/duplicate stuck dispatch while
             // PathRunner is aborting the route.
@@ -4867,50 +5113,58 @@ namespace DriverScanTester.Services
             }
 
             CancelMobGrouping("ReverseDiagonalRecovery started");
+            EnsureNavigationProgressWaypoint(target, currX, currY);
             _consecutiveStuckAttempts++;
             _lastStuckAttemptPos = (currX, currY);
+            if (_lastNavigationProgressTime == DateTime.MinValue)
+            {
+                _lastNavigationProgressDistance = _bestWaypointDistance;
+                _lastNavigationProgressTime = DateTime.UtcNow;
+            }
             bool inCity = _memoryService.GetIsInCity();
             int maxAttempts = inCity ? STUCK_MAX_ATTEMPTS_IN_CITY : STUCK_MAX_ATTEMPTS_OUTSIDE;
-            _log($"[Unstuck] Waypoint=({target.X:F1},{target.Y:F1}) Attempt={_consecutiveStuckAttempts}/{maxAttempts} City={inCity}");
+            double noProgressSeconds = (DateTime.UtcNow - _lastNavigationProgressTime).TotalSeconds;
+            _log($"[Unstuck] waypoint={_navigationProgressWaypointId} Attempt={_consecutiveStuckAttempts}/{maxAttempts} bestDistance={_bestWaypointDistance:F2} noProgress={noProgressSeconds:F1}s City={inCity}.");
 
             if (_consecutiveStuckAttempts >= maxAttempts)
             {
-                _consecutiveStuckAttempts = 0;
-                _lastStuckAttemptPos = null;
                 CaptureStuckScreenshot();
                 _reverseDiagonalRecovery.Stop();
                 _isUnstuckRoutineActive = false;
 
+                if (!InternalRepotEnabled)
+                {
+                    // Workflow mode: the coordinator owns repot. Stop the route right here —
+                    // no teleport key and no idle on this dead route. The coordinator waits
+                    // 10 minutes, resets the failure bookkeeping and restarts the flow from
+                    // the Repot step (go repot → start again).
+                    _log($"[Unstuck] CITY STUCK LIMIT REACHED ({_consecutiveStuckAttempts}/{maxAttempts}) — stopping the route; the coordinator waits 10 min, resets and restarts from the Repot step.");
+                    EscalateNavigationFailure(
+                        $"navigation failure limit reached ({_consecutiveStuckAttempts}/{maxAttempts}) for the same waypoint",
+                        token);
+                    return;
+                }
+
+                _consecutiveStuckAttempts = 0;
+                _lastStuckAttemptPos = null;
+
                 if (inCity)
                 {
-                    if (InternalRepotEnabled)
-                    {
-                        // Legacy mode: no external repot flow — press the town teleport and
-                        // wait before retrying.
-                        _log("[Unstuck] CITY STUCK LIMIT REACHED.");
-                        _log($"[Unstuck] Reached {maxAttempts} stuck attempts in city — pressing 6 and waiting 10 minutes.");
-                        StopMoving();
-                        ReleaseCombatKeys();
-                        GameInput.PressKey(GameInput.VK_6, GameInput.SCAN_6);
+                    // Legacy mode: no external repot flow — press the town teleport and
+                    // wait before retrying.
+                    _log("[Unstuck] CITY STUCK LIMIT REACHED.");
+                    _log($"[Unstuck] Reached {maxAttempts} stuck attempts in city — pressing 6 and waiting 10 minutes.");
+                    StopMoving();
+                    ReleaseCombatKeys();
+                    if (token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
+                        return;
+                    GameInput.PressKey(GameInput.VK_6, GameInput.SCAN_6);
 
-                        // Screenshot immediately after the scroll is triggered — before the
-                        // town starts loading — so the image shows the state at teleport time.
-                        ScreenshotService.CaptureFullScreen(ScreenshotService.TownPortalsFolder, _log, "[Unstuck]");
+                    // Screenshot immediately after the scroll is triggered — before the
+                    // town starts loading — so the image shows the state at teleport time.
+                    ScreenshotService.CaptureFullScreen(ScreenshotService.TownPortalsFolder, _log, "[Unstuck]");
 
-                        _inCityStuckCooldownUntil = DateTime.Now.AddMinutes(10);
-                    }
-                    else
-                    {
-                        // Workflow mode: the coordinator handles repot, so do NOT press the
-                        // teleport key / idle for 10 minutes here. Signal a fatal city-stuck
-                        // state so PathRunner aborts the route and the coordinator retries
-                        // (and eventually fails visibly instead of standing silently).
-                        _log("[Unstuck] CITY STUCK LIMIT REACHED.");
-                        _log($"[Unstuck] Reached {maxAttempts} stuck attempts in city (workflow) — aborting current route so the coordinator can retry from the city.");
-                        _isCityStuckFatal = true;
-                        StopMoving();
-                        ReleaseCombatKeys();
-                    }
+                    _inCityStuckCooldownUntil = DateTime.Now.AddMinutes(10);
                 }
                 else
                 {
@@ -4918,22 +5172,33 @@ namespace DriverScanTester.Services
                     _log($"[Unstuck] Triggering ReportAndGoBack.");
                     StopMoving();
                     ReleaseCombatKeys();
+                    if (token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
+                        return;
                     _repotHelper.ReportAndGoBack();
                 }
 
                 return;
             }
 
-            _reverseDiagonalRecovery.Start(currX, currY, target.X, target.Y,
-                _lastHealthyMoveBearingDeg != UnsetBearing ? _lastHealthyMoveBearingDeg : (float?)null,
-                _lastHealthyMoveTime);
-            ApplyCameraBearing(_reverseDiagonalRecovery.CurrentBearingDeg); // camera only — Recovery controls W
+            lock (_inputLock)
+            {
+                if (token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
+                {
+                    ReleaseRecoveryOwnership("navigation recovery cancelled before start");
+                    return;
+                }
 
-            // Mark the unstuck routine as active: while it runs, the combat handler
-            // returns None (no TAB / no attack) and the route resync is skipped, so the
-            // recovery is never interrupted and the player really walks away from the
-            // stuck spot.
-            _isUnstuckRoutineActive = true;
+                _reverseDiagonalRecovery.Start(currX, currY, target.X, target.Y,
+                    _lastHealthyMoveBearingDeg != UnsetBearing ? _lastHealthyMoveBearingDeg : (float?)null,
+                    _lastHealthyMoveTime);
+
+                // Mark the unstuck routine as active: while it runs, the combat handler
+                // returns None (no TAB / no attack) and the route resync is skipped, so the
+                // recovery is never interrupted and the player really walks away from the
+                // stuck spot.
+                _isUnstuckRoutineActive = true;
+            }
+            ApplyCameraBearing(_reverseDiagonalRecovery.CurrentBearingDeg); // camera only — Recovery controls W
         }
 
         /// <summary>
@@ -5035,17 +5300,25 @@ namespace DriverScanTester.Services
                 _lastRepositionPos = null;
             }
 
+            Waypoint target = _waypoints.Count > 0
+                ? _waypoints.Peek()
+                : new Waypoint(Waypoint2.X, Waypoint2.Y, GlobalPrecision, BotMode.OnlyMove);
+            float reachThreshold = GetEffectiveWaypointReachThreshold(target);
+            float initialDistance = GeometryUtils.Distance(currX, currY, target.X, target.Y);
+
             // ── Escalation ──
-            // Count consecutive reposition cycles. Real movement progress since the previous
-            // attempt resets the counter; repeated cycles from an unchanged position mean the
-            // player cannot leave (geometry block + phantom target re-selected by TAB) —
-            // escalate to the standard unstuck so the existing escalation chain
-            // (reverse-diagonal → ReportAndGoBack) applies.
+            // Count consecutive reposition cycles. Only movement that really reduced the
+            // distance to the current waypoint resets the counter: walking away from (or
+            // sideways to) the waypoint is not progress, so arbitrary displacement in any
+            // direction can never postpone the escalation. Repeated cycles from an unchanged
+            // position mean the player cannot leave (geometry block + phantom target
+            // re-selected by TAB) — escalate to the standard unstuck so the existing
+            // escalation chain (reverse-diagonal → ReportAndGoBack) applies.
             if (_lastRepositionPos.HasValue)
             {
-                float movedSinceLastAttempt = GeometryUtils.Distance(
-                    currX, currY, _lastRepositionPos.Value.X, _lastRepositionPos.Value.Y);
-                if (movedSinceLastAttempt > BotConstants.Movement.StuckProgressResetDistance)
+                float previousDistance = GeometryUtils.Distance(
+                    _lastRepositionPos.Value.X, _lastRepositionPos.Value.Y, target.X, target.Y);
+                if (previousDistance - initialDistance >= BotConstants.ReverseDiagonal.SuccessDistImprove)
                 {
                     _repositionRetryCount = 0;
                 }
@@ -5066,9 +5339,18 @@ namespace DriverScanTester.Services
                 return;
             }
 
-            Waypoint target = _waypoints.Count > 0
-                ? _waypoints.Peek()
-                : new Waypoint(Waypoint2.X, Waypoint2.Y, GlobalPrecision, BotMode.OnlyMove);
+            // ── Already at the waypoint ──
+            // There is nothing to walk to: W is never pressed, the 2500 ms budget is never
+            // spent and being nearby is never reported as a successful reposition. The attempt
+            // stays a failure, so the escalation counter above and the existing failed-recovery
+            // mechanism decide what happens to the still-unsuccessful attack.
+            if (initialDistance <= reachThreshold)
+            {
+                _log($"[Combat] Reposition skipped — start=({currX:F1},{currY:F1}) is already inside the waypoint reach threshold " +
+                     $"(target=({target.X:F1},{target.Y:F1}), initialDistance={initialDistance:F2}, reachThreshold={reachThreshold:F2}, " +
+                     $"attempt={_repositionRetryCount}/{REPOSITION_MAX_ATTEMPTS}); no W, no retry TAB, combat baselines kept.");
+                return;
+            }
 
             int walkMs = BotConstants.Combat.CombatRepositionDurationMs;
 
@@ -5097,35 +5379,45 @@ namespace DriverScanTester.Services
                 }
             }
 
-            _log($"[Combat] Attack not consuming mana — repositioning: walk toward waypoint ({target.X:F1},{target.Y:F1}) for {walkMs}ms, then TAB + attack.");
+            _log($"[Combat] Attack not consuming mana — repositioning: start=({currX:F1},{currY:F1}) target=({target.X:F1},{target.Y:F1}) " +
+                 $"initialDistance={initialDistance:F2} reachThreshold={reachThreshold:F2} maxBudget={walkMs}ms, then TAB + attack.");
 
-            CombatRepositionResult result;
-            float displacement = 0f;
+            CombatRepositionObservation observation;
             try
             {
                 // Force an immediate camera update to the waypoint direction (fresh segment
-                // bypasses the camera filter) and walk forward for the reposition duration.
+                // bypasses the camera filter) and walk forward until the waypoint threshold is
+                // reached or the maximum movement budget expires.
                 ResetBearingState();
                 ApplyCameraBearing(GeometryUtils.GetBearingToTargetDeg(currX, currY, target.X, target.Y));
 
                 // A performed key-down and a performed movement are tracked separately: only
                 // the second one may ever count as a successful reposition.
                 bool inputAccepted = TryStartMoving();
-                if (inputAccepted)
-                {
-                    (result, displacement) = await WaitForCombatRepositionAsync(
-                        currX, currY, walkMs, authorizedRecovery, token);
-                }
-                else
-                {
-                    result = CombatRepositionResult.InputDenied;
-                }
+                observation = inputAccepted
+                    ? await WaitForCombatRepositionAsync(
+                        currX, currY, target.X, target.Y, reachThreshold, initialDistance, walkMs, authorizedRecovery, token)
+                    : CombatRepositionObservation.InputDenied(currX, currY, initialDistance);
             }
             finally
             {
                 StopMoving();
                 EndCombatRecoveryMovement("reposition finished");
             }
+
+            CombatRepositionResult result = observation.Result;
+            float displacement = observation.Displacement;
+            float finalDistance = observation.FinalDistance;
+            float distanceImprovement = initialDistance - finalDistance;
+            string finalPosition = observation.EndPositionRead
+                ? $"({observation.EndX:F1},{observation.EndY:F1})"
+                : "unreadable";
+            string report =
+                $"start=({currX:F1},{currY:F1}), target=({target.X:F1},{target.Y:F1}), " +
+                $"initialDistance={initialDistance:F2}, reachThreshold={reachThreshold:F2}, " +
+                $"final={finalPosition}, finalDistance={finalDistance:F2}, " +
+                $"displacement={displacement:F2}, improvement={distanceImprovement:F2}, " +
+                $"termination={observation.Termination}";
 
             // ── Completion ──
             // Only a confirmed physical reposition may reset the combat baselines and re-TAB.
@@ -5134,23 +5426,30 @@ namespace DriverScanTester.Services
             switch (result)
             {
                 case CombatRepositionResult.Moved:
-                    _log($"[Combat] Reposition confirmed by {displacement:F2} units of real displacement.");
+                    _log($"[Combat] Reposition confirmed by {displacement:F2} units of real displacement — {report}.");
                     break;
 
                 case CombatRepositionResult.InsufficientDisplacement:
-                    _log($"[Combat] Reposition failed — moved only {displacement:F2} units (< {BotConstants.ReverseDiagonal.SuccessDisplacement:F2}); not reselecting the same target.");
+                    _log($"[Combat] Reposition failed — moved only {displacement:F2} units (< {BotConstants.ReverseDiagonal.SuccessDisplacement:F2}); {report}.");
+                    return;
+
+                case CombatRepositionResult.NoWaypointProgress:
+                    string direction = distanceImprovement < 0f
+                        ? "moved away from the waypoint"
+                        : "no meaningful progress toward the waypoint";
+                    _log($"[Combat] Reposition failed — {direction} (improvement {distanceImprovement:F2} < {BotConstants.ReverseDiagonal.SuccessDistImprove:F2}); {report}.");
                     return;
 
                 case CombatRepositionResult.InputDenied:
-                    _log("[Combat] Reposition failed — forward input was not accepted; not reselecting the same target.");
+                    _log($"[Combat] Reposition failed — forward input was not accepted; not reselecting the same target. {report}.");
                     return;
 
                 case CombatRepositionResult.AuthorizationLost:
-                    _log("[Combat] Reposition aborted — authorization lost mid-attempt; combat baselines kept, no retry TAB.");
+                    _log($"[Combat] Reposition aborted — authorization lost mid-attempt; combat baselines kept, no retry TAB. {report}.");
                     return;
 
                 case CombatRepositionResult.Cancelled:
-                    _log("[Combat] Reposition cancelled — input released, no retry TAB.");
+                    _log($"[Combat] Reposition cancelled — input released, no retry TAB. {report}.");
                     token.ThrowIfCancellationRequested();
                     return;
             }
@@ -5169,19 +5468,72 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Bounded, small-interval observation of one combat reposition. The result distinguishes
-        /// a performed movement from a performed key-down: success requires a readable final
-        /// position whose displacement from the start exceeds coordinate noise. The largest
-        /// historical reading is deliberately NOT used — a character that walked away and came
-        /// back did not reposition. In an authorized recovery the attempt aborts as soon as the
-        /// authorization is lost (target/focus/request change); unrestricted repositioning is
-        /// observed for the full budget like before.
+        /// One reposition attempt's observation: where the walk ended, how far it got and how
+        /// the movement loop terminated. Only <see cref="CombatRepositionResult.Moved"/> may be
+        /// treated as success by the caller.
         /// </summary>
-        private async Task<(CombatRepositionResult Result, float Displacement)> WaitForCombatRepositionAsync(
-            float startX, float startY, int budgetMs, bool authorizedRecovery, CancellationToken token)
+        private readonly record struct CombatRepositionObservation(
+            CombatRepositionResult Result,
+            CombatRepositionTermination Termination,
+            bool EndPositionRead,
+            float EndX,
+            float EndY,
+            float FinalDistance,
+            float Displacement)
         {
+            public static CombatRepositionObservation InputDenied(float startX, float startY, float initialDistance)
+                => new(
+                    CombatRepositionResult.InputDenied,
+                    CombatRepositionTermination.InputDenied,
+                    EndPositionRead: false,
+                    startX,
+                    startY,
+                    initialDistance,
+                    Displacement: 0f);
+        }
+
+        /// <summary>
+        /// Bounded, small-interval observation of one combat reposition. The walk ends as soon as
+        /// the character is inside the waypoint's existing reach threshold, so the budget is a
+        /// MAXIMUM and never an instruction to keep walking (holding W for the whole budget is
+        /// what carried the character through and past the waypoint).
+        ///
+        /// The result distinguishes a performed movement from a performed key-down: success
+        /// requires a readable final position that both moved more than coordinate noise AND
+        /// ended closer to the waypoint. The largest historical reading is deliberately NOT used —
+        /// a character that walked away and came back did not reposition. In an authorized
+        /// recovery the attempt aborts as soon as the authorization is lost (target/focus/request
+        /// change); unrestricted repositioning is observed up to the same maximum budget.
+        /// </summary>
+        private async Task<CombatRepositionObservation> WaitForCombatRepositionAsync(
+            float startX,
+            float startY,
+            float targetX,
+            float targetY,
+            float reachThreshold,
+            float initialDistance,
+            int budgetMs,
+            bool authorizedRecovery,
+            CancellationToken token)
+        {
+            CombatRepositionObservation Observe(
+                CombatRepositionResult result,
+                CombatRepositionTermination termination,
+                bool positionRead,
+                float x,
+                float y)
+                => new(
+                    result,
+                    termination,
+                    positionRead,
+                    x,
+                    y,
+                    positionRead ? GeometryUtils.Distance(x, y, targetX, targetY) : initialDistance,
+                    positionRead ? GeometryUtils.Distance(x, y, startX, startY) : 0f);
+
             DateTime deadline = DateTime.Now.AddMilliseconds(budgetMs);
-            float lastDisplacement = 0f;
+            float lastX = startX;
+            float lastY = startY;
             bool anyPositionRead = false;
 
             while (DateTime.Now < deadline)
@@ -5189,41 +5541,63 @@ namespace DriverScanTester.Services
                 // Cancellation is reported as an explicit outcome (the caller re-throws it after
                 // releasing the input) so it can never be mistaken for a successful reposition.
                 if (token.IsCancellationRequested)
-                    return (CombatRepositionResult.Cancelled, lastDisplacement);
+                    return Observe(CombatRepositionResult.Cancelled, CombatRepositionTermination.Cancelled, anyPositionRead, lastX, lastY);
 
                 await Task.Delay(BotConstants.Combat.CombatRepositionPollMs, CancellationToken.None);
 
                 // A failed position read is not proof of motion: it leaves the last known
-                // displacement untouched.
+                // position untouched.
                 var (sampleX, sampleY, sampleRead) = _memoryService.GetPlayerPosition();
                 if (sampleRead)
                 {
                     anyPositionRead = true;
-                    lastDisplacement = GeometryUtils.Distance(sampleX, sampleY, startX, startY);
+                    lastX = sampleX;
+                    lastY = sampleY;
                 }
 
                 if (authorizedRecovery && !IsCombatRecoveryMovementStillValid())
                 {
                     _log("[CombatRecovery] Reposition aborted — recovery authorization lost (target/request/focus/stop changed).");
-                    return (CombatRepositionResult.AuthorizationLost, lastDisplacement);
+                    return Observe(CombatRepositionResult.AuthorizationLost, CombatRepositionTermination.AuthorizationLost, anyPositionRead, lastX, lastY);
+                }
+
+                // Waypoint-distance-aware termination: as soon as the character is inside the
+                // waypoint's own reach threshold the walk is finished and W is released by the
+                // caller's finally block.
+                if (sampleRead && GeometryUtils.Distance(sampleX, sampleY, targetX, targetY) <= reachThreshold)
+                {
+                    CombatRepositionObservation reached = Observe(
+                        CombatRepositionResult.Moved, CombatRepositionTermination.WaypointReached, true, sampleX, sampleY);
+
+                    // Standing inside the threshold is not proof that the character walked:
+                    // a real displacement is still required.
+                    return reached.Displacement >= BotConstants.ReverseDiagonal.SuccessDisplacement
+                        ? reached
+                        : reached with { Result = CombatRepositionResult.InsufficientDisplacement };
                 }
             }
 
             if (token.IsCancellationRequested)
-                return (CombatRepositionResult.Cancelled, lastDisplacement);
+                return Observe(CombatRepositionResult.Cancelled, CombatRepositionTermination.Cancelled, anyPositionRead, lastX, lastY);
 
             // Final position sample: the decision is made on where the character ended the walk.
+            // A failed final read can never be reported as a successful reposition.
             var (endX, endY, endRead) = _memoryService.GetPlayerPosition();
-            if (endRead)
-            {
-                anyPositionRead = true;
-                lastDisplacement = GeometryUtils.Distance(endX, endY, startX, startY);
-            }
+            if (!endRead)
+                return Observe(CombatRepositionResult.InsufficientDisplacement, CombatRepositionTermination.PositionUnreadable, anyPositionRead, lastX, lastY);
 
-            if (!anyPositionRead || lastDisplacement < BotConstants.ReverseDiagonal.SuccessDisplacement)
-                return (CombatRepositionResult.InsufficientDisplacement, lastDisplacement);
+            CombatRepositionObservation final = Observe(
+                CombatRepositionResult.Moved, CombatRepositionTermination.DurationLimit, true, endX, endY);
 
-            return (CombatRepositionResult.Moved, lastDisplacement);
+            if (final.Displacement < BotConstants.ReverseDiagonal.SuccessDisplacement)
+                return final with { Result = CombatRepositionResult.InsufficientDisplacement };
+
+            // Displacement alone is not progress: the walk must also have ended closer to the
+            // waypoint than it started, otherwise walking away or sideways counted as success.
+            if (initialDistance - final.FinalDistance < BotConstants.ReverseDiagonal.SuccessDistImprove)
+                return final with { Result = CombatRepositionResult.NoWaypointProgress };
+
+            return final;
         }
 
         [DllImport("user32.dll", SetLastError = true)]
@@ -5293,6 +5667,9 @@ namespace DriverScanTester.Services
         {
             lock (_inputLock)
             {
+                if (Volatile.Read(ref _stopRequested) != 0)
+                    return false;
+
                 bool combatRecoveryBarrierAuthorization =
                     _lootNavigationBarrierHoldsInput && IsCombatRecoveryMovementStillValid();
                 if (_lootNavigationBarrierHoldsInput && !combatRecoveryBarrierAuthorization)
@@ -5357,6 +5734,9 @@ namespace DriverScanTester.Services
         {
             lock (_inputLock)
             {
+                if (Volatile.Read(ref _stopRequested) != 0)
+                    return;
+
                 if (_lootNavigationBarrierHoldsInput)
                 {
                     if (!_lootMoveSuppressedLogged)
@@ -5445,6 +5825,56 @@ namespace DriverScanTester.Services
                     _log($"[Input] ForceStartMoving failed: {ex.Message}");
                 }
             }
+        }
+
+        /// <summary>
+        /// Permanently stops this route instance. The latch is set before recovery
+        /// cancellation and key-up cleanup, so callbacks from an in-flight recovery can
+        /// never start W/A/D after Stop begins.
+        /// </summary>
+        public void Stop()
+        {
+            Interlocked.Exchange(ref _stopRequested, 1);
+            ReleaseStoppedInputs();
+            void TryCleanup(Action cleanup, string action)
+            {
+                try { cleanup(); }
+                catch (Exception ex) { _log($"[MovementStop] {action} failed: {ex.Message}"); }
+            }
+
+            try
+            {
+                TryCleanup(() => LootSystemRef?.SuspendForRecovery("movement system stopped"), "loot suspension");
+                TryCleanup(() => CancelMobGrouping("movement system stopped"), "mob grouping cancellation");
+                TryCleanup(() => EndCombatRecoveryMovement("movement system stopped"), "combat recovery cancellation");
+                TryCleanup(() =>
+                {
+                    lock (_inputLock)
+                    {
+                        _reverseDiagonalRecovery.Stop();
+                        _waypointMobRecovery?.Stop();
+                    }
+                    _waypointMobRecovery = null;
+                }, "ReverseDiagonal cancellation");
+                TryCleanup(CancelWaypointSpecialRecovery, "waypoint recovery cancellation");
+            }
+            finally
+            {
+                _isUnstuckRoutineActive = false;
+                try { ReleaseRecoveryOwnership("movement system stopped"); }
+                catch (Exception ex) { _log($"[MovementStop] Recovery ownership release failed: {ex.Message}"); }
+                finally { ReleaseStoppedInputs(); }
+            }
+        }
+
+        private void ReleaseStoppedInputs()
+        {
+            try { StopMoving(); }
+            catch (Exception ex) { _log($"[Input] Movement key release after stop failed: {ex.Message}"); }
+            try { SendSyntheticBackwardKeyEvent(keyUp: true); }
+            catch (Exception ex) { _log($"[Input] S-up cleanup after movement stop failed: {ex.Message}"); }
+            try { ReleaseCombatKeys(); }
+            catch (Exception ex) { _log($"[Input] Combat key release after movement stop failed: {ex.Message}"); }
         }
 
         public void StopMoving()
@@ -5554,18 +5984,24 @@ namespace DriverScanTester.Services
 
         private void HoldSkillThree()
         {
-            if (_isSkillThreeHeld)
-                return;
+            lock (_inputLock)
+            {
+                if (Volatile.Read(ref _stopRequested) != 0 || _isSkillThreeHeld)
+                    return;
 
-            _log("[Key] 3 hold (attack skill)");
-            SendSkillThreeKeyEvent(keyUp: false);
-            _isSkillThreeHeld = true;
+                _log("[Key] 3 hold (attack skill)");
+                SendSkillThreeKeyEvent(keyUp: false);
+                _isSkillThreeHeld = true;
+            }
         }
 
         private void ReleaseSkillThree()
         {
-            if (_isSkillThreeHeld)
+            lock (_inputLock)
             {
+                if (!_isSkillThreeHeld)
+                    return;
+
                 _log("[Key] 3 up");
                 SendSkillThreeKeyEvent(keyUp: true);
                 _isSkillThreeHeld = false;
@@ -5847,6 +6283,7 @@ namespace DriverScanTester.Services
             }
             _consecutiveStuckAttempts = 0;
             _lastStuckAttemptPos = null;
+            ResetNavigationProgressTracking();
 
             return RouteResyncResult.Applied;
         }

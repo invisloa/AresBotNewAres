@@ -3751,8 +3751,6 @@ namespace DriverScanTester.ViewModels
 
             CancelAutoStopTimer();
             StopGameConnectionMonitor();
-            PauseController.Resume();
-            AppendBotLog($"[BotStop] Stopping every bot action ({reason}).");
             try
             {
                 if (_workflowCoordinator != null)
@@ -3774,6 +3772,8 @@ namespace DriverScanTester.ViewModels
             {
                 AppendBotLog($"[AutoStop] Bots stop error: {ex.Message}");
             }
+            PauseController.Resume();
+            AppendBotLog($"[BotStop] Stopping every bot action ({reason}).");
             // May run on the timer's background thread — marshal to the UI thread
             // like the coordinator callbacks do.
             System.Windows.Application.Current?.Dispatcher?.Invoke(() =>
@@ -4307,9 +4307,9 @@ namespace DriverScanTester.ViewModels
                 public void StopAllBotsInternal()
                 {
                     CancelAutoStopTimer();
+                    ToggleMovementBot(false);
                     PauseController.Resume();
                     ReleaseAllBotInputs();
-                    ToggleMovementBot(false);
                     ToggleHealManaBot(false);
                     ToggleLootBot(false);
                     StopGameConnectionMonitorIfIdle();
@@ -4329,6 +4329,7 @@ namespace DriverScanTester.ViewModels
                     {
                         _movementBotCts?.Cancel();
                         _isMovementBotRunning = false;
+                        try { _movementSystem?.Stop(); } catch { }
                         // Also stop loot bot when movement stops
                         ToggleLootBot(false);
                         try { _movementSystem?.ReleaseCameraOwnership(); } catch { }

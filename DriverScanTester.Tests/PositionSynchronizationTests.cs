@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -35,6 +36,14 @@ namespace DriverScanTester.Tests
         private static readonly MethodInfo EnsureRouteEntryValidatedMethod = typeof(BotWorkflowCoordinator)
             .GetMethod("EnsureRouteEntryValidatedAsync", PrivateInstance)
             ?? throw new InvalidOperationException("EnsureRouteEntryValidatedAsync not found.");
+
+        private static readonly MethodInfo ExecuteRepotStepMethod = typeof(BotWorkflowCoordinator)
+            .GetMethod("ExecuteRepotStepAsync", PrivateInstance)
+            ?? throw new InvalidOperationException("ExecuteRepotStepAsync not found.");
+
+        private static readonly FieldInfo TeleportRetryCountField = typeof(BotWorkflowCoordinator)
+            .GetField("_teleportRetryCount", PrivateInstance)
+            ?? throw new InvalidOperationException("_teleportRetryCount not found.");
 
         private static PositionSyncOptions FastOptions() => new()
         {
@@ -781,6 +790,86 @@ namespace DriverScanTester.Tests
             Assert.Equal(10, result.State.Y);
             Assert.Equal(0, nudges);
             Assert.Equal(PositionSyncState.PositionReady, service.State);
+        }
+
+        [Fact]
+        public async Task NavigationRecoveryTownArrivalUsesValidatedCityTeleportAndContinuesRepotWorkflow()
+        {
+            string saveDirectory = Path.GetFullPath(
+                Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "SavedPaths"));
+            Directory.CreateDirectory(saveDirectory);
+            string pathFile = $"NavigationRepot_{Guid.NewGuid():N}.json";
+            string fullPath = Path.Combine(saveDirectory, pathFile);
+            File.WriteAllText(fullPath,
+                "{\"Name\":\"navigation-repot\",\"Points\":[{\"X\":300,\"Y\":300,\"Precision\":2,\"Mode\":0,\"ZoneRestriction\":2}]}" );
+
+            try
+            {
+                var memory = new SyncMemory { Map = 35, X = 100, Y = 100, InCity = false };
+                var service = CreateService(memory, FastOptions(), _ => Task.CompletedTask, out List<string> log);
+                var coordinator = CreateCoordinator(memory, service, log, _ =>
+                {
+                    memory.InCity = true;
+                    memory.X = 300;
+                    memory.Y = 300;
+                    return Task.FromResult(true);
+                });
+                coordinator.ActiveProfile.DryRunRepot = true;
+                coordinator.ActiveProfile.MaxTeleportRetries = 2;
+
+                var step = new BotFlowStep
+                {
+                    Type = BotFlowStepType.Repot,
+                    RepotPaths = new List<BotRouteStep> { new() { PathFile = pathFile } }
+                };
+                var task = (Task<bool>?)ExecuteRepotStepMethod.Invoke(
+                    coordinator, new object[] { step, CancellationToken.None });
+                Assert.NotNull(task);
+
+                Assert.True(await task!, string.Join(Environment.NewLine, log));
+                Assert.True(memory.InCity);
+                Assert.Contains(log, line => line.Contains("Town destination validated"));
+                Assert.Contains(log, line => line.Contains("Town arrival validated"));
+                Assert.Contains(log, line => line.Contains("continuing the existing Repot workflow"));
+                Assert.Contains(log, line => line.Contains("DryRunRepot=true"));
+            }
+            finally
+            {
+                try { File.Delete(fullPath); } catch { }
+            }
+        }
+
+        [Fact]
+        public async Task FailedTownTeleportValidationRetriesWithinProfileLimitThenFailsWorkflow()
+        {
+            var memory = new SyncMemory { Map = 35, X = 100, Y = 100, InCity = false };
+            var service = CreateService(memory, FastOptions(), _ => Task.CompletedTask, out List<string> log);
+            int teleportInputs = 0;
+            var coordinator = CreateCoordinator(memory, service, log, _ =>
+            {
+                teleportInputs++;
+                memory.InCity = true; // The city flag alone is insufficient while coordinates remain stale.
+                return Task.FromResult(true);
+            });
+            coordinator.ActiveProfile.MaxTeleportRetries = 2;
+            var step = new BotFlowStep { Type = BotFlowStepType.Repot };
+
+            var firstAttempt = (Task<bool>?)ExecuteRepotStepMethod.Invoke(
+                coordinator, new object[] { step, CancellationToken.None });
+            Assert.NotNull(firstAttempt);
+            Assert.False(await firstAttempt!);
+            Assert.Equal(1, (int)TeleportRetryCountField.GetValue(coordinator)!);
+
+            var secondAttempt = (Task<bool>?)ExecuteRepotStepMethod.Invoke(
+                coordinator, new object[] { step, CancellationToken.None });
+            Assert.NotNull(secondAttempt);
+            Assert.False(await secondAttempt!);
+
+            Assert.Equal(2, teleportInputs);
+            Assert.Equal(0, (int)TeleportRetryCountField.GetValue(coordinator)!);
+            Assert.Equal(BotPhase.Failed, coordinator.CurrentPhase);
+            Assert.Contains(log, line => line.Contains("bounded retry 1/2"));
+            Assert.Contains(log, line => line.Contains("failed after 2/2 attempts"));
         }
 
         [Fact]
