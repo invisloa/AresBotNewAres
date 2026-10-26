@@ -89,6 +89,23 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void PinkOnlyFrameAnalysisIgnoresAquamarineOnlyPixels()
+        {
+            using var bitmap = new Bitmap(40, 40);
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+            using (var brush = new SolidBrush(Color.FromArgb(0, 255, 170)))
+            {
+                graphics.Clear(Color.Black);
+                graphics.FillRectangle(brush, 10, 10, 12, 12);
+            }
+
+            LootSystem.PinkFrameAnalysisResult result = LootSystem.AnalyzePinkFrame(bitmap);
+
+            Assert.Equal(0, result.RawPinkPixels);
+            Assert.Empty(result.CandidateComponents);
+        }
+
+        [Fact]
         public void PinkBlobAtMinimumSize_IsSodSopCandidate()
         {
             // 10x10 — exactly the minimum loot-square size.

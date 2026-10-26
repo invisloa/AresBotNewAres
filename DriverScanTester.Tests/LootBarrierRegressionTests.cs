@@ -471,6 +471,7 @@ namespace DriverScanTester.Tests
         public void LootCaptureRequiresExactDistanceLockSettlementAndOwnership()
         {
             Assert.Equal((short)17050, BotConstants.Camera.LootScanDistance);
+            Assert.Equal((short)17050, BotConstants.Camera.SodSopLootScanDistance);
             Assert.Equal(BotConstants.Camera.LootScanDistance, LootSystem.NormalLootScanDistance);
 
             short distance = LootSystem.NormalLootScanDistance;
@@ -482,6 +483,9 @@ namespace DriverScanTester.Tests
                 distance, distance, lockValue, lockValue,
                 stabilizationElapsed: true, ownershipHeld: true));
 
+            Assert.False(LootSystem.IsLootCaptureAuthorized(
+                distance, (short)17000, lockValue, lockValue,
+                stabilizationElapsed: true, ownershipHeld: true));
             Assert.False(LootSystem.IsLootCaptureAuthorized(
                 distance, (short)(distance - 1), lockValue, lockValue,
                 stabilizationElapsed: true, ownershipHeld: true));
@@ -536,6 +540,8 @@ namespace DriverScanTester.Tests
             object?[] arguments = { null };
 
             Assert.True((bool)(ensure.Invoke(loot, arguments) ?? false));
+            Assert.Equal((short)17050,
+                BitConverter.ToInt16(memoryBytes[cameraBase + BotConstants.MemoryOffsets.CameraDistance], 0));
             Assert.Equal(BotConstants.Camera.StationaryVerticalLock,
                 BitConverter.ToInt16(memoryBytes[cameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset], 0));
 
@@ -626,6 +632,23 @@ namespace DriverScanTester.Tests
         }
 
         // ── Test 11 — other movement modes ──────────────────────────────────────
+
+        [Fact]
+        public void SeparatePinkScanRequestsAreIgnoredOutsidePinkOnlyMode()
+        {
+            using var loot = CreateLoot(_ => { });
+
+            loot.RequestPinkScan();
+            Assert.False(loot.IsPinkScanPendingOrActive);
+
+            loot.PinkLootOnlyMode = true;
+            loot.RequestPinkScan();
+            Assert.True(loot.IsPinkScanPendingOrActive);
+            Assert.False(loot.IsLootCycleActive);
+
+            loot.PinkLootOnlyMode = false;
+            Assert.False(loot.IsPinkScanPendingOrActive);
+        }
 
         [Fact]
         public void OnlyMoveAndMoveAndAttackDoNotUseTheMandatoryBarrier()

@@ -1,4 +1,5 @@
 using System.Drawing;
+using DriverScanTester;
 using DriverScanTester.Services;
 using Xunit;
 
@@ -187,6 +188,65 @@ namespace DriverScanTester.Tests
             Assert.NotEqual(
                 LootSystem.BuildLootProbeProgressKey("BigScan", null, new[] { component }),
                 LootSystem.BuildLootProbeProgressKey("BigScan", null, new[] { shifted }));
+        }
+
+        [Fact]
+        public void CombinedPlannerExhaustsPinkFirstWithoutSpendingTheNormalProbeBudget()
+        {
+            LootSystem.LootComponent pink = MakeBlobAt(0, 0, 12, 11);
+            LootSystem.LootComponent largeNormal = MakeBlobAt(50, 0, 30, 30);
+            LootSystem.LootComponent smallNormal = MakeBlobAt(100, 0, 10, 10);
+            var typedCandidates = new[]
+            {
+                new LootSystem.TypedLootCandidate(pink, LootSystem.LootCandidateKind.SodSopPink),
+                new LootSystem.TypedLootCandidate(largeNormal, LootSystem.LootCandidateKind.NormalAquamarine),
+                new LootSystem.TypedLootCandidate(smallNormal, LootSystem.LootCandidateKind.NormalAquamarine)
+            };
+            var planner = LootSystem.LootProbePlanner.CreateForCombined(typedCandidates, alreadyProbed: null);
+
+            for (int i = 0; i < pink.Area; i++)
+            {
+                Assert.True(planner.TryNext(out int candidateIndex, out Point point));
+                Assert.Equal(0, candidateIndex);
+                Assert.Equal(pink.Points[i], point);
+            }
+
+            Assert.True(planner.TryNext(out int firstNormal, out _));
+            Assert.True(planner.TryNext(out int secondNormal, out _));
+            Assert.NotEqual(firstNormal, secondNormal);
+            Assert.Contains(firstNormal, new[] { 1, 2 });
+            Assert.Contains(secondNormal, new[] { 1, 2 });
+
+            // Simulate the 400 normal-probe cap: pink work is already fully complete,
+            // and exhausting the normal cap cannot leave a pink candidate pending.
+            for (int i = 2; i < 400; i++)
+            {
+                Assert.True(planner.TryNext(out int candidateIndex, out _));
+                Assert.NotEqual(0, candidateIndex);
+            }
+            Assert.True(planner.RemainingProbeCount > 0);
+            Assert.Equal(pink.Area, planner.AttemptsFor(0));
+        }
+
+        [Fact]
+        public void ScanModeAndCandidateKindRemainSeparateForAuthorizationAndTiming()
+        {
+            var pinkCandidate = new LootSystem.TypedLootCandidate(
+                MakeFilledBlob(12, 11), LootSystem.LootCandidateKind.SodSopPink);
+            Assert.Equal(LootSystem.LootCandidateKind.SodSopPink, pinkCandidate.Kind);
+            Assert.True(LootSystem.IsLootScanModeAuthorized(
+                LootSystem.LootScanMode.NormalCombined, pinkLootOnlyMode: false));
+            Assert.False(LootSystem.IsLootScanModeAuthorized(
+                LootSystem.LootScanMode.PinkOnly, pinkLootOnlyMode: false));
+            Assert.True(LootSystem.IsLootScanModeAuthorized(
+                LootSystem.LootScanMode.PinkOnly, pinkLootOnlyMode: true));
+
+            Assert.Equal(BotConstants.Delays.NormalLootMouseOverSettleMs,
+                LootSystem.MouseOverSettleMsForCandidate(LootSystem.LootCandidateKind.NormalAquamarine));
+            Assert.Equal(BotConstants.Delays.SodSopMouseOverSettleMs,
+                LootSystem.MouseOverSettleMsForCandidate(LootSystem.LootCandidateKind.SodSopPink));
+            Assert.True(LootSystem.UsesExtraMouseOverPolls(LootSystem.LootCandidateKind.NormalAquamarine));
+            Assert.False(LootSystem.UsesExtraMouseOverPolls(LootSystem.LootCandidateKind.SodSopPink));
         }
 
         [Fact]

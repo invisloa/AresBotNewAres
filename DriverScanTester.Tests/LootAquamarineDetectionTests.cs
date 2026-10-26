@@ -41,6 +41,26 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void NormalCombinedBitmapReaderCollectsBothMasksFromOneFrameAndRejectsMarkerMagenta()
+        {
+            using var bitmap = new Bitmap(3, 1);
+            bitmap.SetPixel(0, 0, Color.FromArgb(0, 255, 170));
+            bitmap.SetPixel(1, 0, Color.FromArgb(255, 34, 175));
+            bitmap.SetPixel(2, 0, Color.FromArgb(255, 0, 255));
+            var aquamarinePoints = new List<Point>();
+            var pinkPoints = new List<Point>();
+
+            LootSystem.PixelCollectionStats stats = LootSystem.CollectTargetPointsFromBitmap(
+                bitmap, pinkOnly: false, aquamarinePoints, pinkPoints);
+
+            Assert.Equal(new[] { new Point(0, 0) }, aquamarinePoints);
+            Assert.Equal(new[] { new Point(1, 0) }, pinkPoints);
+            Assert.Equal(1, stats.MaskPixels);
+            Assert.Equal(2, stats.RawPinkPixels);
+            Assert.Equal(1, stats.MarkerPixelsRejected);
+        }
+
+        [Fact]
         public void BulkBufferReaderCollectsAquamarineFromBgra()
         {
             const int width = 2;
@@ -64,6 +84,80 @@ namespace DriverScanTester.Tests
                 pinkOnly: false, targetPoints: points);
 
             Assert.Equal(new[] { new Point(0, 0) }, points);
+        }
+
+        [Fact]
+        public void CombinedBufferReaderKeepsBothMasksAlignedForBottomUpFrames()
+        {
+            const int width = 2;
+            const int height = 2;
+            const int stride = -width * 4;
+            byte[] buffer = new byte[Math.Abs(stride) * height];
+
+            void SetPixel(int x, int y, byte r, byte g, byte b)
+            {
+                int row = height - 1 - y;
+                int offset = row * Math.Abs(stride) + x * 4;
+                buffer[offset] = b;
+                buffer[offset + 1] = g;
+                buffer[offset + 2] = r;
+                buffer[offset + 3] = 255;
+            }
+
+            SetPixel(0, 0, 0, 255, 170);
+            SetPixel(1, 1, 255, 34, 175);
+            var aquamarinePoints = new List<Point>();
+            var pinkPoints = new List<Point>();
+
+            LootSystem.CollectTargetPointsFromBuffer(
+                buffer, stride, height, 0, width, 0, height,
+                pinkOnly: false, aquamarinePoints, pinkPoints);
+
+            Assert.Equal(new[] { new Point(0, 0) }, aquamarinePoints);
+            Assert.Equal(new[] { new Point(1, 1) }, pinkPoints);
+        }
+
+        [Fact]
+        public void CombinedBigRegionMasksClipAquamarineButKeepPinkAcrossTheClient()
+        {
+            using var bitmap = new Bitmap(1500, 800);
+            Color aqua = Color.FromArgb(0, 255, 170);
+            Color pinkColor = Color.FromArgb(255, 34, 175);
+            bitmap.SetPixel(600, 300, pinkColor); // Outside SmallScan, inside BigScan.
+            bitmap.SetPixel(900, 400, aqua);       // Inside BigScan's aquamarine rectangle.
+            bitmap.SetPixel(1400, 760, aqua);      // Outside BigScan's aquamarine rectangle.
+            bitmap.SetPixel(1400, 780, pinkColor);// Pink remains whole-client in BigScan.
+            var aquamarinePoints = new List<Point>();
+            var pinkPoints = new List<Point>();
+
+            LootSystem.CollectTargetPointsFromBitmap(
+                bitmap, pinkOnly: false, aquamarinePoints, pinkPoints,
+                aquamarineBounds: new Rectangle(550, 290, 810, 470));
+
+            Assert.Equal(new[] { new Point(900, 400) }, aquamarinePoints);
+            Assert.Equal(new[] { new Point(600, 300), new Point(1400, 780) }, pinkPoints);
+        }
+
+        [Fact]
+        public void PassiveAnalysisKeepsTouchingAquamarineAndPinkComponentsIndependent()
+        {
+            using var bitmap = new Bitmap(100, 60);
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+            {
+                graphics.Clear(Color.Black);
+                using var aquamarine = new SolidBrush(Color.FromArgb(0, 255, 170));
+                using var pink = new SolidBrush(Color.FromArgb(255, 34, 175));
+                graphics.FillRectangle(aquamarine, 20, 20, 12, 12);
+                graphics.FillRectangle(pink, 32, 20, 12, 12);
+            }
+
+            LootPreScanResult result = LootSystem.AnalyzeNormalLootCandidates(
+                bitmap, new Rectangle(0, 0, bitmap.Width, bitmap.Height),
+                BotConstants.Loot.PassivePreScanMaxCandidateComponents);
+
+            Assert.Equal(LootPreScanOutcome.PotentialCandidate, result.Outcome);
+            Assert.Equal(2, result.CandidateComponents);
+            Assert.Equal(new Rectangle(20, 20, 24, 12), result.CandidateBounds);
         }
 
         [Fact]

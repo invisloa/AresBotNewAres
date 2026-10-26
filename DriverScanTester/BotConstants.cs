@@ -27,7 +27,7 @@ namespace DriverScanTester
             /// <summary>Default camera distance lock for waypoints and movement.</summary>
             public const short DefaultDistanceLock = 17020;
 
-            /// <summary>Camera distance used during normal aquamarine loot pixel scans.</summary>
+            /// <summary>Camera distance used during normal combined aquamarine + SOD/SOP loot scans.</summary>
             public const short LootScanDistance = 17050;
 
             /// <summary>Camera distance used by the other-player marker detector.</summary>

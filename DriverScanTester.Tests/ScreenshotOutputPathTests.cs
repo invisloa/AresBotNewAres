@@ -6,12 +6,23 @@ using Xunit;
 namespace DriverScanTester.Tests
 {
     /// <summary>
-    /// The manual loot diagnostic writes its annotated frames into the project's
-    /// LootSSFolder so they are visible in the IDE/explorer. These tests cover the
-    /// project-folder discovery used by that output path.
+    /// Automatic loot diagnostics write annotated frames into the project's visible
+    /// Screenshots/LootTest folder. These tests cover the project-folder discovery and
+    /// uncapped frame cloning used by that output path.
     /// </summary>
     public sealed class ScreenshotOutputPathTests
     {
+        [Fact]
+        public void AutomaticLootCaptureDefaultsToTheVisibleProjectFolder()
+        {
+            Assert.True(ScreenshotService.LootScanCaptureEnabled);
+            Assert.True(ScreenshotService.LootScanCaptureToProjectScreenshots);
+            Assert.EndsWith(
+                Path.Combine("Screenshots", ScreenshotService.DiagnosticLootScreenshotsFolder),
+                ScreenshotService.GetLootScanOutputDirectory().TrimEnd(
+                    Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        }
+
         [Fact]
         public void FindsProjectFolderFromNestedBuildOutput()
         {
@@ -74,6 +85,26 @@ namespace DriverScanTester.Tests
             finally
             {
                 ScreenshotService.LootScanCaptureToProjectScreenshots = previous;
+            }
+        }
+
+        [Fact]
+        public void LootCaptureRetainsEveryFramePastTheFormerPerProcessLimit()
+        {
+            bool previousCapture = ScreenshotService.LootScanCaptureEnabled;
+            try
+            {
+                ScreenshotService.LootScanCaptureEnabled = true;
+                using var source = new System.Drawing.Bitmap(2, 2);
+                for (int i = 0; i < 10; i++)
+                {
+                    using System.Drawing.Bitmap? clone = ScreenshotService.CloneLootScanFrame(source);
+                    Assert.NotNull(clone);
+                }
+            }
+            finally
+            {
+                ScreenshotService.LootScanCaptureEnabled = previousCapture;
             }
         }
 

@@ -17,6 +17,68 @@ namespace DriverScanTester.Tests
         private static readonly Color ScrollPink = Color.FromArgb(255, 20, 147);
 
         [Fact]
+        public void ReportedCandidateIsDetectedByNormalCombinedAndPinkOnlyButNotAquamarine()
+        {
+            using Bitmap frame = CreateReportedCandidateFrame();
+
+            LootSystem.PinkFrameAnalysisResult pinkOnly = LootSystem.AnalyzePinkFrame(frame);
+            LootSystem.LootPreScanResult combined = LootSystem.AnalyzeNormalLootCandidates(
+                frame, new Rectangle(0, 0, frame.Width, frame.Height),
+                BotConstants.Loot.PassivePreScanMaxCandidateComponents);
+            var aquamarinePoints = new List<Point>();
+            var pinkPoints = new List<Point>();
+            LootSystem.PixelCollectionStats pixelStats = LootSystem.CollectTargetPointsFromBitmap(
+                frame, pinkOnly: false, aquamarinePoints, pinkPoints);
+            var pinkStats = new LootSystem.PixelCollectionStats(
+                pixelStats.PixelsExamined, pixelStats.RawPinkPixels,
+                pixelStats.MarkerPixelsRejected, pinkPoints.Count);
+            List<LootSystem.TypedLootCandidate> typedCandidates = LootSystem.AnalyzeLootCandidateMasks(
+                frame, aquamarinePoints, pinkPoints, pinkStats, LootSystem.LootScanMode.NormalCombined,
+                out _, out _, out _, out _);
+
+            LootSystem.LootComponent candidate = Assert.Single(pinkOnly.CandidateComponents);
+            Assert.Equal(new Rectangle(539, 315, 12, 11),
+                Rectangle.FromLTRB(candidate.XMin, candidate.YMin, candidate.XMax + 1, candidate.YMax + 1));
+            Assert.Equal(74, candidate.Area);
+            Assert.InRange(candidate.Area / (float)(candidate.Width * candidate.Height), 0.56f, 0.562f);
+            Assert.Equal(LootSystem.LootPreScanOutcome.PotentialCandidate, combined.Outcome);
+            Assert.Equal(1, combined.CandidateComponents);
+            Assert.Equal(new Rectangle(539, 315, 12, 11), combined.CandidateBounds);
+            Assert.Equal(74, Assert.Single(combined.Candidates!).Component.Area);
+            Assert.Equal(LootSystem.LootCandidateKind.SodSopPink, Assert.Single(typedCandidates).Kind);
+            Assert.Empty(aquamarinePoints);
+        }
+
+        [Fact]
+        public void ValidPinkCandidateSurvivesArtificialMagentaMarkerPixels()
+        {
+            using Bitmap frame = CreateReportedCandidateFrame();
+            using (Graphics graphics = Graphics.FromImage(frame))
+            using (var markerBrush = new SolidBrush(Color.FromArgb(255, 0, 255)))
+                graphics.FillRectangle(markerBrush, 700, 600, 12, 12);
+
+            LootSystem.PinkFrameAnalysisResult result = LootSystem.AnalyzePinkFrame(frame);
+
+            Assert.Equal(1, result.LootCandidates);
+            Assert.True(result.MarkerPixelsRejected >= 144);
+            Assert.Equal(74, Assert.Single(result.CandidateComponents).Area);
+        }
+
+        [Fact]
+        public void PassiveCombinedPreScanFindsPinkOutsideItsAquamarineRegion()
+        {
+            using Bitmap frame = CreateReportedCandidateFrame();
+
+            LootSystem.LootPreScanResult result = LootSystem.AnalyzeNormalLootCandidates(
+                frame, new Rectangle(0, 0, 100, 100),
+                BotConstants.Loot.PassivePreScanMaxCandidateComponents);
+
+            Assert.Equal(LootSystem.LootPreScanOutcome.PotentialCandidate, result.Outcome);
+            Assert.Equal(1, result.CandidateComponents);
+            Assert.Equal(new Rectangle(539, 315, 12, 11), result.CandidateBounds);
+        }
+
+        [Fact]
         public void ScreenshotLikeScroll_IsOneCandidateAndSuppliesInClientProbePoints()
         {
             using Bitmap frame = CreateScreenshotLikeFrame();
@@ -306,6 +368,20 @@ namespace DriverScanTester.Tests
 
             Assert.Equal(reference, bulk);
             Assert.Equal(referenceStats, bulkStats);
+        }
+
+        private static Bitmap CreateReportedCandidateFrame()
+        {
+            var frame = new Bitmap(ClientWidth, ClientHeight, PixelFormat.Format32bppArgb);
+            int[] rowWidths = { 2, 4, 6, 8, 10, 12, 12, 8, 6, 4, 2 };
+            for (int row = 0; row < rowWidths.Length; row++)
+            {
+                int width = rowWidths[row];
+                int startX = 539 + (12 - width) / 2;
+                for (int offset = 0; offset < width; offset++)
+                    frame.SetPixel(startX + offset, 315 + row, Color.FromArgb(255, 34, 175));
+            }
+            return frame;
         }
 
         private static Bitmap CreateScreenshotLikeFrame()

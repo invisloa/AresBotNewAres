@@ -4,7 +4,6 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
-using System.Threading;
 
 namespace DriverScanTester.Services
 {
@@ -43,9 +42,9 @@ namespace DriverScanTester.Services
         public const string LootScanFolder = "LootSSFolder";
 
         /// <summary>
-        /// Project folder for manual test-loot screenshots. Unlike LootSSFolder this
-        /// folder is explicitly un-ignored in .gitignore, so screenshots from the
-        /// Tools-tab loot tests appear in Git Changes.
+        /// Project folder for automatic and manual loot diagnostics. Unlike LootSSFolder
+        /// this folder is explicitly un-ignored in .gitignore so captured frames are
+        /// visible in the IDE and Git Changes.
         /// </summary>
         public const string DiagnosticLootScreenshotsFolder = "LootTest";
 
@@ -56,56 +55,35 @@ namespace DriverScanTester.Services
         public const string ConnectionStatesFolder = "ConnectionStates";
 
         /// <summary>
-        /// Master switch for loot-scan diagnostics. When false,
-        /// <see cref="CloneLootScanFrame"/> returns null and nothing is written to
-        /// LootSSFolder (no per-scan clone, no annotation, no PNG). Default: false —
-        /// diagnostics off; flip to true to debug loot detection again.
+        /// Master switch for loot-scan diagnostics. Enabled by default so every loot
+        /// frame is saved with its validated candidate pixels annotated.
         /// </summary>
-        public static bool LootScanCaptureEnabled { get; set; } = false;
+        public static bool LootScanCaptureEnabled { get; set; } = true;
 
         /// <summary>
-        /// While true, loot diagnostic frames are written to the project's un-ignored
-        /// Screenshots/LootTest folder instead of the normal (ignored) LootSSFolder.
-        /// Set only for the manual Tools-tab loot tests.
+        /// Loot screenshots go to the project's visible Screenshots/LootTest folder
+        /// by default; setting this false keeps the legacy ignored LootSSFolder path.
         /// </summary>
-        public static bool LootScanCaptureToProjectScreenshots { get; set; } = false;
-        private const int MaximumPinkDiagnosticFramesPerProcess = 8;
-        private const int MaximumOtherLootDiagnosticFramesPerProcess = 4;
-        private static int _pinkDiagnosticFramesCloned;
-        private static int _otherLootDiagnosticFramesCloned;
-
-        /// <summary>
-        /// Resets the per-process diagnostic frame budgets. Manual Tools-tab loot tests
-        /// call this before each run so repeated diagnostics keep saving frames.
-        /// </summary>
-        internal static void ResetLootScanDiagnosticBudgets()
-        {
-            Interlocked.Exchange(ref _pinkDiagnosticFramesCloned, 0);
-            Interlocked.Exchange(ref _otherLootDiagnosticFramesCloned, 0);
-        }
+        public static bool LootScanCaptureToProjectScreenshots { get; set; } = true;
 
         /// <summary>
         /// Clones the current loot-scan frame. The loot scanner reuses one bitmap for
         /// every capture, so a clone must be taken at capture time to preserve the
         /// exact pixels that were analyzed (the next capture — e.g. the post-click
-        /// refresh — overwrites the same buffer). Returns null when diagnostics are
-        /// disabled or the clone fails. Never throws.
+        /// refresh — overwrites the same buffer). Every enabled loot capture is retained;
+        /// cloning is not capped. Returns null when diagnostics are disabled or cloning
+        /// fails. Never throws.
         /// </summary>
         public static Bitmap? CloneLootScanFrame(Bitmap? source)
-            => CloneLootScanFrameBounded(
-                source, ref _otherLootDiagnosticFramesCloned,
-                MaximumOtherLootDiagnosticFramesPerProcess);
+            => CloneLootScanFrameCore(source);
 
-        /// <summary>Clones a pink Phase-A frame with a separate small diagnostic budget.</summary>
+        /// <summary>Clones a pink Phase-A frame; pink scans have the same uncapped retention.</summary>
         public static Bitmap? ClonePinkLootScanFrame(Bitmap? source)
-            => CloneLootScanFrameBounded(
-                source, ref _pinkDiagnosticFramesCloned,
-                MaximumPinkDiagnosticFramesPerProcess);
+            => CloneLootScanFrameCore(source);
 
-        private static Bitmap? CloneLootScanFrameBounded(Bitmap? source, ref int cloneCount, int limit)
+        private static Bitmap? CloneLootScanFrameCore(Bitmap? source)
         {
-            if (!LootScanCaptureEnabled || source == null ||
-                Interlocked.Increment(ref cloneCount) > limit)
+            if (!LootScanCaptureEnabled || source == null)
                 return null;
 
             try
@@ -143,10 +121,10 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Saves one loot-scan frame unmodified as a PNG in LootSSFolder (dev: project
-        /// root, next to Screenshots; published: next to the exe), so the exact frame
-        /// consumed by the pixel scan can be inspected without annotations. The frame is
-        /// disposed afterwards. Never throws — diagnostics must not break the bot.
+        /// Saves one loot-scan frame unmodified as a PNG in the configured loot-diagnostics
+        /// folder, so the exact frame consumed by the pixel scan can be inspected without
+        /// annotations. The frame is disposed afterwards. Never throws — diagnostics must
+        /// not break the bot.
         /// </summary>
         /// <param name="label">Scan label, e.g. "SmallScan", "BigScan", "AfterClick".</param>
         /// <param name="metadata">Diagnostic metadata appended to the log line.</param>
@@ -187,7 +165,7 @@ namespace DriverScanTester.Services
         /// Annotates and saves one loot-scan frame. The annotation keeps the separate
         /// datasets visually distinct:
         ///    green rectangle  — scanned region;
-        ///    yellow 1px dots  — ALL pixels classified as aquamarine;
+        ///    yellow 1px dots  — pixels classified by the active loot color masks;
         ///    orange 1px dots  — pixels of accepted loot candidate components;
         ///    magenta outline  — accepted candidate component bounds;
         ///    cyan 3px dots    — actual mouseover probe positions;
@@ -352,8 +330,8 @@ namespace DriverScanTester.Services
         internal static string GetLootScanOutputDirectory() => ResolveLootScanDir();
 
         /// <summary>
-        /// Folder for manual test-loot screenshots: Screenshots/LootTest in the project.
-        /// This path is un-ignored so the generated PNGs are visible in Git Changes.
+        /// Visible project folder for automatic and manual loot screenshots:
+        /// Screenshots/LootTest. This path is un-ignored so generated PNGs are visible in Git Changes.
         /// </summary>
         internal static string GetDiagnosticLootScanOutputDirectory()
         {
