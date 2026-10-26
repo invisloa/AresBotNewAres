@@ -336,6 +336,26 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void BulkBufferReader_CombinedModeCollectsBothMasksInOneTraversal()
+        {
+            const int width = 3;
+            const int height = 1;
+            byte[] buffer = BgraBuffer(width, height, width * 4,
+                (0, 0, 0, 255, 170),
+                (1, 0, 255, 34, 175),
+                (2, 0, 255, 0, 255));
+            var normal = new List<Point>();
+            var pink = new List<Point>();
+
+            LootSystem.CollectTargetPointsFromBuffer(
+                buffer, width * 4, height, 0, width, 0, height,
+                pinkOnly: false, normal, pink);
+
+            Assert.Equal(new[] { new Point(0, 0) }, normal);
+            Assert.Equal(new[] { new Point(1, 0) }, pink);
+        }
+
+        [Fact]
         public void BulkBufferReader_ScansEveryPixelIncludingCharacterCenter()
         {
             const int width = 4;

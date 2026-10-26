@@ -8,9 +8,10 @@ using Xunit;
 namespace DriverScanTester.Tests
 {
     /// <summary>
-    /// Diagnostic-only coverage for the X-only loot unstuck decision. The click
-    /// operation is injected so the tests never move the real mouse or click the
-    /// desktop; production calls the same method without an override.
+    /// Diagnostic-only coverage for the combined position and collection-evidence
+    /// loot unstuck decision. The click operation is injected so the tests never
+    /// move the real mouse or click the desktop; production calls the same method
+    /// without an override.
     /// </summary>
     public sealed class LootUnstuckDiagnosticsTests
     {
@@ -21,28 +22,29 @@ namespace DriverScanTester.Tests
         private static readonly BindingFlags PrivateInstance = BindingFlags.Instance | BindingFlags.NonPublic;
 
         [Fact]
-        public void EqualXTriggersTheExistingGroundClickAndEmitsDetailedTriggeredLog()
+        public void Unchanged2DPositionAndConfirmedNoPickupTriggerGroundClick()
         {
             var lines = new List<string>();
-            var memory = new PositionMemory { X = 225, Y = 54 };
+            var memory = new PositionMemory { X = 225, Y = 51 };
             using var loot = CreateLoot(lines.Add, memory);
-            var context = CreateContext(beforeX: 225, beforeY: 51, inventoryChanged: true);
+            var context = CreateContext(beforeX: 225, beforeY: 51);
 
             var clicks = InvokeUnbug(loot, 225, context);
 
             var click = Assert.Single(clicks);
             Assert.Equal((550, 697, 100), click);
             Assert.Contains(lines, line => line.Contains("[LootUnstuck] TRIGGERED", StringComparison.Ordinal));
-            Assert.Contains(lines, line => line.Contains("Reason=BeforeAndAfterXAreEqual", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("Reason=PositionUnchangedAndNoItemCollected", StringComparison.Ordinal));
             Assert.Contains(lines, line => line.Contains("BeforeX=225", StringComparison.Ordinal));
             Assert.Contains(lines, line => line.Contains("CurrentX=225", StringComparison.Ordinal));
             Assert.Contains(lines, line => line.Contains("DeltaX=0", StringComparison.Ordinal));
             Assert.Contains(lines, line => line.Contains("BeforePosition=(225,51)", StringComparison.Ordinal));
-            Assert.Contains(lines, line => line.Contains("CurrentPosition=(225,54)", StringComparison.Ordinal));
-            Assert.Contains(lines, line => line.Contains("Displacement2D=3.00", StringComparison.Ordinal));
-            Assert.Contains(lines, line => line.Contains("InventoryChanged=True", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("CurrentPosition=(225,51)", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("Displacement2D=0.00", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("PositionChanged=False", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("ItemCollected=False", StringComparison.Ordinal));
             Assert.Contains(lines, line => line.Contains("CollectionExitReason=PositionStable", StringComparison.Ordinal));
-            Assert.Contains(lines, line => line.Contains("Condition=(beforeClickPosX == currentX) => True", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("Condition=(playerPositionUnchanged && confirmedNoItemCollected) => True", StringComparison.Ordinal));
             Assert.Contains(lines, line => line.Contains("Action=GroundClick", StringComparison.Ordinal));
             Assert.Contains(lines, line => line.Contains("ClickConfiguredX=900 ClickConfiguredY=600", StringComparison.Ordinal));
             Assert.Contains(lines, line => line.Contains("ClickReferenceClientOrigin=(450,103)", StringComparison.Ordinal));
@@ -51,6 +53,56 @@ namespace DriverScanTester.Tests
             Assert.Contains(lines, line => line.Contains("ClickDelayMs=100", StringComparison.Ordinal));
             Assert.Contains(lines, line => line.Contains("CLICK START source=UnbugWhenCollecting screen=(550,697)", StringComparison.Ordinal));
             Assert.Contains(lines, line => line.Contains("CLICK RETURNED source=UnbugWhenCollecting", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void StationaryPlayerWithCollectedItemSkipsGroundClick()
+        {
+            var lines = new List<string>();
+            var memory = new PositionMemory { X = 225, Y = 51 };
+            using var loot = CreateLoot(lines.Add, memory);
+            var context = CreateContext(beforeX: 225, beforeY: 51, itemCollected: true);
+
+            var clicks = InvokeUnbug(loot, 225, context);
+
+            Assert.Empty(clicks);
+            Assert.Contains(lines, line => line.Contains("ItemCollected=True", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("Reason=ItemSuccessfullyCollected", StringComparison.Ordinal));
+            Assert.DoesNotContain(lines, line => line.Contains("CLICK START", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void ExistingStackQuantityIncreaseConfirmsCollectionWithoutNewSlot()
+        {
+            var before = new GameMemoryService.InventorySnapshot(new[] { 9050 }, new[] { 4 });
+            var after = new GameMemoryService.InventorySnapshot(new[] { 9050 }, new[] { 5 });
+            var lines = new List<string>();
+            var memory = new PositionMemory { X = 225, Y = 51 };
+            using var loot = CreateLoot(lines.Add, memory);
+            var context = CreateContext(beforeX: 225, beforeY: 51, itemCollected: true);
+            context.InventoryBefore = before;
+            context.InventoryAfter = after;
+            context.InventoryChanged = true;
+
+            Assert.True(LootSystem.InventoryHasIncrease(before, after));
+            Assert.True(LootSystem.DetermineItemCollected(true, before, true, after));
+            Assert.Empty(InvokeUnbug(loot, 225, context));
+            Assert.Contains(lines, line => line.Contains("Reason=ItemSuccessfullyCollected", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void InvalidInventoryEvidenceIsUnknownAndCannotTriggerUnstuck()
+        {
+            var lines = new List<string>();
+            var memory = new PositionMemory { X = 225, Y = 51 };
+            using var loot = CreateLoot(lines.Add, memory);
+            var context = CreateContext(beforeX: 225, beforeY: 51, itemCollected: null);
+
+            var clicks = InvokeUnbug(loot, 225, context);
+
+            Assert.Empty(clicks);
+            Assert.Contains(lines, line => line.Contains("ItemCollected=Unknown", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("Reason=InsufficientCollectionEvidence", StringComparison.Ordinal));
         }
 
         [Fact]
@@ -68,31 +120,86 @@ namespace DriverScanTester.Tests
             Assert.Contains(lines, line => line.Contains("BeforeX=225", StringComparison.Ordinal));
             Assert.Contains(lines, line => line.Contains("CurrentX=228", StringComparison.Ordinal));
             Assert.Contains(lines, line => line.Contains("DeltaX=3", StringComparison.Ordinal));
-            Assert.Contains(lines, line => line.Contains("Reason=XChangedDuringCollection", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("Reason=PlayerPositionChanged", StringComparison.Ordinal));
             Assert.Contains(lines, line => line.Contains("GroundClickExecuted=False", StringComparison.Ordinal));
             Assert.DoesNotContain(lines, line => line.Contains("CLICK START", StringComparison.Ordinal));
         }
 
         [Fact]
-        public void UnchangedXWithChangedYWarnsAboutTheXOnlyFalsePositiveButStillClicks()
+        public void UnchangedXWithChangedYSkipsBecauseThe2DPositionChanged()
         {
             var lines = new List<string>();
             var memory = new PositionMemory { X = 225, Y = 54 };
             using var loot = CreateLoot(lines.Add, memory);
-            var context = CreateContext(beforeX: 225, beforeY: 51, inventoryChanged: true);
+            var context = CreateContext(beforeX: 225, beforeY: 51);
 
             var clicks = InvokeUnbug(loot, 225, context);
 
-            Assert.Single(clicks);
-            Assert.Contains(lines, line => line.Contains(
-                "WARNING: X is unchanged, but 2D position indicates player movement. Existing X-only condition still triggers the ground click.",
-                StringComparison.Ordinal));
+            Assert.Empty(clicks);
+            Assert.Contains(lines, line => line.Contains("PositionChanged=True", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("Reason=PlayerPositionChanged", StringComparison.Ordinal));
             Assert.Contains(lines, line => line.Contains("Displacement2D=3.00", StringComparison.Ordinal));
-            Assert.Contains(lines, line => line.Contains("Reason=BeforeAndAfterXAreEqual", StringComparison.Ordinal));
         }
 
         [Fact]
-        public void InventoryChecksumChangeIsReportedAsEvidenceNotAsGuaranteedPickup()
+        public void InventorySnapshotReadsItemTypesAndStackCountsOnlyWhenComplete()
+        {
+            var bytes = new byte[BotConstants.GameMagicValues.TotalInventorySlots * BotConstants.GameMagicValues.InventorySlotSize];
+            BitConverter.GetBytes((short)9050).CopyTo(bytes, 0);
+            bytes[6] = 4;
+            BitConverter.GetBytes((short)9060).CopyTo(bytes, BotConstants.GameMagicValues.InventorySlotSize);
+            bytes[BotConstants.GameMagicValues.InventorySlotSize + 6] = 2;
+            var memory = new PositionMemory { X = 225, Y = 51, InventoryBytes = bytes };
+            var service = memory.CreateService();
+
+            Assert.True(service.TryGetInventorySnapshot(out var snapshot));
+            Assert.Equal(9050, snapshot.ItemTypes[0]);
+            Assert.Equal(4, snapshot.ItemCounts[0]);
+            Assert.Equal(9060, snapshot.ItemTypes[1]);
+            Assert.Equal(2, snapshot.ItemCounts[1]);
+            Assert.Equal(false, LootSystem.DetermineItemCollected(true, snapshot, true, snapshot));
+
+            memory.InventoryBytes = bytes[..^1];
+            Assert.False(service.TryGetInventorySnapshot(out _));
+        }
+
+        [Fact]
+        public void InstantPickupIsComparedAgainstThePreClickInventorySnapshot()
+        {
+            var bytes = new byte[BotConstants.GameMagicValues.TotalInventorySlots * BotConstants.GameMagicValues.InventorySlotSize];
+            var memory = new PositionMemory { X = 225, Y = 51, InventoryBytes = bytes };
+            var service = memory.CreateService();
+
+            Assert.True(service.TryGetInventorySnapshot(out var before));
+            BitConverter.GetBytes((short)9050).CopyTo(bytes, 0);
+            bytes[6] = 1;
+            Assert.True(service.TryGetInventorySnapshot(out var after));
+
+            Assert.True(LootSystem.DetermineItemCollected(true, before, true, after));
+        }
+
+        [Fact]
+        public void DelayedPickupFoundInFinalInventorySnapshotSkipsGroundClick()
+        {
+            var before = new GameMemoryService.InventorySnapshot(new[] { 0 }, new[] { 0 });
+            var after = new GameMemoryService.InventorySnapshot(new[] { 9050 }, new[] { 1 });
+            var lines = new List<string>();
+            var memory = new PositionMemory { X = 225, Y = 51 };
+            using var loot = CreateLoot(lines.Add, memory);
+            var context = CreateContext(
+                beforeX: 225,
+                beforeY: 51,
+                itemCollected: LootSystem.DetermineItemCollected(true, before, true, after));
+            context.InventoryBefore = before;
+            context.InventoryAfter = after;
+            context.InventoryChanged = true;
+
+            Assert.Empty(InvokeUnbug(loot, 225, context));
+            Assert.Contains(lines, line => line.Contains("Reason=ItemSuccessfullyCollected", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void CollectionSummaryReportsSnapshotDiagnosticsAndUnknownPickup()
         {
             var lines = new List<string>();
             var memory = new PositionMemory { X = 225, Y = 51 };
@@ -102,7 +209,10 @@ namespace DriverScanTester.Tests
                 beforeY: 51,
                 inventoryChanged: true,
                 checksumBefore: 1234,
-                checksumAfter: 1250);
+                checksumAfter: 1250,
+                itemCollected: null);
+            context.InventoryBefore = new GameMemoryService.InventorySnapshot(new[] { 123 }, new[] { 2 });
+            context.InventoryAfter = new GameMemoryService.InventorySnapshot(new[] { 123 }, new[] { 1 });
 
             loot.LogLootCollectionSummary(context);
 
@@ -111,8 +221,11 @@ namespace DriverScanTester.Tests
             Assert.Contains("ChecksumBefore=1234", summary, StringComparison.Ordinal);
             Assert.Contains("ChecksumAfter=1250", summary, StringComparison.Ordinal);
             Assert.Contains("InventoryChanged=True", summary, StringComparison.Ordinal);
-            Assert.Contains("InventoryChangedMeaning=checksum-change-only-not-pickup-proof", summary, StringComparison.Ordinal);
-            Assert.DoesNotContain("ItemCollected=True", summary, StringComparison.Ordinal);
+            Assert.Contains("ItemCollected=Unknown", summary, StringComparison.Ordinal);
+            Assert.Contains("InventoryBefore=Valid:", summary, StringComparison.Ordinal);
+            Assert.Contains("InventoryAfter=Valid:", summary, StringComparison.Ordinal);
+            Assert.Contains("ChecksumBeforeTiming=before-click-before-collection-attempt", summary, StringComparison.Ordinal);
+            Assert.Contains("ChecksumMeaning=legacy-item-type-sum-not-pickup-proof", summary, StringComparison.Ordinal);
         }
 
         [Fact]
@@ -135,46 +248,51 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void DiagnosticPositionReadFailureCannotChangeTheUnstuckDecision()
+        public void DiagnosticPositionReadFailureCannotTriggerTheGroundClick()
         {
             var lines = new List<string>();
-            var memory = new PositionMemory { X = 225, Y = 54, ThrowOnYRead = true };
+            var memory = new PositionMemory { X = 225, Y = 54, ThrowOnXRead = true };
             using var loot = CreateLoot(lines.Add, memory);
             var context = CreateContext(beforeX: 225, beforeY: 51);
 
             var clicks = InvokeUnbug(loot, 225, context);
 
-            Assert.Single(clicks);
+            Assert.Empty(clicks);
             Assert.Contains(lines, line => line.Contains("POSITION READ FAILED stage=UnstuckDecision", StringComparison.Ordinal));
             Assert.Contains(lines, line => line.Contains("CurrentPosition=<unavailable>", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("CurrentX=<unavailable>", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("DeltaX=Unavailable", StringComparison.Ordinal));
             Assert.Contains(lines, line => line.Contains("Displacement2D=Unavailable", StringComparison.Ordinal));
-            Assert.Contains(lines, line => line.Contains("[LootUnstuck] TRIGGERED", StringComparison.Ordinal));
-            Assert.Contains(lines, line => line.Contains("CLICK START source=UnbugWhenCollecting", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("PositionChanged=Unknown", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("Reason=InsufficientCollectionEvidence", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("[LootUnstuck] SKIPPED", StringComparison.Ordinal));
+            Assert.DoesNotContain(lines, line => line.Contains("CLICK START", StringComparison.Ordinal));
         }
 
         [Fact]
-        public void InvalidBeforePositionIsReportedWithoutFabricatingDisplacement()
+        public void InvalidBeforePositionCannotTriggerTheGroundClick()
         {
             var lines = new List<string>();
-            var memory = new PositionMemory { X = 225, Y = 54 };
+            var memory = new PositionMemory { X = 225, Y = 51 };
             using var loot = CreateLoot(lines.Add, memory);
             var context = CreateContext(beforeX: 225, beforeY: 51, beforePositionValid: false);
 
             var clicks = InvokeUnbug(loot, 225, context);
 
-            Assert.Single(clicks);
+            Assert.Empty(clicks);
             Assert.Contains(lines, line => line.Contains("BeforePosition=<unavailable>", StringComparison.Ordinal));
             Assert.Contains(lines, line => line.Contains("Displacement2D=Unavailable", StringComparison.Ordinal));
-            Assert.DoesNotContain(lines, line => line.Contains("WARNING: X is unchanged", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("PositionChanged=Unknown", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("Reason=InsufficientCollectionEvidence", StringComparison.Ordinal));
         }
 
         [Fact]
         public void LoggingCannotCauseAdditionalClicksOrRepeatedUnstuckAttempts()
         {
             var lines = new List<string>();
-            var memory = new PositionMemory { X = 225, Y = 54 };
+            var memory = new PositionMemory { X = 225, Y = 51 };
             using var loot = CreateLoot(lines.Add, memory);
-            var context = CreateContext(beforeX: 225, beforeY: 51, inventoryChanged: true);
+            var context = CreateContext(beforeX: 225, beforeY: 51);
 
             loot.LogLootCollectionSummary(context);
             var clicks = InvokeUnbug(loot, 225, context);
@@ -189,7 +307,7 @@ namespace DriverScanTester.Tests
         public void ClickOperationFailureIsLoggedAndStillPropagates()
         {
             var lines = new List<string>();
-            var memory = new PositionMemory { X = 225, Y = 54 };
+            var memory = new PositionMemory { X = 225, Y = 51 };
             using var loot = CreateLoot(lines.Add, memory);
             var context = CreateContext(beforeX: 225, beforeY: 51);
 
@@ -231,7 +349,8 @@ namespace DriverScanTester.Tests
             bool inventoryChanged = false,
             int checksumBefore = 1000,
             int checksumAfter = 1000,
-            string exitReason = "PositionStable")
+            string exitReason = "PositionStable",
+            bool? itemCollected = false)
             => new()
             {
                 AttemptId = 7,
@@ -241,7 +360,12 @@ namespace DriverScanTester.Tests
                 BeforePositionY = beforeY,
                 ChecksumBeforeWait = checksumBefore,
                 ChecksumAfterWait = checksumAfter,
+                InventoryBeforeValid = true,
+                InventoryBefore = new GameMemoryService.InventorySnapshot(new[] { 123 }, new[] { 1 }),
+                InventoryAfterValid = true,
+                InventoryAfter = new GameMemoryService.InventorySnapshot(new[] { 123 }, new[] { 1 }),
                 InventoryChanged = inventoryChanged,
+                ItemCollected = itemCollected,
                 XMovementObserved = true,
                 StableChecks = 3,
                 StableChecksRequired = 3,
@@ -263,6 +387,8 @@ namespace DriverScanTester.Tests
             public short Y { get; set; }
             public bool FailYRead { get; set; }
             public bool ThrowOnYRead { get; set; }
+            public bool ThrowOnXRead { get; set; }
+            public byte[]? InventoryBytes { get; set; }
 
             public GameMemoryService CreateService()
             {
@@ -274,7 +400,14 @@ namespace DriverScanTester.Tests
                             return Fill(buffer, BitConverter.GetBytes(PlayerBase), out bytesRead);
 
                         if (address == PlayerBase + BotConstants.MemoryOffsets.X)
+                        {
+                            if (ThrowOnXRead)
+                                throw new InvalidOperationException("diagnostic X read failed");
                             return Fill(buffer, BitConverter.GetBytes(X), out bytesRead);
+                        }
+
+                        if (address == PlayerBase + (ulong)BotConstants.MemoryOffsets.SlotFirstSell && InventoryBytes != null)
+                            return Fill(buffer, InventoryBytes, out bytesRead);
 
                         if (address == PlayerBase + BotConstants.MemoryOffsets.Y)
                         {

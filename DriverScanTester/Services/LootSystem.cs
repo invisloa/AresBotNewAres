@@ -131,6 +131,10 @@ namespace DriverScanTester.Services
                 Outcome is LootDiagnosticOutcome.Collected or LootDiagnosticOutcome.NoItem;
         }
 
+        private enum LootScanMode { NormalCombined, PinkOnly }
+        private enum LootCandidateKind { NormalAquamarine, SodSopPink }
+        private readonly record struct TypedLootCandidate(LootComponent Component, LootCandidateKind Kind);
+
         internal readonly record struct PixelCollectionStats(
             int PixelsExamined,
             int RawPinkPixels,
@@ -2302,12 +2306,13 @@ namespace DriverScanTester.Services
             }
 
             var lootPoints = new List<Point>();
-
+            var pinkPoints = new List<Point>();
             CollectBitmapTargetPoints(
-                bitmap, xStart, xEnd, yStart, yEnd,
-                pinkOnly: false, lootPoints, ref reusableBuffer, out _, out _);
+                bitmap, 0, bitmap.Width, 0, bitmap.Height,
+                pinkOnly: false, lootPoints, ref reusableBuffer, out _, out _,
+                pinkPoints, new Rectangle(xStart, yStart, xEnd - xStart, yEnd - yStart));
 
-            int lootPixels = lootPoints.Count;
+            int lootPixels = lootPoints.Count + pinkPoints.Count;
             var candidates = new List<LootComponent>();
             foreach (LootComponent component in LabelLootComponents(lootPoints))
             {
@@ -2318,6 +2323,10 @@ namespace DriverScanTester.Services
             HashSet<LootComponent> textGlyphs = FindTextGlyphs(candidates);
             if (textGlyphs.Count > 0)
                 candidates.RemoveAll(textGlyphs.Contains);
+
+            var pinkAnalysis = AnalyzePinkMask(bitmap, pinkPoints,
+                new PixelCollectionStats(bitmap.Width * bitmap.Height, 0, 0, pinkPoints.Count));
+            candidates.AddRange(pinkAnalysis.CandidateComponents);
 
             if (candidates.Count == 0)
             {
@@ -2341,7 +2350,7 @@ namespace DriverScanTester.Services
 
             return new LootPreScanResult(
                 LootPreScanOutcome.PotentialCandidate, candidates.Count, lootPixels, bounds,
-                "plausible normal-loot candidates");
+                "plausible combined loot candidates (aquamarine and SOD/SOP pink)");
         }
 
         private (float X, float Y) GetPlayerPositionForSuppression()
@@ -3344,12 +3353,11 @@ namespace DriverScanTester.Services
                 int yStart = Math.Clamp(yRange[0] - refY, 0, _bitmap.Height - 1);
                 int yEnd   = Math.Clamp(yRange[1] - refY, 0, _bitmap.Height);
 
-                // The SOD/SOP pink pass sweeps the WHOLE captured client area: a
-                // drop can land anywhere on screen (a corner outside BigScan, or
-                // under the character after a kill), so the BigScan rectangle does
-                // not bound this pass. Override the clamped range with the full
-                // bitmap; normal-loot scans keep using their region.
-                if (pinkOnly)
+                // PinkOnly and combined BigScan inspect pink across the whole client.
+                // Aquamarine remains clipped to the configured normal scan rectangle.
+                Rectangle aquamarineBounds = new(xStart, yStart, xEnd - xStart, yEnd - yStart);
+                bool fullClientPink = pinkOnly || (!pinkOnly && regionName.StartsWith("BigScan", StringComparison.Ordinal));
+                if (fullClientPink)
                 {
                     xStart = 0;
                     xEnd = _bitmap.Width;
@@ -3393,12 +3401,15 @@ namespace DriverScanTester.Services
                 //    pink-family mask with artificial marker magenta removed before
                 //    labeling. Only concentrated color components become candidates. ──
                 var targetPoints = new List<Point>();
+                var pinkPoints = new List<Point>();
                 pixelStats = CollectScanTargetPoints(
                     xStart, xEnd, yStart, yEnd,
                     pinkOnly, targetPoints,
                     out diagnosticPixelFormat,
-                    out diagnosticStride);
-                diagnosticLootCount = targetPoints.Count;
+                    out diagnosticStride,
+                    pinkOnly ? null : pinkPoints,
+                    fullClientPink && !pinkOnly ? aquamarineBounds : null);
+                diagnosticLootCount = targetPoints.Count + pinkPoints.Count;
                 diagnosticAquamarineCount = pinkOnly ? 0 : targetPoints.Count;
 
                 if (!pinkOnly && ScreenshotService.LootScanCaptureEnabled)
@@ -3409,14 +3420,20 @@ namespace DriverScanTester.Services
                 //    pink mode shares the AnalyzePinkFrame production path. ──
                 List<LootComponent> components;
                 var candidates = new List<LootComponent>();
+                var pinkCandidates = new List<LootComponent>();
                 int filteredComponents;
                 int tinyPinkComponents;
                 int mobMarkerComponents;
-                if (pinkOnly)
+                if (pinkOnly || pinkPoints.Count > 0)
                 {
-                    pinkAnalysis = AnalyzePinkMask(_bitmap, targetPoints, pixelStats);
+                    List<Point> mask = pinkOnly ? targetPoints : pinkPoints;
+                    var pinkStats = pinkOnly
+                        ? pixelStats
+                        : new PixelCollectionStats(pixelStats.PixelsExamined, pixelStats.RawPinkPixels,
+                            pixelStats.MarkerPixelsRejected, pinkPoints.Count);
+                    pinkAnalysis = AnalyzePinkMask(_bitmap, mask, pinkStats);
                     components = pinkAnalysis.AllComponents.ToList();
-                    candidates.AddRange(pinkAnalysis.CandidateComponents);
+                    pinkCandidates.AddRange(pinkAnalysis.CandidateComponents);
                     filteredComponents = pinkAnalysis.SizeOrShapeRejectedComponents;
                     tinyPinkComponents = pinkAnalysis.TinyComponents;
                     mobMarkerComponents = pinkAnalysis.MobMarkerRings;
@@ -3452,19 +3469,41 @@ namespace DriverScanTester.Services
 
                 diagnosticComponentCount = components.Count;
 
-                // Mob names are glyph rows — drop them so a name can never eat the
-                // probe budget before the loot below/next to it is reached. In pink
-                // SOD/SOP mode the pink name/glow itself is the target, so no text
-                // filtering is applied there.
+                // Mob names are glyph rows — drop them from aquamarine candidates only.
                 HashSet<LootComponent> textGlyphs = pinkOnly
                     ? new HashSet<LootComponent>()
                     : FindTextGlyphs(candidates);
                 if (textGlyphs.Count > 0)
                     candidates.RemoveAll(textGlyphs.Contains);
 
-                // Probe left → right, like the old column-major pixel scan.
+                // Preserve independent connected-component labeling and prioritize pink
+                // candidates ahead of normal candidates in the shared collection pass.
                 candidates.Sort((a, b) => a.XMin != b.XMin ? a.XMin.CompareTo(b.XMin) : a.YMin.CompareTo(b.YMin));
+                pinkCandidates.Sort((a, b) => a.XMin != b.XMin ? a.XMin.CompareTo(b.XMin) : a.YMin.CompareTo(b.YMin));
+                if (pinkOnly)
+                {
+                    candidates.Clear();
+                    candidates.AddRange(pinkCandidates);
+                }
+                else
+                    candidates.InsertRange(0, pinkCandidates);
+                List<TypedLootCandidate> typedCandidates = pinkOnly
+                    ? pinkCandidates.Select(component => new TypedLootCandidate(component, LootCandidateKind.SodSopPink)).ToList()
+                    : pinkCandidates.Select(component => new TypedLootCandidate(component, LootCandidateKind.SodSopPink))
+                        .Concat(candidates.Skip(pinkCandidates.Count)
+                            .Select(component => new TypedLootCandidate(component, LootCandidateKind.NormalAquamarine)))
+                        .ToList();
+                candidates.Clear();
+                candidates.AddRange(typedCandidates.Select(candidate => candidate.Component));
+                var pinkCandidateSet = typedCandidates
+                    .Where(candidate => candidate.Kind == LootCandidateKind.SodSopPink)
+                    .Select(candidate => candidate.Component)
+                    .ToHashSet();
                 diagnosticCandidateCount = candidates.Count;
+                _log($"[Loot] {regionName} mode={(pinkOnly ? "PinkOnly" : "NormalCombined")} " +
+                     $"cameraDistance={( _memoryService.TryGetCameraDistance(out short loggedDistance) ? loggedDistance : (short)-1)} " +
+                     $"aquamarinePixels={diagnosticAquamarineCount} pinkPixels={(pinkOnly ? targetPoints.Count : pinkPoints.Count)} " +
+                     $"aquamarineCandidates={(pinkOnly ? 0 : candidates.Count - pinkCandidates.Count)} pinkCandidates={pinkCandidates.Count}");
 
                 bool captureCandidateMask = !pinkOnly && ScreenshotService.LootScanCaptureEnabled;
                 foreach (LootComponent candidate in candidates)
@@ -3503,10 +3542,11 @@ namespace DriverScanTester.Services
 
                 LootProbePlanner probePlanner = pinkOnly
                     ? LootProbePlanner.CreateForPink(candidates)
-                    : LootProbePlanner.CreateForNormal(candidates, _probedLootProbeProgress);
+                    : LootProbePlanner.CreateForCombined(candidates, pinkCandidateSet, _probedLootProbeProgress);
                 diagnosticPreviouslyProbedSkipped = probePlanner.PreviouslyProbedSkipped;
 
                 int probesUsed = 0;
+                int normalProbesUsed = 0;
                 while (probePlanner.TryNext(out int candidateIndex, out Point probe))
                 {
                     if (ShouldAbortLoot() || _scanToken.IsCancellationRequested ||
@@ -3518,18 +3558,21 @@ namespace DriverScanTester.Services
                     }
 
                     LootComponent component = candidates[candidateIndex];
-                    bool addDiagonals = pinkOnly && component.Area <= TinyProbeWithDiagonalsArea;
+                    bool candidateIsPink = pinkOnly || pinkCandidateSet.Contains(component);
+                    bool addDiagonals = candidateIsPink && component.Area <= TinyProbeWithDiagonalsArea;
                     actualCursorProbes++;
                     probesUsed++;
-                    if (!pinkOnly)
+                    if (!candidateIsPink) normalProbesUsed++;
+                    if (!candidateIsPink)
                         _probedLootProbeProgress.Add(probe);
 
-                    LootProbeResult probeResult = TryCollectAt(probe.X, probe.Y, pinkOnly);
+                    LootProbeResult probeResult = TryCollectAt(probe.X, probe.Y, candidateIsPink, pinkOnly);
                     diagnosticProbeHits.Add(probe);
                     if (probeResult == LootProbeResult.Collected)
                     {
                         diagnosticSuccessProbe = probe;
                         diagnosticOutcome = "collected";
+                        _log($"[Loot] Collecting candidate={(candidateIsPink ? "SodSopPink" : "NormalAquamarine")}");
                         _log($"[Loot] {regionName}: mouseover confirmed at bitmap-local ({probe.X},{probe.Y}) — " +
                              $"candidate {candidateIndex + 1}/{candidates.Count} {FormatLootComponent(component)}, " +
                              $"probe {probePlanner.AttemptsFor(candidateIndex)}/{probePlanner.InitialRemainingFor(candidateIndex)} of this candidate, " +
@@ -3556,7 +3599,7 @@ namespace DriverScanTester.Services
                         {
                             var diagonal = new Point(probe.X + dx, probe.Y + dy);
                             LootProbeResult result = TryCollectAtWithCount(
-                                diagonal.X, diagonal.Y, pinkOnly, ref actualCursorProbes);
+                                diagonal.X, diagonal.Y, candidateIsPink, pinkOnly, ref actualCursorProbes);
                             if (result == LootProbeResult.Collected)
                                 diagnosticSuccessProbe = diagonal;
                             return result;
@@ -3578,7 +3621,7 @@ namespace DriverScanTester.Services
                     }
 
                     // Only the normal-loot scan keeps the probe budget.
-                    if (!pinkOnly && probesUsed >= MaxLootProbesPerRegion)
+                    if (!pinkOnly && !candidateIsPink && normalProbesUsed >= MaxLootProbesPerRegion)
                     {
                         _log($"[Loot] {regionName}: probe budget ({MaxLootProbesPerRegion}) exhausted — " +
                              $"{probesUsed} probes, {probePlanner.RemainingProbeCount} of {probePlanner.InitialRemainingProbes} candidate pixels still unexamined " +
@@ -3617,6 +3660,7 @@ namespace DriverScanTester.Services
                 if (!pinkOnly)
                     ClearLootProbeProgress();
                 diagnosticOutcome = sweepResult == LootScanPassResult.NoItem ? "no-item" : "probe-sequence-incomplete";
+                _log($"[Loot] {regionName} mode={(pinkOnly ? "PinkOnly" : "NormalCombined")} completed status={sweepResult} probes={probesUsed}.");
                 return sweepResult;
             }
             catch (Exception ex)
@@ -4041,11 +4085,13 @@ namespace DriverScanTester.Services
             int xStart, int xEnd, int yStart, int yEnd,
             bool pinkOnly, List<Point> targetPoints,
             out PixelFormat sourcePixelFormat,
-            out int sourceStride)
+            out int sourceStride,
+            List<Point>? pinkPoints = null,
+            Rectangle? aquamarineBounds = null)
             => CollectBitmapTargetPoints(
                 _bitmap, xStart, xEnd, yStart, yEnd,
                 pinkOnly, targetPoints, ref _scanBuffer,
-                out sourcePixelFormat, out sourceStride);
+                out sourcePixelFormat, out sourceStride, pinkPoints, aquamarineBounds);
 
         internal static PixelCollectionStats CollectTargetPointsFromBitmap(
             Bitmap bitmap, bool pinkOnly, List<Point> targetPoints)
@@ -4062,13 +4108,16 @@ namespace DriverScanTester.Services
             bool pinkOnly, List<Point> targetPoints,
             ref byte[] reusableBuffer,
             out PixelFormat sourcePixelFormat,
-            out int sourceStride)
+            out int sourceStride,
+            List<Point>? pinkPoints = null,
+            Rectangle? aquamarineBounds = null)
         {
             ArgumentNullException.ThrowIfNull(bitmap);
             ArgumentNullException.ThrowIfNull(targetPoints);
             sourcePixelFormat = bitmap.PixelFormat;
             sourceStride = 0;
             int initialCount = targetPoints.Count;
+            int initialPinkCount = pinkPoints?.Count ?? 0;
 
             Bitmap? converted = null;
             Bitmap scanBitmap = bitmap;
@@ -4106,11 +4155,13 @@ namespace DriverScanTester.Services
                 return CollectTargetPointsFromBuffer(
                     reusableBuffer, rowBytes, scanBitmap.Height,
                     xStart, xEnd, yStart, yEnd,
-                    pinkOnly, targetPoints);
+                    pinkOnly, targetPoints, pinkPoints, aquamarineBounds);
             }
             catch
             {
                 targetPoints.RemoveRange(initialCount, targetPoints.Count - initialCount);
+                if (pinkPoints != null)
+                    pinkPoints.RemoveRange(initialPinkCount, pinkPoints.Count - initialPinkCount);
                 useReferenceReader = true;
             }
             finally
@@ -4128,7 +4179,7 @@ namespace DriverScanTester.Services
                 sourceStride = 0;
                 return CollectTargetPointsFromBitmapReference(
                     bitmap, xStart, xEnd, yStart, yEnd,
-                    pinkOnly, targetPoints);
+                    pinkOnly, targetPoints, pinkPoints, aquamarineBounds);
             }
 
             return default;
@@ -4141,7 +4192,8 @@ namespace DriverScanTester.Services
         internal static PixelCollectionStats CollectTargetPointsFromBitmapReference(
             Bitmap bitmap,
             int xStart, int xEnd, int yStart, int yEnd,
-            bool pinkOnly, List<Point> targetPoints)
+            bool pinkOnly, List<Point> targetPoints, List<Point>? pinkPoints = null,
+            Rectangle? aquamarineBounds = null)
         {
             ArgumentNullException.ThrowIfNull(bitmap);
             ArgumentNullException.ThrowIfNull(targetPoints);
@@ -4165,7 +4217,16 @@ namespace DriverScanTester.Services
                     }
                     else
                     {
-                        isTarget = IsAquamarineLootPixel(color);
+                        isTarget = IsAquamarineLootPixel(color) &&
+                            (!aquamarineBounds.HasValue || aquamarineBounds.Value.Contains(x, y));
+                        if (pinkPoints != null)
+                        {
+                            bool raw = IsSodSopPinkPixel(color);
+                            if (raw) rawPink++;
+                            bool pinkTarget = IsPinkLootMaskPixel(color);
+                            if (raw && !pinkTarget) markerRejected++;
+                            if (pinkTarget) pinkPoints.Add(new Point(x, y));
+                        }
                     }
 
                     if (isTarget)
@@ -4184,7 +4245,8 @@ namespace DriverScanTester.Services
         internal static PixelCollectionStats CollectTargetPointsFromBuffer(
             byte[] buffer, int stride, int bitmapHeight,
             int xStart, int xEnd, int yStart, int yEnd,
-            bool pinkOnly, List<Point> targetPoints)
+            bool pinkOnly, List<Point> targetPoints, List<Point>? pinkPoints = null,
+            Rectangle? aquamarineBounds = null)
         {
             ArgumentNullException.ThrowIfNull(buffer);
             ArgumentNullException.ThrowIfNull(targetPoints);
@@ -4225,7 +4287,16 @@ namespace DriverScanTester.Services
                     }
                     else
                     {
-                        isTarget = IsAquamarineLootPixel(r, g, b);
+                        isTarget = IsAquamarineLootPixel(r, g, b) &&
+                            (!aquamarineBounds.HasValue || aquamarineBounds.Value.Contains(x, y));
+                        if (pinkPoints != null)
+                        {
+                            bool raw = IsSodSopPinkPixel(r, g, b);
+                            if (raw) rawPink++;
+                            bool pinkTarget = IsPinkLootMaskPixel(r, g, b);
+                            if (raw && !pinkTarget) markerRejected++;
+                            if (pinkTarget) pinkPoints.Add(new Point(x, y));
+                        }
                     }
 
                     if (isTarget)
@@ -4640,18 +4711,22 @@ namespace DriverScanTester.Services
             private readonly List<List<Point>> _points;
             private readonly List<int> _next;
             private readonly bool _interleave;
+            private readonly int _priorityCount;
+            private int _priorityCursor;
             private int _cursor;
 
             private LootProbePlanner(
                 List<List<Point>> points,
                 bool interleave,
-                int previouslyProbedSkipped)
+                int previouslyProbedSkipped,
+                int priorityCount = 0)
             {
                 _points = points;
                 _next = new List<int>(points.Count);
                 for (int i = 0; i < points.Count; i++)
                     _next.Add(0);
                 _interleave = interleave;
+                _priorityCount = Math.Clamp(priorityCount, 0, points.Count);
                 PreviouslyProbedSkipped = previouslyProbedSkipped;
 
                 int initialRemaining = 0;
@@ -4688,6 +4763,35 @@ namespace DriverScanTester.Services
                     points.Add(remaining);
                 }
                 return new LootProbePlanner(points, interleave: true, skipped);
+            }
+
+            public static LootProbePlanner CreateForCombined(
+                IReadOnlyList<LootComponent> candidates,
+                IReadOnlySet<LootComponent> pinkCandidates,
+                IReadOnlySet<Point>? alreadyProbed)
+            {
+                ArgumentNullException.ThrowIfNull(candidates);
+                var points = new List<List<Point>>(candidates.Count);
+                int skipped = 0;
+                int priorityCount = 0;
+                foreach (LootComponent candidate in candidates)
+                {
+                    if (pinkCandidates.Contains(candidate))
+                    {
+                        points.Add(new List<Point>(candidate.Points));
+                        priorityCount++;
+                        continue;
+                    }
+                    LootProbePlan plan = BuildLootProbePlan(candidate);
+                    var remaining = new List<Point>(plan.Points.Count);
+                    foreach (Point point in plan.Points)
+                    {
+                        if (alreadyProbed != null && alreadyProbed.Contains(point)) { skipped++; continue; }
+                        remaining.Add(point);
+                    }
+                    points.Add(remaining);
+                }
+                return new LootProbePlanner(points, interleave: true, skipped, priorityCount);
             }
 
             public static LootProbePlanner CreateForPink(IReadOnlyList<LootComponent> candidates)
@@ -4738,6 +4842,18 @@ namespace DriverScanTester.Services
 
             public bool TryNext(out int candidateIndex, out Point point)
             {
+                while (_priorityCursor < _priorityCount)
+                {
+                    int priorityIndex = _priorityCursor;
+                    if (_next[priorityIndex] < _points[priorityIndex].Count)
+                    {
+                        point = _points[priorityIndex][_next[priorityIndex]++];
+                        candidateIndex = priorityIndex;
+                        if (_next[priorityIndex] >= _points[priorityIndex].Count) _priorityCursor++;
+                        return true;
+                    }
+                    _priorityCursor++;
+                }
                 if (_points.Count == 0)
                 {
                     candidateIndex = -1;
@@ -4848,10 +4964,10 @@ namespace DriverScanTester.Services
             return string.Join(", ", parts);
         }
 
-        private LootProbeResult CheckProbeCaptureOwnership(bool pinkOnly)
+        private LootProbeResult CheckProbeCaptureOwnership(bool pinkOnlyMode)
         {
             if (_scanToken.IsCancellationRequested || ShouldAbortLoot() ||
-                (pinkOnly && !PinkLootOnlyMode))
+                (pinkOnlyMode && !PinkLootOnlyMode))
                 return LootProbeResult.Cancelled;
 
             lock (_captureGate)
@@ -4934,14 +5050,14 @@ namespace DriverScanTester.Services
             }
         }
 
-        private LootProbeResult TryCollectAt(int x, int y, bool pinkOnly = false)
+        private LootProbeResult TryCollectAt(int x, int y, bool pinkCandidate = false, bool pinkOnlyMode = false)
         {
-            LootProbeResult guard = CheckProbeCaptureOwnership(pinkOnly);
+            LootProbeResult guard = CheckProbeCaptureOwnership(pinkOnlyMode);
             if (guard != LootProbeResult.Miss)
                 return guard;
 
-            WaitMouseInPosition(x, y, pinkOnly);
-            guard = CheckProbeCaptureOwnership(pinkOnly);
+            WaitMouseInPosition(x, y, pinkCandidate);
+            guard = CheckProbeCaptureOwnership(pinkOnlyMode);
             if (guard != LootProbeResult.Miss)
                 return guard;
 
@@ -4949,9 +5065,9 @@ namespace DriverScanTester.Services
             // with the calibrated mouseover, not the separate highlighted-type
             // field, which need not describe the ground item under this cursor.
             // The read always follows THIS cursor move (never a cached result).
-            if (WaitForLootMouseOver(pinkOnly))
+            if (WaitForLootMouseOver(pinkCandidate))
             {
-                if (pinkOnly)
+                if (pinkCandidate)
                 {
                     _log("[Loot] Pink candidate mouseover matches calibration — collecting.");
 
@@ -4960,7 +5076,7 @@ namespace DriverScanTester.Services
                     MakeRoomForScrollIfFull();
                 }
 
-                guard = CheckProbeCaptureOwnership(pinkOnly);
+                guard = CheckProbeCaptureOwnership(pinkOnlyMode);
                 if (guard != LootProbeResult.Miss)
                     return guard;
                 CollectionClick();
@@ -4970,10 +5086,10 @@ namespace DriverScanTester.Services
         }
 
         private LootProbeResult TryCollectAtWithCount(
-            int x, int y, bool pinkOnly, ref int cursorProbes)
+            int x, int y, bool pinkCandidate, bool pinkOnlyMode, ref int cursorProbes)
         {
             cursorProbes++;
-            return TryCollectAt(x, y, pinkOnly);
+            return TryCollectAt(x, y, pinkCandidate, pinkOnlyMode);
         }
 
         private static string ProbeOutcomeName(LootProbeResult result) => result switch
@@ -5095,7 +5211,17 @@ namespace DriverScanTester.Services
             public float BeforePositionY { get; init; }
             public int ChecksumBeforeWait { get; set; }
             public int ChecksumAfterWait { get; set; }
+            public bool InventoryBeforeValid { get; set; }
+            public GameMemoryService.InventorySnapshot InventoryBefore { get; set; }
+            public bool InventoryAfterValid { get; set; }
+            public GameMemoryService.InventorySnapshot InventoryAfter { get; set; }
             public bool InventoryChanged { get; set; }
+            public bool? ItemCollected { get; set; }
+            public bool AfterPositionCaptured { get; set; }
+            public bool AfterPositionValid { get; set; }
+            public float AfterPositionX { get; set; }
+            public float AfterPositionY { get; set; }
+            public bool? PositionChanged { get; set; }
             public bool XMovementObserved { get; set; }
             public int StableChecks { get; set; }
             public int StableChecksRequired { get; set; }
@@ -5126,8 +5252,14 @@ namespace DriverScanTester.Services
             _isCollecting = true;
             try
             {
-            // Release any held right button, then left-click to pick up the item.
+            // Release any held right button, then capture inventory before issuing the collection click.
             MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.RightUp);
+            bool inventoryBeforeValid = TryCaptureInventorySnapshot("BeforeClick", out var inventoryBefore);
+            collectionDiagnostics.InventoryBeforeValid = inventoryBeforeValid;
+            collectionDiagnostics.InventoryBefore = inventoryBefore;
+            int checksumBefore = _memoryService.ComputeInventoryChecksum();
+            int checksumAtCollectionStart = checksumBefore;
+
             MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.LeftDown);
             leftButtonDown = true;
 
@@ -5143,10 +5275,11 @@ namespace DriverScanTester.Services
             // when they stop (arrived at item).  Spacebar keeps pressing during
             // the entire walk so the character also area-loots any other items
             // it passes along the way.
-            int checksumBefore = _memoryService.ComputeInventoryChecksum();
-            int checksumAtCollectionStart = checksumBefore;
             int checksumAfter = checksumBefore;
             bool inventoryChanged = false;
+            bool itemCollectedObserved = false;
+            var previousInventory = inventoryBefore;
+            bool previousInventoryValid = inventoryBeforeValid;
             collectionDiagnostics.ChecksumBeforeWait = checksumBefore;
             collectionDiagnostics.ChecksumAfterWait = checksumBefore;
             int beforeX = positionBeforeClick;
@@ -5156,6 +5289,7 @@ namespace DriverScanTester.Services
             int emptyRounds = 0;
             const int maxEmptyRounds = 10;
             bool xMovementObserved = false;
+            bool inventoryReadFailureLoggedDuringWait = false;
 
             while (true)
             {
@@ -5192,11 +5326,32 @@ namespace DriverScanTester.Services
                     GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                 Thread.Sleep(100);
 
+                bool inventoryRoundValid = TryCaptureInventorySnapshot(
+                    "CollectionWait", out var inventoryRound, logFailure: !inventoryReadFailureLoggedDuringWait);
+                if (!inventoryRoundValid)
+                    inventoryReadFailureLoggedDuringWait = true;
+                if (inventoryRoundValid)
+                {
+                    collectionDiagnostics.InventoryAfterValid = true;
+                    collectionDiagnostics.InventoryAfter = inventoryRound;
+
+                    if (previousInventoryValid && !InventorySnapshotsEqual(previousInventory, inventoryRound))
+                    {
+                        inventoryChanged = true;
+                        collectionDiagnostics.InventoryChanged = true;
+                        if (InventoryHasIncrease(previousInventory, inventoryRound))
+                            itemCollectedObserved = true;
+                    }
+
+                    previousInventory = inventoryRound;
+                    previousInventoryValid = true;
+                }
+
                 checksumAfter = _memoryService.ComputeInventoryChecksum();
                 collectionDiagnostics.ChecksumAfterWait = checksumAfter;
                 if (checksumAfter != checksumBefore)
                 {
-                    // Item collected along the way — reset baseline, keep spamming.
+                    // Preserve the existing checksum-based collection wait behavior.
                     inventoryChanged = true;
                     collectionDiagnostics.InventoryChanged = true;
                     checksumBefore = checksumAfter;
@@ -5252,6 +5407,44 @@ namespace DriverScanTester.Services
 
             Thread.Sleep(BotConstants.Delays.CollectAnimationMs); // Wait for collection animation/movement
 
+            bool inventoryAfterValid = TryCaptureInventorySnapshot("AfterCollection", out var inventoryAfter);
+            collectionDiagnostics.InventoryAfterValid = inventoryAfterValid;
+            collectionDiagnostics.InventoryAfter = inventoryAfter;
+            checksumAfter = _memoryService.ComputeInventoryChecksum();
+            collectionDiagnostics.ChecksumAfterWait = checksumAfter;
+            if (inventoryAfterValid)
+            {
+                if (inventoryBeforeValid)
+                {
+                    bool finalInventoryChanged = !InventorySnapshotsEqual(inventoryBefore, inventoryAfter);
+                    inventoryChanged |= finalInventoryChanged;
+                    if (InventoryHasIncrease(inventoryBefore, inventoryAfter))
+                        itemCollectedObserved = true;
+                }
+            }
+
+            collectionDiagnostics.InventoryChanged = inventoryChanged;
+            bool? finalCollectionResult = DetermineItemCollected(
+                inventoryBeforeValid, inventoryBefore, inventoryAfterValid, inventoryAfter);
+            collectionDiagnostics.ItemCollected = itemCollectedObserved
+                ? true
+                : inventoryChanged && finalCollectionResult == false
+                    ? null
+                    : finalCollectionResult;
+
+            var afterPosition = TryGetDiagnosticPlayerPosition("UnstuckDecision");
+            collectionDiagnostics.AfterPositionCaptured = true;
+            collectionDiagnostics.AfterPositionValid = afterPosition.Success;
+            collectionDiagnostics.AfterPositionX = afterPosition.X;
+            collectionDiagnostics.AfterPositionY = afterPosition.Y;
+            collectionDiagnostics.PositionChanged = DeterminePositionChanged(
+                collectionDiagnostics.BeforePositionValid,
+                collectionDiagnostics.BeforePositionX,
+                collectionDiagnostics.BeforePositionY,
+                afterPosition.Success,
+                afterPosition.X,
+                afterPosition.Y);
+
             LogLootCollectionSummary(collectionDiagnostics);
             UnbugWhenCollecting(positionBeforeClick, collectionDiagnostics);
 
@@ -5301,16 +5494,39 @@ namespace DriverScanTester.Services
 
         internal void LogLootCollectionSummary(LootCollectionDiagnostics collectionDiagnostics)
         {
+            string beforePosition = FormatDiagnosticPosition(
+                collectionDiagnostics.BeforePositionValid,
+                collectionDiagnostics.BeforePositionX,
+                collectionDiagnostics.BeforePositionY);
+            string afterPosition = FormatDiagnosticPosition(
+                collectionDiagnostics.AfterPositionValid,
+                collectionDiagnostics.AfterPositionX,
+                collectionDiagnostics.AfterPositionY);
+            string positionChanged = collectionDiagnostics.PositionChanged switch
+            {
+                true => "True",
+                false => "False",
+                null => "Unknown"
+            };
+            string itemCollected = FormatNullableBoolean(collectionDiagnostics.ItemCollected);
+
             _log($"[LootUnstuck] COLLECTION SUMMARY attempt={collectionDiagnostics.AttemptId} " +
                  $"BeforeX={collectionDiagnostics.BeforeTriggerX} " +
+                 $"BeforePosition={beforePosition} " +
+                 $"AfterPosition={afterPosition} " +
+                 $"PositionChanged={positionChanged} " +
                  $"XMovementObserved={collectionDiagnostics.XMovementObserved} " +
                  $"StableChecks={collectionDiagnostics.StableChecks}/{collectionDiagnostics.StableChecksRequired} " +
                  $"UnsuccessfulInventoryRounds={collectionDiagnostics.EmptyRounds}/{collectionDiagnostics.MaxEmptyRounds} " +
+                 $"InventoryBefore={FormatInventorySnapshot(collectionDiagnostics.InventoryBeforeValid, collectionDiagnostics.InventoryBefore)} " +
+                 $"InventoryAfter={FormatInventorySnapshot(collectionDiagnostics.InventoryAfterValid, collectionDiagnostics.InventoryAfter)} " +
                  $"ChecksumBefore={collectionDiagnostics.ChecksumBeforeWait} " +
                  $"ChecksumAfter={collectionDiagnostics.ChecksumAfterWait} " +
-                 $"ChecksumBeforeTiming=after-click-release-before-collection-wait " +
+                 $"ChecksumBeforeTiming=before-click-before-collection-attempt " +
+                 $"ChecksumMeaning=legacy-item-type-sum-not-pickup-proof " +
                  $"InventoryChanged={collectionDiagnostics.InventoryChanged} " +
-                 $"InventoryChangedMeaning=checksum-change-only-not-pickup-proof " +
+                 $"InventoryChangedMeaning=observed-change-not-pickup-proof " +
+                 $"ItemCollected={itemCollected} " +
                  $"CollectionExitReason={collectionDiagnostics.ExitReason}");
         }
 
@@ -5319,51 +5535,68 @@ namespace DriverScanTester.Services
             LootCollectionDiagnostics collectionDiagnostics,
             Action<int, int, int>? clickOperation = null)
         {
-            int currentX = GetPositionX();
-            var currentPosition = TryGetDiagnosticPlayerPosition("UnstuckDecision");
-            int deltaX = currentX - beforeClickPosX;
-            bool condition = beforeClickPosX == currentX;
-            bool hasDisplacement = collectionDiagnostics.BeforePositionValid && currentPosition.Success;
+            var currentPosition = collectionDiagnostics.AfterPositionCaptured
+                ? (collectionDiagnostics.AfterPositionX, collectionDiagnostics.AfterPositionY, collectionDiagnostics.AfterPositionValid)
+                : TryGetDiagnosticPlayerPosition("UnstuckDecision");
+            bool? positionChanged = DeterminePositionChanged(
+                collectionDiagnostics.BeforePositionValid,
+                collectionDiagnostics.BeforePositionX,
+                collectionDiagnostics.BeforePositionY,
+                currentPosition.Item3,
+                currentPosition.Item1,
+                currentPosition.Item2);
+            collectionDiagnostics.PositionChanged = positionChanged;
+
+            int? currentX = currentPosition.Item3 ? (int)currentPosition.Item1 : null;
+            string currentXText = currentX?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "<unavailable>";
+            string deltaXText = currentX.HasValue
+                ? (currentX.Value - beforeClickPosX).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : "Unavailable";
+            bool hasDisplacement = collectionDiagnostics.BeforePositionValid && currentPosition.Item3;
             double displacement2D = hasDisplacement
                 ? Math.Sqrt(
-                    Math.Pow(currentPosition.X - collectionDiagnostics.BeforePositionX, 2) +
-                    Math.Pow(currentPosition.Y - collectionDiagnostics.BeforePositionY, 2))
+                    Math.Pow(currentPosition.Item1 - collectionDiagnostics.BeforePositionX, 2) +
+                    Math.Pow(currentPosition.Item2 - collectionDiagnostics.BeforePositionY, 2))
                 : double.NaN;
-            bool xUnchangedButYChanged = condition && hasDisplacement &&
-                Math.Abs(currentPosition.Y - collectionDiagnostics.BeforePositionY) > 0.001f;
             string beforePositionText = FormatDiagnosticPosition(
                 collectionDiagnostics.BeforePositionValid,
                 collectionDiagnostics.BeforePositionX,
                 collectionDiagnostics.BeforePositionY);
             string currentPositionText = FormatDiagnosticPosition(
-                currentPosition.Success, currentPosition.X, currentPosition.Y);
+                currentPosition.Item3, currentPosition.Item1, currentPosition.Item2);
             string displacementText = hasDisplacement
                 ? displacement2D.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)
                 : "Unavailable";
-            string decision = condition ? "TRIGGERED" : "SKIPPED";
+            bool playerPositionUnchanged = positionChanged == false;
+            bool confirmedNoItemCollected = collectionDiagnostics.ItemCollected == false;
+            bool condition = playerPositionUnchanged && confirmedNoItemCollected;
+            string reason = collectionDiagnostics.ItemCollected == true
+                ? "ItemSuccessfullyCollected"
+                : positionChanged == true
+                    ? "PlayerPositionChanged"
+                    : condition
+                        ? "PositionUnchangedAndNoItemCollected"
+                        : "InsufficientCollectionEvidence";
 
-            _log($"[LootUnstuck] {decision} attempt={collectionDiagnostics.AttemptId}");
+            _log($"[LootUnstuck] {(condition ? "TRIGGERED" : "SKIPPED")} attempt={collectionDiagnostics.AttemptId} Reason={reason}");
             _log($"[LootUnstuck] BeforeX={beforeClickPosX} BeforeXSource={LootPositionXSource}");
-            _log($"[LootUnstuck] CurrentX={currentX} CurrentXSource={LootPositionXSource}");
-            _log($"[LootUnstuck] DeltaX={deltaX}");
+            _log($"[LootUnstuck] CurrentX={currentXText} CurrentXSource={PlayerPositionSource}");
+            _log($"[LootUnstuck] DeltaX={deltaXText}");
             _log($"[LootUnstuck] BeforePosition={beforePositionText} BeforePositionSource={PlayerPositionSource}");
             _log($"[LootUnstuck] CurrentPosition={currentPositionText} CurrentPositionSource={PlayerPositionSource}");
             _log($"[LootUnstuck] Displacement2D={displacementText}");
+            _log($"[LootUnstuck] PositionChanged={FormatNullableBoolean(positionChanged)}");
+            _log($"[LootUnstuck] InventoryBefore={FormatInventorySnapshot(collectionDiagnostics.InventoryBeforeValid, collectionDiagnostics.InventoryBefore)}");
+            _log($"[LootUnstuck] InventoryAfter={FormatInventorySnapshot(collectionDiagnostics.InventoryAfterValid, collectionDiagnostics.InventoryAfter)}");
             _log($"[LootUnstuck] InventoryChanged={collectionDiagnostics.InventoryChanged}");
+            _log($"[LootUnstuck] ItemCollected={FormatNullableBoolean(collectionDiagnostics.ItemCollected)}");
             _log($"[LootUnstuck] CollectionExitReason={collectionDiagnostics.ExitReason}");
-            _log($"[LootUnstuck] Condition=(beforeClickPosX == currentX) => {(condition ? "True" : "False")}");
+            _log($"[LootUnstuck] Condition=(playerPositionUnchanged && confirmedNoItemCollected) => {(condition ? "True" : "False")}");
 
             if (!condition)
             {
-                _log("[LootUnstuck] Reason=XChangedDuringCollection");
                 _log("[LootUnstuck] GroundClickExecuted=False");
                 return;
-            }
-
-            _log("[LootUnstuck] Reason=BeforeAndAfterXAreEqual");
-            if (xUnchangedButYChanged)
-            {
-                _log("[LootUnstuck] WARNING: X is unchanged, but 2D position indicates player movement. Existing X-only condition still triggers the ground click.");
             }
 
             // Hardcoded UnbugClickX/Y are screen-absolute → convert to bitmap-local.
@@ -5394,6 +5627,149 @@ namespace DriverScanTester.Services
                 throw;
             }
         }
+
+        private bool TryCaptureInventorySnapshot(
+            string stage,
+            out GameMemoryService.InventorySnapshot snapshot,
+            bool logFailure = true)
+        {
+            try
+            {
+                if (_memoryService.TryGetInventorySnapshot(out snapshot))
+                    return true;
+
+                if (logFailure)
+                    _log($"[LootUnstuck] INVENTORY READ FAILED stage={stage}");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                snapshot = default;
+                if (logFailure)
+                    _log($"[LootUnstuck] INVENTORY READ FAILED stage={stage} error={ex.GetType().Name}: {ex.Message}");
+                return false;
+            }
+        }
+
+        internal static bool? DetermineItemCollected(
+            bool beforeValid,
+            GameMemoryService.InventorySnapshot before,
+            bool afterValid,
+            GameMemoryService.InventorySnapshot after)
+        {
+            if (!beforeValid || !afterValid)
+                return null;
+            if (InventoryHasIncrease(before, after))
+                return true;
+            return InventorySnapshotsEqual(before, after) ? false : null;
+        }
+
+        internal static bool InventoryHasIncrease(
+            GameMemoryService.InventorySnapshot before,
+            GameMemoryService.InventorySnapshot after)
+        {
+            if (before.ItemTypes == null || before.ItemCounts == null ||
+                after.ItemTypes == null || after.ItemCounts == null ||
+                before.ItemTypes.Length != before.ItemCounts.Length ||
+                after.ItemTypes.Length != after.ItemCounts.Length)
+                return false;
+
+            int sharedSlotCount = Math.Min(before.ItemTypes.Length, after.ItemTypes.Length);
+            for (int i = 0; i < sharedSlotCount; i++)
+            {
+                if (before.ItemTypes[i] != 0 &&
+                    before.ItemTypes[i] == after.ItemTypes[i] &&
+                    after.ItemCounts[i] > before.ItemCounts[i])
+                    return true;
+            }
+
+            var beforeTotals = GetInventoryItemTotals(before);
+            var afterTotals = GetInventoryItemTotals(after);
+            foreach (var (itemType, count) in afterTotals)
+            {
+                if (!beforeTotals.TryGetValue(itemType, out int beforeCount) || count > beforeCount)
+                    return true;
+            }
+            return false;
+        }
+
+        private static Dictionary<int, int> GetInventoryItemTotals(GameMemoryService.InventorySnapshot snapshot)
+        {
+            var totals = new Dictionary<int, int>();
+            for (int i = 0; i < snapshot.ItemTypes.Length; i++)
+            {
+                int itemType = snapshot.ItemTypes[i];
+                if (itemType == 0)
+                    continue;
+
+                int itemCount = i < snapshot.ItemCounts.Length && snapshot.ItemCounts[i] > 0
+                    ? snapshot.ItemCounts[i]
+                    : 1;
+                totals[itemType] = totals.TryGetValue(itemType, out int total)
+                    ? total + itemCount
+                    : itemCount;
+            }
+            return totals;
+        }
+
+        private static bool InventorySnapshotsEqual(
+            GameMemoryService.InventorySnapshot left,
+            GameMemoryService.InventorySnapshot right)
+        {
+            return left.ItemTypes != null && left.ItemCounts != null &&
+                   right.ItemTypes != null && right.ItemCounts != null &&
+                   left.ItemTypes.SequenceEqual(right.ItemTypes) &&
+                   left.ItemCounts.SequenceEqual(right.ItemCounts);
+        }
+
+        private static int ComputeInventorySnapshotChecksum(GameMemoryService.InventorySnapshot snapshot)
+        {
+            unchecked
+            {
+                int checksum = 17;
+                for (int i = 0; i < snapshot.ItemTypes.Length; i++)
+                {
+                    checksum = checksum * 31 + snapshot.ItemTypes[i];
+                    checksum = checksum * 31 + snapshot.ItemCounts[i];
+                }
+                return checksum;
+            }
+        }
+
+        private static string FormatInventorySnapshot(
+            bool success,
+            GameMemoryService.InventorySnapshot snapshot)
+        {
+            if (!success || snapshot.ItemTypes == null || snapshot.ItemCounts == null)
+                return "<unavailable>";
+
+            int occupiedSlots = snapshot.ItemTypes.Count(itemType => itemType != 0);
+            return $"Valid:slots={snapshot.ItemTypes.Length},occupied={occupiedSlots},checksum={ComputeInventorySnapshotChecksum(snapshot)}";
+        }
+
+        private static bool? DeterminePositionChanged(
+            bool beforeValid,
+            float beforeX,
+            float beforeY,
+            bool afterValid,
+            float afterX,
+            float afterY)
+        {
+            if (!beforeValid || !afterValid)
+                return null;
+
+            const float positionTolerance = 0.001f;
+            return Math.Abs(afterX - beforeX) > positionTolerance ||
+                   Math.Abs(afterY - beforeY) > positionTolerance;
+        }
+
+        private static string FormatNullableBoolean(bool? value)
+            => value switch
+            {
+                true => "True",
+                false => "False",
+                null => "Unknown"
+            };
 
         private (float X, float Y, bool Success) TryGetDiagnosticPlayerPosition(string stage)
         {

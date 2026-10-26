@@ -261,7 +261,7 @@ namespace DriverScanTester.Tests
             Assert.True(result.CandidateComponents >= 1);
             Assert.True(result.LootPixels > 0);
             Assert.False(result.CandidateBounds.IsEmpty);
-            Assert.Equal((short)17000, BotConstants.Camera.LootScanDistance);
+            Assert.Equal((short)17050, BotConstants.Camera.LootScanDistance);
             Assert.Equal(BotConstants.Camera.LootScanDistance, LootSystem.NormalLootScanDistance);
         }
 
@@ -470,7 +470,7 @@ namespace DriverScanTester.Tests
         [Fact]
         public void LootCaptureRequiresExactDistanceLockSettlementAndOwnership()
         {
-            Assert.Equal((short)17000, BotConstants.Camera.LootScanDistance);
+            Assert.Equal((short)17050, BotConstants.Camera.LootScanDistance);
             Assert.Equal(BotConstants.Camera.LootScanDistance, LootSystem.NormalLootScanDistance);
 
             short distance = LootSystem.NormalLootScanDistance;
@@ -505,7 +505,7 @@ namespace DriverScanTester.Tests
             var memoryBytes = new Dictionary<ulong, byte[]>
             {
                 [moduleBase + BotConstants.MemoryOffsets.CameraPtr] = BitConverter.GetBytes(cameraBase),
-                [cameraBase + BotConstants.MemoryOffsets.CameraDistance] = BitConverter.GetBytes((short)17000),
+                [cameraBase + BotConstants.MemoryOffsets.CameraDistance] = BitConverter.GetBytes((short)17050),
                 [cameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset] =
                     BitConverter.GetBytes(BotConstants.Camera.StationaryVerticalLock)
             };

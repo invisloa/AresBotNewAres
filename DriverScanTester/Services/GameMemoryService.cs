@@ -23,6 +23,8 @@ namespace DriverScanTester.Services
 
     public class GameMemoryService
     {
+        internal readonly record struct InventorySnapshot(int[] ItemTypes, int[] ItemCounts);
+
         public delegate bool ReadMemoryDelegate(uint pid, ulong address, byte[] buffer, out uint bytesRead);
         public delegate bool WriteMemoryDelegate(uint pid, ulong address, byte[] buffer, out uint bytesWritten);
 
@@ -1034,6 +1036,46 @@ namespace DriverScanTester.Services
                 return checksum;
             }
             return 0;
+        }
+
+        /// <summary>
+        /// Captures all inventory slot item types and stack counts in one complete
+        /// read. A failed or partial read is not returned as an empty inventory.
+        /// </summary>
+        internal bool TryGetInventorySnapshot(out InventorySnapshot snapshot)
+        {
+            snapshot = default;
+            try
+            {
+                ulong playerPointerAddress = _moduleBase + PlayerPtrOffset;
+                if (!TryReadPointer(playerPointerAddress, out ulong playerBase) || playerBase == 0)
+                    return false;
+
+                ulong slotBase = playerBase + (ulong)SlotFirstSellOffset;
+                int slotCount = BotConstants.GameMagicValues.TotalInventorySlots;
+                int slotSize = BotConstants.GameMagicValues.InventorySlotSize;
+                byte[] buffer = new byte[slotCount * slotSize];
+                if (!_read(_pid, slotBase, buffer, out uint bytesRead) || bytesRead != buffer.Length)
+                    return false;
+
+                var itemTypes = new int[slotCount];
+                var itemCounts = new int[slotCount];
+                for (int i = 0; i < slotCount; i++)
+                {
+                    int slotOffset = i * slotSize;
+                    int itemType = BitConverter.ToInt16(buffer, slotOffset);
+                    itemTypes[i] = itemType;
+                    if (itemType != 0)
+                        itemCounts[i] = buffer[slotOffset + 6];
+                }
+
+                snapshot = new InventorySnapshot(itemTypes, itemCounts);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         /// <summary>
