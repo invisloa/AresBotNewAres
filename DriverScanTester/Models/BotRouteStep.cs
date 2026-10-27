@@ -16,6 +16,20 @@ namespace DriverScanTester.Models
         public int StartDelayMs { get; set; } = 0;
 
         /// <summary>
+        /// Optional map number the player must be standing on for THIS route to be chosen
+        /// by the map-based startup detection (see <see cref="Services.BotStartupActionSelector"/>).
+        /// 0 means unspecified — such a route is never selected by the startup detection and
+        /// falls back to the owning step's <see cref="BotFlowStep.StartMapNumber"/> when that
+        /// one is configured. This is the map the route STARTS on, which is not necessarily
+        /// the map it ends on: a route that crosses a portal starts on the map before the
+        /// portal, while <see cref="ProtectionMapNumber"/> is the map required once the route
+        /// (or its portal) has been entered. It is also independent of
+        /// <see cref="BotFlowStep.ExpectedDestinationMapNumber"/>, which is the map REACHED
+        /// after a travel route and is never treated as a starting map.
+        /// </summary>
+        public int StartMapNumber { get; set; } = 0;
+
+        /// <summary>
         /// When true, the bot runs the start-position protection before executing THIS
         /// route, using THIS route's OWN settings: if the player is not on
         /// <see cref="StartPositionX"/>/<see cref="StartPositionY"/> (within

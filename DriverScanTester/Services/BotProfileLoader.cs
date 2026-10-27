@@ -45,9 +45,9 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Loads a profile by name (with or without .json extension).
-        /// Profiles saved with an older three-stage / hunt-based schema are migrated in
-        /// memory into the new linear flow (FlowSteps). Saving the profile writes only
-        /// the new flow schema.
+        /// Only the current flow schema (BotProfile.FlowSteps) is supported: a profile
+        /// without flow steps is rejected with an explicit diagnostic instead of being
+        /// guessed at. Saving the profile writes the same flow schema.
         /// </summary>
         public BotProfile? LoadProfile(string profileName)
         {
@@ -71,9 +71,14 @@ namespace DriverScanTester.Services
                     return null;
                 }
 
-                MigrateLegacyToFlow(profile, json);
+                if (profile.FlowSteps == null || profile.FlowSteps.Count == 0)
+                {
+                    _log($"[BotProfileLoader] Profile '{profile.Name}' has no flow steps and cannot be used. " +
+                         "Saving a profile always writes the flow schema, so this file is not a supported profile.");
+                    return null;
+                }
 
-                _log($"[BotProfileLoader] Loaded profile '{profile.Name}' with {profile.FlowSteps?.Count ?? 0} flow steps.");
+                _log($"[BotProfileLoader] Loaded profile '{profile.Name}' with {profile.FlowSteps.Count} flow steps.");
                 return profile;
             }
             catch (Exception ex)
@@ -81,252 +86,6 @@ namespace DriverScanTester.Services
                 _log($"[BotProfileLoader] Error loading profile '{profileName}': {ex.Message}");
                 return null;
             }
-        }
-
-        // ──────────────────── Legacy migration (private) ────────────────────
-
-        /// <summary>
-        /// DTO for the old direct three-stage schema (CityToRepot, TravelToExpRoutes,
-        /// ExpLoop, PreExpOperations). Used only to read legacy profile JSON; the public
-        /// BotProfile model exposes only FlowSteps.
-        /// </summary>
-        private sealed class LegacyProfileDto
-        {
-            public string Name { get; set; } = "";
-            public List<BotRouteStep> CityToRepotPaths { get; set; } = new();
-            public List<TravelRouteStep> TravelToExpRoutes { get; set; } = new();
-            public BotRouteStep? ExpLoop { get; set; }
-            public List<string> PreExpOperations { get; set; } = new();
-        }
-
-        /// <summary>
-        /// DTO for the old Hunt-based schema. Used only to read legacy profile JSON.
-        /// </summary>
-        private sealed class LegacyHuntDto
-        {
-            public string Name { get; set; } = "";
-            public List<TravelRouteStep> TravelToExpRoutes { get; set; } = new();
-            public BotRouteStep ExpLoop { get; set; } = new();
-            public BotRouteStep? RepotToCityExit { get; set; }
-            public BotRouteStep? CityExitToExp { get; set; }
-        }
-
-        /// <summary>
-        /// Converts any legacy schema into the new linear flow. A profile is considered
-        /// legacy when it has no FlowSteps but has any of the old fields. The migration
-        /// produces:
-        ///   • one Repot step (from the repot path pool),
-        ///   • for each travel route: optional OperationBefore step → Path step → optional OperationAfter step,
-        ///   • pre-EXP operations as Operation steps,
-        ///   • one ExpLoop step (from ExpLoop).
-        /// </summary>
-        private void MigrateLegacyToFlow(BotProfile profile, string json)
-        {
-            if (profile.FlowSteps != null && profile.FlowSteps.Count > 0)
-                return;
-
-            LegacyProfileDto legacy;
-            try
-            {
-                legacy = ParseLegacyProfile(json);
-            }
-            catch (Exception ex)
-            {
-                _log($"[BotProfileLoader] Legacy profile parse error: {ex.Message}");
-                return;
-            }
-
-            var flow = new List<BotFlowStep>();
-
-            // Stage 1: REPOT
-            if (legacy.CityToRepotPaths.Count > 0)
-            {
-                flow.Add(new BotFlowStep
-                {
-                    Type = BotFlowStepType.Repot,
-                    RepotPaths = legacy.CityToRepotPaths
-                });
-            }
-
-            // Stage 2: GO TO EXP (travel routes with optional operations around them)
-            for (int i = 0; i < legacy.TravelToExpRoutes.Count; i++)
-            {
-                var route = legacy.TravelToExpRoutes[i];
-                if (route == null)
-                    continue;
-
-                if (!string.IsNullOrWhiteSpace(route.OperationBefore))
-                {
-                    flow.Add(new BotFlowStep
-                    {
-                        Type = BotFlowStepType.Operation,
-                        OperationName = route.OperationBefore
-                    });
-                }
-
-                flow.Add(new BotFlowStep
-                {
-                    Type = BotFlowStepType.Path,
-                    PathFile = route.PathFile ?? "",
-                    StartDelayMs = route.StartDelayMs,
-                    CompletionMode = route.CompletionMode,
-                    ExpectedDestinationMapNumber = route.ExpectedDestinationMapNumber
-                });
-
-                if (!string.IsNullOrWhiteSpace(route.OperationAfter))
-                {
-                    flow.Add(new BotFlowStep
-                    {
-                        Type = BotFlowStepType.Operation,
-                        OperationName = route.OperationAfter
-                    });
-                }
-            }
-
-            // Pre-EXP custom operations
-            foreach (var op in legacy.PreExpOperations)
-            {
-                if (string.IsNullOrWhiteSpace(op))
-                    continue;
-                flow.Add(new BotFlowStep
-                {
-                    Type = BotFlowStepType.Operation,
-                    OperationName = op
-                });
-            }
-
-            // Stage 3: EXP LOOP
-            if (legacy.ExpLoop != null && !string.IsNullOrWhiteSpace(legacy.ExpLoop.PathFile))
-            {
-                flow.Add(new BotFlowStep
-                {
-                    Type = BotFlowStepType.ExpLoop,
-                    PathFile = legacy.ExpLoop.PathFile,
-                    StartDelayMs = legacy.ExpLoop.StartDelayMs
-                });
-            }
-
-            if (flow.Count == 0)
-                return;
-
-            profile.FlowSteps = flow;
-            _log($"[BotProfileLoader] Profile '{profile.Name}': migrated legacy schema into a {flow.Count}-step flow.");
-        }
-
-        /// <summary>
-        /// Extracts the legacy profile structure from raw JSON, applying the hunt-based
-        /// migration when the file uses the old HuntDefinitions schema.
-        /// </summary>
-        private LegacyProfileDto ParseLegacyProfile(string json)
-        {
-            var legacy = new LegacyProfileDto();
-
-            using var doc = JsonDocument.Parse(json);
-
-            if (doc.RootElement.TryGetProperty("Name", out var nameEl) &&
-                nameEl.ValueKind == JsonValueKind.String)
-            {
-                legacy.Name = nameEl.GetString() ?? "";
-            }
-
-            // Repot paths: either a single CityToRepot object or a CityToRepotPaths array.
-            if (doc.RootElement.TryGetProperty("CityToRepot", out var cityEl) &&
-                cityEl.ValueKind == JsonValueKind.Object)
-            {
-                var step = cityEl.Deserialize<BotRouteStep>();
-                if (step != null && !string.IsNullOrWhiteSpace(step.PathFile))
-                    legacy.CityToRepotPaths.Add(step);
-            }
-            if (doc.RootElement.TryGetProperty("CityToRepotPaths", out var cityPathsEl) &&
-                cityPathsEl.ValueKind == JsonValueKind.Array)
-            {
-                legacy.CityToRepotPaths = cityPathsEl.Deserialize<List<BotRouteStep>>() ?? legacy.CityToRepotPaths;
-            }
-
-            // Travel routes (direct schema).
-            if (doc.RootElement.TryGetProperty("TravelToExpRoutes", out var routesEl) &&
-                routesEl.ValueKind == JsonValueKind.Array)
-            {
-                legacy.TravelToExpRoutes = routesEl.Deserialize<List<TravelRouteStep>>() ?? legacy.TravelToExpRoutes;
-            }
-
-            // Pre-EXP operations.
-            if (doc.RootElement.TryGetProperty("PreExpOperations", out var preOpsEl) &&
-                preOpsEl.ValueKind == JsonValueKind.Array)
-            {
-                legacy.PreExpOperations = preOpsEl.Deserialize<List<string>>() ?? legacy.PreExpOperations;
-            }
-
-            // Exp loop.
-            if (doc.RootElement.TryGetProperty("ExpLoop", out var expLoopEl) &&
-                expLoopEl.ValueKind == JsonValueKind.Object)
-            {
-                legacy.ExpLoop = expLoopEl.Deserialize<BotRouteStep>();
-            }
-
-// Legacy hunt schema: if there are no direct travel routes yet, migrate a hunt.
-            if (legacy.TravelToExpRoutes.Count == 0 &&
-                doc.RootElement.TryGetProperty("HuntDefinitions", out var huntsEl) &&
-                huntsEl.ValueKind == JsonValueKind.Array)
-            {
-                string defaultHuntName = "";
-                if (doc.RootElement.TryGetProperty("DefaultHuntName", out var defaultEl) &&
-                    defaultEl.ValueKind == JsonValueKind.String)
-                {
-                    defaultHuntName = defaultEl.GetString() ?? "";
-                }
-                MigrateLegacyHuntInto(legacy, huntsEl, defaultHuntName);
-            }
-
-            return legacy;
-        }
-
-        /// <summary>
-        /// One-time in-memory migration for profiles saved with the Hunt-based schema.
-        /// The hunt matching the old DefaultHuntName (or the first hunt when there is
-        /// no match) is selected and its TravelToExpRoutes / ExpLoop are copied into the
-        /// legacy structure. All other profile settings are preserved.
-        /// </summary>
-        private void MigrateLegacyHuntInto(LegacyProfileDto legacy, JsonElement huntsElement, string defaultHuntName)
-        {
-            var hunts = new List<LegacyHuntDto>();
-            foreach (var huntElement in huntsElement.EnumerateArray())
-            {
-                var hunt = huntElement.Deserialize<LegacyHuntDto>();
-                if (hunt != null)
-                    hunts.Add(hunt);
-            }
-            if (hunts.Count == 0)
-                return;
-
-            var selected = hunts.FirstOrDefault(h =>
-                string.Equals(h.Name, defaultHuntName, StringComparison.OrdinalIgnoreCase))
-                ?? hunts[0];
-
-            var routes = new List<TravelRouteStep>(selected.TravelToExpRoutes ?? new List<TravelRouteStep>());
-            if (routes.Count == 0 && (selected.RepotToCityExit != null || selected.CityExitToExp != null))
-            {
-                foreach (var step in new[] { selected.RepotToCityExit, selected.CityExitToExp })
-                {
-                    if (step == null)
-                        continue;
-
-                    routes.Add(new TravelRouteStep
-                    {
-                        PathFile = step.PathFile ?? "",
-                        StartDelayMs = step.StartDelayMs,
-                        CompletionMode = TravelRouteCompletionMode.FinalWaypoint,
-                        ExpectedDestinationMapNumber = 0
-                    });
-                }
-            }
-
-            legacy.TravelToExpRoutes = routes;
-            legacy.ExpLoop = selected.ExpLoop ?? new BotRouteStep();
-
-            _log($"[BotProfileLoader] Legacy profile '{legacy.Name}': migrated hunt '{selected.Name}' into the profile's travel routes / exp loop.");
-            if (hunts.Count > 1)
-                _log($"[BotProfileLoader] Legacy profile '{legacy.Name}' contained {hunts.Count} hunts; only '{selected.Name}' was migrated into the flow.");
         }
 
         /// <summary>
@@ -550,6 +309,19 @@ namespace DriverScanTester.Services
             if (profile.StartPositionTolerance < 0)
                 errors.Add("Start position check: start position tolerance cannot be negative.");
 
+            // Per-step starting maps (map-based startup detection). 0 = unspecified and valid;
+            // a negative value is always a configuration error.
+            if (profile.FlowSteps != null)
+            {
+                for (int s = 0; s < profile.FlowSteps.Count; s++)
+                {
+                    var step = profile.FlowSteps[s];
+                    if (step == null) continue;
+                    if (step.StartMapNumber < 0)
+                        errors.Add($"Flow step {s + 1}: starting map number cannot be negative (0 means unspecified).");
+                }
+            }
+
             // Per-route start checks: every route with the start check enabled must
             // carry its own protected map and a nonnegative tolerance.
             if (profile.FlowSteps != null)
@@ -622,6 +394,11 @@ namespace DriverScanTester.Services
 
             if (step.StartDelayMs < 0)
                 errors.Add($"{displayName}: wait time cannot be negative.");
+
+            // Optional map-based startup metadata: 0 = unspecified (valid), negative
+            // values are invalid.
+            if (step.StartMapNumber < 0)
+                errors.Add($"{displayName}: starting map number cannot be negative (0 means unspecified).");
         }
 
         /// <summary>

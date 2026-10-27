@@ -92,6 +92,28 @@ namespace DriverScanTester.Services
         /// </summary>
         private readonly Dictionary<BotFlowStep, int> _stepRouteIndex = new();
 
+        /// <summary>
+        /// One-shot startup-entry context produced by the map-based startup detection in
+        /// <see cref="StartAsync"/>. It is keyed to the ONE flow step + route selected for
+        /// the initial resume, and is consumed by the first execution of exactly that route
+        /// (where the route's entrance-coordinate start protection is replaced by a
+        /// map-aware validated-position check). It never survives into retries, later route
+        /// executions, repots or workflow cycles: an unrelated step execution discards it.
+        /// Only Path / ExpLoop steps use it — the Repot step has its own in-city validation.
+        /// </summary>
+        private StartupRouteEntry? _startupRouteEntry;
+
+        /// <summary>
+        /// Human-readable description of the map-based startup selection applied by the
+        /// current run. Empty when the detection did not select an action.
+        /// </summary>
+        public string StartupSelectionText { get; private set; } = "";
+
+        /// <summary>
+        /// The one flow step / route selected by the map-based startup detection.
+        /// </summary>
+        private sealed record StartupRouteEntry(BotFlowStep Step, int RouteIndex, int StartMapNumber);
+
         /// <summary>Consecutive repot-path failures. After 3 the workflow fails
         /// visibly instead of retrying forever (e.g. the player cannot move in the city).</summary>
         private int _moveToRepotRetryCount;
@@ -330,6 +352,8 @@ namespace DriverScanTester.Services
             _teleportRetryCount = 0;
             _postRepotVerifyRetryCount = 0;
             _playerMarkerInterruptionsSinceFullExpCycle = 0;
+            _startupRouteEntry = null;
+            StartupSelectionText = "";
             _positionSync.Reset();
 
             _focusGameWindow();
@@ -351,17 +375,28 @@ namespace DriverScanTester.Services
             Task? healTask = null;
             try
             {
-                // ── Start position protection gate ──
-                // Verifies the player stands on the profile's start position; if not,
-                // uses the town teleport scroll and then verifies map + position against
-                // the profile's protection settings. On failure the bot stops instead
-                // of starting the flow (the finally block below performs the cleanup).
-                if (!await RunStartProtectionAsync(token))
+                // ── Map-based startup action detection (exactly once per explicit start) ──
+                // Only this StartAsync path runs the detection: normal loop iterations,
+                // repot, recovery, pause/resume and flow wrapping never do.
+                StartupEntryOutcome startupEntry = await ApplyStartupSelectionAsync(token);
+                if (startupEntry != StartupEntryOutcome.Selected)
                 {
-                    _log("[Coordinator] Start protection failed — the bot will not start.");
-                    CurrentPhase = BotPhase.Failed;
+                    if (!token.IsCancellationRequested)
+                    {
+                        _log("[Startup] The bot will not start: the startup action selection did not resolve a safe entry.");
+                        CurrentPhase = BotPhase.Failed;
+                    }
                     return;
                 }
+
+                // The map-based startup entry already validated the player's map and position
+                // for the selected action, so the profile-wide spawn-point requirement is NOT
+                // enforced for that entry: being away from the profile's first configured spawn
+                // point must not trigger a destructive town teleport. The validated map +
+                // position of the startup location are the mandatory gate instead, and the
+                // route-level start checks keep running for every later entry.
+                _log("[StartProtection] Map-based startup entry in effect — the profile-wide start position check is not enforced for this initial action " +
+                     "(the observed map and position were validated for the selected action instead). Normal route protection stays active.");
 
                 healTask = Task.Run(async () =>
                 {
@@ -524,6 +559,10 @@ namespace DriverScanTester.Services
             await WaitIfPausedAsync(token);
             if (token.IsCancellationRequested) return false;
 
+            // The startup entry exception belongs to exactly one route execution. If the flow
+            // position points somewhere else, drop it instead of carrying it forward.
+            DropForeignStartupRouteEntry(step);
+
             switch (step.Type)
             {
                 case BotFlowStepType.Path:
@@ -559,7 +598,19 @@ namespace DriverScanTester.Services
             var (route, routeIndex) = GetCurrentRoute(step, pool);
             _log($"[Path] Using route {routeIndex + 1}/{pool.Count} — '{route.PathFile}'.");
 
-            if (!await RunRouteStartProtectionAsync(route, token))
+            if (IsStartupRouteEntry(step, routeIndex))
+            {
+                // Initial resume of the map the user started the bot on: map + validated
+                // position only, the configured entrance coordinates are not required.
+                var startupEntry = _startupRouteEntry!;
+                if (!await EnsureStartupRouteEntryValidatedAsync(route, startupEntry.StartMapNumber, "Path", token))
+                {
+                    CurrentPhase = BotPhase.Failed;
+                    return false;
+                }
+                ConsumeStartupRouteEntry(step, routeIndex);
+            }
+            else if (!await RunRouteStartProtectionAsync(route, token))
             {
                 HandleRouteStartProtectionFailure("Path step");
                 return false;
@@ -916,20 +967,36 @@ namespace DriverScanTester.Services
             var (route, routeIndex) = GetCurrentRoute(step, pool);
             _log($"[ExpLoop] Using route {routeIndex + 1}/{pool.Count} — '{route.PathFile}'.");
 
-            if (!await RunRouteStartProtectionAsync(route, token))
+            if (IsStartupRouteEntry(step, routeIndex))
             {
-                HandleRouteStartProtectionFailure("ExpLoop");
-                return false;
+                // Initial resume of the map the user started the bot on (e.g. the middle of
+                // the COT hunting route): map + validated position only. The configured
+                // entrance coordinates are NOT demanded and no town teleport may be triggered.
+                var startupEntry = _startupRouteEntry!;
+                if (!await EnsureStartupRouteEntryValidatedAsync(route, startupEntry.StartMapNumber, "ExpLoop", token))
+                {
+                    CurrentPhase = BotPhase.Failed;
+                    return false;
+                }
+                ConsumeStartupRouteEntry(step, routeIndex);
             }
-
-            // Destination gate: the EXP path runner (including its initial RouteResync)
-            // must not initialize until the post-transition position was validated for
-            // this route's destination. A failed gate stops the step safely instead of
-            // selecting waypoints from coordinates that may belong to the previous map.
-            if (!await EnsureRouteEntryValidatedAsync(route, "ExpLoop", token))
+            else
             {
-                CurrentPhase = BotPhase.Failed;
-                return false;
+                if (!await RunRouteStartProtectionAsync(route, token))
+                {
+                    HandleRouteStartProtectionFailure("ExpLoop");
+                    return false;
+                }
+
+                // Destination gate: the EXP path runner (including its initial RouteResync)
+                // must not initialize until the post-transition position was validated for
+                // this route's destination. A failed gate stops the step safely instead of
+                // selecting waypoints from coordinates that may belong to the previous map.
+                if (!await EnsureRouteEntryValidatedAsync(route, "ExpLoop", token))
+                {
+                    CurrentPhase = BotPhase.Failed;
+                    return false;
+                }
             }
 
             // Wait once before starting the looping route (not on every cycle).
@@ -1576,18 +1643,7 @@ namespace DriverScanTester.Services
         /// Returns null when no route is configured at all.
         /// </summary>
         private static List<BotRouteStep>? GetRoutePool(BotFlowStep step)
-        {
-            if (step.Routes != null && step.Routes.Count > 0)
-                return step.Routes;
-
-            if (string.IsNullOrWhiteSpace(step.PathFile))
-                return null;
-
-            return new List<BotRouteStep>
-            {
-                new BotRouteStep { PathFile = step.PathFile, StartDelayMs = step.StartDelayMs }
-            };
-        }
+            => BotStartupActionSelector.GetRoutePool(step);
 
         /// <summary>
         /// Picks the next route of a step's route group without advancing the rotation.
@@ -2063,31 +2119,431 @@ namespace DriverScanTester.Services
             return false;
         }
 
-        /// <summary>
-        /// Profile-level start-position protection gate, run once when the workflow
-        /// starts. When the profile has <see cref="BotProfile.EnableStartPositionCheck"/>
-        /// disabled this returns immediately and the flow starts normally; otherwise the
-        /// core start-protection check runs.
-        /// </summary>
-        private async Task<bool> RunStartProtectionAsync(CancellationToken token)
-        {
-            if (!_profile.EnableStartPositionCheck)
-                return true;
+        // ======================== Map-based startup entry ========================
 
-            bool passed = await RunStartProtectionCoreAsync(
+        /// <summary>Outcome of the one-time map-based startup detection.</summary>
+        private enum StartupEntryOutcome
+        {
+            /// <summary>A matching action was selected; the flow starts on it.</summary>
+            Selected,
+
+            /// <summary>No safe action could be determined; the workflow must not start.</summary>
+            Failed
+        }
+
+        /// <summary>
+        /// Runs the map-based startup detection ONCE for an explicit user-initiated workflow
+        /// start and initializes the flow position from it:
+        ///   1. Resolve a trustworthy player map/position (coherent reads, stable map,
+        ///      post-transition freshness).
+        ///   2. Select the FIRST flow action (and the FIRST route inside it) whose starting
+        ///      map matches the observed map — see <see cref="BotStartupActionSelector"/>.
+        ///   3. Initialize <see cref="_flowIndex"/> plus <see cref="_repotPathIndex"/> or
+        ///      <see cref="_stepRouteIndex"/> for the selected action.
+        ///
+        /// It is called from <see cref="StartAsync"/> only. Routes that were skipped are NOT
+        /// marked as completed; after the selected action finishes the normal workflow
+        /// progression (and route rotation) continues exactly as before.
+        /// </summary>
+        private async Task<StartupEntryOutcome> ApplyStartupSelectionAsync(CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+
+            var steps = _profile.FlowSteps;
+            if (steps == null || steps.Count == 0)
+            {
+                _log("[Startup] The profile has no flow steps — the workflow will not start.");
+                return StartupEntryOutcome.Failed;
+            }
+
+            // Every flow action that may be started must declare the map it starts on; the
+            // startup never falls back to step 1 and never invents starting maps.
+            if (!BotStartupActionSelector.HasConfiguredStartupMaps(_profile))
+            {
+                _log("[Startup] No flow step or route declares a starting map — the workflow will not start. " +
+                     "Configure the starting map of every action/route that may be started (the first action whose starting map matches the player's map is used).");
+                return StartupEntryOutcome.Failed;
+            }
+
+            _log("[Startup] Map-based startup detection running — resolving the player's current map and position...");
+            PlayerStateSnapshot? location = await ResolveStartupLocationAsync(token);
+            if (token.IsCancellationRequested || _stopRequested)
+                return StartupEntryOutcome.Failed;
+
+            if (location is not { HasCoherentState: true } observed)
+            {
+                _log("[Startup] No trustworthy player location (map/position) could be validated — the workflow will not start.");
+                return StartupEntryOutcome.Failed;
+            }
+
+            BotStartupSelection selection = BotStartupActionSelector.Select(_profile, observed.Map);
+            switch (selection.Status)
+            {
+                case BotStartupSelectionStatus.NoStartupMapConfigured:
+                    _log($"[Startup] Startup aborted: {selection.Reason} Configure the starting map of the actions that may be started.");
+                    return StartupEntryOutcome.Failed;
+
+                case BotStartupSelectionStatus.NoMatchingAction:
+                    _log($"[Startup] Startup aborted: observed map {observed.Map} at ({observed.X},{observed.Y}) does not match any configured starting action. {selection.Reason}");
+                    _log("[Startup] No unrelated action was chosen and no teleport was attempted. Configure the starting map for the action(s) that belong to this location.");
+                    return StartupEntryOutcome.Failed;
+
+                case BotStartupSelectionStatus.InvalidInput:
+                    _log($"[Startup] Startup aborted: {selection.Reason}");
+                    return StartupEntryOutcome.Failed;
+            }
+
+            var step = selection.Step;
+            if (step == null)
+            {
+                _log("[Startup] Startup aborted: the selector returned no step.");
+                return StartupEntryOutcome.Failed;
+            }
+
+            _flowIndex = selection.FlowIndex;
+
+            if (step.Type == BotFlowStepType.Repot)
+            {
+                // Alternative repot routes: start with the first matching repot route and let
+                // the existing _repotPathIndex advancement rotate from there.
+                _repotPathIndex = Math.Max(0, selection.RouteIndex);
+            }
+            else if (selection.RouteIndex >= 0 && step.Type is BotFlowStepType.Path or BotFlowStepType.ExpLoop)
+            {
+                // Route group: start with the first matching route; AdvanceRoute() keeps the
+                // existing rotation behavior after this execution.
+                _stepRouteIndex[step] = selection.RouteIndex;
+            }
+
+            if (step.Type is BotFlowStepType.Path or BotFlowStepType.ExpLoop)
+            {
+                _startupRouteEntry = new StartupRouteEntry(step, Math.Max(0, selection.RouteIndex), selection.StartMapNumber);
+            }
+
+            StartupSelectionText = $"flow step {selection.FlowIndex + 1}/{steps.Count}" +
+                                    (selection.RouteIndex >= 0 ? $", route {selection.RouteIndex + 1}" : "") +
+                                    $", start map {selection.StartMapNumber}";
+
+            _log($"[Startup] Selected {StartupSelectionText}: {DescribeStep(step)}.");
+            _log($"[Startup] Reason: {selection.Reason}");
+            _log($"[Startup] Player location: map {observed.Map}, position ({observed.X},{observed.Y}). Earlier flow steps are not executed on this start; " +
+                 "the route index is initialized for map-based resume and skipped routes are not marked as completed.");
+
+            return StartupEntryOutcome.Selected;
+        }
+
+        /// <summary>
+        /// Resolves the player's current map/position for the startup detection and proves it
+        /// trustworthy before a single waypoint may be selected from it:
+        ///
+        ///   1. Coherent snapshot gate — the player pointer, the map read, a nonzero map and
+        ///      the X/Y read must all succeed (<see cref="GameMemoryService.GetPlayerStateSnapshot"/>;
+        ///      one pointer read for map + position, never a pair of independent reads).
+        ///   2. Stable map confirmation — the same map must be observed for
+        ///      <see cref="BotConstants.Delays.MapTransitionStableReadCount"/> consecutive reads
+        ///      inside the existing map-settlement window.
+        ///   3. Post-transition freshness — handled through the existing
+        ///      <see cref="PositionSyncService"/> lifecycle. A pending transition is resolved,
+        ///      and when the profile declares a baseline map/location the player is NOT standing
+        ///      on, the location is treated as a post-transition one: its coordinates must be
+        ///      proven live (bounded mini-W refresh through PositionSync), so the confirmed COT
+        ///      failure — map 36 exposed while X/Y still belong to Etana — can never select a
+        ///      waypoint from stale data.
+        ///
+        /// Returns the validated snapshot, or null when the location could not be proven
+        /// (the caller must stop the startup without navigation or teleport).
+        /// </summary>
+        private async Task<PlayerStateSnapshot?> ResolveStartupLocationAsync(CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+
+            // ── 1. Coherent snapshot gate ──
+            var coherentDeadline = DateTime.UtcNow.AddMilliseconds(BotConstants.Delays.ValidMapReadTimeoutMs);
+            PlayerStateSnapshot snapshot = default;
+            bool coherent = false;
+
+            while (DateTime.UtcNow < coherentDeadline)
+            {
+                token.ThrowIfCancellationRequested();
+                snapshot = _memoryService.GetPlayerStateSnapshot();
+                if (IsStartupLocationReadCoherent(snapshot))
+                {
+                    coherent = true;
+                    break;
+                }
+
+                await PausableDelayAsync(BotConstants.Delays.MapTransitionPollMs, token);
+            }
+
+            if (!coherent)
+            {
+                _log($"[Startup] Player location is not readable ({DescribeStartupLocationFailure(snapshot)}) within {BotConstants.Delays.ValidMapReadTimeoutMs} ms.");
+                return null;
+            }
+
+            // ── 2. Stable map confirmation (existing synchronization configuration) ──
+            int stableMap = snapshot.Map;
+            int stableReads = 1;
+            var settleDeadline = DateTime.UtcNow.AddMilliseconds(BotConstants.Delays.MapTransitionSettleTimeoutMs);
+
+            while (stableReads < BotConstants.Delays.MapTransitionStableReadCount &&
+                   DateTime.UtcNow < settleDeadline)
+            {
+                await PausableDelayAsync(BotConstants.Delays.MapTransitionPollMs, token);
+                token.ThrowIfCancellationRequested();
+
+                PlayerStateSnapshot next = _memoryService.GetPlayerStateSnapshot();
+                if (!IsStartupLocationReadCoherent(next))
+                {
+                    _log($"[Startup] Ignoring an incoherent location read while confirming the map ({DescribeStartupLocationFailure(next)}).");
+                    stableReads = 0;
+                    continue;
+                }
+
+                if (next.Map != stableMap)
+                {
+                    _log($"[Startup] Map changed during confirmation ({stableMap} -> {next.Map}); restarting map stability confirmation.");
+                    stableMap = next.Map;
+                    stableReads = 1;
+                    snapshot = next;
+                    continue;
+                }
+
+                stableReads++;
+                snapshot = next;
+            }
+
+            if (stableReads < BotConstants.Delays.MapTransitionStableReadCount)
+            {
+                _log($"[Startup] Map did not stabilize within {BotConstants.Delays.MapTransitionSettleTimeoutMs} ms (pending map transition?) — the workflow will not start from an unconfirmed map.");
+                return null;
+            }
+
+            _log($"[Startup] Location confirmed: map {snapshot.Map}, position ({snapshot.X},{snapshot.Y}) (map read {stableReads}x stable).");
+
+            // ── 3. Post-transition freshness through the existing PositionSync lifecycle ──
+            PositionSyncResult sync;
+
+            if (_positionSync.HasPendingTransition)
+            {
+                _log("[Startup] A position transition is still pending — validating it before any startup decision.");
+                sync = await _positionSync.SynchronizeAsync(snapshot.Map, token);
+            }
+            else if (IsStartupLocationAtDeclaredBaseline(snapshot))
+            {
+                _log("[Startup] The player stands on the profile's configured start location — no post-transition freshness proof is needed.");
+                sync = await _positionSync.EnsurePositionReadyAsync(
+                    "startup location detection",
+                    snapshot.Map,
+                    token);
+            }
+            else if (ProfileDeclaresStartBaseline)
+            {
+                // The player is NOT standing where the profile says the run starts. This is
+                // exactly the case where the game may still expose the previous map's X/Y
+                // after a portal (COT map 36 with Etana coordinates). Treat the observation
+                // as a post-transition position: anchor a transition on it and require
+                // PositionSync to prove the coordinates are live (bounded mini-W refresh) or
+                // stop the startup instead of guessing a waypoint.
+                string declaredBaseline = _profile.EnableStartPositionCheck
+                    ? $"map {_profile.ProtectionMapNumber} at ({_profile.StartPositionX},{_profile.StartPositionY}) " +
+                      $"within tolerance {Math.Max(0, _profile.StartPositionTolerance)}"
+                    : $"map {_profile.ProtectionMapNumber} (profile start-position check disabled)";
+                _log($"[Startup] The player is not at the profile's declared baseline ({declaredBaseline}) — " +
+                     "proving that the observed coordinates belong to the current map before selecting an action.");
+                _positionSync.BeginTransition(
+                    $"startup location detection (map {snapshot.Map})",
+                    snapshot);
+                sync = await _positionSync.SynchronizeAsync(snapshot.Map, token);
+            }
+            else
+            {
+                // No spawn baseline configured: keep the normal, context-free readiness check
+                // (a coherent read is enough when nothing points at a transition).
+                sync = await _positionSync.EnsurePositionReadyAsync(
+                    "startup location detection",
+                    snapshot.Map,
+                    token);
+            }
+
+            if (token.IsCancellationRequested || _stopRequested)
+                return null;
+
+            if (!sync.IsReady)
+            {
+                _log($"[Startup] Position NOT validated ({sync.Kind}: {sync.Message}; {sync.State.Describe()}) — " +
+                     "no waypoint will be selected and no teleport is attempted.");
+                return null;
+            }
+
+            if (!IsStartupLocationReadCoherent(sync.State))
+            {
+                _log($"[Startup] Post-validation snapshot is incomplete ({DescribeStartupLocationFailure(sync.State)}) — the workflow will not start.");
+                return null;
+            }
+
+            if (sync.State.Map != snapshot.Map)
+            {
+                _log($"[Startup] Map changed during position validation ({snapshot.Map} -> {sync.State.Map}) — restarting the startup decision is not attempted automatically; the workflow will not start.");
+                return null;
+            }
+
+            _log($"[Startup] Position validated: {sync.State.Describe()} DestinationStatus={sync.DestinationStatus}.");
+            return sync.State;
+        }
+
+        /// <summary>
+        /// True when a startup location read is usable: the player pointer, the map read, a
+        /// nonzero map number and the X/Y read all succeeded in the SAME snapshot.
+        /// </summary>
+        private static bool IsStartupLocationReadCoherent(PlayerStateSnapshot snapshot)
+        {
+            return snapshot.HasCoherentState &&
+                   snapshot.PlayerPointerReadSucceeded &&
+                   snapshot.MapReadSucceeded &&
+                   snapshot.Map != 0 &&
+                   snapshot.PositionReadSucceeded;
+        }
+
+        private static string DescribeStartupLocationFailure(PlayerStateSnapshot snapshot)
+        {
+            if (!snapshot.PlayerPointerReadSucceeded)
+                return "player pointer read failed";
+            if (!snapshot.MapReadSucceeded)
+                return "map read failed";
+            if (snapshot.Map == 0)
+                return "map read returned 0 (not a valid map)";
+            if (!snapshot.PositionReadSucceeded)
+                return "X/Y read failed";
+            return snapshot.Describe();
+        }
+
+        /// <summary>
+        /// True when the profile declares the map its run is based on
+        /// (<see cref="BotProfile.ProtectionMapNumber"/>). Such a profile says "the bot belongs
+        /// to this map", so a startup anywhere else is treated as a post-transition location
+        /// whose coordinates must be proven live instead of being trusted from a coherent read
+        /// alone. Profiles without a protection map use the plain readiness check.
+        /// </summary>
+        private bool ProfileDeclaresStartBaseline => _profile.ProtectionMapNumber > 0;
+
+        /// <summary>
+        /// True when the snapshot already satisfies the profile's configured start position
+        /// (same map + coordinates within the configured tolerance) — i.e. the profile's own
+        /// start gate would pass, so no post-transition freshness proof is required. Only an
+        /// ENABLED profile start check declares such a position; without it the liveness proof
+        /// still runs for a map-based start.
+        /// </summary>
+        private bool IsStartupLocationAtDeclaredBaseline(PlayerStateSnapshot snapshot)
+        {
+            if (!ProfileDeclaresStartBaseline || !_profile.EnableStartPositionCheck)
+                return false;
+
+            return StartPositionMatches(
+                snapshot,
                 _profile.StartPositionX,
                 _profile.StartPositionY,
                 _profile.ProtectionMapNumber,
                 Math.Max(0, _profile.StartPositionTolerance),
-                token);
+                out _,
+                out _);
+        }
 
-            if (!passed && _startProtectionRecoveredToTown)
+        /// <summary>
+        /// True when the one-shot startup entry belongs to THIS flow step + route, i.e. the next
+        /// execution of this route is the initial resume of the map selected at startup.
+        /// </summary>
+        private bool IsStartupRouteEntry(BotFlowStep step, int routeIndex)
+            => _startupRouteEntry is { } entry &&
+               ReferenceEquals(entry.Step, step) &&
+               entry.RouteIndex == routeIndex;
+
+        /// <summary>
+        /// Consumes the one-shot startup entry exception. It must not survive into retries,
+        /// later route executions, repots or workflow cycles, so it is cleared as soon as the
+        /// initial route execution has been validated.
+        /// </summary>
+        private void ConsumeStartupRouteEntry(BotFlowStep step, int routeIndex)
+        {
+            if (!IsStartupRouteEntry(step, routeIndex))
+                return;
+
+            _startupRouteEntry = null;
+            _log($"[Startup] The one-shot startup route entry for '{DescribeStep(step)}' (route {routeIndex + 1}) is consumed — " +
+                 "all further route entries use the normal configured start protection.");
+        }
+
+        /// <summary>
+        /// Discards the one-shot startup entry when the workflow position no longer points at the
+        /// selected step, so it can never bypass protection for an unrelated later action.
+        /// </summary>
+        private void DropForeignStartupRouteEntry(BotFlowStep step)
+        {
+            if (_startupRouteEntry is not { } entry)
+                return;
+            if (ReferenceEquals(entry.Step, step))
+                return;
+
+            _startupRouteEntry = null;
+            _log("[Startup] The one-shot startup route entry was discarded because the workflow position moved to a different step before that route started.");
+        }
+
+        /// <summary>
+        /// Startup-entry variant of the route start gates. The startup detection selected this
+        /// route BECAUSE the player already stands on its map, and the startup location was
+        /// validated, so the route's configured ENTRANCE coordinates are not demanded (they only
+        /// describe one valid point of the hunting route). The map invariant and a validated,
+        /// trustworthy position stay mandatory, and no teleport is ever attempted here.
+        /// </summary>
+        private async Task<bool> EnsureStartupRouteEntryValidatedAsync(
+            BotRouteStep route,
+            int startupMap,
+            string stageName,
+            CancellationToken token)
+        {
+            if (route == null)
+                return false;
+
+            int expectedMap = route.ProtectionMapNumber > 0
+                ? route.ProtectionMapNumber
+                : startupMap;
+
+            if (expectedMap <= 0)
             {
-                _startProtectionRecoveredToTown = false;
-                _log("[StartProtection] Recovery town teleport completed and validated against the town destination, but the profile start position is on a different map — the bot will not start until the profile start can be reached again.");
+                _log($"[Startup] {stageName} route '{route.PathFile}' has no usable map invariant (route map {route.ProtectionMapNumber}, startup map {startupMap}) — refusing to start the route.");
+                return false;
             }
 
-            return passed;
+            if (startupMap > 0 && startupMap != expectedMap)
+            {
+                _log($"[Startup] {stageName} route '{route.PathFile}' validates map {expectedMap} but the startup location is map {startupMap} — refusing to start the route.");
+                return false;
+            }
+
+            DestinationValidationContext destination = DestinationValidationContext.ForMap(
+                expectedMap,
+                $"startup {stageName} entry '{route.PathFile}'");
+
+            PositionSyncResult sync = await _positionSync.EnsurePositionReadyAsync(
+                $"{stageName} startup entry '{route.PathFile}'",
+                expectedMap,
+                destination,
+                token);
+
+            if (token.IsCancellationRequested)
+                return false;
+
+            if (sync.Kind == PositionSyncResultKind.Ready && sync.State.Map == expectedMap)
+            {
+                _log($"[Startup] {stageName} route '{route.PathFile}' entry validated on map {sync.State.Map} at ({sync.State.X},{sync.State.Y}) " +
+                     $"(DestinationStatus={sync.DestinationStatus}). The configured entrance position ({route.StartPositionX},{route.StartPositionY}) is not required for this initial startup resume; " +
+                     "MovementSystem resynchronizes to the appropriate waypoint.");
+                return true;
+            }
+
+            _log($"[Startup] {stageName} route '{route.PathFile}' entry NOT validated ({sync.Kind}: {sync.Message}; {sync.State.Describe()}) — " +
+                 "the path runner stays blocked so no waypoint is selected from unvalidated coordinates.");
+            return false;
         }
 
         /// <summary>

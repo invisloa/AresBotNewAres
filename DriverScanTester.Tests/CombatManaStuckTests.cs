@@ -8,7 +8,7 @@ namespace DriverScanTester.Tests
     /// <summary>
     /// Regression tests for the combat "attack not connecting" detector.
     ///
-    /// Bug this guards: the detector used to treat ANY change of the mana value as
+    /// Bug this guards (1): the detector used to treat ANY change of the mana value as
     /// attack progress (mana != previous). Natural mana regeneration (a slow +1 MP
     /// every few seconds) therefore reset the 5 s stall window over and over, so a
     /// phantom attack against an unreachable mob never triggered
@@ -18,6 +18,14 @@ namespace DriverScanTester.Tests
     /// Correct semantics: only a mana DECREASE proves the skill actually consumed
     /// mana (the attack connected). Mana increases (regen / potions) must NOT reset
     /// the stall timer.
+    ///
+    /// Bug this guards (2): a valid target that still has to be reached consumes no mana
+    /// while the character runs toward it. The mana-only window therefore fired a false
+    /// <see cref="CombatAction.RepositionAndRetry"/> after five seconds of legitimate
+    /// pursuit. The stall now requires BOTH no mana consumption AND no meaningful position
+    /// progress (Euclidean displacement of at least
+    /// <see cref="BotConstants.Combat.CombatManaStuckMoveProgressUnits"/> units from the last
+    /// progress anchor). Sub-threshold steps and oscillation never count as progress.
     /// </summary>
     public sealed class CombatManaStuckTests
     {
@@ -87,15 +95,38 @@ namespace DriverScanTester.Tests
 
         private static readonly Action<string> NoLog = _ => { };
 
-        private static void Backdate(CombatHandler handler, string fieldName, double seconds)
-        {
-            FieldInfo field = typeof(CombatHandler).GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic)
+        private static FieldInfo Field(string fieldName)
+            => typeof(CombatHandler).GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic)
                 ?? throw new InvalidOperationException($"Field {fieldName} not found.");
-            field.SetValue(handler, DateTime.Now.AddSeconds(-seconds));
+
+        private static void Backdate(CombatHandler handler, string fieldName, double seconds)
+            => Field(fieldName).SetValue(handler, DateTime.Now.AddSeconds(-seconds));
+
+        /// <summary>
+        /// Ages BOTH progress clocks of the stall window. A stationary "five seconds passed"
+        /// simulation must age the mana clock and the independent movement-progress clock —
+        /// otherwise the fresh movement baseline hides the stall.
+        /// </summary>
+        private static void BackdateProgressClocks(CombatHandler handler, double seconds)
+        {
+            Backdate(handler, "_lastManaChangeAt", seconds);
+            Backdate(handler, "_lastMovementProgressAt", seconds);
         }
 
-        private static CombatAction Evaluate(CombatHandler handler, GameMemoryService memory)
-            => handler.EvaluateCombatAction(memory, BotMode.MoveAndAttackAndLoot, isUnstuckActive: false, currX: 10f, currY: 10f);
+        /// <summary>Ages an existing timestamp by the given number of seconds (no-op at MinValue).</summary>
+        private static void Age(CombatHandler handler, string fieldName, double seconds)
+        {
+            FieldInfo field = Field(fieldName);
+            if ((DateTime)field.GetValue(handler)! == DateTime.MinValue)
+                return;
+            field.SetValue(handler, ((DateTime)field.GetValue(handler)!).AddSeconds(-seconds));
+        }
+
+        private static (float X, float Y)? MovementAnchor(CombatHandler handler)
+            => ((float X, float Y)?)Field("_movementProgressAnchor").GetValue(handler);
+
+        private static CombatAction Evaluate(CombatHandler handler, GameMemoryService memory, float x = 10f, float y = 10f)
+            => handler.EvaluateCombatAction(memory, BotMode.MoveAndAttackAndLoot, isUnstuckActive: false, currX: x, currY: y);
 
         [Fact]
         public void ManaIncrease_DoesNotResetStallTimer_TriggersReposition()
@@ -107,13 +138,202 @@ namespace DriverScanTester.Tests
             // First tick with a selected mob / attack status baselines the attack state.
             Assert.Equal(CombatAction.Attack, Evaluate(handler, memory));
 
-            // Simulate 6 s of phantom attacking: mana only went UP (regen/potion).
-            Backdate(handler, "_lastManaChangeAt", 6.0);
+            // Simulate 6 s of phantom attacking: mana only went UP (regen/potion) and the
+            // character did not move at all.
+            BackdateProgressClocks(handler, 6.0);
             stub.Mana = 1402;
 
             CombatAction action = Evaluate(handler, memory);
 
             Assert.Equal(CombatAction.RepositionAndRetry, action);
+        }
+
+        /// <summary>
+        /// Scenario 1: a target that takes longer than the stall timeout to reach. The
+        /// character keeps making real position progress, mana stays unchanged — no recovery.
+        /// </summary>
+        [Fact]
+        public void PursuitWithRealPositionProgress_NeverTriggersReposition()
+        {
+            var stub = new MemoryStub { Mana = 1400 };
+            var handler = new CombatHandler(NoLog);
+            GameMemoryService memory = stub.Create(NoLog);
+
+            Assert.Equal(CombatAction.Attack, Evaluate(handler, memory, 100f, 100f));
+
+            // 00:05 — (104,103): 5 units from the anchor, mana unchanged for 5 s+.
+            Backdate(handler, "_lastManaChangeAt", 5.5);
+            Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory, 104f, 103f));
+
+            // 00:09 — (110,107): another 7.2 units, mana still unchanged.
+            Backdate(handler, "_lastManaChangeAt", 5.5);
+            Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory, 110f, 107f));
+
+            // 00:12 — (115,111): still pursuing and still no mana spent.
+            Backdate(handler, "_lastManaChangeAt", 5.5);
+            Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory, 115f, 111f));
+        }
+
+        /// <summary>
+        /// Scenario 3: reaching the mob region refreshes the progress window; the recovery may
+        /// only fire after a further five seconds without movement or mana consumption.
+        /// </summary>
+        [Fact]
+        public void MovementRefreshesTheWindow_ThenStationaryTimeoutTriggersRecovery()
+        {
+            var stub = new MemoryStub { Mana = 1400 };
+            var handler = new CombatHandler(NoLog);
+            GameMemoryService memory = stub.Create(NoLog);
+
+            Assert.Equal(CombatAction.Attack, Evaluate(handler, memory, 100f, 100f));
+
+            // 00:04 — 8 units of real progress resets the movement-progress clock.
+            Backdate(handler, "_lastManaChangeAt", 4.0);
+            Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory, 108f, 100f));
+            Assert.Equal((108f, 100f), MovementAnchor(handler)!.Value);
+
+            // 00:09 — nothing moved and no mana spent for another 5 s: genuine stall.
+            BackdateProgressClocks(handler, 5.2);
+            Assert.Equal(CombatAction.RepositionAndRetry, Evaluate(handler, memory, 108f, 100f));
+        }
+
+        /// <summary>
+        /// Scenario 4: movement smaller than the progress threshold never proves pursuit.
+        /// </summary>
+        [Fact]
+        public void SubThresholdMovement_DoesNotSuppressTheRecovery()
+        {
+            var stub = new MemoryStub { Mana = 1400 };
+            var handler = new CombatHandler(NoLog);
+            GameMemoryService memory = stub.Create(NoLog);
+
+            Assert.Equal(CombatAction.Attack, Evaluate(handler, memory, 100f, 100f));
+
+            BackdateProgressClocks(handler, 5.2);
+            Assert.Equal(CombatAction.RepositionAndRetry, Evaluate(handler, memory, 101f, 100f));
+
+            // The anchor is untouched by sub-threshold movement.
+            Assert.Equal((100f, 100f), MovementAnchor(handler)!.Value);
+        }
+
+        /// <summary>
+        /// Oscillating around the anchor (never reaching 2 units of displacement) must not keep
+        /// postponing the recovery forever.
+        /// </summary>
+        [Fact]
+        public void RepeatedSmallOscillation_NeverCountsAsMovementProgress()
+        {
+            var stub = new MemoryStub { Mana = 1400 };
+            var handler = new CombatHandler(NoLog);
+            GameMemoryService memory = stub.Create(NoLog);
+
+            Assert.Equal(CombatAction.Attack, Evaluate(handler, memory, 100f, 100f));
+
+            // 1.6 s per tick, oscillating by 1.5 units around the anchor.
+            Age(handler, "_lastManaChangeAt", 1.6);
+            Age(handler, "_lastMovementProgressAt", 1.6);
+            Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory, 101.5f, 100f));
+            Assert.Equal((100f, 100f), MovementAnchor(handler)!.Value);
+
+            Age(handler, "_lastManaChangeAt", 1.6);
+            Age(handler, "_lastMovementProgressAt", 1.6);
+            Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory, 100f, 100f));
+            Assert.Equal((100f, 100f), MovementAnchor(handler)!.Value);
+
+            Age(handler, "_lastManaChangeAt", 1.6);
+            Age(handler, "_lastMovementProgressAt", 1.6);
+            Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory, 101.5f, 100f));
+            Assert.Equal((100f, 100f), MovementAnchor(handler)!.Value);
+
+            // 6.4 s after the last real progress: oscillation did not refresh the window.
+            Age(handler, "_lastManaChangeAt", 1.6);
+            Age(handler, "_lastMovementProgressAt", 1.6);
+            Assert.Equal(CombatAction.RepositionAndRetry, Evaluate(handler, memory, 100f, 100f));
+            Assert.Equal((100f, 100f), MovementAnchor(handler)!.Value);
+        }
+
+        /// <summary>
+        /// A real movement-progress event refreshes the stall window without touching the
+        /// mana-consumption clock (<c>_lastManaChangeAt</c> keeps meaning "mana consumed").
+        /// </summary>
+        [Fact]
+        public void MovementProgress_DoesNotOverwriteTheManaConsumptionClock()
+        {
+            var stub = new MemoryStub { Mana = 1400 };
+            var handler = new CombatHandler(NoLog);
+            GameMemoryService memory = stub.Create(NoLog);
+
+            Assert.Equal(CombatAction.Attack, Evaluate(handler, memory, 100f, 100f));
+            Backdate(handler, "_lastManaChangeAt", 4.0);
+            DateTime manaClockBefore = (DateTime)Field("_lastManaChangeAt").GetValue(handler)!;
+
+            Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory, 110f, 100f));
+
+            Assert.Equal(manaClockBefore, (DateTime)Field("_lastManaChangeAt").GetValue(handler)!);
+            Assert.True((DateTime)Field("_lastMovementProgressAt").GetValue(handler)! > manaClockBefore);
+        }
+
+        /// <summary>
+        /// A completed combat episode drops the movement baseline; the next episode starts a
+        /// fresh anchor at the position the new attack begins from.
+        /// </summary>
+        [Fact]
+        public void MovementProgressBaseline_ResetsBetweenCombatEpisodes()
+        {
+            var stub = new MemoryStub { Mana = 1400 };
+            var handler = new CombatHandler(NoLog);
+            GameMemoryService memory = stub.Create(NoLog);
+
+            Assert.Equal(CombatAction.Attack, Evaluate(handler, memory, 100f, 100f));
+            Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory, 110f, 100f));
+            Assert.Equal((110f, 100f), MovementAnchor(handler)!.Value);
+
+            // Target lost — the episode ends and every combat baseline is dropped.
+            stub.TargetId = 0;
+            Assert.Equal(CombatAction.TabAfterKill, Evaluate(handler, memory, 110f, 100f));
+            Assert.Null(MovementAnchor(handler));
+            Assert.Equal(DateTime.MinValue, (DateTime)Field("_lastMovementProgressAt").GetValue(handler)!);
+
+            // A new episode resumes combat from a completely different position.
+            stub.TargetId = 5000;
+            Assert.Equal(CombatAction.Attack, Evaluate(handler, memory, 300f, 300f));
+            Assert.Equal((300f, 300f), MovementAnchor(handler)!.Value);
+
+            // The stale episode's progress cannot hide a stall of the new one.
+            BackdateProgressClocks(handler, 5.2);
+            Assert.Equal(CombatAction.RepositionAndRetry, Evaluate(handler, memory, 300f, 300f));
+        }
+
+        /// <summary>
+        /// A temporary external movement suspension (MobGrouping walk) removes the paused time
+        /// from the movement-progress clock too, so the deliberate walk cannot fabricate a stall.
+        /// </summary>
+        [Fact]
+        public void ExternalMovementSuspension_ShiftsTheMovementProgressClock()
+        {
+            var stub = new MemoryStub { Mana = 1400 };
+            var handler = new CombatHandler(NoLog);
+            GameMemoryService memory = stub.Create(NoLog);
+
+            Assert.Equal(CombatAction.Attack, Evaluate(handler, memory, 100f, 100f));
+            Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory, 110f, 100f));
+            DateTime progressBefore = (DateTime)Field("_lastMovementProgressAt").GetValue(handler)!;
+
+            handler.SuspendForExternalMovement();
+            Field("_externalSuspensionStartedAt").SetValue(handler, DateTime.Now.AddSeconds(-8.0));
+            handler.ResumeAfterExternalMovement();
+
+            DateTime progressAfter = (DateTime)Field("_lastMovementProgressAt").GetValue(handler)!;
+            Assert.InRange((progressAfter - progressBefore).TotalMilliseconds, 7500, 8500);
+            Assert.Equal((110f, 100f), MovementAnchor(handler)!.Value);
+
+            // The shifted clock is not stale yet, so the same position stays in combat.
+            Backdate(handler, "_lastManaChangeAt", 5.2);
+            Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory, 110f, 100f));
+
+            // Once both clocks really expire without progress, the recovery fires.
+            BackdateProgressClocks(handler, 5.2);
+            Assert.Equal(CombatAction.RepositionAndRetry, Evaluate(handler, memory, 110f, 100f));
         }
 
         [Fact]
@@ -127,9 +347,13 @@ namespace DriverScanTester.Tests
             Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory));
 
             // 6 s later the skill finally consumes mana — attack IS connecting.
-            Backdate(handler, "_lastManaChangeAt", 6.0);
+            BackdateProgressClocks(handler, 6.0);
             stub.Mana = 1380;
 
+            Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory));
+
+            // The mana consumption also re-arms the stall window for the next five seconds.
+            BackdateProgressClocks(handler, 2.0);
             Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory));
         }
 
@@ -143,7 +367,8 @@ namespace DriverScanTester.Tests
             Assert.Equal(CombatAction.Attack, Evaluate(handler, memory));
             Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory));
 
-            Backdate(handler, "_lastManaChangeAt", 6.0);
+            // No mana consumed and no meaningful movement for 5 s+.
+            BackdateProgressClocks(handler, 6.0);
 
             Assert.Equal(CombatAction.RepositionAndRetry, Evaluate(handler, memory));
         }

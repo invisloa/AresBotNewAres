@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -8,9 +8,8 @@ using DriverScanTester.Utils;
 namespace DriverScanTester.Services
 {
     /// <summary>
-    /// Built-in custom bot operations that can be referenced by NAME from a profile:
-    ///   • TravelRouteStep.OperationBefore / OperationAfter (run around a travel leg)
-    ///   • BotProfile.PreExpOperations (run once at the EXP map, before hunting)
+    /// Built-in custom bot operations that can be referenced by NAME from a profile
+    /// flow step (<see cref="Models.BotFlowStep.OperationName"/>).
     ///
     /// This is the "special class" where hardcoded game-specific logic lives.
     /// To add a new operation:

@@ -332,6 +332,18 @@
                                                 </DataGridTemplateColumn.CellTemplate>
                                             </DataGridTemplateColumn>
 
+                                            <!-- Start map (map-based startup detection) -->
+                                            <DataGridTemplateColumn Header="Start map" Width="70">
+                                                <DataGridTemplateColumn.CellTemplate>
+                                                    <DataTemplate>
+                                                        <TextBox Text="{Binding StartMapNumber, UpdateSourceTrigger=PropertyChanged}"
+                                                                 BorderThickness="0" Background="Transparent"
+                                                                 VerticalAlignment="Center" Margin="2,0"
+                                                                 ToolTip="Map number the player must be standing on for this action to be chosen when the bot is explicitly started (0 = unspecified). The bot uses the FIRST action in this list whose starting map matches. This is the map the action STARTS on — not the protection map of its routes and not the destination map of a travel route."/>
+                                                    </DataTemplate>
+                                                </DataGridTemplateColumn.CellTemplate>
+                                            </DataGridTemplateColumn>
+
                                             <!-- Operation -->
                                             <DataGridTemplateColumn Header="Operation" Width="1.5*">
                                                 <DataGridTemplateColumn.CellTemplate>
@@ -450,6 +462,17 @@
                                             <DataGridTextColumn Header="Wait (ms)" Width="70"
                                                                 Binding="{Binding StartDelayMs, UpdateSourceTrigger=PropertyChanged}"/>
 
+                                            <!-- Start map (map-based startup detection) -->
+                                            <DataGridTextColumn Header="Start map" Width="75"
+                                                                Binding="{Binding StartMapNumber, UpdateSourceTrigger=PropertyChanged}">
+                                                <DataGridTextColumn.CellStyle>
+                                                    <Style TargetType="DataGridCell">
+                                                        <Setter Property="ToolTip"
+                                                                Value="Map number this route STARTS on, used by the map-based startup detection (0 = inherit the step's starting map / unspecified). A route that crosses a portal starts on the map BEFORE the portal. Not the protection map (Prot. map) and not the travel destination map."/>
+                                                    </Style>
+                                                </DataGridTextColumn.CellStyle>
+                                            </DataGridTextColumn>
+
                                             <!-- Start check (per-route data) -->
                                             <DataGridCheckBoxColumn Header="Start check" Width="70"
                                                                     Binding="{Binding StartCheckEnabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
@@ -457,8 +480,15 @@
                                                                 Binding="{Binding StartPositionX, UpdateSourceTrigger=PropertyChanged}"/>
                                             <DataGridTextColumn Header="Start Y" Width="60"
                                                                 Binding="{Binding StartPositionY, UpdateSourceTrigger=PropertyChanged}"/>
-                                            <DataGridTextColumn Header="Map" Width="55"
-                                                                Binding="{Binding ProtectionMapNumber, UpdateSourceTrigger=PropertyChanged}"/>
+                                            <DataGridTextColumn Header="Prot. map" Width="65"
+                                                                Binding="{Binding ProtectionMapNumber, UpdateSourceTrigger=PropertyChanged}">
+                                                <DataGridTextColumn.CellStyle>
+                                                    <Style TargetType="DataGridCell">
+                                                        <Setter Property="ToolTip"
+                                                                Value="Protection map: the map the player must be on after this route's start-position recovery teleport. Used by the route start check — it is NOT the route's starting map (Start map)."/>
+                                                    </Style>
+                                                </DataGridTextColumn.CellStyle>
+                                            </DataGridTextColumn>
                                             <DataGridTextColumn Header="Tolerance" Width="70"
                                                                 Binding="{Binding StartPositionTolerance, UpdateSourceTrigger=PropertyChanged}"/>
                                         </DataGrid.Columns>

@@ -212,6 +212,16 @@ namespace DriverScanTester
             public const double CombatManaStuckTimeoutMs = 5000;
 
             /// <summary>
+            /// Movement progress (game-coordinate units) that also proves the attack episode is
+            /// still making progress. The character often has to run toward the selected mob for
+            /// longer than <see cref="CombatManaStuckTimeoutMs"/> before the first mana-consuming
+            /// swing, so mana silence alone is not a stall. Measured as the Euclidean
+            /// displacement from the last recorded progress position — small per-tick steps and
+            /// sub-threshold oscillation never accumulate.
+            /// </summary>
+            public const float CombatManaStuckMoveProgressUnits = 2.0f;
+
+            /// <summary>
             /// How long (ms) the bot walks toward the next waypoint during the attack
             /// reposition before TABbing and attacking again (2-3 seconds).
             /// </summary>

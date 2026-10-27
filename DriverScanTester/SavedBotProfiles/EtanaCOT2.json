@@ -5,6 +5,7 @@
       "Type": 1,
       "PathFile": "",
       "StartDelayMs": 0,
+      "StartMapNumber": 35,
       "Routes": [],
       "CompletionMode": 0,
       "ExpectedDestinationMapNumber": 0,
@@ -13,6 +14,7 @@
         {
           "PathFile": "Etana repot 01.json",
           "StartDelayMs": 1111,
+          "StartMapNumber": 35,
           "StartCheckEnabled": false,
           "StartPositionX": 214,
           "StartPositionY": 213,
@@ -22,6 +24,7 @@
         {
           "PathFile": "Etana repot 02.json",
           "StartDelayMs": 1111,
+          "StartMapNumber": 35,
           "StartCheckEnabled": false,
           "StartPositionX": 214,
           "StartPositionY": 213,
@@ -31,6 +34,7 @@
         {
           "PathFile": "Etana repot 03.json",
           "StartDelayMs": 1111,
+          "StartMapNumber": 35,
           "StartCheckEnabled": false,
           "StartPositionX": 214,
           "StartPositionY": 213,
@@ -40,6 +44,7 @@
         {
           "PathFile": "Etana repot 04.json",
           "StartDelayMs": 1111,
+          "StartMapNumber": 35,
           "StartCheckEnabled": false,
           "StartPositionX": 214,
           "StartPositionY": 213,
@@ -49,6 +54,7 @@
         {
           "PathFile": "Etana repot 05.json",
           "StartDelayMs": 1111,
+          "StartMapNumber": 35,
           "StartCheckEnabled": false,
           "StartPositionX": 214,
           "StartPositionY": 213,
@@ -61,10 +67,12 @@
       "Type": 0,
       "PathFile": "Etana Go COT 01.json",
       "StartDelayMs": 555,
+      "StartMapNumber": 35,
       "Routes": [
         {
           "PathFile": "Etana Go COT 01.json",
           "StartDelayMs": 555,
+          "StartMapNumber": 35,
           "StartCheckEnabled": false,
           "StartPositionX": 0,
           "StartPositionY": 0,
@@ -74,6 +82,7 @@
         {
           "PathFile": "Etana Go COT 02.json",
           "StartDelayMs": 555,
+          "StartMapNumber": 35,
           "StartCheckEnabled": false,
           "StartPositionX": 0,
           "StartPositionY": 0,
@@ -83,6 +92,7 @@
         {
           "PathFile": "Etana Go COT 03.json",
           "StartDelayMs": 555,
+          "StartMapNumber": 35,
           "StartCheckEnabled": false,
           "StartPositionX": 0,
           "StartPositionY": 0,
@@ -92,6 +102,7 @@
         {
           "PathFile": "Etana Go COT 04.json",
           "StartDelayMs": 0,
+          "StartMapNumber": 35,
           "StartCheckEnabled": false,
           "StartPositionX": 0,
           "StartPositionY": 0,
@@ -118,10 +129,12 @@
       "Type": 3,
       "PathFile": "COT LEVEL 2.json",
       "StartDelayMs": 2000,
+      "StartMapNumber": 36,
       "Routes": [
         {
           "PathFile": "COT LEVEL 2.json",
           "StartDelayMs": 2000,
+          "StartMapNumber": 36,
           "StartCheckEnabled": true,
           "StartPositionX": 127,
           "StartPositionY": 145,

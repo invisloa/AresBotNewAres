@@ -540,7 +540,7 @@ namespace DriverScanTester.ViewModels
         /// Copies one editor step ViewModel into a BotFlowStep model. Path and ExpLoop
         /// steps write their route group (<see cref="BotFlowStep.Routes"/>) and keep the
         /// single-route fields (PathFile / StartDelayMs) in sync with the first route so
-        /// the step stays readable as a legacy single-route step.
+        /// the step stays readable as a single-route step.
         /// </summary>
         private static BotFlowStep BuildStepModel(BotFlowStepViewModel s)
         {
@@ -549,6 +549,7 @@ namespace DriverScanTester.ViewModels
                 Type = s.Type,
                 PathFile = s.PathFile ?? "",
                 StartDelayMs = s.StartDelayMs,
+                StartMapNumber = s.StartMapNumber,
                 CompletionMode = s.CompletionMode,
                 ExpectedDestinationMapNumber = s.ExpectedDestinationMapNumber,
                 OperationName = s.OperationName ?? "",
@@ -557,6 +558,7 @@ namespace DriverScanTester.ViewModels
                     {
                         PathFile = rp.PathFile,
                         StartDelayMs = rp.StartDelayMs,
+                        StartMapNumber = rp.StartMapNumber,
                         StartCheckEnabled = rp.StartCheckEnabled,
                         StartPositionX = rp.StartPositionX,
                         StartPositionY = rp.StartPositionY,
@@ -573,6 +575,7 @@ namespace DriverScanTester.ViewModels
                     {
                         PathFile = rp.PathFile,
                         StartDelayMs = rp.StartDelayMs,
+                        StartMapNumber = rp.StartMapNumber,
                         StartCheckEnabled = rp.StartCheckEnabled,
                         StartPositionX = rp.StartPositionX,
                         StartPositionY = rp.StartPositionY,
@@ -770,6 +773,7 @@ namespace DriverScanTester.ViewModels
                     Type = step.Type,
                     PathFile = step.PathFile ?? "",
                     StartDelayMs = step.StartDelayMs,
+                    StartMapNumber = step.StartMapNumber,
                     CompletionMode = step.CompletionMode,
                     ExpectedDestinationMapNumber = step.ExpectedDestinationMapNumber,
                     OperationName = step.OperationName ?? ""
@@ -780,6 +784,7 @@ namespace DriverScanTester.ViewModels
                     {
                         PathFile = rp.PathFile ?? "",
                         StartDelayMs = rp.StartDelayMs,
+                        StartMapNumber = rp.StartMapNumber,
                         StartCheckEnabled = rp.StartCheckEnabled,
                         StartPositionX = rp.StartPositionX,
                         StartPositionY = rp.StartPositionY,
@@ -793,6 +798,7 @@ namespace DriverScanTester.ViewModels
                     {
                         PathFile = route.PathFile ?? "",
                         StartDelayMs = route.StartDelayMs,
+                        StartMapNumber = route.StartMapNumber,
                         StartCheckEnabled = route.StartCheckEnabled,
                         StartPositionX = route.StartPositionX,
                         StartPositionY = route.StartPositionY,
@@ -800,7 +806,7 @@ namespace DriverScanTester.ViewModels
                         StartPositionTolerance = route.StartPositionTolerance
                     });
                 }
-                // Legacy single-route Path/ExpLoop steps (Routes empty, PathFile set):
+                // Single-route Path/ExpLoop steps (Routes empty, PathFile set):
                 // surface the path as the first route so the route panel always shows it.
                 if ((step.Type == BotFlowStepType.Path || step.Type == BotFlowStepType.ExpLoop) &&
                     vm.Routes.Count == 0 &&
@@ -809,7 +815,8 @@ namespace DriverScanTester.ViewModels
                     vm.Routes.Add(new BotRouteStepViewModel
                     {
                         PathFile = step.PathFile ?? "",
-                        StartDelayMs = step.StartDelayMs
+                        StartDelayMs = step.StartDelayMs,
+                        StartMapNumber = step.StartMapNumber
                     });
                 }
                 FlowSteps.Add(vm);
@@ -997,6 +1004,19 @@ namespace DriverScanTester.ViewModels
             set => SetProperty(ref _startDelayMs, value);
         }
 
+        /// <summary>
+        /// Optional map number this action starts on, used by the map-based startup detection.
+        /// For Path / ExpLoop / Repot steps it is the default for routes without their own
+        /// value; for an Operation step it makes the operation eligible for the startup
+        /// selection. 0 = unspecified. Not the protection map and not the destination map.
+        /// </summary>
+        private int _stepStartMapNumber = 0;
+        public int StartMapNumber
+        {
+            get => _stepStartMapNumber;
+            set => SetProperty(ref _stepStartMapNumber, value);
+        }
+
         private TravelRouteCompletionMode _completionMode = TravelRouteCompletionMode.FinalWaypoint;
         public TravelRouteCompletionMode CompletionMode
         {
@@ -1107,6 +1127,20 @@ namespace DriverScanTester.ViewModels
         {
             get => _startDelayMs;
             set => SetProperty(ref _startDelayMs, value);
+        }
+
+        private int _routeStartMapNumber = 0;
+
+        /// <summary>
+        /// Optional map number this route STARTS on (map-based startup detection). 0 = inherit
+        /// the owning step's starting map / unspecified. Distinct from
+        /// <see cref="ProtectionMapNumber"/> (start protection) and from the step's
+        /// ExpectedDestinationMapNumber (the map reached after a travel route).
+        /// </summary>
+        public int StartMapNumber
+        {
+            get => _routeStartMapNumber;
+            set => SetProperty(ref _routeStartMapNumber, value);
         }
 
         /// <summary>

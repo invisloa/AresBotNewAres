@@ -3,6 +3,25 @@ using System.Collections.Generic;
 namespace DriverScanTester.Models
 {
     /// <summary>
+    /// Determines how a travel route (a leg of the Repot → EXP journey) is considered complete.
+    /// </summary>
+    public enum TravelRouteCompletionMode
+    {
+        /// <summary>
+        /// Execute the path normally and complete when the final waypoint is reached
+        /// (MovementSystem.IsGoalReached). ExpectedDestinationMapNumber must be 0.
+        /// </summary>
+        FinalWaypoint = 0,
+
+        /// <summary>
+        /// Follow the path, but complete as soon as the configured nonzero destination map
+        /// is stably detected — the final waypoint does not need to be reached. Used for
+        /// portal routes that teleport the player to another map mid-path.
+        /// </summary>
+        ExpectedMapReached = 1
+    }
+
+    /// <summary>
     /// The kind of work a single flow step performs. A profile's flow is a linear,
     /// ordered list of these steps that the bot cycles through; any step type can be
     /// placed anywhere in the flow, so repot / paths / custom operations / hunting can
@@ -45,6 +64,25 @@ namespace DriverScanTester.Models
     {
         /// <summary>The kind of work this step performs.</summary>
         public BotFlowStepType Type { get; set; } = BotFlowStepType.Path;
+
+        /// <summary>
+        /// Optional map number the player must be standing on for this action to be chosen by
+        /// the map-based startup detection (see <see cref="Services.BotStartupActionSelector"/>).
+        /// The bot searches the flow in its configured order on an explicit start and uses the
+        /// FIRST action whose starting map matches the observed player map.
+        ///
+        /// For Path / ExpLoop / Repot steps this value is the DEFAULT for the step's routes:
+        /// a route with its own <see cref="BotRouteStep.StartMapNumber"/> wins, a route without
+        /// one inherits this value. For an Operation step it makes the operation eligible for
+        /// the startup detection; an operation with no starting map configured is never
+        /// selected by name/location resemblance.
+        ///
+        /// 0 means unspecified (no map match). It is deliberately NOT the same as
+        /// <see cref="BotRouteStep.ProtectionMapNumber"/> (start-protection/route-validation
+        /// map) nor as <see cref="ExpectedDestinationMapNumber"/> (the map reached AFTER a
+        /// travel route).
+        /// </summary>
+        public int StartMapNumber { get; set; } = 0;
 
         // ── Path / ExpLoop ──
         /// <summary>

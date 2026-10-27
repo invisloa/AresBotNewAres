@@ -37,10 +37,11 @@ namespace DriverScanTester.Services
         /// </summary>
         Unstuck,
         /// <summary>
-        /// The attack animation plays but mana is not consumed for the mana-stuck
-        /// timeout — the attack is NOT connecting (phantom/unreachable target, mob HP
-        /// never drops). The caller must physically reposition: walk toward the next
-        /// waypoint for a short time, then TAB and attack the (re-selected) target again.
+        /// The attack animation plays but neither mana is consumed NOR real position progress
+        /// is made for the mana-stuck timeout — the attack is NOT connecting
+        /// (phantom/unreachable target, mob HP never drops). The caller must physically
+        /// reposition: walk toward the next waypoint for a short time, then TAB and attack the
+        /// (re-selected) target again.
         /// </summary>
         RepositionAndRetry
     }
@@ -61,6 +62,7 @@ namespace DriverScanTester.Services
         private const double COMBAT_STUCK_TIMEOUT_MS = BotConstants.Combat.CombatStuckTimeoutMs;
         private const float COMBAT_STUCK_POS_EPSILON = BotConstants.Combat.CombatStuckPosEpsilon;
         private const double COMBAT_MANA_STUCK_TIMEOUT_MS = BotConstants.Combat.CombatManaStuckTimeoutMs;
+        private const float COMBAT_MANA_STUCK_MOVE_PROGRESS = BotConstants.Combat.CombatManaStuckMoveProgressUnits;
 
         // ── State ──
         private bool _wasAttacking;
@@ -85,6 +87,19 @@ namespace DriverScanTester.Services
         private DateTime _lastCombatPosChangeAt = DateTime.MinValue;
         /// <summary>Previous position sample (for change detection).</summary>
         private (float X, float Y)? _lastCombatPos = null;
+        /// <summary>
+        /// Position of the last confirmed movement progress during the current attack episode
+        /// (the movement-progress anchor). Only a displacement of at least
+        /// <see cref="COMBAT_MANA_STUCK_MOVE_PROGRESS"/> units from this anchor counts as progress;
+        /// small per-tick steps and oscillation never accumulate.
+        /// </summary>
+        private (float X, float Y)? _movementProgressAnchor = null;
+        /// <summary>
+        /// Last time real movement progress (>= <see cref="COMBAT_MANA_STUCK_MOVE_PROGRESS"/> units
+        /// from the anchor) was observed. Tracked separately from <see cref="_lastManaChangeAt"/>,
+        /// which must keep representing mana consumption only.
+        /// </summary>
+        private DateTime _lastMovementProgressAt = DateTime.MinValue;
         private bool _externallySuspended;
         private DateTime _externalSuspensionStartedAt = DateTime.MinValue;
 
@@ -191,6 +206,10 @@ namespace DriverScanTester.Services
                     _lastCombatPosChangeAt = DateTime.Now;
                     _lastManaValue = int.MinValue;
                     _lastCombatPos = (currX, currY);
+                    // Independent movement-progress baseline: chasing a mob can legitimately
+                    // take longer than the mana-stall timeout without consuming any mana.
+                    _movementProgressAnchor = (currX, currY);
+                    _lastMovementProgressAt = DateTime.Now;
                     return CombatAction.Attack;
                 }
 
@@ -227,15 +246,18 @@ namespace DriverScanTester.Services
                 // Any non-idle action, or no mob selected, resets the idle timer
                 _combatIdleStartTime = DateTime.MinValue;
 
-                // ── Attack-not-connecting detection: mana not consumed ──
+                // ── Attack-not-connecting detection: no mana AND no movement progress ──
                 // A real attack consumes mana (skill) with every swing. If the attack
-                // animation keeps playing (a target ID is present) but mana does NOT drop for
-                // COMBAT_MANA_STUCK_TIMEOUT_MS, the attack is not connecting — the mob
-                // looks attacked but its HP never drops (phantom/unreachable target).
-                // Position is deliberately NOT part of this check: the attack lunge
-                // animation moves the player every swing, so a static-position test can
-                // never fire while this is happening. The bot must physically reposition:
-                // walk toward the next waypoint for a short time, then TAB and attack again.
+                // animation keeps playing (a target ID is present) but NEITHER mana is
+                // consumed NOR the character makes real progress toward the selected mob for
+                // COMBAT_MANA_STUCK_TIMEOUT_MS, the attack is not connecting — the mob looks
+                // attacked but its HP never drops (phantom/unreachable target). The bot must
+                // physically reposition: walk toward the next waypoint for a short time, then
+                // TAB and attack again.
+                //
+                // Movement progress is a second, independent source of legitimate activity: a
+                // selected target that still has to be reached (running for more than the
+                // timeout) consumes no mana at all, which used to look like a failed attack.
                 //
                 // IMPORTANT: only a mana DECREASE counts as attack progress. Natural
                 // mana regeneration / mana potions raise the value; treating those as
@@ -251,18 +273,46 @@ namespace DriverScanTester.Services
                     _lastManaValue = mana;
                 }
 
+                // Movement progress is tracked independently and never touches
+                // _lastManaChangeAt (that timestamp must keep meaning "mana consumed").
+                UpdateMovementProgress(currX, currY);
+
                 // Only fire when mana was actually sampled at least once (otherwise the
                 // unreadable-mana case falls through to the position-based check below).
-                if (_lastManaValue != int.MinValue &&
-                    _lastManaChangeAt != DateTime.MinValue &&
-                    (DateTime.Now - _lastManaChangeAt).TotalMilliseconds >= COMBAT_MANA_STUCK_TIMEOUT_MS)
+                // The stall window is anchored on the MOST RECENT of the two progress signals.
+                if (_lastManaValue != int.MinValue)
                 {
-                    _log($"[Combat] Mana not consumed for {COMBAT_MANA_STUCK_TIMEOUT_MS:F0}ms while attacking (last mana {_lastManaValue}) — attack animation plays but no mana consumed (attack not connecting, mob HP not dropping). Repositioning toward next waypoint.");
-                    return CombatAction.RepositionAndRetry;
+                    DateTime lastProgressAt = _lastManaChangeAt > _lastMovementProgressAt
+                        ? _lastManaChangeAt
+                        : _lastMovementProgressAt;
+
+                    if (lastProgressAt != DateTime.MinValue &&
+                        (DateTime.Now - lastProgressAt).TotalMilliseconds >= COMBAT_MANA_STUCK_TIMEOUT_MS)
+                    {
+                        double sinceManaMs = _lastManaChangeAt == DateTime.MinValue
+                            ? -1
+                            : (DateTime.Now - _lastManaChangeAt).TotalMilliseconds;
+                        double sinceMovementMs = _lastMovementProgressAt == DateTime.MinValue
+                            ? -1
+                            : (DateTime.Now - _lastMovementProgressAt).TotalMilliseconds;
+                        float anchorDisplacement = _movementProgressAnchor.HasValue
+                            ? GeometryUtils.Distance(currX, currY, _movementProgressAnchor.Value.X, _movementProgressAnchor.Value.Y)
+                            : 0f;
+                        string anchorText = _movementProgressAnchor.HasValue
+                            ? $"({_movementProgressAnchor.Value.X:F1},{_movementProgressAnchor.Value.Y:F1})"
+                            : "none";
+
+                        _log($"[Combat] Attack not connecting for {(DateTime.Now - lastProgressAt).TotalMilliseconds:F0}ms — " +
+                             $"sinceLastManaConsumption={sinceManaMs:F0}ms, sinceMovementProgress={sinceMovementMs:F0}ms, " +
+                             $"player=({currX:F1},{currY:F1}), progressAnchor={anchorText}, anchorDisplacement={anchorDisplacement:F2}, " +
+                             $"requiredMovement={COMBAT_MANA_STUCK_MOVE_PROGRESS:F1}, lastMana={_lastManaValue}. " +
+                             $"Reason: neither mana consumption nor >= {COMBAT_MANA_STUCK_MOVE_PROGRESS:F1} units of position progress for {COMBAT_MANA_STUCK_TIMEOUT_MS:F0}ms (attack animation plays, mob HP not dropping). Repositioning toward next waypoint.");
+                        return CombatAction.RepositionAndRetry;
+                    }
                 }
 
                 // ── Combat stuck detection fallback: mana + position unchanged ──
-                // Only reachable when the mana read is unavailable (otherwise the mana-only
+                // Only reachable when the mana read is unavailable (otherwise the mana+movement
                 // check above fires first). Position AND mana both unchanged for the longer
                 // timeout means the player is NOT actually fighting (unreachable mob / attack
                 // not connecting, while the animation may still play). Trigger the STANDARD
@@ -307,6 +357,8 @@ namespace DriverScanTester.Services
                 _lastCombatPos = null;
                 _lastManaChangeAt = DateTime.MinValue;
                 _lastCombatPosChangeAt = DateTime.MinValue;
+                _movementProgressAnchor = null;
+                _lastMovementProgressAt = DateTime.MinValue;
 
                 // Loot mode (MoveAndAttackAndLoot) with no mob selected: keep cycling
                 // targets on the normal interval. Attacking always has priority — the
@@ -421,6 +473,7 @@ namespace DriverScanTester.Services
             ShiftTimestamp(ref _combatIdleStartTime, suspension);
             ShiftTimestamp(ref _lastManaChangeAt, suspension);
             ShiftTimestamp(ref _lastCombatPosChangeAt, suspension);
+            ShiftTimestamp(ref _lastMovementProgressAt, suspension);
             _externalSuspensionStartedAt = DateTime.MinValue;
             _externallySuspended = false;
         }
@@ -448,6 +501,33 @@ namespace DriverScanTester.Services
             _lastCombatPos = null;
             _lastManaChangeAt = DateTime.MinValue;
             _lastCombatPosChangeAt = DateTime.MinValue;
+            _movementProgressAnchor = null;
+            _lastMovementProgressAt = DateTime.MinValue;
+        }
+
+        /// <summary>
+        /// Records movement progress for the mana-stall window: the current position becomes the
+        /// new anchor only when the Euclidean displacement from the previous anchor reaches
+        /// <see cref="COMBAT_MANA_STUCK_MOVE_PROGRESS"/> units. Sub-threshold steps and oscillation
+        /// are ignored, so only real travel toward (or around) the selected mob refreshes the
+        /// progress timestamp — a character that merely jitters in place still stalls.
+        /// </summary>
+        private void UpdateMovementProgress(float currX, float currY)
+        {
+            if (!_movementProgressAnchor.HasValue)
+            {
+                _movementProgressAnchor = (currX, currY);
+                _lastMovementProgressAt = DateTime.Now;
+                return;
+            }
+
+            float displacement = GeometryUtils.Distance(
+                currX, currY, _movementProgressAnchor.Value.X, _movementProgressAnchor.Value.Y);
+            if (displacement < COMBAT_MANA_STUCK_MOVE_PROGRESS)
+                return;
+
+            _movementProgressAnchor = (currX, currY);
+            _lastMovementProgressAt = DateTime.Now;
         }
     }
 }
