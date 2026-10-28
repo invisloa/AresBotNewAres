@@ -1128,6 +1128,9 @@ namespace DriverScanTester.Services
 
         private bool _isMovingForward = false;
         private bool _isSkillThreeHeld = false;
+        private DateTime _attackRetryStartedAt = DateTime.MinValue;
+        private int _attackRetryLastMana = int.MinValue;
+        private int _attackRetryTargetId;
         private bool _attackSuppressedForCurrentWaypoint = false;
         /// <summary>
         /// One-shot flag for the speed-pot slot-reserve log: while red or white
@@ -2321,6 +2324,8 @@ namespace DriverScanTester.Services
             // at loot distance; resume watchdog timing after the sweep is done.
             if (LootSystemRef?.IsPinkRescanActive == true)
             {
+                lock (_inputLock)
+                    CancelAttackKeyRetry("loot rescan owns input");
                 _combatHandler.SuspendForExternalMovement();
                 await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
                 return;
@@ -2525,6 +2530,7 @@ namespace DriverScanTester.Services
                         HoldSkillThree();
                         _resumeCombatSkillAfterGrouping = false;
                     }
+                    CheckAttackKeyRetry(token);
                     // Skill 3 is held, W is released — keep waiting in combat
                     await Task.Delay(BotConstants.Delays.CombatAttackWaitMs, token);
                     return;
@@ -5989,16 +5995,80 @@ namespace DriverScanTester.Services
                 if (Volatile.Read(ref _stopRequested) != 0 || _isSkillThreeHeld)
                     return;
 
+                _attackRetryTargetId = _memoryService.GetSelectedTargetId();
+                _attackRetryLastMana = _memoryService.TryGetMana(out short mana) ? mana : int.MinValue;
                 _log("[Key] 3 hold (attack skill)");
                 SendSkillThreeKeyEvent(keyUp: false);
                 _isSkillThreeHeld = true;
+                _attackRetryStartedAt = DateTime.UtcNow;
+                _log("[Combat] Attack key 3 activated; retry check in 1000ms.");
             }
+        }
+
+        private void CheckAttackKeyRetry(CancellationToken token)
+        {
+            lock (_inputLock)
+            {
+                if (_attackRetryStartedAt == DateTime.MinValue)
+                    return;
+
+                int targetId = _memoryService.GetSelectedTargetId();
+                string? cancelReason = token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0
+                    ? "stop or cancellation"
+                    : !_isSkillThreeHeld ? "attack input released"
+                    : _isUnstuckRoutineActive ? "unstuck active"
+                    : IsMobGroupingSequenceActive ? "grouping owns movement"
+                    : LootSystemRef?.IsCollecting == true || LootSystemRef?.IsPinkScanPendingOrActive == true
+                        ? "loot owns input"
+                    : !GameMemoryService.IsMobTargetId(targetId) || targetId != _attackRetryTargetId
+                        ? "target lost or changed" : null;
+                if (cancelReason != null)
+                {
+                    CancelAttackKeyRetry(cancelReason);
+                    return;
+                }
+
+                if (!_memoryService.TryGetMana(out short mana))
+                    return;
+                if (_attackRetryLastMana == int.MinValue)
+                {
+                    // A failed initial read cannot prove that mana was not consumed.
+                    _attackRetryLastMana = mana;
+                    _attackRetryStartedAt = DateTime.UtcNow;
+                    return;
+                }
+                if (mana < _attackRetryLastMana)
+                {
+                    _attackRetryStartedAt = DateTime.MinValue;
+                    _log("[Combat] Mana consumption detected — attack retry not needed.");
+                    return;
+                }
+                _attackRetryLastMana = mana;
+                if ((DateTime.UtcNow - _attackRetryStartedAt).TotalMilliseconds < 1000)
+                    return;
+
+                _attackRetryStartedAt = DateTime.MinValue;
+                _log("[Combat] No mana consumption after 1000ms — releasing and pressing key 3 again (retry 1/1).");
+                SendSkillThreeKeyEvent(keyUp: true);
+                _isSkillThreeHeld = false;
+                SendSkillThreeKeyEvent(keyUp: false);
+                _isSkillThreeHeld = true;
+            }
+        }
+
+        private void CancelAttackKeyRetry(string reason)
+        {
+            if (_attackRetryStartedAt == DateTime.MinValue)
+                return;
+            _attackRetryStartedAt = DateTime.MinValue;
+            _log($"[Combat] Attack retry cancelled — reason={reason}.");
         }
 
         private void ReleaseSkillThree()
         {
             lock (_inputLock)
             {
+                CancelAttackKeyRetry("attack input released");
                 if (!_isSkillThreeHeld)
                     return;
 

@@ -3,9 +3,9 @@
   "FlowSteps": [
     {
       "Type": 1,
+      "StartMapNumber": 35,
       "PathFile": "",
       "StartDelayMs": 0,
-      "StartMapNumber": 35,
       "Routes": [],
       "CompletionMode": 0,
       "ExpectedDestinationMapNumber": 0,
@@ -45,9 +45,9 @@
     },
     {
       "Type": 0,
+      "StartMapNumber": 35,
       "PathFile": "Etana_GoCOT_01.json",
       "StartDelayMs": 0,
-      "StartMapNumber": 35,
       "Routes": [
         {
           "PathFile": "Etana_GoCOT_01.json",
@@ -97,6 +97,7 @@
     },
     {
       "Type": 2,
+      "StartMapNumber": 0,
       "PathFile": "",
       "StartDelayMs": 0,
       "Routes": [],
@@ -107,9 +108,9 @@
     },
     {
       "Type": 3,
+      "StartMapNumber": 36,
       "PathFile": "COT LEVEL 1.json",
       "StartDelayMs": 0,
-      "StartMapNumber": 36,
       "Routes": [
         {
           "PathFile": "COT LEVEL 1.json",
@@ -133,7 +134,7 @@
   "MaxWeightRatio": 0.9,
   "MinHp": 500,
   "MinMana": 100,
-  "HpBuyTarget": 66,
+  "HpBuyTarget": 88,
   "ManaBuyTarget": 66,
   "RedBuyTarget": 4,
   "WhiteBuyTarget": 4,
