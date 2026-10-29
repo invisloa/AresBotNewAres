@@ -61,6 +61,10 @@ namespace DriverScanTester.Tests
             "_initialHeadingAlignmentPending",
             PrivateInstance) ?? throw new InvalidOperationException("_initialHeadingAlignmentPending not found.");
 
+        private static readonly FieldInfo InitialResyncDoneField = typeof(MovementSystem).GetField(
+            "_initialResyncDone",
+            PrivateInstance) ?? throw new InvalidOperationException("_initialResyncDone not found.");
+
         private static readonly FieldInfo LastMoveProgressTimeField = typeof(MovementSystem).GetField(
             "_lastMoveProgressTime",
             PrivateInstance) ?? throw new InvalidOperationException("_lastMoveProgressTime not found.");
@@ -127,6 +131,52 @@ namespace DriverScanTester.Tests
                 new object[] { 262f, 188f, target, CancellationToken.None, "RegressionTest" });
             Assert.NotNull(task);
             await task!;
+        }
+
+        private static async Task<bool> UpdateNavigationProgressAsync(
+            MovementSystem movement,
+            Waypoint target,
+            float x,
+            float y)
+        {
+            var task = (Task<bool>?)UpdateNavigationProgressMethod.Invoke(
+                movement,
+                new object[] { target, x, y, CancellationToken.None });
+            Assert.NotNull(task);
+            return await task!;
+        }
+
+        private static DateTime GetNavigationProgressTime(MovementSystem movement)
+            => (DateTime)(LastNavigationProgressTimeField.GetValue(movement) ?? DateTime.MinValue);
+
+        private static List<Waypoint> CreateReportedRoute() => new()
+        {
+            new Waypoint(325, 166, MovementPrecision.Accurate, BotMode.OnlyMove,
+                zoneRestriction: ZoneRestriction.Both),
+            new Waypoint(335, 143, MovementPrecision.Accurate, BotMode.OnlyMove,
+                zoneRestriction: ZoneRestriction.Both)
+        };
+
+        private static SyntheticInputPathMovementSystem CreateReportedMovement(
+            SimulatedGameMemory simulation,
+            Action<string> log,
+            float x = 326f,
+            float y = 164f,
+            byte action = 75)
+        {
+            simulation.X = x;
+            simulation.Y = y;
+            simulation.Action = action;
+            simulation.InCity = false;
+            var movement = new SyntheticInputPathMovementSystem(
+                simulation.CreateMemory(log),
+                log,
+                CreateReportedRoute());
+            // The reported run was already navigating WP5; the initial route-resync
+            // optimisation (unrelated to this regression) is skipped so the active
+            // waypoint stays the exact reproduction target.
+            InitialResyncDoneField.SetValue(movement, true);
+            return movement;
         }
 
         /// <summary>
@@ -365,10 +415,7 @@ namespace DriverScanTester.Tests
 
             // Only ordinary route progress that beats the pre-collision best proves
             // navigation resumed; it still does not erase the same-waypoint history.
-            object? result = UpdateNavigationProgressMethod.Invoke(
-                movement,
-                new object[] { target, 264f, 190f, CancellationToken.None });
-            Assert.False(Assert.IsType<bool>(result));
+            Assert.False(await UpdateNavigationProgressAsync(movement, target, 264f, 190f));
             Assert.Equal(1, GetStuckCount(movement));
             Assert.Contains(lines, line => line.Contains("NavigationRecovered=True"));
         }
@@ -387,10 +434,8 @@ namespace DriverScanTester.Tests
             DateTime timerAtCollision = (DateTime)LastNavigationProgressTimeField.GetValue(movement)!;
 
             // Simulate ReverseDiagonal backing away, then returning toward the same wall.
-            Assert.False(Assert.IsType<bool>(UpdateNavigationProgressMethod.Invoke(
-                movement, new object[] { target, 256f, 188f, CancellationToken.None })));
-            Assert.False(Assert.IsType<bool>(UpdateNavigationProgressMethod.Invoke(
-                movement, new object[] { target, 262.5f, 188f, CancellationToken.None })));
+            Assert.False(await UpdateNavigationProgressAsync(movement, target, 256f, 188f));
+            Assert.False(await UpdateNavigationProgressAsync(movement, target, 262.5f, 188f));
 
             float bestAfterRecovery = (float)BestWaypointDistanceField.GetValue(movement)!;
             Assert.True(bestAfterRecovery < bestAtCollision); // the physical best is retained
@@ -398,8 +443,7 @@ namespace DriverScanTester.Tests
 
             // Returning to the old collision position is worse than the recovery best,
             // so it cannot refresh the navigation timer.
-            Assert.False(Assert.IsType<bool>(UpdateNavigationProgressMethod.Invoke(
-                movement, new object[] { target, 262f, 188f, CancellationToken.None })));
+            Assert.False(await UpdateNavigationProgressAsync(movement, target, 262f, 188f));
             Assert.Equal(bestAfterRecovery, (float)BestWaypointDistanceField.GetValue(movement)!);
             Assert.Equal(timerAtCollision, (DateTime)LastNavigationProgressTimeField.GetValue(movement)!);
             Assert.Equal(1, GetStuckCount(movement));
@@ -420,12 +464,242 @@ namespace DriverScanTester.Tests
             await DispatchStuckAsync(movement, target);
             LastNavigationProgressTimeField.SetValue(movement, DateTime.UtcNow.AddSeconds(-16));
 
-            bool escalated = Assert.IsType<bool>(UpdateNavigationProgressMethod.Invoke(
-                movement, new object[] { target, 262f, 188f, CancellationToken.None }));
+            bool escalated = await UpdateNavigationProgressAsync(movement, target, 262f, 188f);
 
             Assert.True(escalated);
             Assert.True(movement.IsNavigationFailureEscalationRequested);
             Assert.Contains(lines, line => line.Contains("no genuine waypoint progress for"));
+        }
+
+        [Fact]
+        public async Task StationaryNearWaypointStartsNavigationClockAndInvokesExistingUnstuck()
+        {
+            var lines = new List<string>();
+            var simulation = new SimulatedGameMemory();
+            MovementSystem movement = CreateReportedMovement(simulation, lines.Add);
+
+            IgnoreStuckUntilField.SetValue(movement, DateTime.Now.AddSeconds(-1));
+            InitialHeadingAlignmentField.SetValue(movement, false);
+
+            // Tick 1 requests forward movement (W down), tick 2 opens the navigation
+            // window. This is the exact reported state: Fwd=True, Act=75, distance 2.24.
+            await movement.Update(CancellationToken.None);
+            await movement.Update(CancellationToken.None);
+
+            Assert.False(IsRecoveryActive(movement));
+            Assert.Equal(0, GetStuckCount(movement));
+            DateTime windowStart = GetNavigationProgressTime(movement);
+            Assert.NotEqual(DateTime.MinValue, windowStart);
+
+            // The player stays at (326,164) for longer than the existing navigation
+            // no-progress timeout.
+            LastNavigationProgressTimeField.SetValue(movement, DateTime.UtcNow.AddSeconds(-16));
+            await movement.Update(CancellationToken.None);
+
+            Assert.Equal(1, GetStuckCount(movement));
+            Assert.True(IsRecoveryActive(movement));
+            Assert.False(movement.IsNavigationFailureEscalationRequested);
+            Assert.Contains(lines, line => line.Contains("[NavigationStall]") &&
+                                           line.Contains("325") &&
+                                           line.Contains("166") &&
+                                           line.Contains("noProgress=") &&
+                                           line.Contains("invoking existing unstuck"));
+            Assert.Contains(lines, line => line.Contains("[Unstuck]") && line.Contains("Attempt=1/3"));
+            Assert.Contains(lines, line => line.Contains("[ReverseDiagonal] Started."));
+            Assert.DoesNotContain(lines, line => line.Contains("[ConnectionWatchdog]"));
+        }
+
+        [Fact]
+        public async Task GenuineMovementTowardWaypointDoesNotTriggerUnstuck()
+        {
+            var lines = new List<string>();
+            var simulation = new SimulatedGameMemory();
+            MovementSystem movement = CreateReportedMovement(simulation, lines.Add, x: 340f, y: 166f);
+            Waypoint wp5 = CreateReportedRoute()[0];
+            MovingForwardField.SetValue(movement, true);
+
+            Assert.False(await UpdateNavigationProgressAsync(movement, wp5, 340f, 166f));
+            LastNavigationProgressTimeField.SetValue(movement, DateTime.UtcNow.AddSeconds(-16));
+
+            // 2.0 units closer is meaningful progress and refreshes the window.
+            Assert.False(await UpdateNavigationProgressAsync(movement, wp5, 338f, 166f));
+            DateTime refreshed = GetNavigationProgressTime(movement);
+            Assert.True(refreshed > DateTime.UtcNow.AddSeconds(-2));
+            Assert.False(IsRecoveryActive(movement));
+            Assert.Equal(0, GetStuckCount(movement));
+            Assert.DoesNotContain(lines, line => line.Contains("[NavigationStall]"));
+
+            // Further normal approach also stays quiet.
+            LastNavigationProgressTimeField.SetValue(movement, DateTime.UtcNow.AddSeconds(-10));
+            Assert.False(await UpdateNavigationProgressAsync(movement, wp5, 335f, 166f));
+            Assert.Equal(0, GetStuckCount(movement));
+        }
+
+        [Fact]
+        public async Task SmallCoordinateFluctuationsCannotSuppressTheNavigationStall()
+        {
+            var lines = new List<string>();
+            var simulation = new SimulatedGameMemory();
+            MovementSystem movement = CreateReportedMovement(simulation, lines.Add);
+            Waypoint wp5 = CreateReportedRoute()[0];
+            MovingForwardField.SetValue(movement, true);
+
+            Assert.False(await UpdateNavigationProgressAsync(movement, wp5, 326f, 164f));
+            LastNavigationProgressTimeField.SetValue(movement, DateTime.UtcNow.AddSeconds(-10));
+            DateTime before = GetNavigationProgressTime(movement);
+
+            // Fluctuations that do not improve waypoint distance by 1.0 must not reset
+            // the no-progress clock.
+            Assert.False(await UpdateNavigationProgressAsync(movement, wp5, 327f, 165f));
+            Assert.False(await UpdateNavigationProgressAsync(movement, wp5, 327f, 164f));
+            Assert.False(await UpdateNavigationProgressAsync(movement, wp5, 326f, 164f));
+            Assert.Equal(before, GetNavigationProgressTime(movement));
+            Assert.Equal(0, GetStuckCount(movement));
+
+            LastNavigationProgressTimeField.SetValue(movement, DateTime.UtcNow.AddSeconds(-16));
+            Assert.True(await UpdateNavigationProgressAsync(movement, wp5, 326f, 164f));
+            Assert.Equal(1, GetStuckCount(movement));
+            Assert.True(IsRecoveryActive(movement));
+            Assert.Contains(lines, line => line.Contains("[NavigationStall]"));
+        }
+
+        [Fact]
+        public async Task VerifiedRecoveryResumesNavigationAndAdvancesTheWaypoint()
+        {
+            var lines = new List<string>();
+            var simulation = new SimulatedGameMemory();
+            MovementSystem movement = CreateReportedMovement(simulation, lines.Add);
+
+            IgnoreStuckUntilField.SetValue(movement, DateTime.Now.AddSeconds(-1));
+            InitialHeadingAlignmentField.SetValue(movement, false);
+            await movement.Update(CancellationToken.None);
+            await movement.Update(CancellationToken.None);
+            LastNavigationProgressTimeField.SetValue(movement, DateTime.UtcNow.AddSeconds(-16));
+            await movement.Update(CancellationToken.None);
+            Assert.True(IsRecoveryActive(movement));
+
+            // ReverseDiagonal verifies real displacement before reporting success.
+            await DriveSuccessfulRecoveryAsync(movement, simulation, 326f, 164f, 330f, 164f);
+            Assert.False(IsRecoveryActive(movement));
+            Assert.Contains(lines, line => line.Contains("PhysicalRecoverySucceeded=True"));
+            Assert.Equal(1, GetStuckCount(movement));
+
+            // Route movement resumes: reaching WP5 within its acceptance radius advances
+            // to WP6, which is the only proof that navigation actually resumed.
+            simulation.X = 324f;
+            simulation.Y = 165f;
+            await movement.Update(CancellationToken.None);
+
+            Assert.Contains(lines, line => line.Contains("325") && line.Contains("166") && line.Contains("reached"));
+            Assert.Contains(lines, line => line.Contains("Tracking waypoint=WP2") &&
+                                           line.Contains("335") && line.Contains("143"));
+            Assert.Equal(0, GetStuckCount(movement));
+            Assert.False(movement.IsNavigationFailureEscalationRequested);
+        }
+
+        [Fact]
+        public async Task FailedRecoveryFallsBackToTheExistingBoundedEscalation()
+        {
+            var lines = new List<string>();
+            var simulation = new SimulatedGameMemory();
+            MovementSystem movement = CreateReportedMovement(simulation, lines.Add);
+            Waypoint wp5 = CreateReportedRoute()[0];
+
+            IgnoreStuckUntilField.SetValue(movement, DateTime.Now.AddSeconds(-1));
+            InitialHeadingAlignmentField.SetValue(movement, false);
+            await movement.Update(CancellationToken.None);
+            await movement.Update(CancellationToken.None);
+            LastNavigationProgressTimeField.SetValue(movement, DateTime.UtcNow.AddSeconds(-16));
+            await movement.Update(CancellationToken.None);
+            Assert.Equal(1, GetStuckCount(movement));
+
+            // The maneuver produces no meaningful movement: the existing recovery
+            // exhausts its own bounded attempts and preserves the failure history.
+            await DriveFailedRecoveryAsync(movement, simulation, 326f, 164f);
+            Assert.False(IsRecoveryActive(movement));
+            Assert.Equal(1, GetStuckCount(movement));
+            Assert.Contains(lines, line => line.Contains("PhysicalRecoverySucceeded=False"));
+            Assert.False(movement.IsNavigationFailureEscalationRequested);
+
+            // Navigation resumes with W held but still cannot progress: the existing
+            // navigation-failure fallback runs instead of looping the failed maneuver.
+            MovingForwardField.SetValue(movement, true);
+            LastNavigationProgressTimeField.SetValue(movement, DateTime.UtcNow.AddSeconds(-16));
+            Assert.True(await UpdateNavigationProgressAsync(movement, wp5, 326f, 164f),
+                string.Join(Environment.NewLine, lines));
+
+            Assert.True(movement.IsNavigationFailureEscalationRequested);
+            Assert.Contains(lines, line => line.Contains("no genuine waypoint progress for"));
+            Assert.DoesNotContain(lines, line => line.Contains("Attempt=2/3"));
+        }
+
+        [Fact]
+        public async Task PlayerInsideAcceptanceRadiusAdvancesWithoutRecovery()
+        {
+            var lines = new List<string>();
+            var simulation = new SimulatedGameMemory();
+            MovementSystem movement = CreateReportedMovement(simulation, lines.Add, x: 325f, y: 167f);
+
+            IgnoreStuckUntilField.SetValue(movement, DateTime.Now.AddSeconds(-1));
+            InitialHeadingAlignmentField.SetValue(movement, false);
+            await movement.Update(CancellationToken.None);
+
+            Assert.Contains(lines, line => line.Contains("325") && line.Contains("166") && line.Contains("reached"));
+            Assert.Contains(lines, line => line.Contains("Tracking waypoint=WP") &&
+                                           line.Contains("335") && line.Contains("143"));
+            Assert.Equal(0, GetStuckCount(movement));
+            Assert.False(IsRecoveryActive(movement));
+            Assert.DoesNotContain(lines, line => line.Contains("[NavigationStall]"));
+        }
+
+        [Fact]
+        public async Task IntentionalStationaryNavigationDoesNotCountAsAStall()
+        {
+            var lines = new List<string>();
+            var simulation = new SimulatedGameMemory();
+            MovementSystem movement = CreateReportedMovement(simulation, lines.Add);
+            Waypoint wp5 = CreateReportedRoute()[0];
+            MovingForwardField.SetValue(movement, false);
+
+            // A stale window from an earlier movement phase must be discarded while
+            // navigation intentionally holds input (loot/combat hold, first-step turn).
+            LastNavigationProgressTimeField.SetValue(movement, DateTime.UtcNow.AddSeconds(-30));
+            Assert.False(await UpdateNavigationProgressAsync(movement, wp5, 326f, 164f));
+            Assert.Equal(DateTime.MinValue, GetNavigationProgressTime(movement));
+            Assert.Equal(0, GetStuckCount(movement));
+            Assert.False(IsRecoveryActive(movement));
+
+            // When forward movement resumes the window restarts from that moment.
+            MovingForwardField.SetValue(movement, true);
+            Assert.False(await UpdateNavigationProgressAsync(movement, wp5, 326f, 164f));
+            DateTime resumed = GetNavigationProgressTime(movement);
+            Assert.NotEqual(DateTime.MinValue, resumed);
+            Assert.True(resumed > DateTime.UtcNow.AddSeconds(-2));
+            Assert.Equal(0, GetStuckCount(movement));
+
+            // The restarted window still detects a stationary player after the timeout.
+            LastNavigationProgressTimeField.SetValue(movement, DateTime.UtcNow.AddSeconds(-16));
+            Assert.True(await UpdateNavigationProgressAsync(movement, wp5, 326f, 164f));
+            Assert.Equal(1, GetStuckCount(movement));
+        }
+
+        [Fact]
+        public void NavigationRecoveryRunsBeforeTheConnectionWatchdogAndDoesNotHideRealDisconnects()
+        {
+            var watchdog = new GameConnectionWatchdog();
+            DateTime start = new(2026, 10, 28, 2, 58, 1, DateTimeKind.Utc);
+
+            // 02:58:01 -> player stationary at (326,164) with W requested.
+            Assert.False(watchdog.Observe(true, 326f, 164f, start));
+            Assert.False(watchdog.Observe(true, 326f, 164f, start.AddSeconds(14.9)));
+
+            // 02:58:16 -> the navigation recovery (which runs at 15s, before this 30s
+            // watchdog) verifies real displacement; the watchdog restarts its interval.
+            Assert.False(watchdog.Observe(true, 324f, 163f, start.AddSeconds(16)));
+            Assert.False(watchdog.Observe(true, 324f, 163f, start.AddSeconds(45.9)));
+
+            // A genuine 30-second unresponsive interval still stops the bot.
+            Assert.True(watchdog.Observe(true, 324f, 163f, start.AddSeconds(46)));
         }
 
         [Fact]
@@ -759,6 +1033,40 @@ namespace DriverScanTester.Tests
             {
                 InternalRepotEnabled = false;
             }
+
+            protected override void CaptureStuckScreenshot()
+            {
+                // Regression tests must not capture the desktop.
+            }
+        }
+
+        /// <summary>
+        /// Multi-waypoint movement used by the navigation-progress regression tests.
+        /// Synthetic key events are suppressed so tests never touch the real keyboard.
+        /// </summary>
+        private sealed class SyntheticInputPathMovementSystem : MovementSystem
+        {
+            public SyntheticInputPathMovementSystem(
+                GameMemoryService memory,
+                Action<string> log,
+                List<Waypoint> path)
+                : base(
+                    memory,
+                    log,
+                    path[^1].X,
+                    path[^1].Y,
+                    customPath: path,
+                    loopPath: false,
+                    enableWaypointSpecialRecoveries: true)
+            {
+                InternalRepotEnabled = false;
+            }
+
+            protected override void SendSyntheticForwardKeyEvent(bool keyUp) { }
+
+            protected override void SendSyntheticBackwardKeyEvent(bool keyUp) { }
+
+            protected override void SendTurnKeyEvent(bool leftA, bool keyUp) { }
 
             protected override void CaptureStuckScreenshot()
             {

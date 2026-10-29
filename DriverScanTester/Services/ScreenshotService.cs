@@ -54,6 +54,9 @@ namespace DriverScanTester.Services
         /// <summary>Folder for screenshots captured by the game-connection watchdog.</summary>
         public const string ConnectionStatesFolder = "ConnectionStates";
 
+        /// <summary>Parent folder for per-operation failure diagnostics (Screenshots/Operations).</summary>
+        public const string OperationsFolder = "Operations";
+
         /// <summary>
         /// Master switch for loot-scan diagnostics. Enabled by default so every loot
         /// frame is saved with its validated candidate pixels annotated.
@@ -587,27 +590,151 @@ namespace DriverScanTester.Services
         {
             try
             {
-                var virtualScreen = System.Windows.Forms.SystemInformation.VirtualScreen;
+                string screenshotsDir = ResolveScreenshotsDir(subfolder);
+                Directory.CreateDirectory(screenshotsDir);
 
-                using (Bitmap bitmap = new Bitmap(virtualScreen.Width, virtualScreen.Height))
-                using (Graphics graphics = Graphics.FromImage(bitmap))
-                {
-                    graphics.CopyFromScreen(virtualScreen.X, virtualScreen.Y, 0, 0, bitmap.Size);
+                string fileName = $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss-fff}.png";
+                string filePath = Path.Combine(screenshotsDir, fileName);
 
-                    string screenshotsDir = ResolveScreenshotsDir(subfolder);
-                    Directory.CreateDirectory(screenshotsDir);
-
-                    string fileName = $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss-fff}.png";
-                    string filePath = Path.Combine(screenshotsDir, fileName);
-
-                    bitmap.Save(filePath, ImageFormat.Png);
-                    log($"{logPrefix} Screenshot saved: {filePath}");
-                }
+                CaptureVirtualScreen(filePath);
+                log($"{logPrefix} Screenshot saved: {filePath}");
             }
             catch (Exception ex)
             {
                 log($"{logPrefix} Failed to capture screenshot: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Captures a diagnostic screenshot for one failed custom-operation attempt into
+        /// Screenshots/Operations/&lt;operation&gt;/ and returns the saved path. Each capture is
+        /// saved under a filename that contains the operation, the attempt number and the
+        /// failure reason, so retries can never overwrite an earlier failure image.
+        /// The capture is taken immediately, before the caller cleans up or retries.
+        /// Never throws — a failed capture is logged with its exception and null is returned
+        /// so the operation's normal failure/retry flow can continue.
+        /// </summary>
+        public static string? CaptureOperationFailureScreenshot(
+            string operationName,
+            string failureReason,
+            int attemptNumber,
+            Action<string> log,
+            string logPrefix)
+        {
+            try
+            {
+                string screenshotsDir = ResolveOperationScreenshotsDir(operationName);
+                Directory.CreateDirectory(screenshotsDir);
+
+                string fileName = BuildOperationFailureScreenshotFileName(
+                    operationName, failureReason, attemptNumber, DateTime.Now);
+                string filePath = EnsureUniqueFilePath(Path.Combine(screenshotsDir, fileName));
+
+                CaptureVirtualScreen(filePath);
+                log($"{logPrefix} Diagnostic screenshot saved: {filePath}");
+                return filePath;
+            }
+            catch (Exception ex)
+            {
+                log($"{logPrefix} Diagnostic screenshot failed: {ex}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Folder for a specific operation's failure images:
+        /// Screenshots/Operations/&lt;operation&gt; in a dev/source run, or next to the exe
+        /// for a published run. Uses the same project-folder discovery as the loot
+        /// diagnostics so nested subfolders still resolve to the visible project tree.
+        /// </summary>
+        internal static string ResolveOperationScreenshotsDir(string operationName)
+        {
+            string subfolder = Path.Combine(
+                OperationsFolder,
+                SanitizeFileNameSegment(operationName));
+
+            string? projectDir = TryFindProjectDirectory(AppDomain.CurrentDomain.BaseDirectory)
+                ?? TryFindProjectDirectory(Directory.GetCurrentDirectory());
+            if (projectDir != null)
+                return Path.Combine(projectDir, "Screenshots", subfolder);
+
+            return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Screenshots", subfolder);
+        }
+
+        /// <summary>
+        /// Builds the deterministic failure-screenshot filename. Milliseconds are included
+        /// in addition to the attempt number so separate operation runs can never collide.
+        /// </summary>
+        internal static string BuildOperationFailureScreenshotFileName(
+            string operationName,
+            string failureReason,
+            int attemptNumber,
+            DateTime timestamp)
+        {
+            return $"{timestamp:yyyy-MM-dd_HH-mm-ss-fff}_" +
+                   $"{SanitizeFileNameSegment(operationName)}_" +
+                   $"Attempt{Math.Max(1, attemptNumber)}_" +
+                   $"{SanitizeFileNameSegment(failureReason)}.png";
+        }
+
+        /// <summary>Captures the full virtual screen to an already resolved file path.</summary>
+        private static void CaptureVirtualScreen(string filePath)
+        {
+            var virtualScreen = System.Windows.Forms.SystemInformation.VirtualScreen;
+
+            using Bitmap bitmap = new Bitmap(virtualScreen.Width, virtualScreen.Height);
+            using Graphics graphics = Graphics.FromImage(bitmap);
+            graphics.CopyFromScreen(virtualScreen.X, virtualScreen.Y, 0, 0, bitmap.Size);
+            bitmap.Save(filePath, ImageFormat.Png);
+        }
+
+        /// <summary>Removes characters that are not valid in a Windows filename.</summary>
+        private static string SanitizeFileNameSegment(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return "Unknown";
+
+            char[] invalid = Path.GetInvalidFileNameChars();
+            var builder = new System.Text.StringBuilder(value.Length);
+            foreach (char c in value.Trim())
+            {
+                bool isInvalid = false;
+                foreach (char candidate in invalid)
+                {
+                    if (c == candidate)
+                    {
+                        isInvalid = true;
+                        break;
+                    }
+                }
+                builder.Append(isInvalid ? '_' : c);
+            }
+
+            string sanitized = builder.ToString();
+            return sanitized.Length == 0 ? "Unknown" : sanitized;
+        }
+
+        /// <summary>
+        /// Returns a path that does not exist yet. Bounded to 1000 candidates; the final
+        /// fallback uses a GUID so a diagnostic capture can never overwrite older images.
+        /// </summary>
+        private static string EnsureUniqueFilePath(string filePath)
+        {
+            if (!File.Exists(filePath))
+                return filePath;
+
+            string directory = Path.GetDirectoryName(filePath) ?? "";
+            string baseName = Path.GetFileNameWithoutExtension(filePath);
+            string extension = Path.GetExtension(filePath);
+
+            for (int suffix = 2; suffix <= 1000; suffix++)
+            {
+                string candidate = Path.Combine(directory, $"{baseName}_{suffix}{extension}");
+                if (!File.Exists(candidate))
+                    return candidate;
+            }
+
+            return Path.Combine(directory, $"{baseName}_{Guid.NewGuid():N}{extension}");
         }
 
         /// <summary>

@@ -25,6 +25,7 @@ namespace DriverScanTester.Tests
         {
             public short Mana = 1400;
             public int Target = 5000;
+            public bool ManaUnavailable;
             public GameMemoryService Create()
             {
                 GameMemoryService.ReadMemoryDelegate read = (uint pid, ulong address, byte[] buffer, out uint count) =>
@@ -32,7 +33,7 @@ namespace DriverScanTester.Tests
                     byte[]? value = address switch {
                         0x486BC8 => BitConverter.GetBytes(0x100000UL),
                         0x100060 => BitConverter.GetBytes(Target),
-                        0x100C58 => BitConverter.GetBytes(Mana),
+                        0x100C58 => ManaUnavailable ? null : BitConverter.GetBytes(Mana),
                         _ => null
                     };
                     count = 0;
@@ -62,6 +63,14 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void UnchangedManaBeforeDeadline_DoesNotRetry()
+        {
+            var memory = new Memory(); var rig = new Rig(memory.Create());
+            Invoke(rig, "HoldSkillThree"); Check(rig);
+            Assert.Equal(new[] { false }, rig.Events);
+        }
+
+        [Fact]
         public void ConsumptionBeforeDeadline_PreventsRetry()
         {
             var memory = new Memory(); var rig = new Rig(memory.Create());
@@ -85,6 +94,27 @@ namespace DriverScanTester.Tests
             Invoke(rig, "HoldSkillThree"); Age(rig); memory.Target = 0; Check(rig);
             memory.Target = 5000; Check(rig);
             Assert.Equal(new[] { false }, rig.Events);
+        }
+
+        [Fact]
+        public void UnreadableInitialMana_DoesNotCauseAnUnfoundedRetry()
+        {
+            var memory = new Memory { ManaUnavailable = true }; var rig = new Rig(memory.Create());
+            Invoke(rig, "HoldSkillThree"); Age(rig); Check(rig);
+            memory.ManaUnavailable = false; Check(rig);
+            Assert.Equal(new[] { false }, rig.Events);
+            Age(rig); Check(rig);
+            Assert.Equal(new[] { false, true, false }, rig.Events);
+        }
+
+        [Fact]
+        public void ChangedMob_CancelsTheOldAttemptsRetry()
+        {
+            var memory = new Memory(); var rig = new Rig(memory.Create());
+            Invoke(rig, "HoldSkillThree"); Age(rig); memory.Target = 5001; Check(rig);
+            Assert.Equal(new[] { false }, rig.Events);
+            rig.ReleaseCombatKeys(); Invoke(rig, "HoldSkillThree"); Age(rig); Check(rig);
+            Assert.Equal(new[] { false, true, false, true, false }, rig.Events);
         }
 
         [Fact]

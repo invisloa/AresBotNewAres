@@ -1025,6 +1025,8 @@ namespace DriverScanTester.Services
         // Best distance and deadline are scoped to the unresolved waypoint. ReverseDiagonal
         // movement is deliberately excluded: backing away and re-approaching an obstacle is
         // not navigation progress until ordinary route movement beats the previous best.
+        // The deadline starts with the waypoint's first forward-movement tick and is cleared
+        // by intentional input holds (never by an elapsed timer alone).
         private string _navigationProgressWaypointId = "";
         private float _navigationProgressTargetX = float.NaN;
         private float _navigationProgressTargetY = float.NaN;
@@ -2746,7 +2748,7 @@ namespace DriverScanTester.Services
 
                 var target = _waypoints.Peek();
                 TryApplyMovementCameraDistance(target.CameraDistanceLock);
-                if (UpdateNavigationProgress(target, currX, currY, token))
+                if (await UpdateNavigationProgress(target, currX, currY, token))
                     return;
                 float distNow = GeometryUtils.Distance(currX, currY, target.X, target.Y);
                 float thresholdNow = GetEffectiveWaypointReachThreshold(target);
@@ -4802,7 +4804,7 @@ namespace DriverScanTester.Services
             _log($"[NavigationProgress] Tracking waypoint={_navigationProgressWaypointId} bestDistance={_bestWaypointDistance:F2}.");
         }
 
-        private bool UpdateNavigationProgress(
+        private async Task<bool> UpdateNavigationProgress(
             Waypoint target,
             float currX,
             float currY,
@@ -4811,38 +4813,68 @@ namespace DriverScanTester.Services
             EnsureNavigationProgressWaypoint(target, currX, currY);
             DateTime now = DateTime.UtcNow;
             float distance = GeometryUtils.Distance(currX, currY, target.X, target.Y);
+            bool recoveryOwnsMovement = _reverseDiagonalRecovery.IsActive || _isUnstuckRoutineActive;
 
-            if (_consecutiveStuckAttempts > 0 && _lastNavigationProgressTime == DateTime.MinValue)
-                _lastNavigationProgressTime = now;
+            // The no-progress window starts with the first forward-movement tick of a
+            // tracked waypoint. It must NOT wait for a previous stuck attempt: the other
+            // detectors are vetoed close to the waypoint and on unknown action bytes, so
+            // gating this clock on _consecutiveStuckAttempts > 0 made the first stall of
+            // every waypoint invisible (noProgress stayed 0 while W was held forever).
+            // Intentional stops (loot/combat holds, in-place first-turn alignment, pause)
+            // end the window; the next forward-movement tick starts a fresh one.
+            if (!recoveryOwnsMovement)
+            {
+                if (_isMovingForward)
+                {
+                    if (_lastNavigationProgressTime == DateTime.MinValue)
+                    {
+                        _lastNavigationProgressDistance = distance;
+                        _lastNavigationProgressTime = now;
+                    }
+                }
+                else if (_lastNavigationProgressTime != DateTime.MinValue)
+                {
+                    // Navigation intentionally has no forward input: do not count the
+                    // stationary period against the waypoint.
+                    _lastNavigationProgressDistance = distance;
+                    _lastNavigationProgressTime = DateTime.MinValue;
+                }
+            }
 
             // Keep the best physical distance monotonically, but a smaller distance
             // observed during ReverseDiagonal is not navigation progress and must not
             // refresh the 15-second clock or prove route recovery. Ordinary route
             // movement must beat this best value after the local maneuver has ended.
             if (distance < _bestWaypointDistance - 0.01f)
-            {
                 _bestWaypointDistance = distance;
-                if (_reverseDiagonalRecovery.IsActive)
+
+            if (_reverseDiagonalRecovery.IsActive)
+            {
+                if (distance < _lastNavigationProgressDistance - 0.01f)
                 {
                     // A recovery that happened to move toward the waypoint may improve
                     // the best/reference distance, but it never refreshes the timer.
                     _lastNavigationProgressDistance = distance;
                     _log($"[NavigationProgress] waypoint={_navigationProgressWaypointId} bestDistance={_bestWaypointDistance:F2} observedDuringRecovery=True; navigation timer unchanged.");
                 }
-                else if (_consecutiveStuckAttempts > 0 &&
-                         distance <= _lastNavigationProgressDistance - NAVIGATION_PROGRESS_MIN_DISTANCE)
-                {
-                    _lastNavigationProgressDistance = distance;
+            }
+            else if (distance <= _lastNavigationProgressDistance - NAVIGATION_PROGRESS_MIN_DISTANCE)
+            {
+                // Genuine route-directed progress, independent of whether an earlier
+                // unstuck attempt happened. Small fluctuations and recovery detours are
+                // excluded by the 1.0-unit threshold.
+                _lastNavigationProgressDistance = distance;
+                if (_lastNavigationProgressTime != DateTime.MinValue)
                     _lastNavigationProgressTime = now;
-                    if (_awaitingNavigationRecoveryProof)
-                    {
-                        _log($"[Navigation] NavigationRecovered=True waypoint={_navigationProgressWaypointId} bestDistance={_bestWaypointDistance:F2}; failure history preserved at {_consecutiveStuckAttempts}.");
-                        _awaitingNavigationRecoveryProof = false;
-                    }
-                    else
-                    {
-                        _log($"[NavigationProgress] waypoint={_navigationProgressWaypointId} bestDistance={_bestWaypointDistance:F2}; failures={_consecutiveStuckAttempts}.");
-                    }
+
+                if (_awaitingNavigationRecoveryProof)
+                {
+                    _log($"[Navigation] NavigationRecovered=True waypoint={_navigationProgressWaypointId} bestDistance={_bestWaypointDistance:F2}; failure history preserved at {_consecutiveStuckAttempts}.");
+                    _awaitingNavigationRecoveryProof = false;
+                }
+                else if (_consecutiveStuckAttempts > 0)
+                {
+                    _log($"[NavigationProgress] waypoint={_navigationProgressWaypointId} bestDistance={_bestWaypointDistance:F2}; failures={_consecutiveStuckAttempts}.");
                 }
             }
 
@@ -4854,15 +4886,26 @@ namespace DriverScanTester.Services
                 double noProgressSeconds = _lastNavigationProgressTime == DateTime.MinValue
                     ? 0
                     : (now - _lastNavigationProgressTime).TotalSeconds;
-                _log($"[NavigationProgress] waypoint={_navigationProgressWaypointId} failures={_consecutiveStuckAttempts}/{maxAttempts} bestDistance={_bestWaypointDistance:F2} noProgress={noProgressSeconds:F1}/{NAVIGATION_NO_PROGRESS_TIMEOUT_SECONDS:F0}s.");
+                _log($"[NavigationProgress] waypoint={_navigationProgressWaypointId} pos=({currX:F1},{currY:F1}) distance={distance:F2} bestDistance={_bestWaypointDistance:F2} failures={_consecutiveStuckAttempts}/{maxAttempts} noProgress={noProgressSeconds:F1}/{NAVIGATION_NO_PROGRESS_TIMEOUT_SECONDS:F0}s.");
             }
 
-            if (_consecutiveStuckAttempts > 0 &&
-                _lastNavigationProgressTime != DateTime.MinValue)
+            if (_lastNavigationProgressTime != DateTime.MinValue)
             {
                 double noProgressSeconds = (now - _lastNavigationProgressTime).TotalSeconds;
                 if (noProgressSeconds >= NAVIGATION_NO_PROGRESS_TIMEOUT_SECONDS)
                 {
+                    if (_consecutiveStuckAttempts == 0)
+                    {
+                        // First navigation stall for this waypoint: hand it to the existing
+                        // confirmed-stuck dispatcher (same reverse-diagonal / configured
+                        // waypoint recovery used by ActionStuck and NoProgress, including
+                        // loot-ownership deferral). Leaving the timestamp in place lets a
+                        // deferred dispatch retry on the next navigation tick.
+                        _log($"[NavigationStall] waypoint={_navigationProgressWaypointId} pos=({currX:F1},{currY:F1}) distance={distance:F2} bestDistance={_bestWaypointDistance:F2} noProgress={noProgressSeconds:F1}s/{NAVIGATION_NO_PROGRESS_TIMEOUT_SECONDS:F0}s while forward movement was requested — invoking existing unstuck.");
+                        await HandleConfirmedNavigationStuckAsync(currX, currY, target, token, "NavigationNoProgress");
+                        return true;
+                    }
+
                     string reason = $"no genuine waypoint progress for {noProgressSeconds:F1}s (limit {NAVIGATION_NO_PROGRESS_TIMEOUT_SECONDS:F0}s)";
                     return EscalateNavigationFailure(reason, token);
                 }
@@ -5122,11 +5165,11 @@ namespace DriverScanTester.Services
             EnsureNavigationProgressWaypoint(target, currX, currY);
             _consecutiveStuckAttempts++;
             _lastStuckAttemptPos = (currX, currY);
-            if (_lastNavigationProgressTime == DateTime.MinValue)
-            {
-                _lastNavigationProgressDistance = _bestWaypointDistance;
-                _lastNavigationProgressTime = DateTime.UtcNow;
-            }
+            // A recovery attempt owns the movement input: start its own verified-progress
+            // window so the elapsed time from the preceding stall cannot immediately
+            // escalate (or re-dispatch) while the maneuver is still running.
+            _lastNavigationProgressDistance = _bestWaypointDistance;
+            _lastNavigationProgressTime = DateTime.UtcNow;
             bool inCity = _memoryService.GetIsInCity();
             int maxAttempts = inCity ? STUCK_MAX_ATTEMPTS_IN_CITY : STUCK_MAX_ATTEMPTS_OUTSIDE;
             double noProgressSeconds = (DateTime.UtcNow - _lastNavigationProgressTime).TotalSeconds;
@@ -6366,6 +6409,13 @@ namespace DriverScanTester.Services
         /// <returns>RouteResyncResult indicating whether the queue was changed or why it was skipped.</returns>
         private RouteResyncResult RouteResyncFromCurrentPosition(float currX, float currY, bool isInitialResync = false)
         {
+            // The initial resync is the point where the route decides its first target, so
+            // the coordinates it uses must be logged explicitly: the coordinator only
+            // starts a route after PositionSync validated the position (after the mandatory
+            // post-town-teleport W refresh when one was required).
+            if (isInitialResync)
+                _log($"[RouteResync] Starting from validated position: ({currX:F1},{currY:F1})");
+
             // ── Guard conditions ──
             if (_initialPath.Count < 2)
             {

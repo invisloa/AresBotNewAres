@@ -40,6 +40,24 @@ namespace DriverScanTester.Services
         /// <summary>Shared W-camera owner for direct W input issued by bot operations.</summary>
         public WKeyCameraController? WCameraController { get; }
 
+        /// <summary>
+        /// 1-based attempt number of the custom operation currently being executed by
+        /// <see cref="OperationRunnerService"/>. Operations use it to label per-attempt
+        /// diagnostics (screenshots, failure reasons). Defaults to 1 for direct/manual runs.
+        /// </summary>
+        public int CurrentOperationAttempt { get; internal set; } = 1;
+
+        /// <summary>Maximum attempts configured for the operation currently executing.</summary>
+        public int CurrentOperationMaxAttempts { get; internal set; } = OperationRunnerService.MaxAttempts;
+
+        /// <summary>
+        /// Optional capture hook for operation failure diagnostics. Production leaves this
+        /// null so <see cref="ScreenshotService.CaptureOperationFailureScreenshot"/> is used;
+        /// tests can inject a deterministic capture that records calls without touching a
+        /// real screen. Returns the saved path, or null when capture failed.
+        /// </summary>
+        public Func<string, string, int, string?>? DiagnosticScreenshotCapture { get; }
+
         private readonly Action<bool> _sendWKeyEvent;
 
         /// <summary>Sends a W key-up/down event through the configured input path.</summary>
@@ -54,7 +72,8 @@ namespace DriverScanTester.Services
             Action focusGameWindow,
             PositionSyncService? positionSync = null,
             WKeyCameraController? wKeyCameraController = null,
-            Action<bool>? sendWKeyEvent = null)
+            Action<bool>? sendWKeyEvent = null,
+            Func<string, string, int, string?>? diagnosticScreenshotCapture = null)
         {
             Memory = memory;
             PathRunner = pathRunner;
@@ -64,6 +83,7 @@ namespace DriverScanTester.Services
             FocusGameWindow = focusGameWindow;
             PositionSync = positionSync;
             WCameraController = wKeyCameraController;
+            DiagnosticScreenshotCapture = diagnosticScreenshotCapture;
             _sendWKeyEvent = sendWKeyEvent ?? (keyUp => GameInput.keybd_event(
                 GameInput.VK_W,
                 GameInput.SCAN_W,

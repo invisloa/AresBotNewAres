@@ -1133,6 +1133,12 @@ namespace DriverScanTester
             /// <summary>Poll interval in ms while observing the result of a W refresh.</summary>
             public const int PositionSyncWRefreshPollMs = 100;
 
+            /// <summary>
+            /// Consecutive identical post-refresh reads required before a mandatory
+            /// (town-teleport) refresh may publish its coordinates.
+            /// </summary>
+            public const int PositionSyncWRefreshStableReadCount = 2;
+
             /// <summary>Maximum number of bounded W refresh presses per position synchronization.</summary>
             public const int PositionSyncMaxWRefreshAttempts = 3;
 

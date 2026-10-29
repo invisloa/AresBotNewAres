@@ -42,7 +42,17 @@ namespace DriverScanTester.Services
         /// Runs the named operation, retrying up to <see cref="MaxAttempts"/> times.
         /// Returns true when the operation ultimately succeeded. Throws when cancelled.
         /// </summary>
-        public async Task<bool> RunWithRetryAsync(string name, CancellationToken token)
+        public Task<bool> RunWithRetryAsync(string name, CancellationToken token)
+            => RunWithRetryAsync(name, token, operationOverride: null);
+
+        /// <summary>
+        /// Retry core. The optional operation override lets tests exercise the exact retry
+        /// loop (including per-attempt diagnostics) without touching the live game.
+        /// </summary>
+        internal async Task<bool> RunWithRetryAsync(
+            string name,
+            CancellationToken token,
+            BotOperations.OperationDelegate? operationOverride)
         {
             if (string.IsNullOrWhiteSpace(name))
             {
@@ -50,7 +60,7 @@ namespace DriverScanTester.Services
                 return true;
             }
 
-            if (!BotOperations.IsKnown(name))
+            if (operationOverride == null && !BotOperations.IsKnown(name))
             {
                 _log($"[Operation] Unknown operation '{name}'. Check the BotOperations.Operations registry.");
                 return false;
@@ -66,7 +76,7 @@ namespace DriverScanTester.Services
                     _log($"[Operation] '{name}' resumed.");
                 }
 
-                if (await RunOnceAsync(name, token))
+                if (await RunOnceAsync(name, token, attempt, operationOverride))
                     return true;
 
                 if (token.IsCancellationRequested)
@@ -91,8 +101,21 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Runs the named operation once with a hard timeout. Returns true on success.
+        /// Direct/manual invocations report themselves as attempt 1.
         /// </summary>
-        public async Task<bool> RunOnceAsync(string name, CancellationToken token)
+        public Task<bool> RunOnceAsync(string name, CancellationToken token)
+            => RunOnceAsync(name, token, attemptNumber: 1, operationOverride: null);
+
+        /// <summary>
+        /// Runs the named operation once with a hard timeout and publishes the current
+        /// attempt number to <see cref="OperationContext"/> so operation diagnostics can
+        /// label each failed attempt (e.g. GoInsideCOT screenshots).
+        /// </summary>
+        internal async Task<bool> RunOnceAsync(
+            string name,
+            CancellationToken token,
+            int attemptNumber,
+            BotOperations.OperationDelegate? operationOverride)
         {
             if (string.IsNullOrWhiteSpace(name))
             {
@@ -100,18 +123,23 @@ namespace DriverScanTester.Services
                 return true;
             }
 
-            if (!BotOperations.IsKnown(name))
+            if (operationOverride == null && !BotOperations.IsKnown(name))
             {
                 _log($"[Operation] Unknown operation '{name}'. Check the BotOperations.Operations registry.");
                 return false;
             }
+
+            _ctx.CurrentOperationAttempt = Math.Max(1, attemptNumber);
+            _ctx.CurrentOperationMaxAttempts = MaxAttempts;
 
             _log($"[Operation] Running '{name}'...");
             try
             {
                 using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token);
                 timeoutCts.CancelAfter(OperationTimeoutMs);
-                bool ok = await BotOperations.Operations[name](_ctx, timeoutCts.Token);
+                BotOperations.OperationDelegate operation =
+                    operationOverride ?? BotOperations.Operations[name];
+                bool ok = await operation(_ctx, timeoutCts.Token);
                 _log(ok
                     ? $"[Operation] '{name}' completed."
                     : $"[Operation] '{name}' failed.");

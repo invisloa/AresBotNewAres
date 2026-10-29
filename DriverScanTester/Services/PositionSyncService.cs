@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Threading;
 using System.Threading.Tasks;
 using DriverScanTester.Models;
@@ -73,6 +73,12 @@ namespace DriverScanTester.Services
         public int WRefreshSettleTimeoutMs { get; set; } = BotConstants.Delays.PositionSyncWRefreshSettleTimeoutMs;
         public int WRefreshPollMs { get; set; } = BotConstants.Delays.PositionSyncWRefreshPollMs;
         public int MaxWRefreshAttempts { get; set; } = BotConstants.Delays.PositionSyncMaxWRefreshAttempts;
+
+        /// <summary>
+        /// Consecutive identical post-refresh reads required before a mandatory
+        /// (town-teleport) refresh may publish its coordinates.
+        /// </summary>
+        public int WRefreshStableReadCount { get; set; } = BotConstants.Delays.PositionSyncWRefreshStableReadCount;
         public int WRefreshRetryDelayMs { get; set; } = BotConstants.Delays.PositionSyncWRefreshRetryDelayMs;
         public int MaxTransitionRestarts { get; set; } = BotConstants.Delays.PositionSyncMaxTransitionRestarts;
         public int NudgeKeyDownMs { get; set; } = BotConstants.Delays.StartProtectionNudgeKeyDownMs;
@@ -143,6 +149,11 @@ namespace DriverScanTester.Services
     ///     portal is exactly what stale coordinates look like and is never accepted, or
     ///   • a coordinate change is observed after one bounded W refresh press.
     ///
+    /// A town teleport (<c>TeleportToCity</c>) is a MANDATORY-refresh transition: no
+    /// observation is accepted at all before a bounded physical W press plus a settled
+    /// post-W read, even when the coordinates changed and even when the map stayed the
+    /// same. Only that mandatory path may publish the position for REPOT navigation.
+    ///
     /// Identical repeated coordinates are never used as proof of freshness. When the
     /// destination context cannot be satisfied the result is
     /// <see cref="PositionSyncResultKind.Unconfirmed"/> — never a fabricated
@@ -166,6 +177,15 @@ namespace DriverScanTester.Services
 
         private long _transitionId;
         private bool _transitionPending;
+
+        /// <summary>
+        /// True when the pending transition was started by a town teleport
+        /// (<c>TeleportToCity</c>). Such a transition ALWAYS performs a bounded physical
+        /// W press before it may report <see cref="PositionSyncResultKind.Ready"/> — a
+        /// changed X/Y alone is never accepted (a town teleport can even stay on the
+        /// same map, and the game can publish a partially stale coordinate).
+        /// </summary>
+        private bool _transitionRequiresWRefresh;
         private string _transitionReason = "";
         private PlayerStateSnapshot? _preTransitionState;
 
@@ -241,6 +261,7 @@ namespace DriverScanTester.Services
             {
                 _transitionId = 0;
                 _transitionPending = false;
+                _transitionRequiresWRefresh = false;
                 _transitionReason = "";
                 _preTransitionState = null;
                 _staleReference = null;
@@ -266,11 +287,16 @@ namespace DriverScanTester.Services
         /// portal click, a town-teleport key, ...). Capturing the source snapshot here
         /// is what makes stale destination coordinates detectable: the game may keep
         /// showing the old X/Y after the map number has already changed.
+        ///
+        /// <paramref name="requireWRefresh"/> must be set for a town teleport
+        /// (<c>TeleportToCity</c>): that transition never completes on a changed
+        /// coordinate alone — a bounded physical W press and the settled post-W
+        /// position are required before the position may be reported READY.
         /// </summary>
-        public void MarkTransitionImminent(string reason)
+        public void MarkTransitionImminent(string reason, bool requireWRefresh = false)
         {
             PlayerStateSnapshot source = CaptureCurrentState();
-            BeginTransitionCore(reason, source);
+            BeginTransitionCore(reason, source, requireWRefresh: requireWRefresh);
         }
 
         /// <summary>
@@ -278,10 +304,10 @@ namespace DriverScanTester.Services
         /// completed and its map changed). <paramref name="source"/> should be the last
         /// state observed before the transition when available.
         /// </summary>
-        public void BeginTransition(string reason, PlayerStateSnapshot? source = null)
+        public void BeginTransition(string reason, PlayerStateSnapshot? source = null, bool requireWRefresh = false)
         {
             PlayerStateSnapshot effectiveSource = source ?? CaptureCurrentState();
-            BeginTransitionCore(reason, effectiveSource);
+            BeginTransitionCore(reason, effectiveSource, requireWRefresh: requireWRefresh);
         }
 
         /// <summary>
@@ -297,6 +323,7 @@ namespace DriverScanTester.Services
                     return;
 
                 _transitionPending = false;
+                _transitionRequiresWRefresh = false;
                 _preTransitionState = null;
                 _state = PositionSyncState.Normal;
             }
@@ -506,7 +533,6 @@ namespace DriverScanTester.Services
         {
             _focusGameWindow();
             _log($"[PositionSync] Tapping W for {_options.NudgeKeyDownMs} ms (bounded mini-W refresh)...");
-
             bool cameraOwnerAcquired = false;
             if (_wKeyCameraController != null && _wKeyCameraOwner != null)
             {
@@ -523,6 +549,7 @@ namespace DriverScanTester.Services
                 // its direct bounded key-down when no controller is configured.
                 if (!cameraOwnerAcquired)
                     _keyEvent(GameInput.VK_W, GameInput.SCAN_W, 0);
+                _log("[PositionSync] W DOWN.");
                 await Task.Delay(_options.NudgeKeyDownMs, token);
             }
             finally
@@ -530,11 +557,13 @@ namespace DriverScanTester.Services
                 if (cameraOwnerAcquired && _wKeyCameraController != null && _wKeyCameraOwner != null)
                 {
                     _wKeyCameraController.ReleaseW(_wKeyCameraOwner);
+                    _log("[PositionSync] W UP.");
                     releaseUnresolved = _wKeyCameraController.HasUnresolvedPhysicalWRelease;
                 }
                 else
                 {
                     _keyEvent(GameInput.VK_W, GameInput.SCAN_W, (uint)GameInput.KEYEVENTF_KEYUP);
+                    _log("[PositionSync] W UP.");
                 }
             }
 
@@ -568,6 +597,7 @@ namespace DriverScanTester.Services
                     long id;
                     string reason;
                     PlayerStateSnapshot? source;
+                    bool requiresWRefresh;
 
                     lock (_lock)
                     {
@@ -576,6 +606,7 @@ namespace DriverScanTester.Services
                         activeTransitionId = id;
                         reason = _transitionReason;
                         source = _preTransitionState;
+                        requiresWRefresh = _transitionRequiresWRefresh;
                     }
 
                     if (noPending)
@@ -596,6 +627,7 @@ namespace DriverScanTester.Services
                                 activeTransitionId = id;
                                 reason = _transitionReason;
                                 source = _preTransitionState;
+                                requiresWRefresh = _transitionRequiresWRefresh;
                             }
                         }
                         else
@@ -641,6 +673,7 @@ namespace DriverScanTester.Services
                         source,
                         expectedMap,
                         destination,
+                        requiresWRefresh,
                         token);
 
                     if (result.Kind == PositionSyncResultKind.Superseded &&
@@ -669,6 +702,7 @@ namespace DriverScanTester.Services
                         {
                             _transitionPending = false;
                             _transitionReason = "";
+                            _transitionRequiresWRefresh = false;
                             _preTransitionState = null;
                             _lastValidatedState = result.State;
                             _lastObservedState = result.State;
@@ -731,6 +765,7 @@ namespace DriverScanTester.Services
             PlayerStateSnapshot? source,
             int expectedMap,
             DestinationValidationContext? destination,
+            bool requireWRefresh,
             CancellationToken token)
         {
             PlayerStateSnapshot latest = default;
@@ -854,6 +889,27 @@ namespace DriverScanTester.Services
                 _log($"[PositionSync] Destination validation active: Destination={destination.Describe()} Source={(source.HasValue ? source.Value.Describe() : "unknown")} StaleReference={(staleReference.HasValue ? staleReference.Value.Describe() : "unknown")} StaleRadius={_options.StaleSourceRadiusTiles} InitialSuspicious={initialPositionSuspicious}");
             }
 
+            // A town teleport (TeleportToCity) is a MANDATORY-refresh transition: no
+            // observation — however fresh it looks, and however far it moved from the
+            // source — may be accepted before a real bounded W press. The confirmed
+            // failure accepted (333,213) merely because it differed from (333,143);
+            // the game only published the real (211,210) once W was pressed, which made
+            // the initial RouteResync skip the first waypoints. There is deliberately no
+            // early-return path below for these transitions.
+            if (requireWRefresh)
+            {
+                return await RunMandatoryWRefreshAsync(
+                    transitionId,
+                    reason,
+                    source,
+                    staleReference,
+                    lastStableMap,
+                    initialPositionSuspicious,
+                    latest,
+                    destination,
+                    token);
+            }
+
             // First allow the game itself to finish publishing the new position. This is
             // bounded polling, not a blind fixed sleep: a destination match (or, without
             // a destination context, a coordinate change clearly outside the previous
@@ -875,7 +931,7 @@ namespace DriverScanTester.Services
 
                 if (latest.HasCoherentState && latest.Map != lastStableMap)
                 {
-                    if (TrySupersedeForMapChange(transitionId, latest))
+                    if (TrySupersedeForMapChange(transitionId, latest, requireWRefresh))
                     {
                         return new PositionSyncResult(
                             PositionSyncResultKind.Superseded,
@@ -922,7 +978,7 @@ namespace DriverScanTester.Services
 
                 if (before.HasCoherentState && before.Map != lastStableMap)
                 {
-                    if (TrySupersedeForMapChange(transitionId, before))
+                    if (TrySupersedeForMapChange(transitionId, before, requireWRefresh))
                     {
                         return new PositionSyncResult(
                             PositionSyncResultKind.Superseded,
@@ -999,7 +1055,7 @@ namespace DriverScanTester.Services
 
                     if (after.HasCoherentState && after.Map != lastStableMap)
                     {
-                        if (TrySupersedeForMapChange(transitionId, after))
+                        if (TrySupersedeForMapChange(transitionId, after, requireWRefresh))
                         {
                             return new PositionSyncResult(
                                 PositionSyncResultKind.Superseded,
@@ -1108,6 +1164,253 @@ namespace DriverScanTester.Services
             };
         }
 
+        /// <summary>
+        /// The MANDATORY post-town-teleport refresh.
+        ///
+        /// A town teleport can land on the SAME map as the source (a map change is
+        /// therefore not a usable signal) and can expose a partially stale coordinate
+        /// (only one axis updates). A changed X/Y is not proof that the game published
+        /// the destination location, so this path:
+        ///   1. logs the initial post-teleport snapshot (informational only — never accepted),
+        ///   2. physically presses W through the existing input helper (bounded hold,
+        ///      release guaranteed in a finally block),
+        ///   3. polls the settled post-W position and requires consecutive identical reads,
+        ///   4. validates it (unreadable / still in the pre-teleport neighbourhood without
+        ///      any response to W => not accepted, bounded retry, then UNCONFIRMED),
+        ///   5. returns the REFRESHED snapshot — the pre-refresh snapshot is never
+        ///      reported as the navigation position.
+        /// </summary>
+        private async Task<PositionSyncResult> RunMandatoryWRefreshAsync(
+            long transitionId,
+            string reason,
+            PlayerStateSnapshot? source,
+            PlayerStateSnapshot? staleReference,
+            int confirmedMap,
+            bool initialPositionSuspicious,
+            PlayerStateSnapshot initial,
+            DestinationValidationContext? destination,
+            CancellationToken token)
+        {
+            PlayerStateSnapshot latest = initial;
+            int requiredStableReads = Math.Max(1, _options.WRefreshStableReadCount);
+
+            _log($"[PositionSync] {reason} detected.");
+            _log($"[PositionSync] Initial post-teleport position: {(initial.MapReadSucceeded ? $"Map={initial.Map}" : "Map=unreadable")} {(initial.PositionReadSucceeded ? $"({initial.X},{initial.Y})" : "(unreadable)")} — not accepted before the mandatory W refresh.");
+            _log($"[PositionSync] Mandatory W refresh plan: Reason={reason} MaxAttempts={_options.MaxWRefreshAttempts} HoldMs={_options.NudgeKeyDownMs} StableReads={requiredStableReads} Source={(source.HasValue ? source.Value.Describe() : "unknown")} InitialSuspicious={initialPositionSuspicious} Destination={(destination != null ? destination.Describe() : "none")}.");
+
+            string lastFailure = "the mandatory W refresh did not run";
+
+            for (int attempt = 1; attempt <= _options.MaxWRefreshAttempts; attempt++)
+            {
+                token.ThrowIfCancellationRequested();
+
+                if (IsSuperseded(transitionId))
+                {
+                    return new PositionSyncResult(
+                        PositionSyncResultKind.Superseded,
+                        latest,
+                        transitionId,
+                        "A newer transition started before the mandatory W refresh.");
+                }
+
+                PlayerStateSnapshot before = ReadState();
+                latest = before;
+
+                if (before.HasCoherentState && before.Map != confirmedMap)
+                {
+                    if (TrySupersedeForMapChange(transitionId, before, requireWRefresh: true))
+                    {
+                        return new PositionSyncResult(
+                            PositionSyncResultKind.Superseded,
+                            before,
+                            transitionId,
+                            $"Map changed again to {before.Map} before the mandatory W refresh.");
+                    }
+                }
+
+                _log($"[PositionSync] Mandatory W refresh starting: attempt {attempt}/{_options.MaxWRefreshAttempts} PositionBefore={(before.PositionReadSucceeded ? $"({before.X},{before.Y})" : "(unreadable)")} MapBefore={(before.MapReadSucceeded ? before.Map.ToString() : "unreadable")}");
+
+                try
+                {
+                    await _wRefreshAsync(token);
+                }
+                catch (OperationCanceledException)
+                {
+                    _log("[PositionSync] W refresh cancelled during the press; the input helper releases W in a finally block.");
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _log($"[PositionSync] W refresh failed: {ex.Message}");
+                    if (_wKeyCameraController?.HasUnresolvedPhysicalWRelease == true)
+                    {
+                        lock (_lock)
+                            _state = PositionSyncState.PositionSynchronizationFailed;
+                        _log($"[PositionSync] Result=Unconfirmed TransitionId={transitionId} " +
+                             "Message=physical W-up is unresolved; synchronization aborted until Stop/cleanup releases W.");
+                        return new PositionSyncResult(
+                            PositionSyncResultKind.Unconfirmed,
+                            before,
+                            transitionId,
+                            "Physical W-up is unresolved; synchronization aborted until the release is retried.");
+                    }
+
+                    lastFailure = $"the mandatory W refresh failed ({ex.Message})";
+                    _log($"[PositionSync] Position validation FAILED: {lastFailure} — the coordinates were NOT accepted.");
+                    if (attempt < _options.MaxWRefreshAttempts)
+                        await Task.Delay(_options.WRefreshRetryDelayMs, token);
+                    continue;
+                }
+
+                // Only the SETTLED post-W reading may be validated: the game can publish
+                // an intermediate frame (e.g. the stale X with the new Y) before the real
+                // location, and the old snapshot must never leak into navigation.
+                PlayerStateSnapshot after = before;
+                PlayerStateSnapshot stableState = default;
+                int stableReads = 0;
+                DateTime refreshDeadline = DateTime.UtcNow.AddMilliseconds(_options.WRefreshSettleTimeoutMs);
+
+                while (DateTime.UtcNow < refreshDeadline)
+                {
+                    token.ThrowIfCancellationRequested();
+                    after = ReadState();
+
+                    if (IsSuperseded(transitionId))
+                    {
+                        return new PositionSyncResult(
+                            PositionSyncResultKind.Superseded,
+                            after,
+                            transitionId,
+                            "A newer transition started after the mandatory W refresh.");
+                    }
+
+                    if (after.HasCoherentState && after.Map != confirmedMap)
+                    {
+                        if (TrySupersedeForMapChange(transitionId, after, requireWRefresh: true))
+                        {
+                            return new PositionSyncResult(
+                                PositionSyncResultKind.Superseded,
+                                after,
+                                transitionId,
+                                $"Map changed again to {after.Map} after the mandatory W refresh.");
+                        }
+                    }
+
+                    if (after.HasCoherentState)
+                    {
+                        bool sameAsStable = stableReads > 0 &&
+                                            after.Map == stableState.Map &&
+                                            after.X == stableState.X &&
+                                            after.Y == stableState.Y;
+
+                        if (sameAsStable)
+                        {
+                            stableReads++;
+                        }
+                        else
+                        {
+                            stableState = after;
+                            stableReads = 1;
+                        }
+
+                        if (stableReads >= requiredStableReads)
+                            break;
+                    }
+                    else
+                    {
+                        stableReads = 0;
+                    }
+
+                    await Task.Delay(_options.WRefreshPollMs, token);
+                }
+
+                latest = after;
+
+                bool coherent = after.HasCoherentState;
+                bool stableEnough = coherent && stableReads >= requiredStableReads;
+                bool changedFromBefore = before.HasCoherentState &&
+                                         coherent &&
+                                         after.Map == before.Map &&
+                                         after.PositionChangedFrom(before);
+                int deltaX = before.PositionReadSucceeded && after.PositionReadSucceeded
+                    ? (int)after.X - before.X
+                    : 0;
+                int deltaY = before.PositionReadSucceeded && after.PositionReadSucceeded
+                    ? (int)after.Y - before.Y
+                    : 0;
+                bool withinSourceNeighbourhood = IsWithinStaleNeighbourhood(after, source) ||
+                                                 IsWithinStaleNeighbourhood(after, staleReference);
+                bool destinationMatched = destination != null && destination.Matches(after);
+
+                _log($"[PositionSync] Post-W position: Attempt={attempt}/{_options.MaxWRefreshAttempts} {(after.MapReadSucceeded ? $"Map={after.Map}" : "Map=unreadable")} {(after.PositionReadSucceeded ? $"({after.X},{after.Y})" : "(unreadable)")} StableReads={stableReads}/{requiredStableReads} Changed={changedFromBefore} Delta=({deltaX},{deltaY}) SourceNeighbourhood={withinSourceNeighbourhood} DestinationMatch={destinationMatched}");
+
+                if (!coherent)
+                {
+                    lastFailure = $"the post-W position is not readable ({after.Describe()})";
+                    _log($"[PositionSync] Position validation FAILED: {lastFailure}.");
+                }
+                else if (!stableEnough)
+                {
+                    lastFailure = $"the post-W position did not settle within {_options.WRefreshSettleTimeoutMs} ms ({stableReads}/{requiredStableReads} consecutive identical reads)";
+                    _log($"[PositionSync] Position validation FAILED: {lastFailure} — the coordinates are not stable enough for navigation.");
+                }
+                else if (!changedFromBefore && withinSourceNeighbourhood)
+                {
+                    // The W press produced no observable change and the reading still sits
+                    // where the player was BEFORE the teleport: indistinguishable from a
+                    // stale read, so it must not become a navigation position.
+                    lastFailure = $"the post-W position still sits in the pre-teleport neighbourhood and did not respond to the W press ({after.Describe()})";
+                    _log($"[PositionSync] Position validation FAILED: {lastFailure} — treated as stale.");
+                }
+                else if (destination != null && !destinationMatched)
+                {
+                    // A town teleport is never routed into destructive recovery from here:
+                    // the position was refreshed, but it genuinely does not satisfy the
+                    // caller's expectation, so it must not report READY.
+                    lastFailure = $"the refreshed position ({after.X},{after.Y}) map {after.Map} does not satisfy the destination expectation ({destination.Label})";
+                    _log($"[PositionSync] Position validation FAILED: {lastFailure}.");
+                }
+                else
+                {
+                    string evidence = changedFromBefore
+                        ? $"the W press changed the coordinates from ({before.X},{before.Y}) to ({after.X},{after.Y})"
+                        : $"already settled outside the pre-teleport neighbourhood ({stableReads} consecutive identical read(s))";
+                    _log($"[PositionSync] Position validation OK: {evidence}; using the refreshed position {(after.MapReadSucceeded ? $"Map={after.Map}" : "Map=unreadable")} {(after.PositionReadSucceeded ? $"({after.X},{after.Y})" : "(unreadable)")}.");
+
+                    return ReadyResult(
+                        after,
+                        transitionId,
+                        destinationMatched
+                            ? $"Position confirmed by the mandatory W refresh and matches the destination expectation ({destination!.Label})."
+                            : "Position confirmed by the mandatory W refresh.",
+                        destination,
+                        destinationMatched
+                            ? DestinationValidationStatus.MatchedDestination
+                            : DestinationValidationStatus.NoContext);
+                }
+
+                if (attempt < _options.MaxWRefreshAttempts)
+                    await Task.Delay(_options.WRefreshRetryDelayMs, token);
+            }
+
+            PlayerStateSnapshot finalState = ReadState();
+            string finalMessage =
+                $"Position could not be validated after the mandatory post-teleport W refresh ({_options.MaxWRefreshAttempts} attempt(s)); reason: {lastFailure}.";
+
+            _log($"[PositionSync] Mandatory refresh UNCONFIRMED: TransitionId={transitionId} Reason={reason} DestinationStatus={(destination != null ? DestinationValidationStatus.Unconfirmed.ToString() : DestinationValidationStatus.NoContext.ToString())} Destination={(destination != null ? destination.Describe() : "none")} Source={(source.HasValue ? source.Value.Describe() : "unknown")} InitialSuspicious={initialPositionSuspicious} {finalState.Describe()} Detail={finalMessage}");
+            return new PositionSyncResult(
+                PositionSyncResultKind.Unconfirmed,
+                finalState,
+                transitionId,
+                finalMessage)
+            {
+                DestinationStatus = destination != null
+                    ? DestinationValidationStatus.Unconfirmed
+                    : DestinationValidationStatus.NoContext,
+                Destination = destination
+            };
+        }
+
         private PlayerStateSnapshot ReadState()
         {
             PlayerStateSnapshot snapshot = _memory.GetPlayerStateSnapshot();
@@ -1127,7 +1430,7 @@ namespace DriverScanTester.Services
                 return transitionId != _transitionId;
         }
 
-        private bool TrySupersedeForMapChange(long transitionId, PlayerStateSnapshot state)
+        private bool TrySupersedeForMapChange(long transitionId, PlayerStateSnapshot state, bool requireWRefresh)
         {
             lock (_lock)
             {
@@ -1139,7 +1442,8 @@ namespace DriverScanTester.Services
 
             BeginTransitionCore(
                 $"Map changed again during position synchronization (was transition {transitionId})",
-                state);
+                state,
+                requireWRefresh: requireWRefresh);
             return true;
         }
 
@@ -1250,7 +1554,8 @@ namespace DriverScanTester.Services
         private void BeginTransitionCore(
             string reason,
             PlayerStateSnapshot? source,
-            bool preserveStaleReference = false)
+            bool preserveStaleReference = false,
+            bool requireWRefresh = false)
         {
             long id;
             string transitionReason = string.IsNullOrWhiteSpace(reason) ? "unspecified" : reason;
@@ -1265,6 +1570,7 @@ namespace DriverScanTester.Services
                 _transitionId++;
                 id = _transitionId;
                 _transitionPending = true;
+                _transitionRequiresWRefresh = requireWRefresh;
                 _transitionReason = transitionReason;
                 _preTransitionState = effectiveSource;
 
@@ -1279,7 +1585,7 @@ namespace DriverScanTester.Services
                 _state = PositionSyncState.TransitionPending;
             }
 
-            _log($"[PositionSync] Transition detected: TransitionId={id} Reason={transitionReason} Source={(source.HasValue ? source.Value.Describe() : "unknown")} PreservedStaleReference={preserveStaleReference}.");
+            _log($"[PositionSync] Transition detected: TransitionId={id} Reason={transitionReason} Source={(source.HasValue ? source.Value.Describe() : "unknown")} PreservedStaleReference={preserveStaleReference} MandatoryWRefresh={requireWRefresh}.");
         }
     }
 }

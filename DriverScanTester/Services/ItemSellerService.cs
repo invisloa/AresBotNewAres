@@ -31,6 +31,13 @@ namespace DriverScanTester.Services
         private readonly WKeyCameraController? _wKeyCameraController;
         private int _howManyTries;
 
+        /// <summary>
+        /// Screen coordinates of the most recent NPC right-click performed by
+        /// <see cref="ScanAndRightClickNpc"/>, or null when no NPC was clicked in the
+        /// current scan. Used only for operation failure diagnostics.
+        /// </summary>
+        public (int X, int Y)? LastNpcRightClickScreenPosition { get; internal set; }
+
         public const int MapHershal = 17;
         public const int MapKharon = 44;
         public const int MapEtana = 35;
@@ -145,6 +152,8 @@ namespace DriverScanTester.Services
         /// </param>
         public bool ScanAndRightClickNpc(int maxFullScans = SellerMaxFullScans)
         {
+            LastNpcRightClickScreenPosition = null;
+
             if (!TryAcquireSellerCamera(out object? cameraOwner))
                 return false;
 
@@ -1381,6 +1390,7 @@ namespace DriverScanTester.Services
                 return false;
 
             _log($"ItemSeller: S_IsSellerPointed=={SellerPointedValue} (0x{(uint)SellerPointedValue:X8}) detected at client ({clientX},{clientY}) screen ({screenX},{screenY}) [scan {scanIndex + 1}, point {pointIndex}]. Right-clicking to open the NPC dialog.");
+            LastNpcRightClickScreenPosition = (screenX, screenY);
 
             // Right-click the seller NPC to open its context menu (Shop / Storage / etc.).
             MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.RightDown);

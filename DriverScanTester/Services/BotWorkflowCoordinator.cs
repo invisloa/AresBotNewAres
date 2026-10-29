@@ -2995,6 +2995,11 @@ namespace DriverScanTester.Services
         /// Screenshots/TownPortals. The pre-teleport snapshot is marked BEFORE the key is
         /// sent so stale city coordinates can be detected instead of being compared with
         /// the route start.
+        ///
+        /// The transition is marked as a MANDATORY W refresh: an in-town teleport can keep
+        /// the same map and publish a partially stale coordinate, so
+        /// <see cref="PositionSyncService"/> always presses W, re-reads the settled
+        /// position and validates it before the route / RouteResync may start from it.
         /// </summary>
         private async Task<bool> TeleportToCity(CancellationToken token)
         {
@@ -3004,7 +3009,7 @@ namespace DriverScanTester.Services
             byte vk = (byte)_profile.TeleportKey;
             byte scan = (byte)_profile.TeleportScanCode;
 
-            _positionSync.MarkTransitionImminent("TeleportToCity");
+            _positionSync.MarkTransitionImminent("TeleportToCity", requireWRefresh: true);
 
             bool arrived;
             if (TownTeleportOverride is { } townTeleport)

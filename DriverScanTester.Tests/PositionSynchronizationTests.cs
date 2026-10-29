@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -44,6 +44,10 @@ namespace DriverScanTester.Tests
         private static readonly FieldInfo TeleportRetryCountField = typeof(BotWorkflowCoordinator)
             .GetField("_teleportRetryCount", PrivateInstance)
             ?? throw new InvalidOperationException("_teleportRetryCount not found.");
+
+        private static readonly MethodInfo TeleportToCityMethod = typeof(BotWorkflowCoordinator)
+            .GetMethod("TeleportToCity", PrivateInstance)
+            ?? throw new InvalidOperationException("TeleportToCity not found.");
 
         private static PositionSyncOptions FastOptions() => new()
         {
@@ -873,12 +877,24 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public async Task TownTeleportWithUnchangedMapButChangedPositionIsFresh()
+        public async Task TownTeleportWithUnchangedMapButChangedPositionStillRequiresTheMandatoryWRefresh()
         {
+            // Same-map town teleport (source map 35 -> destination map 35). The map ID
+            // never changes, so a map transition cannot be the freshness signal, and the
+            // changed X/Y alone is NOT proof either: the mandatory W refresh must run and
+            // the refreshed coordinates are the ones reported as ready.
             var memory = new SyncMemory { Map = 35, X = 214, Y = 211 };
-            var service = CreateService(memory, FastOptions(), _ => Task.CompletedTask, out _);
+            int nudges = 0;
+            var service = CreateService(memory, FastOptions(), _ =>
+            {
+                nudges++;
+                // The game publishes the real town position only once the player moves.
+                memory.X = 220;
+                memory.Y = 210;
+                return Task.CompletedTask;
+            }, out List<string> log);
 
-            service.MarkTransitionImminent("TeleportToCity");
+            service.MarkTransitionImminent("TeleportToCity", requireWRefresh: true);
             memory.Map = 35;
             memory.X = 300;
             memory.Y = 300;
@@ -886,9 +902,227 @@ namespace DriverScanTester.Tests
             PositionSyncResult result = await service.SynchronizeAsync(0, CancellationToken.None);
 
             Assert.True(result.IsReady);
+            Assert.Equal(1, nudges);
             Assert.Equal(35, result.State.Map);
+            Assert.Equal(220, result.State.X);
+            Assert.Equal(210, result.State.Y);
+            Assert.Equal(220, service.LastValidatedState!.Value.X);
+            Assert.Equal(210, service.LastValidatedState!.Value.Y);
+            Assert.Contains(log, line => line.Contains("[PositionSync] TeleportToCity detected."));
+            Assert.Contains(log, line => line.Contains("Mandatory W refresh starting"));
+            Assert.DoesNotContain(log, line => line.Contains("freshness established without a W refresh"));
+        }
+
+        /// <summary>
+        /// TEST A — the confirmed incident reproduced end to end through the coordinator's
+        /// town teleport: (333,143) -> teleport -> the game reports (333,213) (only Y
+        /// updated, X still belongs to the COT entrance) -> the real town position
+        /// (211,210) is only published after W.
+        ///
+        /// The stale (333,213) snapshot must never become the navigation position, and W
+        /// must be pressed BEFORE PositionSync reports READY.
+        /// </summary>
+        [Fact]
+        public async Task TestA_TownTeleportUsesPostWCoordinatesAndNeverTheStaleSnapshot()
+        {
+            var memory = new SyncMemory { Map = 35, X = 333, Y = 143, InCity = false };
+            int nudges = 0;
+            var service = CreateService(memory, FastOptions(), _ =>
+            {
+                nudges++;
+                // The game only publishes the real town position after the player moves.
+                memory.X = 211;
+                memory.Y = 210;
+                return Task.CompletedTask;
+            }, out List<string> log);
+
+            var coordinator = CreateCoordinator(memory, service, log, _ =>
+            {
+                // Teleport lands on the SAME map with a partially stale coordinate.
+                memory.InCity = true;
+                memory.Map = 35;
+                memory.X = 333;
+                memory.Y = 213;
+                return Task.FromResult(true);
+            });
+
+            var task = (Task<bool>?)TeleportToCityMethod.Invoke(
+                coordinator, new object[] { CancellationToken.None });
+            Assert.NotNull(task);
+            bool ready = await task!;
+
+            Assert.True(ready, string.Join(Environment.NewLine, log));
+            Assert.Equal(1, nudges);
+            Assert.Equal(PositionSyncState.PositionReady, service.State);
+            Assert.False(service.HasPendingTransition);
+
+            // The validated (navigation) position is the refreshed one — never (333,213).
+            Assert.NotNull(service.LastValidatedState);
+            Assert.Equal(211, service.LastValidatedState!.Value.X);
+            Assert.Equal(210, service.LastValidatedState!.Value.Y);
+            Assert.Equal(35, service.LastValidatedState!.Value.Map);
+
+            // W is physically requested BEFORE the synchronization may report ready.
+            int wRefreshIndex = log.FindIndex(line => line.Contains("Mandatory W refresh starting"));
+            int readyIndex = log.FindIndex(line => line.Contains("Position ready:"));
+            Assert.True(wRefreshIndex >= 0, "The mandatory W refresh was not requested.");
+            Assert.True(readyIndex > wRefreshIndex,
+                "PositionSync reported ready before the mandatory W refresh ran.");
+
+            // The coordinates handed to the route/RouteResync are the refreshed ones.
+            string validatedLine = log.Single(line => line.Contains("[Teleport] Town destination validated"));
+            Assert.Contains("Position=(211,210)", validatedLine);
+            Assert.DoesNotContain("Position=(333,213)", validatedLine);
+            Assert.DoesNotContain(log, line => line.Contains("freshness established without a W refresh"));
+            Assert.Contains(log, line => line.Contains("Position validation OK"));
+        }
+
+        /// <summary>
+        /// TEST C — the post-teleport coordinates already changed and look valid. The
+        /// mandatory town-teleport refresh must STILL execute before navigation.
+        /// </summary>
+        [Fact]
+        public async Task TestC_AlreadyChangedPostTeleportCoordinatesStillRequireTheMandatoryWRefresh()
+        {
+            var memory = new SyncMemory { Map = 35, X = 100, Y = 100 };
+            int nudges = 0;
+            var service = CreateService(memory, FastOptions(), _ =>
+            {
+                nudges++;
+                // The W press is blocked (wall) — the settled position simply confirms
+                // the coordinates the game already published.
+                return Task.CompletedTask;
+            }, out List<string> log);
+
+            service.MarkTransitionImminent("TeleportToCity", requireWRefresh: true);
+            memory.Map = 35;
+            memory.X = 300; // looks completely fresh: far outside the source neighbourhood
+            memory.Y = 300;
+
+            PositionSyncResult result = await service.SynchronizeAsync(0, CancellationToken.None);
+
+            Assert.True(result.IsReady);
+            Assert.Equal(1, nudges);
             Assert.Equal(300, result.State.X);
             Assert.Equal(300, result.State.Y);
+            Assert.Contains(log, line => line.Contains("Mandatory W refresh starting"));
+            Assert.Contains(log, line => line.Contains("Position validation OK"));
+        }
+
+        /// <summary>
+        /// TEST D — the mandatory W refresh fails. No false READY may be published and no
+        /// navigation may start from unverified coordinates; the bounded retries end in
+        /// the existing failure handling.
+        /// </summary>
+        [Fact]
+        public async Task TestD_MandatoryWRefreshFailureNeverReportsReadyAndBlocksNavigation()
+        {
+            var memory = new SyncMemory { Map = 35, X = 333, Y = 143, InCity = true };
+            var options = FastOptions();
+            options.MaxWRefreshAttempts = 2;
+            int attempts = 0;
+            var service = CreateService(memory, options, _ =>
+            {
+                attempts++;
+                throw new InvalidOperationException("test W press failure");
+            }, out List<string> log);
+
+            var coordinator = CreateCoordinator(memory, service, log);
+
+            service.MarkTransitionImminent("TeleportToCity", requireWRefresh: true);
+            memory.Map = 35;
+            memory.X = 333;
+            memory.Y = 213;
+
+            PositionSyncResult result = await service.SynchronizeAsync(0, CancellationToken.None);
+
+            Assert.False(result.IsReady);
+            Assert.Equal(PositionSyncResultKind.Unconfirmed, result.Kind);
+            Assert.Equal(2, attempts);
+            Assert.True(service.HasPendingTransition);
+            Assert.Equal(PositionSyncState.PositionSynchronizationFailed, service.State);
+            Assert.Null(service.LastValidatedState);
+            Assert.DoesNotContain(log, line => line.Contains("Position ready:"));
+            Assert.Contains(log, line => line.Contains("W refresh failed"));
+            Assert.Contains(log, line => line.Contains("Position validation FAILED"));
+
+            // The route entry gate refuses to initialise navigation from unvalidated data.
+            Assert.False(await RunExpRouteEntryGateAsync(coordinator, CotRoute()));
+        }
+
+        /// <summary>
+        /// TEST E — cancellation during the mandatory W press releases W and preserves the
+        /// existing cancellation contract (no READY, transition stays pending).
+        /// </summary>
+        [Fact]
+        public async Task TestE_CancellationDuringMandatoryWRefreshReleasesKeyAndNeverReportsReady()
+        {
+            var memory = new SyncMemory { Map = 35, X = 333, Y = 143 };
+            var events = new List<(byte vk, byte scan, uint flags)>();
+            var options = FastOptions();
+            options.NudgeKeyDownMs = 5000;
+
+            var service = new PositionSyncService(
+                memory.CreateMemory(_ => { }),
+                _ => { },
+                () => { },
+                wRefreshAsync: null,
+                options,
+                (vk, scan, flags) => events.Add((vk, scan, flags)));
+
+            service.MarkTransitionImminent("TeleportToCity", requireWRefresh: true);
+            memory.Map = 35;
+            memory.X = 333;
+            memory.Y = 213;
+
+            using var cts = new CancellationTokenSource(1000);
+            PositionSyncResult result = await service.SynchronizeAsync(0, cts.Token);
+
+            Assert.False(result.IsReady);
+            Assert.Equal(PositionSyncResultKind.Cancelled, result.Kind);
+            Assert.Equal(2, events.Count);
+            Assert.Equal(BotConstants.Keyboard.VkW, events[0].vk);
+            Assert.Equal(0u, events[0].flags);
+            Assert.Equal(BotConstants.Keyboard.VkW, events[1].vk);
+            Assert.Equal((uint)BotConstants.Keyboard.KeyEventKeyUp, events[1].flags);
+            Assert.Equal(PositionSyncState.PositionSynchronizationFailed, service.State);
+            Assert.True(service.HasPendingTransition);
+        }
+
+        /// <summary>
+        /// TEST F — ordinary navigation is untouched: no extra W refresh is introduced
+        /// after the town transition was validated.
+        /// </summary>
+        [Fact]
+        public async Task TestF_NormalNavigationAfterTownTeleportNeedsNoFurtherWRefresh()
+        {
+            var memory = new SyncMemory { Map = 35, X = 333, Y = 143 };
+            int nudges = 0;
+            var service = CreateService(memory, FastOptions(), _ =>
+            {
+                nudges++;
+                memory.X = 211;
+                memory.Y = 210;
+                return Task.CompletedTask;
+            }, out _);
+
+            service.MarkTransitionImminent("TeleportToCity", requireWRefresh: true);
+            memory.Map = 35;
+            memory.X = 333;
+            memory.Y = 213;
+
+            Assert.True((await service.SynchronizeAsync(0, CancellationToken.None)).IsReady);
+            Assert.Equal(1, nudges);
+            Assert.False(service.HasPendingTransition);
+
+            // Ordinary waypoint movement: a coherent read is enough, no W is pressed.
+            PositionSyncResult ordinary = await service.EnsurePositionReadyAsync(
+                "ordinary waypoint movement", 0, CancellationToken.None);
+
+            Assert.True(ordinary.IsReady);
+            Assert.Equal(1, nudges);
+            Assert.Equal(211, ordinary.State.X);
+            Assert.Equal(210, ordinary.State.Y);
         }
 
         [Fact]

@@ -306,7 +306,7 @@ namespace DriverScanTester.Services
                              $"sinceLastManaConsumption={sinceManaMs:F0}ms, sinceMovementProgress={sinceMovementMs:F0}ms, " +
                              $"player=({currX:F1},{currY:F1}), progressAnchor={anchorText}, anchorDisplacement={anchorDisplacement:F2}, " +
                              $"requiredMovement={COMBAT_MANA_STUCK_MOVE_PROGRESS:F1}, lastMana={_lastManaValue}. " +
-                             $"Reason: neither mana consumption nor >= {COMBAT_MANA_STUCK_MOVE_PROGRESS:F1} units of position progress for {COMBAT_MANA_STUCK_TIMEOUT_MS:F0}ms (attack animation plays, mob HP not dropping). Repositioning toward next waypoint.");
+                             $"Reason: neither a sampled mana decrease nor >= {COMBAT_MANA_STUCK_MOVE_PROGRESS:F1} units of position progress for {COMBAT_MANA_STUCK_TIMEOUT_MS:F0}ms. Target HP is not measured; repositioning toward next waypoint.");
                         return CombatAction.RepositionAndRetry;
                     }
                 }

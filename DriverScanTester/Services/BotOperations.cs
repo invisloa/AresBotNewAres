@@ -74,7 +74,10 @@ namespace DriverScanTester.Services
             // Capture the pre-teleport position and mark the transition BEFORE the key
             // is sent. The destination coordinates can remain stale until the game has
             // loaded, so the workflow must validate them before comparing positions.
-            ctx.PositionSync?.MarkTransitionImminent("Operation TeleportToCity");
+            // A town teleport can land on the SAME map, so the transition is marked as a
+            // MANDATORY W refresh: PositionSync presses W, re-reads the settled position
+            // and only then reports READY (a changed coordinate alone is not accepted).
+            ctx.PositionSync?.MarkTransitionImminent("Operation TeleportToCity", requireWRefresh: true);
 
             GameInput.PressKey(
                 (byte)ctx.Profile.TeleportKey,
@@ -140,8 +143,31 @@ namespace DriverScanTester.Services
         ///   2. Wait for the NPC popup dialog to open and verify it is open.
         ///   3. Click the "enter" option at calibrated (570, 565), wait 2 s, click again.
         ///   4. Wait 5 s for the teleport, then succeed only when the map has changed.
+        /// Every failed attempt captures one diagnostic screenshot at the failure point,
+        /// before the operation returns so the runner can retry.
         /// </summary>
-        public static async Task<bool> GoInsideCOT(OperationContext ctx, CancellationToken token)
+        public static Task<bool> GoInsideCOT(OperationContext ctx, CancellationToken token)
+        {
+            return GoInsideCOTCoreAsync(
+                ctx,
+                () => ctx.ItemSeller.ScanAndRightClickNpc(),
+                (delayMs, cancellationToken) => Task.Delay(delayMs, cancellationToken),
+                (calibratedX, calibratedY, logPrefix) =>
+                    ClickAtCalibrated(ctx, calibratedX, calibratedY, logPrefix: logPrefix),
+                token);
+        }
+
+        /// <summary>
+        /// Testable GoInsideCOT core. The public operation supplies the real NPC scan,
+        /// game delays and calibrated clicks; tests replace only those side effects so
+        /// every failure/screenshot path can be verified deterministically.
+        /// </summary>
+        internal static async Task<bool> GoInsideCOTCoreAsync(
+            OperationContext ctx,
+            Func<bool> scanAndRightClickNpc,
+            Func<int, CancellationToken, Task> delayAsync,
+            Action<int, int, string> clickAtCalibrated,
+            CancellationToken token)
         {
             ctx.Log("[Operation] GoInsideCOT: starting.");
             ctx.FocusGameWindow();
@@ -151,18 +177,24 @@ namespace DriverScanTester.Services
             ctx.Log($"[Operation] GoInsideCOT: current map before entering: {previousMap}.");
 
             // 1. Scan for the NPC and right-click it (same as the repot seller NPC).
-            if (!ctx.ItemSeller.ScanAndRightClickNpc())
+            if (!scanAndRightClickNpc())
             {
                 ctx.Log("[Operation] GoInsideCOT: NPC not found after scanning. Aborting.");
-                return false;
+                return FailGoInsideCOT(ctx, "NpcNotFound", npcDetected: false, clickPosition: null);
             }
 
             // 2. Wait for the popup to appear and verify it is open.
-            await Task.Delay(1000, token);
-            if (!ctx.Memory.IsDialogOpen())
+            await delayAsync(1000, token);
+            bool dialogOpen = ctx.Memory.IsDialogOpen();
+            if (!dialogOpen)
             {
                 ctx.Log("[Operation] GoInsideCOT: NPC popup did not open. Aborting.");
-                return false;
+                return FailGoInsideCOT(
+                    ctx,
+                    "NpcDialogNotOpened",
+                    npcDetected: true,
+                    clickPosition: ctx.ItemSeller.LastNpcRightClickScreenPosition,
+                    isDialogOpen: false);
             }
             ctx.Log("[Operation] GoInsideCOT: NPC popup is open.");
 
@@ -170,12 +202,12 @@ namespace DriverScanTester.Services
             // Mark the impending map transition first so the pre-entry position is the
             // freshness baseline — not an older snapshot from before walking to the NPC.
             ctx.PositionSync?.MarkTransitionImminent("GoInsideCOT");
-            ClickAtCalibrated(ctx, CotEnterClickX, CotEnterClickY);
-            await Task.Delay(2000, token);
-            ClickAtCalibrated(ctx, CotEnterClickX, CotEnterClickY);
+            clickAtCalibrated(CotEnterClickX, CotEnterClickY, "GoInsideCOT");
+            await delayAsync(2000, token);
+            clickAtCalibrated(CotEnterClickX, CotEnterClickY, "GoInsideCOT");
 
             // 4. Wait for the teleport, then verify the map actually changed.
-            await Task.Delay(5000, token);
+            await delayAsync(5000, token);
             int currentMap = ctx.Memory.GetMapNumber();
             ctx.Log($"[Operation] GoInsideCOT: map after entering: {currentMap}.");
 
@@ -186,7 +218,84 @@ namespace DriverScanTester.Services
             }
 
             ctx.Log("[Operation] GoInsideCOT: map did not change. Failed.");
+            return FailGoInsideCOT(
+                ctx,
+                "MapDidNotChange",
+                npcDetected: true,
+                clickPosition: ctx.ItemSeller.LastNpcRightClickScreenPosition);
+        }
+
+        /// <summary>
+        /// Handles one failed GoInsideCOT attempt: logs the failure context (map, position,
+        /// NPC detection, click position, dialog state) and captures exactly one diagnostic
+        /// screenshot before returning false to the retry loop. Never throws and never
+        /// changes the operation outcome.
+        /// </summary>
+        private static bool FailGoInsideCOT(
+            OperationContext ctx,
+            string reason,
+            bool npcDetected,
+            (int X, int Y)? clickPosition,
+            bool? isDialogOpen = null)
+        {
+            int attemptNumber = Math.Max(1, ctx.CurrentOperationAttempt);
+            int maxAttempts = Math.Max(attemptNumber, ctx.CurrentOperationMaxAttempts);
+
+            var (positionX, positionY, positionRead) = ctx.Memory.GetPlayerPosition();
+            int map = ctx.Memory.GetMapNumber();
+            bool dialogOpen = isDialogOpen ?? ctx.Memory.IsDialogOpen();
+
+            string positionText = positionRead
+                ? $"({positionX:0},{positionY:0})"
+                : "unknown";
+            string clickText = clickPosition.HasValue
+                ? $"({clickPosition.Value.X},{clickPosition.Value.Y})"
+                : "unknown";
+
+            ctx.Log($"[GoInsideCOT] Attempt {attemptNumber}/{maxAttempts} FAILED. Reason={reason}");
+            ctx.Log($"[GoInsideCOT] Map={map} Position={positionText} " +
+                    $"NpcDetected={npcDetected} ClickPosition={clickText} IsDialogOpen={dialogOpen}");
+
+            CaptureGoInsideCOTFailureScreenshot(ctx, reason, attemptNumber);
             return false;
+        }
+
+        /// <summary>
+        /// Captures the diagnostic screenshot for a failed GoInsideCOT attempt. A capture
+        /// error is logged with its exception details and swallowed: diagnostics must never
+        /// break the existing failure/retry workflow. Exactly one capture is attempted.
+        /// </summary>
+        private static void CaptureGoInsideCOTFailureScreenshot(
+            OperationContext ctx,
+            string reason,
+            int attemptNumber)
+        {
+            const string operationName = "GoInsideCOT";
+            const string logPrefix = "[GoInsideCOT]";
+
+            try
+            {
+                Func<string, string, int, string?>? capture = ctx.DiagnosticScreenshotCapture;
+                if (capture == null)
+                {
+                    ScreenshotService.CaptureOperationFailureScreenshot(
+                        operationName, reason, attemptNumber, ctx.Log, logPrefix);
+                    return;
+                }
+
+                string? path = capture(operationName, reason, attemptNumber);
+                if (string.IsNullOrWhiteSpace(path))
+                {
+                    ctx.Log($"{logPrefix} Diagnostic screenshot failed: capture returned no path.");
+                    return;
+                }
+
+                ctx.Log($"{logPrefix} Diagnostic screenshot saved: {path}");
+            }
+            catch (Exception ex)
+            {
+                ctx.Log($"{logPrefix} Diagnostic screenshot failed: {ex}");
+            }
         }
 
         /// <summary>
