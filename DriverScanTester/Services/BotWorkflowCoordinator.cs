@@ -1509,44 +1509,181 @@ namespace DriverScanTester.Services
         /// <summary>
         /// In-city stuck reset. The MovementSystem stops a city route after
         /// STUCK_MAX_ATTEMPTS_IN_CITY (2) unstuck attempts instead of hammering the same spot.
-        /// The workflow therefore stops, waits <see cref="InCityStuckResetDelayMs"/> (10 min),
-        /// clears the failure bookkeeping and restarts from the Repot step —
-        /// "stop, wait 10 min, reset, go repot and start again".
+        /// The workflow therefore stops, teleports BACK TO TOWN through the existing town
+        /// teleport workflow (profile teleport key + validated arrival), and only after that
+        /// waits <see cref="InCityStuckResetDelayMs"/> (10 min) before clearing the failure
+        /// bookkeeping and restarting from the Repot step. The cooldown is never spent at the
+        /// location where the player got stuck.
         /// </summary>
-        /// <returns>True when the reset ran (the caller must yield the current step).</returns>
+        /// <returns>True when the caller must yield the current step (reset performed,
+        /// cancelled, or terminal recovery failure after the town teleport was not verified).</returns>
         private async Task<bool> WaitOutInCityStuckAndResetAsync(string stage, CancellationToken token)
         {
-            _log($"[Unstuck] {stage}: in-city unstuck limit reached — stopping the bot and waiting {InCityStuckResetDelayMs / 60000} min before resetting and starting again from the Repot step.");
+            _log($"[Unstuck] {stage}: in-city unstuck limit reached — stopping the bot, teleporting to town, then waiting {InCityStuckResetDelayMs / 60000} min before resetting and starting again from the Repot step.");
+
+            // The diagnostic stuck screenshot is captured by MovementSystem before it raises
+            // the fatal escalation (Screenshots/Stuck). Preserve that existing capture here
+            // and take no new one: the recovery must not change the stuck-location evidence.
+            _log("[Recovery] Stuck screenshot: existing diagnostic capture (Screenshots/Stuck) preserved before the route abort.");
 
             // The route is already dead (PathRunner released W/A/D and combat keys).
-            // Stop again so an in-flight run can never survive the pause.
+            // Stop again so an in-flight run can never survive the pause, and release any
+            // movement/steering/camera/attack input still owned by the aborted route.
+            _log("[Recovery] Stopping current path and releasing movement/attack inputs.");
             _pathRunner.Stop();
+            if (token.IsCancellationRequested)
+                return true;
 
+            // Teleport FIRST: the cooldown must only ever run in town. The existing
+            // TeleportToCity workflow presses the profile's town teleport key (key 6),
+            // waits for the town UI and validates the destination through PositionSync
+            // (mandatory post-teleport W refresh). A teleport without that validation is
+            // never treated as success.
+            bool inTown;
             try
             {
-                await PausableDelayAsync(InCityStuckResetDelayMs, token);
+                inTown = await TeleportToTownForCityStuckRecoveryAsync(token);
             }
             catch (OperationCanceledException)
             {
+                _log("[Recovery] City-stuck recovery cancelled before the cooldown started.");
                 return true;
             }
 
             if (token.IsCancellationRequested)
                 return true;
 
+            if (!inTown)
+            {
+                // Never spend the 10 minutes at the stuck location and never pretend the
+                // player reached town. The teleport input was already retried within the
+                // profile's existing MaxTeleportRetries budget; fail visibly instead.
+                _log("[Recovery] Terminal recovery failure: the player could not be verified in town. " +
+                     $"NOT starting the {InCityStuckResetDelayMs / 60000}-minute cooldown at the stuck location.");
+                CurrentPhase = BotPhase.Failed;
+                return true;
+            }
+
+            _log("[Recovery] Player safely returned to town.");
+            _log($"[Recovery] Starting {InCityStuckResetDelayMs / 60000}-minute cooldown in town.");
+
+            // The existing 10-minute wait starts only now — after the verified town arrival.
+            try
+            {
+                await PausableDelayAsync(InCityStuckResetDelayMs, token);
+            }
+            catch (OperationCanceledException)
+            {
+                _log("[Recovery] City-stuck cooldown cancelled.");
+                return true;
+            }
+
+            if (token.IsCancellationRequested)
+                return true;
+
+            _log("[Recovery] Cooldown completed.");
+
             // Reset the failure bookkeeping so the restart gets a clean budget.
             _moveToRepotRetryCount = 0;
             _pathStepRetryCount = 0;
             _teleportRetryCount = 0;
             _postRepotVerifyRetryCount = 0;
+            _log("[Recovery] Resetting profile execution.");
             _log("[Unstuck] Wait over — failure counters reset. Going to the Repot step and starting again.");
 
             bool redirected = RedirectToRepotStep($"{stage}: in-city stuck reset");
             if (!redirected)
                 return true;
 
+            _log("[Recovery] Restarting profile from Repot step.");
             _log("[Unstuck] In-city stuck reset complete — repot first, then the flow starts again.");
             return true;
+        }
+
+        /// <summary>
+        /// Runs the existing <see cref="TeleportToCity"/> workflow for the in-city stuck
+        /// recovery and verifies the result BEFORE any cooldown may start. The attempt
+        /// budget reuses the profile's existing <see cref="BotProfile.MaxTeleportRetries"/>;
+        /// there is no new retry mechanism.
+        ///
+        /// Success requires all three of:
+        ///   1. <see cref="TeleportToCity"/> validated the post-teleport position
+        ///      (PositionSync + mandatory W refresh),
+        ///   2. the in-city flag is set,
+        ///   3. the validated position is outside the stuck location's neighbourhood (or
+        ///      the map changed), so a plain W refresh at the stuck spot can never be
+        ///      mistaken for a town arrival.
+        /// </summary>
+        private async Task<bool> TeleportToTownForCityStuckRecoveryAsync(CancellationToken token)
+        {
+            int maxAttempts = Math.Max(1, _profile.MaxTeleportRetries);
+            PlayerStateSnapshot stuckState = _positionSync.CaptureCurrentState();
+            _log($"[Recovery] Captured stuck position: {stuckState.Describe()}.");
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                token.ThrowIfCancellationRequested();
+
+                string keyText = _profile.TeleportKey is >= 0x30 and <= 0x39
+                    ? ((char)_profile.TeleportKey).ToString()
+                    : $"0x{_profile.TeleportKey:X2}";
+                _log($"[Recovery] Executing Scroll to Town (key {keyText}, vk={_profile.TeleportKey}) — attempt {attempt}/{maxAttempts}.");
+
+                bool positionReady = await TeleportToCity(token);
+                if (token.IsCancellationRequested)
+                    return false;
+
+                bool inCity = _memoryService.GetIsInCity();
+                PlayerStateSnapshot? destination = _positionSync.LastValidatedState;
+                string transitionFailure = DescribeTownTransitionFailure(stuckState, destination);
+
+                if (positionReady && inCity && transitionFailure.Length == 0)
+                {
+                    _log($"[Recovery] Teleport verification: SUCCESS — {destination?.Describe() ?? "PositionSync ready"} InCity={inCity}.");
+                    return true;
+                }
+
+                string reason = !positionReady
+                    ? "PositionSync did not validate the post-teleport position"
+                    : !inCity
+                        ? "the in-city flag is not set"
+                        : transitionFailure;
+                _log($"[Recovery] Teleport verification: FAILED — {reason} (PositionSyncReady={positionReady}, InCity={inCity}, Attempt={attempt}/{maxAttempts}).");
+
+                if (attempt < maxAttempts)
+                    _log($"[Recovery] Scroll to Town retry {attempt + 1}/{maxAttempts}.");
+            }
+
+            _log($"[Recovery] Scroll to Town failed after {maxAttempts}/{maxAttempts} attempts — the player is not verified in town.");
+            return false;
+        }
+
+        /// <summary>
+        /// Empty when the validated post-teleport position proves a real town transition
+        /// (map changed or the position left the stuck location's neighbourhood), otherwise
+        /// the human-readable failure reason. A non-coherent stuck snapshot cannot be
+        /// compared, so the existing PositionSync result decides in that case.
+        /// </summary>
+        private static string DescribeTownTransitionFailure(
+            PlayerStateSnapshot stuckState,
+            PlayerStateSnapshot? destination)
+        {
+            if (!stuckState.HasCoherentState)
+                return "";
+
+            if (!destination.HasValue || !destination.Value.HasCoherentState)
+                return "no coherent validated town position was published";
+
+            PlayerStateSnapshot town = destination.Value;
+            if (town.Map != stuckState.Map)
+                return "";
+
+            int radius = BotConstants.Delays.PositionSyncStaleSourceRadiusTiles;
+            int deltaX = Math.Abs((int)town.X - stuckState.X);
+            int deltaY = Math.Abs((int)town.Y - stuckState.Y);
+            return deltaX <= radius && deltaY <= radius
+                ? $"the validated position ({town.X},{town.Y}) is still inside the stuck location neighbourhood"
+                : "";
         }
 
         private bool RedirectToRepotStep(string reason)

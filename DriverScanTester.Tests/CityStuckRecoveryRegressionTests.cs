@@ -81,6 +81,10 @@ namespace DriverScanTester.Tests
             "UpdateNavigationProgress",
             PrivateInstance) ?? throw new InvalidOperationException("UpdateNavigationProgress not found.");
 
+        private static readonly MethodInfo WaitOutInCityStuckAndResetMethod = typeof(BotWorkflowCoordinator).GetMethod(
+            "WaitOutInCityStuckAndResetAsync",
+            PrivateInstance) ?? throw new InvalidOperationException("WaitOutInCityStuckAndResetAsync not found.");
+
         private static readonly FieldInfo RecoveryStageStartField = typeof(ReverseDiagonalRecovery).GetField(
             "_stageStartTime",
             PrivateInstance) ?? throw new InvalidOperationException("_stageStartTime not found.");
@@ -113,6 +117,32 @@ namespace DriverScanTester.Tests
                 path[^1].Y,
                 path);
         }
+
+        /// <summary>
+        /// Fast, input-free PositionSync used by the coordinator recovery tests. The W
+        /// refresh is a no-op unless a test supplies its own simulation, so no real key
+        /// is ever injected and the mandatory post-teleport refresh stays deterministic.
+        /// </summary>
+        private static PositionSyncService CreateFastPositionSync(GameMemoryService memory, List<string> lines)
+            => new(
+                memory,
+                lines.Add,
+                () => { },
+                _ => Task.CompletedTask,
+                new PositionSyncOptions
+                {
+                    MapConfirmationTimeoutMs = 200,
+                    MapStableReadCount = 1,
+                    PollMs = 1,
+                    SettleTimeoutMs = 20,
+                    WRefreshSettleTimeoutMs = 20,
+                    WRefreshPollMs = 1,
+                    MaxWRefreshAttempts = 1,
+                    WRefreshStableReadCount = 1,
+                    WRefreshRetryDelayMs = 1,
+                    MaxTransitionRestarts = 0,
+                    NudgeKeyDownMs = 1
+                });
 
         private static int GetStuckCount(MovementSystem movement)
             => (int)(StuckCountField.GetValue(movement) ?? 0);
@@ -243,6 +273,9 @@ namespace DriverScanTester.Tests
 
             Assert.Equal(1, GetStuckCount(movement));
             Assert.False(IsRecoveryActive(movement));
+            // A successful physical unstuck never escalates, so the coordinator never runs
+            // the town teleport / cooldown recovery for it.
+            Assert.False(movement.IsNavigationFailureEscalationRequested);
             Assert.Contains(lines, line => line.Contains("PhysicalRecoverySucceeded=True"));
             Assert.Contains(lines, line => line.Contains("navigation failure count preserved: 1/2"));
 
@@ -767,6 +800,7 @@ namespace DriverScanTester.Tests
                     lines.Add,
                     () => { });
                 var operationRunner = new OperationRunnerService(operationContext, lines.Add);
+                var positionSync = CreateFastPositionSync(memory, lines);
                 var coordinator = new BotWorkflowCoordinator(
                     memory,
                     repotSystem,
@@ -776,10 +810,23 @@ namespace DriverScanTester.Tests
                     operationRunner,
                     profile,
                     lines.Add,
-                    () => { })
+                    () => { },
+                    positionSync)
                 {
                     // Keep the regression suite fast: the production default is 10 minutes.
                     InCityStuckResetDelayMs = 5
+                };
+
+                int townTeleports = 0;
+                coordinator.TownTeleportOverride = _ =>
+                {
+                    townTeleports++;
+                    // Simulated successful Scroll to Town: the player really left the
+                    // stuck spot (100,100) and the town position is validated afterwards.
+                    simulation.X = 211;
+                    simulation.Y = 210;
+                    simulation.InCity = true;
+                    return Task.FromResult(true);
                 };
 
                 var repotStep = new BotFlowStep
@@ -793,15 +840,32 @@ namespace DriverScanTester.Tests
                 profile.FlowSteps = new List<BotFlowStep> { repotStep };
 
                 // City-stuck escalation (2 unstuck attempts in the city) must not burn more
-                // route retries: the workflow stops, waits, resets and restarts at Repot.
+                // route retries: the workflow stops, teleports to town, waits, resets and
+                // restarts at Repot. The teleport MUST happen before the cooldown.
                 Assert.False(await RunRepotStepWithInjectedCityStuckAsync(coordinator, pathRunner, repotStep));
                 Assert.Equal(PathRunStopReason.CityStuck, pathRunner.LastStopReason);
+                Assert.Equal(1, townTeleports);
+                // The validated town transition is complete, so the Repot step that runs
+                // next must not issue a second town teleport for the same transition.
+                Assert.False(positionSync.HasPendingTransition);
+                Assert.Equal(PositionSyncState.PositionReady, positionSync.State);
                 Assert.Equal(0, GetMoveToRepotRetryCount(coordinator));
                 Assert.NotEqual(BotPhase.Failed, coordinator.CurrentPhase);
                 Assert.Contains(lines, line => line.Contains("in-city unstuck limit reached"));
+                Assert.Contains(lines, line => line.Contains("[Recovery] Stopping current path"));
+                Assert.Contains(lines, line => line.Contains("[Recovery] Executing Scroll to Town"));
+                Assert.Contains(lines, line => line.Contains("[Recovery] Teleport verification: SUCCESS"));
+                Assert.Contains(lines, line => line.Contains("[Recovery] Player safely returned to town"));
+                Assert.Contains(lines, line => line.Contains("[Recovery] Starting") && line.Contains("cooldown in town"));
+                Assert.Contains(lines, line => line.Contains("[Recovery] Cooldown completed"));
+                Assert.Contains(lines, line => line.Contains("[Recovery] Restarting profile from Repot step"));
                 Assert.Contains(lines, line => line.Contains("Going to the Repot step and starting again"));
                 Assert.Contains(lines, line => line.Contains("Redirecting workflow to Repot step 1/1"));
                 Assert.DoesNotContain(lines, line => line.Contains("Could not reach the repot point"));
+                int teleportIndex = lines.FindIndex(line => line.Contains("[Recovery] Teleport verification: SUCCESS"));
+                int cooldownIndex = lines.FindIndex(line => line.Contains("[Recovery] Starting") && line.Contains("cooldown in town"));
+                Assert.True(teleportIndex >= 0 && teleportIndex < cooldownIndex,
+                    "The town teleport must be verified BEFORE the cooldown starts.");
             }
             finally
             {
@@ -898,12 +962,24 @@ namespace DriverScanTester.Tests
                 var profile = new BotProfile { Name = "navigation-failure-recovery" };
                 var operationContext = new OperationContext(memory, pathRunner, itemSeller, profile, lines.Add, () => { });
                 var operationRunner = new OperationRunnerService(operationContext, lines.Add);
+                var positionSync = CreateFastPositionSync(memory, lines);
                 var coordinator = new BotWorkflowCoordinator(
                     memory, repotSystem, repotDetector, pathLoader, pathRunner, operationRunner,
-                    profile, lines.Add, () => { })
+                    profile, lines.Add, () => { }, positionSync)
                 {
                     InCityStuckResetDelayMs = 5
                 };
+
+                int townTeleports = 0;
+                coordinator.TownTeleportOverride = _ =>
+                {
+                    townTeleports++;
+                    simulation.X = 211;
+                    simulation.Y = 210;
+                    simulation.InCity = true;
+                    return Task.FromResult(true);
+                };
+
                 var repotStep = new BotFlowStep
                 {
                     Type = BotFlowStepType.Repot,
@@ -912,19 +988,212 @@ namespace DriverScanTester.Tests
                 profile.FlowSteps = new List<BotFlowStep> { repotStep };
 
                 // A navigation failure inside the city is the in-city unstuck limit: no more
-                // back-to-back repot retries — stop, wait 10 min, reset and start again.
+                // back-to-back repot retries — teleport to town first, then wait, reset and
+                // start again.
                 Assert.False(await RunRepotStepWithInjectedNavigationFailureAsync(coordinator, pathRunner, repotStep));
                 Assert.Equal(PathRunStopReason.NavigationFailure, pathRunner.LastStopReason);
+                Assert.Equal(1, townTeleports);
                 Assert.Equal(0, GetMoveToRepotRetryCount(coordinator));
                 Assert.NotEqual(BotPhase.Failed, coordinator.CurrentPhase);
                 Assert.Contains(lines, line => line.Contains("in-city unstuck limit reached"));
+                Assert.Contains(lines, line => line.Contains("[Recovery] Teleport verification: SUCCESS"));
+                Assert.Contains(lines, line => line.Contains("[Recovery] Player safely returned to town"));
                 Assert.Contains(lines, line => line.Contains("Going to the Repot step and starting again"));
                 Assert.DoesNotContain(lines, line => line.Contains("Could not reach the repot point"));
+                int teleportIndex = lines.FindIndex(line => line.Contains("[Recovery] Teleport verification: SUCCESS"));
+                int cooldownIndex = lines.FindIndex(line => line.Contains("[Recovery] Starting") && line.Contains("cooldown in town"));
+                Assert.True(teleportIndex >= 0 && teleportIndex < cooldownIndex,
+                    "The town teleport must be verified BEFORE the cooldown starts.");
             }
             finally
             {
                 try { File.Delete(fullPath); } catch { }
             }
+        }
+
+        [Fact]
+        public async Task CityStuckRecoveryWithoutValidatedTownTeleportFailsInsteadOfWaitingAtTheStuckSpot()
+        {
+            var (coordinator, _, lines) = CreateCityStuckRecoveryHarness(maxTeleportRetries: 2);
+            coordinator.InCityStuckResetDelayMs = 5;
+
+            int townTeleports = 0;
+            coordinator.TownTeleportOverride = _ =>
+            {
+                townTeleports++;
+                // The scroll never changes the map/position: the mandatory post-teleport
+                // W refresh at the stuck spot must NOT be accepted as a town arrival.
+                return Task.FromResult(false);
+            };
+
+            Assert.True(await RunWaitOutInCityStuckRecoveryAsync(coordinator, CancellationToken.None));
+
+            Assert.Equal(2, townTeleports);
+            Assert.Equal(BotPhase.Failed, coordinator.CurrentPhase);
+            Assert.Contains(lines, line => line.Contains("[Recovery] Teleport verification: FAILED"));
+            Assert.Contains(lines, line => line.Contains("Scroll to Town failed after 2/2 attempts"));
+            Assert.Contains(lines, line => line.Contains("Terminal recovery failure"));
+            Assert.DoesNotContain(lines, line => line.Contains("cooldown in town"));
+            Assert.DoesNotContain(lines, line => line.Contains("Cooldown completed"));
+            Assert.DoesNotContain(lines, line => line.Contains("Redirecting workflow to Repot step"));
+        }
+
+        [Fact]
+        public async Task CityStuckRecoveryDoesNotAcceptAStuckSpotWRefreshAsTownArrival()
+        {
+            // PositionSync reports READY because the bounded W refresh moved the player by
+            // one tile, but the position is still inside the stuck location neighbourhood.
+            // The recovery must not start the cooldown based on that false positive.
+            var (coordinator, _, lines) = CreateCityStuckRecoveryHarness(
+                maxTeleportRetries: 2,
+                onWRefresh: simulation => simulation.X += 1);
+            coordinator.InCityStuckResetDelayMs = 5;
+            coordinator.TownTeleportOverride = _ => Task.FromResult(true);
+
+            Assert.True(await RunWaitOutInCityStuckRecoveryAsync(coordinator, CancellationToken.None));
+
+            Assert.Equal(BotPhase.Failed, coordinator.CurrentPhase);
+            Assert.Contains(lines, line => line.Contains("still inside the stuck location neighbourhood"));
+            Assert.Contains(lines, line => line.Contains("Terminal recovery failure"));
+            Assert.DoesNotContain(lines, line => line.Contains("cooldown in town"));
+            Assert.DoesNotContain(lines, line => line.Contains("Cooldown completed"));
+        }
+
+        [Fact]
+        public async Task ManualStopDuringCityStuckTeleportCancelsWithoutStartingTheCooldown()
+        {
+            var (coordinator, _, lines) = CreateCityStuckRecoveryHarness(maxTeleportRetries: 2);
+            var teleportStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            coordinator.TownTeleportOverride = async token =>
+            {
+                teleportStarted.TrySetResult();
+                await Task.Delay(Timeout.Infinite, token);
+                return true;
+            };
+
+            using var cts = new CancellationTokenSource();
+            Task<bool> recovery = RunWaitOutInCityStuckRecoveryAsync(coordinator, cts.Token);
+
+            Assert.Same(teleportStarted.Task, await Task.WhenAny(teleportStarted.Task, Task.Delay(5000)));
+            cts.Cancel();
+
+            Assert.Same(recovery, await Task.WhenAny(recovery, Task.Delay(5000)));
+            Assert.True(await recovery);
+            Assert.Contains(lines, line => line.Contains("cancelled before the cooldown started"));
+            Assert.DoesNotContain(lines, line => line.Contains("cooldown in town"));
+            Assert.DoesNotContain(lines, line => line.Contains("Redirecting workflow"));
+        }
+
+        [Fact]
+        public async Task ManualStopDuringCityStuckCooldownCancelsBeforeResetAndRepot()
+        {
+            var (coordinator, simulation, lines) = CreateCityStuckRecoveryHarness();
+            coordinator.InCityStuckResetDelayMs = 5000;
+            coordinator.TownTeleportOverride = _ =>
+            {
+                simulation.X = 211;
+                simulation.Y = 210;
+                simulation.InCity = true;
+                return Task.FromResult(true);
+            };
+
+            using var cts = new CancellationTokenSource();
+            Task<bool> recovery = RunWaitOutInCityStuckRecoveryAsync(coordinator, cts.Token);
+
+            bool cooldownStarted = SpinWait.SpinUntil(
+                () => lines.Any(line => line.Contains("[Recovery] Starting") && line.Contains("cooldown in town")),
+                5000);
+            Assert.True(cooldownStarted, string.Join(Environment.NewLine, lines));
+
+            cts.Cancel();
+            Assert.Same(recovery, await Task.WhenAny(recovery, Task.Delay(5000)));
+            Assert.True(await recovery);
+            Assert.Contains(lines, line => line.Contains("City-stuck cooldown cancelled"));
+            Assert.DoesNotContain(lines, line => line.Contains("Cooldown completed"));
+            Assert.DoesNotContain(lines, line => line.Contains("Redirecting workflow"));
+        }
+
+        /// <summary>
+        /// Coordinator harness for the recovery-only tests: real services, a fast
+        /// input-free PositionSync and a minimal profile whose only flow step is Repot.
+        /// </summary>
+        private static (BotWorkflowCoordinator Coordinator, SimulatedGameMemory Simulation, List<string> Lines)
+            CreateCityStuckRecoveryHarness(
+                int maxTeleportRetries = 2,
+                Action<SimulatedGameMemory>? onWRefresh = null)
+        {
+            var lines = new List<string>();
+            var simulation = new SimulatedGameMemory { InCity = true, X = 100, Y = 100 };
+            var memory = simulation.CreateMemory(lines.Add);
+            var pathLoader = new SavedPathLoader(lines.Add);
+            var pathRunner = new PathRunnerService(
+                memory,
+                lines.Add,
+                enableWaypointSpecialRecoveries: false,
+                steeringMode: MovementSteeringMode.DirectCamera);
+            var itemSeller = new ItemSellerService(memory, lines.Add);
+            var profile = new BotProfile
+            {
+                Name = "city-stuck-recovery",
+                MaxTeleportRetries = maxTeleportRetries
+            };
+            var operationContext = new OperationContext(
+                memory, pathRunner, itemSeller, profile, lines.Add, () => { });
+            var operationRunner = new OperationRunnerService(operationContext, lines.Add);
+            var positionSync = new PositionSyncService(
+                memory,
+                lines.Add,
+                () => { },
+                _ =>
+                {
+                    onWRefresh?.Invoke(simulation);
+                    return Task.CompletedTask;
+                },
+                new PositionSyncOptions
+                {
+                    MapConfirmationTimeoutMs = 200,
+                    MapStableReadCount = 1,
+                    PollMs = 1,
+                    SettleTimeoutMs = 20,
+                    WRefreshSettleTimeoutMs = 20,
+                    WRefreshPollMs = 1,
+                    MaxWRefreshAttempts = 1,
+                    WRefreshStableReadCount = 1,
+                    WRefreshRetryDelayMs = 1,
+                    MaxTransitionRestarts = 0,
+                    NudgeKeyDownMs = 1
+                });
+            var coordinator = new BotWorkflowCoordinator(
+                memory,
+                new RepotSystem(memory, lines.Add),
+                new RepotDetectorService(lines.Add),
+                pathLoader,
+                pathRunner,
+                operationRunner,
+                profile,
+                lines.Add,
+                () => { },
+                positionSync)
+            {
+                InCityStuckResetDelayMs = 5
+            };
+            profile.FlowSteps = new List<BotFlowStep>
+            {
+                new() { Type = BotFlowStepType.Repot }
+            };
+
+            return (coordinator, simulation, lines);
+        }
+
+        private static Task<bool> RunWaitOutInCityStuckRecoveryAsync(
+            BotWorkflowCoordinator coordinator,
+            CancellationToken token)
+        {
+            var task = (Task<bool>?)WaitOutInCityStuckAndResetMethod.Invoke(
+                coordinator,
+                new object[] { "Path step", token });
+            Assert.NotNull(task);
+            return task!;
         }
 
         /// <summary>
