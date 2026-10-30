@@ -430,7 +430,7 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public async Task OneSuccessfulPhysicalRecoveryResumesRouteButDoesNotClearFailureHistory()
+        public async Task SuccessfulPhysicalRecoveryFollowedByMeaningfulProgressStartsANewFailureBudget()
         {
             var lines = new List<string>();
             var simulation = new SimulatedGameMemory { InCity = false };
@@ -447,10 +447,19 @@ namespace DriverScanTester.Tests
             Assert.False(movement.IsNavigationFailureEscalationRequested);
 
             // Only ordinary route progress that beats the pre-collision best proves
-            // navigation resumed; it still does not erase the same-waypoint history.
+            // navigation resumed. That confirmed progress also resolves the previous
+            // blockage, so the next ActionStuck must not be treated as its continuation.
             Assert.False(await UpdateNavigationProgressAsync(movement, target, 264f, 190f));
-            Assert.Equal(1, GetStuckCount(movement));
+            Assert.Equal(0, GetStuckCount(movement));
             Assert.Contains(lines, line => line.Contains("NavigationRecovered=True"));
+            Assert.Contains(lines, line => line.Contains("navigation failure count reset (was 1)"));
+
+            // The next genuine stuck starts a fresh unstuck budget instead of escaping
+            // to 2/2 (the reported city incident) without another recovery attempt.
+            await DispatchStuckAsync(movement, target);
+            Assert.Equal(1, GetStuckCount(movement));
+            Assert.True(IsRecoveryActive(movement));
+            Assert.False(movement.IsNavigationFailureEscalationRequested);
         }
 
         [Fact]
@@ -1060,6 +1069,88 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public async Task CityStuckRecoveryNearTownSpawnIsVerifiedByDestinationWithoutRepeatedTeleports()
+        {
+            // Reproduces the confirmed incident: the player is stuck at (219,211), the
+            // town teleport returns to the SAME map near the town spawn and the mandatory
+            // W refresh only moves to (215,213) — still inside the old stuck neighbourhood.
+            // The profile town baseline (214,212) is the destination evidence, so this is
+            // a verified town arrival and MUST NOT trigger another teleport or Failed.
+            var (coordinator, simulation, lines) = CreateCityStuckRecoveryHarness(
+                onWRefresh: sim =>
+                {
+                    sim.X = 215;
+                    sim.Y = 213;
+                },
+                townStartMap: 35,
+                townStartX: 214,
+                townStartY: 212);
+            coordinator.InCityStuckResetDelayMs = 5;
+            simulation.Map = 35;
+            simulation.X = 219;
+            simulation.Y = 211;
+
+            int townTeleports = 0;
+            coordinator.TownTeleportOverride = _ =>
+            {
+                townTeleports++;
+                // Same map, near the previous stuck location: exactly the incident.
+                simulation.X = 219;
+                simulation.Y = 213;
+                simulation.InCity = true;
+                return Task.FromResult(true);
+            };
+
+            Assert.True(await RunWaitOutInCityStuckRecoveryAsync(coordinator, CancellationToken.None));
+
+            Assert.Equal(1, townTeleports);
+            Assert.NotEqual(BotPhase.Failed, coordinator.CurrentPhase);
+            Assert.Contains(lines, line => line.Contains("[Recovery] Teleport verification: SUCCESS"));
+            Assert.Contains(lines, line => line.Contains("DestinationMatched=True"));
+            Assert.Contains(lines, line => line.Contains("[Recovery] Player safely returned to town"));
+            Assert.Contains(lines, line => line.Contains("[Recovery] Cooldown completed"));
+            Assert.Contains(lines, line => line.Contains("Redirecting workflow to Repot step"));
+            Assert.DoesNotContain(lines, line => line.Contains("still inside the stuck location neighbourhood"));
+            Assert.DoesNotContain(lines, line => line.Contains("Terminal recovery failure"));
+        }
+
+        [Fact]
+        public async Task CityStuckRecoveryAcceptsAStableTownSpawnWhenWIsBlocked()
+        {
+            // The player is already on the town spawn when the city recovery starts and W
+            // cannot move (blocked spawn). Unchanged coordinates are not stale proof when
+            // the settled position matches the known town destination.
+            var (coordinator, simulation, lines) = CreateCityStuckRecoveryHarness(
+                townStartMap: 35,
+                townStartX: 214,
+                townStartY: 213);
+            coordinator.InCityStuckResetDelayMs = 5;
+            simulation.Map = 35;
+            simulation.X = 215;
+            simulation.Y = 213;
+
+            int townTeleports = 0;
+            coordinator.TownTeleportOverride = _ =>
+            {
+                townTeleports++;
+                simulation.InCity = true;
+                return Task.FromResult(true);
+            };
+
+            Assert.True(await RunWaitOutInCityStuckRecoveryAsync(coordinator, CancellationToken.None));
+
+            Assert.Equal(1, townTeleports);
+            Assert.NotEqual(BotPhase.Failed, coordinator.CurrentPhase);
+            Assert.Contains(lines, line =>
+                line.Contains("the W press produced no coordinate change") &&
+                line.Contains("matches the destination expectation"));
+            Assert.Contains(lines, line => line.Contains("[Recovery] Teleport verification: SUCCESS"));
+            Assert.Contains(lines, line => line.Contains("[Recovery] Cooldown completed"));
+            Assert.Contains(lines, line => line.Contains("Redirecting workflow to Repot step"));
+            Assert.DoesNotContain(lines, line => line.Contains("Terminal recovery failure"));
+        }
+
+        [Fact]
         public async Task ManualStopDuringCityStuckTeleportCancelsWithoutStartingTheCooldown()
         {
             var (coordinator, _, lines) = CreateCityStuckRecoveryHarness(maxTeleportRetries: 2);
@@ -1120,7 +1211,10 @@ namespace DriverScanTester.Tests
         private static (BotWorkflowCoordinator Coordinator, SimulatedGameMemory Simulation, List<string> Lines)
             CreateCityStuckRecoveryHarness(
                 int maxTeleportRetries = 2,
-                Action<SimulatedGameMemory>? onWRefresh = null)
+                Action<SimulatedGameMemory>? onWRefresh = null,
+                int? townStartMap = null,
+                int townStartX = 0,
+                int townStartY = 0)
         {
             var lines = new List<string>();
             var simulation = new SimulatedGameMemory { InCity = true, X = 100, Y = 100 };
@@ -1137,6 +1231,13 @@ namespace DriverScanTester.Tests
                 Name = "city-stuck-recovery",
                 MaxTeleportRetries = maxTeleportRetries
             };
+            if (townStartMap.HasValue)
+            {
+                profile.EnableStartPositionCheck = true;
+                profile.ProtectionMapNumber = townStartMap.Value;
+                profile.StartPositionX = townStartX;
+                profile.StartPositionY = townStartY;
+            }
             var operationContext = new OperationContext(
                 memory, pathRunner, itemSeller, profile, lines.Add, () => { });
             var operationRunner = new OperationRunnerService(operationContext, lines.Add);

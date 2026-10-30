@@ -266,6 +266,30 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void ExternalCameraLeaseBlocksCameraYawWritesUntilReleased()
+        {
+            var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
+            using var controller = new WKeyCameraController(memory.CreateService(), _ => { });
+            object scanOwner = new();
+            int initialAngleBits = BitConverter.SingleToInt32Bits(1.25f);
+            int attemptedAngleBits = BitConverter.SingleToInt32Bits(2.5f);
+
+            Assert.True(controller.TrySetCameraAngleBits(initialAngleBits));
+            Assert.True(controller.TryAcquireExternalCameraOwner(scanOwner));
+
+            Assert.False(controller.TrySetCameraAngleBits(attemptedAngleBits));
+            Assert.False(controller.TrySetCameraAngle(2.5f));
+            Assert.Equal(initialAngleBits,
+                BitConverter.SingleToInt32Bits(memory.ReadCameraYaw()));
+
+            controller.ReleaseExternalCameraOwner(scanOwner, restoreStationary: true);
+
+            Assert.True(controller.TrySetCameraAngle(2.5f));
+            Assert.Equal(attemptedAngleBits,
+                BitConverter.SingleToInt32Bits(memory.ReadCameraYaw()));
+        }
+
+        [Fact]
         public void ExternalCameraReleaseWithoutRestoreDoesNotForceStationaryView()
         {
             var memory = new MemoryFixture(BotConstants.Camera.StationaryVerticalLock);
@@ -879,7 +903,8 @@ namespace DriverScanTester.Tests
                     targetX: 10,
                     targetY: 10,
                     customPath: new[] { new Waypoint(10, 10, MovementPrecision.Medium, BotMode.OnlyMove) },
-                    wKeyCameraController: cameraController)
+                    wKeyCameraController: cameraController,
+                    targetSafety: CombatSafetyFixtures.Monster(5000))
             {
                 _events = events;
             }

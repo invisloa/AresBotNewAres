@@ -737,7 +737,20 @@ namespace DriverScanTester.Services
                  $"pixels={candidate.PixelCount} fill={candidate.FillRatio:P0} aspect={candidate.AspectRatio:F2}.");
             if (ShouldStopOnOtherPlayerMarker?.Invoke() ?? true)
             {
-                OtherPlayerMarkerDetected?.Invoke();
+                try
+                {
+                    OtherPlayerMarkerDetected?.Invoke();
+                }
+                catch (ObjectDisposedException)
+                {
+                    // The EXP loop may already have been torn down between the detection and
+                    // this callback; the safety decision itself is unaffected.
+                    _log("[PlayerPixels] Other-player response ignored — the owning workflow is already stopped.");
+                }
+                catch (Exception ex)
+                {
+                    _log($"[PlayerPixels] Other-player response failed: {ex.Message}");
+                }
             }
             else
             {

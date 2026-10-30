@@ -146,6 +146,14 @@ namespace DriverScanTester.Services
         private bool _startProtectionRecoveredToTown;
 
         /// <summary>
+        /// PositionSync result of the LAST town teleport performed by
+        /// <see cref="TeleportToCity"/>. The in-city recovery uses its destination status
+        /// to distinguish a verified town destination (which can legitimately be near the
+        /// stuck location on the same map) from an unverified W response at the stuck spot.
+        /// </summary>
+        private PositionSyncResult? _lastTownTeleportSync;
+
+        /// <summary>
         /// Player-marker detections since the last complete EXP loop. First incident gets
         /// the shorter cooldown; repeated incidents before natural repot get 30 minutes.
         /// </summary>
@@ -200,6 +208,48 @@ namespace DriverScanTester.Services
         /// <summary>Called when the heal monitor confirms that the player has died.</summary>
         public Action? OnPlayerDeathDetected { get; set; }
 
+        // ── Death recovery ──
+        // A confirmed character death is a RECOVERABLE workflow event: the coordinator releases
+        // inputs, keeps itself alive, waits five minutes, teleports to town and restarts the whole
+        // profile. It is never routed into the global shutdown path.
+        private readonly object _deathGate = new();
+        private CancellationTokenSource? _deathCts;
+        private bool _deathRecoveryRequested;
+        private DateTime _deathDetectedAtUtc = DateTime.MinValue;
+        private DateTime _deathRecoveryDueUtc = DateTime.MinValue;
+
+        /// <summary>
+        /// Death recovery wait (ms). Production uses the five-minute
+        /// <see cref="BotConstants.DeathRecovery.WaitMs"/>; tests set a short value so the
+        /// real workflow can be exercised without waiting.
+        /// </summary>
+        public int DeathRecoveryWaitMs { get; set; } = BotConstants.DeathRecovery.WaitMs;
+
+        /// <summary>Additional revival recheck wait (ms) used while HP still reads zero.</summary>
+        public int DeathRecoveryRevivalRecheckWaitMs { get; set; } = BotConstants.DeathRecovery.RevivalRecheckWaitMs;
+
+        /// <summary>Poll interval (ms) between two zero-HP checks while waiting for revival.</summary>
+        public int DeathRecoveryRevivalPollMs { get; set; } = BotConstants.DeathRecovery.RevivalPollMs;
+
+        /// <summary>Number of town-teleport attempts performed by the death recovery.</summary>
+        public int DeathRecoveryTownTeleportAttempts { get; set; } = BotConstants.DeathRecovery.TownTeleportAttempts;
+
+        /// <summary>Delay (ms) between two town-teleport attempts performed by the death recovery.</summary>
+        public int DeathRecoveryTownTeleportRetryDelayMs { get; set; } = BotConstants.DeathRecovery.TownTeleportRetryDelayMs;
+
+        /// <summary>True once a confirmed death requested recovery (until the recovery completes).</summary>
+        public bool IsDeathRecoveryRequested
+        {
+            get { lock (_deathGate) return _deathRecoveryRequested; }
+        }
+
+        /// <summary>
+        /// True while the death recovery owns the workflow (requested or executing). Used by the
+        /// host to suppress movement-derived "unresponsive game" shutdowns during the wait.
+        /// </summary>
+        public bool IsDeathRecoveryActive =>
+            IsDeathRecoveryRequested || CurrentPhase == BotPhase.DeathRecovery;
+
         /// <summary>Reads the live UI setting for stopping on a confirmed other-player marker.</summary>
         public Func<bool>? ShouldStopOnOtherPlayerDetected { get; set; }
 
@@ -238,6 +288,63 @@ namespace DriverScanTester.Services
             try { _pathRunner.CurrentMovement?.CancelMobGrouping("workflow paused"); } catch { }
             try { _pathRunner.CurrentMovement?.StopMoving(); } catch { }
             try { _pathRunner.CurrentMovement?.ReleaseCombatKeys(); } catch { }
+        }
+
+        /// <summary>
+        /// Entry point for a confirmed character death (invoked by the workflow's own heal
+        /// monitor; also callable by hosts). It only MARKS the death and stops the current child
+        /// work — it never stops the coordinator. The workflow loop performs the recovery
+        /// (wait → town teleport → restart the whole profile).
+        ///
+        /// Repeated observations of the same death are ignored so the countdown starts exactly
+        /// once and no duplicate recovery task is created.
+        /// </summary>
+        public void NotifyPlayerDeathDetected()
+        {
+            if (!_isRunning)
+            {
+                _log("[DeathRecovery] Death reported while the workflow is not running — no recovery started.");
+                return;
+            }
+
+            lock (_deathGate)
+            {
+                if (_deathRecoveryRequested)
+                    return;
+
+                _deathRecoveryRequested = true;
+                _deathDetectedAtUtc = DateTime.UtcNow;
+                _deathRecoveryDueUtc = _deathDetectedAtUtc.AddMilliseconds(Math.Max(0, DeathRecoveryWaitMs));
+
+                // Cancel ONLY the current child work (movement/loot/exp route). The workflow
+                // token is untouched, so the coordinator and the active profile survive.
+                try { _deathCts?.Cancel(); }
+                catch (ObjectDisposedException) { }
+            }
+
+            _log("[DeathRecovery] Death confirmed.");
+
+            // Release every bot input (3 / W / A / D) and stop the current child work. Each
+            // step is independent so one failing cleanup can never keep a key held or prevent
+            // the death recovery from taking over.
+            try { _pathRunner.CurrentMovement?.CancelMobGrouping("death recovery"); }
+            catch (Exception ex) { _log($"[DeathRecovery] Grouping release failed: {ex.Message}"); }
+            try { _pathRunner.CurrentMovement?.StopMoving(); }
+            catch (Exception ex) { _log($"[DeathRecovery] Movement key release failed: {ex.Message}"); }
+            try { _pathRunner.CurrentMovement?.ReleaseCombatKeys(); }
+            catch (Exception ex) { _log($"[DeathRecovery] Combat key release failed: {ex.Message}"); }
+            try { _pathRunner.Stop(); }
+            catch (Exception ex) { _log($"[DeathRecovery] Child work cancellation failed: {ex.Message}"); }
+            _log("[DeathRecovery] Active actions released.");
+
+            try
+            {
+                OnPlayerDeathDetected?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                _log($"[DeathRecovery] External death handler failed: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -355,6 +462,7 @@ namespace DriverScanTester.Services
             _startupRouteEntry = null;
             StartupSelectionText = "";
             _positionSync.Reset();
+            ResetDeathRecoveryState(createNewCancellationSource: true);
 
             _focusGameWindow();
             _log("[Coordinator] Workflow started.");
@@ -366,7 +474,9 @@ namespace DriverScanTester.Services
             // auto detection (60% max HP / 20% max mana) is disabled for this instance.
             var healSystem = new HealManaSystem(_memoryService, _log, usePlayerBasedThresholds: false)
             {
-                PlayerDeathDetected = OnPlayerDeathDetected
+                // A confirmed death is handed to the coordinator's death recovery, never to a
+                // global shutdown. The heal monitor latches one notification per death episode.
+                PlayerDeathDetected = NotifyPlayerDeathDetected
             };
             HealManaSystem.Threshold1 = (short)Math.Clamp(_profile.MinHp, 0, short.MaxValue);
             HealManaSystem.Threshold2 = (short)Math.Clamp(_profile.MinMana, 0, short.MaxValue);
@@ -453,6 +563,15 @@ namespace DriverScanTester.Services
                 }
                 _pathRunner.WCameraController?.EndSession();
                 _isRunning = false;
+                if (IsDeathRecoveryRequested)
+                {
+                    // A stop while the death recovery owns the workflow is authoritative: the
+                    // countdown is cancelled and nothing restarts automatically. The state is
+                    // always cleared so a later start begins from a clean latch.
+                    ResetDeathRecoveryState(createNewCancellationSource: false);
+                    if (!_stopRequested)
+                        _log("[DeathRecovery] Death recovery cancelled by the workflow stop.");
+                }
                 if (!_stopRequested && CurrentPhase != BotPhase.Failed && CurrentPhase != BotPhase.Stopping)
                     CurrentPhase = BotPhase.Idle;
                 _log("[Coordinator] Workflow stopped.");
@@ -499,6 +618,222 @@ namespace DriverScanTester.Services
         /// next step (wrapping around at the end). Steps that return false handled the
         /// flow position themselves (e.g. a failed Path step restarted the flow).
         /// </summary>
+        /// <summary>
+        /// Resets the death-recovery latch and, when requested, creates a FRESH death-cancellation
+        /// source for the next episode. The workflow token is never reused after it was cancelled
+        /// for a death, and a cancelled death token is never reused for the subsequent workflow.
+        /// </summary>
+        private void ResetDeathRecoveryState(bool createNewCancellationSource)
+        {
+            lock (_deathGate)
+            {
+                _deathRecoveryRequested = false;
+                _deathDetectedAtUtc = DateTime.MinValue;
+                _deathRecoveryDueUtc = DateTime.MinValue;
+
+                CancellationTokenSource? previous = _deathCts;
+                _deathCts = createNewCancellationSource ? new CancellationTokenSource() : null;
+                try { previous?.Dispose(); }
+                catch (ObjectDisposedException) { }
+            }
+        }
+
+        /// <summary>Token cancelled when a confirmed death must abort the current child work.</summary>
+        private CancellationToken DeathRecoveryCancellationToken
+        {
+            get { lock (_deathGate) return _deathCts?.Token ?? CancellationToken.None; }
+        }
+
+        /// <summary>
+        /// Reads the verified death/revival state: returns true when a trustworthy answer exists
+        /// and reports whether the character is alive. A zero HP read with an unreadable max HP
+        /// is NOT treated as a confirmed death.
+        /// </summary>
+        private bool TryReadPlayerVitals(out bool alive, out string detail)
+        {
+            alive = false;
+            var heal = _memoryService.GetHealManaValues();
+            MaxHpManaReadResult maxStats = _memoryService.GetMaxHpMana();
+
+            if (!heal.value1.HasValue)
+            {
+                detail = "current HP read failed";
+                return false;
+            }
+
+            if (!maxStats.MaxHpReadSucceeded || maxStats.MaxHp <= 0)
+            {
+                detail = $"current HP={heal.value1.Value} but max HP is unreadable";
+                return false;
+            }
+
+            alive = heal.value1.Value > 0;
+            detail = $"HP={heal.value1.Value}/{maxStats.MaxHp}";
+            return true;
+        }
+
+        /// <summary>
+        /// Recoverable death workflow (the single authoritative owner of death recovery):
+        ///   wait → verify revival/session → town teleport via the existing mechanism → verify
+        ///   town arrival → reset the ACTIVE profile to its first action → continue the normal
+        ///   flow (Repot → paths → ExpLoop).
+        /// It never resumes the pre-death combat/waypoint queue and it never invokes the global
+        /// stop. While the character still reads dead, no teleport and no profile restart is
+        /// reported as successful (bounded, explicitly logged waits only).
+        /// </summary>
+        private async Task RunDeathRecoveryAsync(CancellationToken token)
+        {
+            DateTime detectedAt;
+            DateTime dueAt;
+            lock (_deathGate)
+            {
+                detectedAt = _deathDetectedAtUtc;
+                dueAt = _deathRecoveryDueUtc;
+            }
+            if (detectedAt == DateTime.MinValue)
+                detectedAt = DateTime.UtcNow;
+            if (dueAt == DateTime.MinValue)
+                dueAt = detectedAt.AddMilliseconds(Math.Max(0, DeathRecoveryWaitMs));
+
+            CurrentPhase = BotPhase.DeathRecovery;
+            CurrentStepText = "Death recovery · waiting for revival, then town teleport and profile restart";
+
+            _log($"[DeathRecovery] Waiting {Math.Max(0, DeathRecoveryWaitMs) / 1000.0:F0} seconds before restart " +
+                 $"(detected {detectedAt:HH:mm:ss}, recovery due {dueAt:HH:mm:ss}).");
+
+            try
+            {
+                await PausableDelayAsync(Math.Max(0, DeathRecoveryWaitMs), token);
+                _log("[DeathRecovery] Wait completed.");
+
+                // 1. Verify the game/session is accessible and the character is actually revived
+                //    before any game input is issued. Still-dead/unreadable states are handled
+                //    explicitly with bounded waits — never with combat and never with a teleport.
+                int rechecks = 0;
+                int extraWaits = 0;
+                while (true)
+                {
+                    token.ThrowIfCancellationRequested();
+
+                    bool readable = TryReadPlayerVitals(out bool alive, out string vitals);
+                    if (readable && alive)
+                    {
+                        _log($"[DeathRecovery] Player revived ({vitals}) — proceeding with the recovery sequence.");
+                        break;
+                    }
+
+                    string state = readable ? vitals : $"unreadable: {vitals}";
+
+                    int waitMs;
+                    if (rechecks < BotConstants.DeathRecovery.MaxRevivalRecheckRounds)
+                    {
+                        waitMs = rechecks == 0
+                            ? Math.Max(0, DeathRecoveryRevivalPollMs)
+                            : Math.Max(0, DeathRecoveryRevivalRecheckWaitMs);
+                        rechecks++;
+                        _log($"[DeathRecovery] Player is still dead after the wait ({state}) — waiting " +
+                             $"{waitMs / 1000.0:F0}s for revival (recheck {rechecks}/{BotConstants.DeathRecovery.MaxRevivalRecheckRounds}).");
+                    }
+                    else
+                    {
+                        extraWaits++;
+                        if (extraWaits > BotConstants.DeathRecovery.MaxAdditionalDeathWaits)
+                        {
+                            _log("[DeathRecovery] Revival was not observed after every bounded wait. No town teleport and no " +
+                                 "profile restart is performed while the character still reads dead; the workflow stays alive. " +
+                                 "Manual check/restart required.");
+                            ResetDeathRecoveryState(createNewCancellationSource: true);
+                            CurrentPhase = BotPhase.Failed;
+                            return;
+                        }
+
+                        waitMs = Math.Max(0, DeathRecoveryWaitMs);
+                        _log($"[DeathRecovery] Player is still dead ({state}) — staying in death recovery; " +
+                             $"waiting another {waitMs / 1000.0:F0}s (extra wait {extraWaits}/{BotConstants.DeathRecovery.MaxAdditionalDeathWaits}).");
+                    }
+
+                    await PausableDelayAsync(waitMs, token);
+                }
+
+                // 2. Town teleport through the existing mechanism (profile teleport key = 6).
+                bool arrivedInCity;
+                if (_memoryService.GetIsInCity())
+                {
+                    _log("[DeathRecovery] Player is already in the city — skipping the town teleport.");
+                    arrivedInCity = true;
+                }
+                else
+                {
+                    arrivedInCity = false;
+                    for (int attempt = 1; attempt <= DeathRecoveryTownTeleportAttempts; attempt++)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        _log($"[DeathRecovery] Town teleport attempt {attempt}/{DeathRecoveryTownTeleportAttempts} " +
+                             $"using teleport key {_profile.TeleportKey}.");
+
+                        bool positionValidated = await TeleportToCity(token);
+                        if (token.IsCancellationRequested)
+                            return;
+
+                        bool inCity = _memoryService.GetIsInCity();
+                        if (positionValidated && inCity)
+                        {
+                            arrivedInCity = true;
+                            _log("[DeathRecovery] Town arrival verified.");
+                            break;
+                        }
+
+                        _log($"[DeathRecovery] Town arrival NOT verified (PositionValidated={positionValidated}, InCity={inCity}) " +
+                             $"— attempt {attempt}/{DeathRecoveryTownTeleportAttempts} failed.");
+                        if (attempt < DeathRecoveryTownTeleportAttempts)
+                        {
+                            await PausableDelayAsync(DeathRecoveryTownTeleportRetryDelayMs, token);
+                        }
+                    }
+                }
+
+                if (!arrivedInCity)
+                {
+                    _log("[DeathRecovery] Town teleport could not be verified — the profile is NOT restarted and no combat is started. " +
+                         "Manual check required.");
+                    ResetDeathRecoveryState(createNewCancellationSource: true);
+                    CurrentPhase = BotPhase.Failed;
+                    return;
+                }
+
+                // 3. Restart the COMPLETE active profile from its first action. The pre-death
+                //    combat context and waypoint queue are discarded (PathRunner already stopped
+                //    the MovementSystem; the next step creates a fresh one from its route file).
+                //    The user-start map detection is deliberately NOT used here.
+                _flowIndex = 0;
+                _repotPathIndex = 0;
+                _stepRouteIndex.Clear();
+                _startupRouteEntry = null;
+                _startProtectionRecoveredToTown = false;
+                _moveToRepotRetryCount = 0;
+                _pathStepRetryCount = 0;
+                _teleportRetryCount = 0;
+                _postRepotVerifyRetryCount = 0;
+                _playerMarkerInterruptionsSinceFullExpCycle = 0;
+
+                int stepCount = _profile.FlowSteps?.Count ?? 0;
+                string firstStep = stepCount > 0 ? DescribeStep(_profile.FlowSteps[0]) : "(no flow steps)";
+                _log($"[DeathRecovery] Profile '{_profile.Name}' reset to its first action (1/{stepCount}: {firstStep}). " +
+                     "The normal repot/path/exp flow runs again; the pre-death waypoint queue is not resumed.");
+
+                // Fresh death-cancellation source for the next episode; the workflow token itself
+                // was never cancelled, so the coordinator stays alive.
+                ResetDeathRecoveryState(createNewCancellationSource: true);
+                CurrentPhase = BotPhase.Idle;
+                _log("[DeathRecovery] Recovery complete — restarting the workflow.");
+            }
+            catch (OperationCanceledException)
+            {
+                // Manual stop (or a global stop) during the countdown: no automatic restart.
+                _log("[DeathRecovery] Recovery interrupted by stop/cancellation — no automatic restart.");
+            }
+        }
+
         private async Task RunWorkflowLoop(CancellationToken token)
         {
             while (!token.IsCancellationRequested)
@@ -506,8 +841,19 @@ namespace DriverScanTester.Services
                 await WaitIfPausedAsync(token);
                 if (token.IsCancellationRequested) break;
 
-                if (CurrentPhase == BotPhase.Stopping)
+                if (CurrentPhase == BotPhase.Stopping || _stopRequested)
                     break;
+
+                // ── Recoverable death recovery (highest priority) ──
+                // The current child work was already cancelled by NotifyPlayerDeathDetected.
+                // The coordinator stays alive: wait, verify revival, teleport to town and restart
+                // the whole active profile from its first action.
+                if (IsDeathRecoveryRequested)
+                {
+                    await RunDeathRecoveryAsync(token);
+                    if (token.IsCancellationRequested) break;
+                    continue;
+                }
 
                 if (CurrentPhase == BotPhase.Failed)
                 {
@@ -536,6 +882,11 @@ namespace DriverScanTester.Services
                 bool advance = await ExecuteFlowStepAsync(step, token);
                 if (token.IsCancellationRequested)
                     break;
+
+                // A death during the step makes its result meaningless: never advance the flow
+                // or count a failure — the loop top performs the death recovery instead.
+                if (IsDeathRecoveryRequested)
+                    continue;
 
                 if (advance)
                 {
@@ -618,6 +969,10 @@ namespace DriverScanTester.Services
 
             var result = await RunTravelRouteAsync(step, route, _flowIndex + 1, _profile.FlowSteps.Count, token);
             if (token.IsCancellationRequested) return false;
+
+            // A confirmed death during the route must not be recorded as a path failure: the
+            // workflow loop performs the death recovery from the pre-death profile position.
+            if (IsDeathRecoveryRequested) return false;
 
             switch (result)
             {
@@ -753,6 +1108,7 @@ namespace DriverScanTester.Services
 
             var result = await RunRouteOnceAsync(repotPath, "Repot path", token);
             if (token.IsCancellationRequested) return false;
+            if (IsDeathRecoveryRequested) return false;
 
             if (result == RouteRunResult.WaypointRepotRequested)
             {
@@ -811,6 +1167,9 @@ namespace DriverScanTester.Services
                 CurrentPhase = BotPhase.Failed;
                 return false;
             }
+
+            if (IsDeathRecoveryRequested)
+                return false;
 
             var snapshot = _memoryService.GetSnapshot();
             _log($"[Repot] Post-repot: HP Pots: {snapshot.HpPotions}, Mana Pots: {snapshot.ManaPotions}");
@@ -880,6 +1239,11 @@ namespace DriverScanTester.Services
 
             if (!await RunOperationWithRetryAsync(step.OperationName, token))
             {
+                // A confirmed death owns the workflow decision; never treat the stopped
+                // operation as a flow failure or restart the flow while the player is dead.
+                if (IsDeathRecoveryRequested)
+                    return false;
+
                 // An operation may have marked an impending transition and then failed
                 // without the map actually changing (e.g. the portal click was ignored).
                 // Do not leave that stale marker blocking the next start check.
@@ -1012,7 +1376,10 @@ namespace DriverScanTester.Services
                 return false;
             }
 
-            using var expCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+            // The EXP route is cancelled by the workflow token OR by a confirmed death. The
+            // death token is cancelled only by NotifyPlayerDeathDetected, so the coordinator
+            // token stays alive and the profile can be recovered.
+            using var expCts = CancellationTokenSource.CreateLinkedTokenSource(token, DeathRecoveryCancellationToken);
             var expToken = expCts.Token;
             int otherPlayerMarkerDetected = 0;
 
@@ -1281,6 +1648,14 @@ namespace DriverScanTester.Services
 
             if (token.IsCancellationRequested)
                 return false;
+
+            // A confirmed death owns the next workflow decision: never interpret the cancelled
+            // EXP route as a repot/teleport/navigation failure and never resume the queue.
+            if (IsDeathRecoveryRequested)
+            {
+                _log("[ExpLoop] Confirmed death — EXP work stopped; the workflow performs death recovery.");
+                return false;
+            }
 
             // ── Confirmed unexpected map transition (highest workflow priority) ──
             // The obsolete route is already dead. The position is synchronized through
@@ -1634,12 +2009,15 @@ namespace DriverScanTester.Services
                     return false;
 
                 bool inCity = _memoryService.GetIsInCity();
+                PositionSyncResult? townSync = _lastTownTeleportSync;
                 PlayerStateSnapshot? destination = _positionSync.LastValidatedState;
-                string transitionFailure = DescribeTownTransitionFailure(stuckState, destination);
+                bool destinationMatched =
+                    townSync?.DestinationStatus == DestinationValidationStatus.MatchedDestination;
+                string transitionFailure = DescribeTownTransitionFailure(stuckState, destination, destinationMatched);
 
                 if (positionReady && inCity && transitionFailure.Length == 0)
                 {
-                    _log($"[Recovery] Teleport verification: SUCCESS — {destination?.Describe() ?? "PositionSync ready"} InCity={inCity}.");
+                    _log($"[Recovery] Teleport verification: SUCCESS — {destination?.Describe() ?? "PositionSync ready"} InCity={inCity} DestinationMatched={destinationMatched}.");
                     return true;
                 }
 
@@ -1648,7 +2026,7 @@ namespace DriverScanTester.Services
                     : !inCity
                         ? "the in-city flag is not set"
                         : transitionFailure;
-                _log($"[Recovery] Teleport verification: FAILED — {reason} (PositionSyncReady={positionReady}, InCity={inCity}, Attempt={attempt}/{maxAttempts}).");
+                _log($"[Recovery] Teleport verification: FAILED — {reason} (PositionSyncReady={positionReady}, InCity={inCity}, DestinationMatched={destinationMatched}, Attempt={attempt}/{maxAttempts}).");
 
                 if (attempt < maxAttempts)
                     _log($"[Recovery] Scroll to Town retry {attempt + 1}/{maxAttempts}.");
@@ -1659,15 +2037,25 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Empty when the validated post-teleport position proves a real town transition
-        /// (map changed or the position left the stuck location's neighbourhood), otherwise
-        /// the human-readable failure reason. A non-coherent stuck snapshot cannot be
-        /// compared, so the existing PositionSync result decides in that case.
+        /// Empty when the validated post-teleport position proves a real town transition,
+        /// otherwise the human-readable failure reason.
+        ///
+        /// A position that matches the destination expectation supplied to PositionSync is
+        /// a SUCCESS even when it is near the stuck location: a town teleport can stay on
+        /// the same map and return the player to the same spawn, and W can be blocked
+        /// there. The proximity check is only the fallback for teleports without a known
+        /// destination, where a one-tile W response at the stuck spot must not be mistaken
+        /// for a town arrival. A non-coherent stuck snapshot cannot be compared, so the
+        /// existing PositionSync result decides in that case.
         /// </summary>
         private static string DescribeTownTransitionFailure(
             PlayerStateSnapshot stuckState,
-            PlayerStateSnapshot? destination)
+            PlayerStateSnapshot? destination,
+            bool destinationMatched)
         {
+            if (destinationMatched)
+                return "";
+
             if (!stuckState.HasCoherentState)
                 return "";
 
@@ -3126,6 +3514,34 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// Destination evidence for a town arrival. The profile's start baseline is the
+        /// known town position (see <see cref="BotProfile.EnableStartPositionCheck"/>): the
+        /// town teleport can stay on the SAME map and return the player to the same spawn,
+        /// so a map change or a coordinate delta cannot be the only acceptance signal.
+        /// Reusing the fixed synchronization radius keeps the user-configurable start
+        /// tolerance out of the freshness decision. Profiles without a configured town
+        /// baseline keep the legacy context-free behavior (a changed response to W or a
+        /// position clearly outside the pre-teleport neighbourhood).
+        /// </summary>
+        private DestinationValidationContext? CreateTownDestinationValidationContext()
+        {
+            if (!_profile.EnableStartPositionCheck)
+                return null;
+
+            if (_profile.ProtectionMapNumber <= 0)
+                return null;
+
+            if (_profile.StartPositionX == 0 && _profile.StartPositionY == 0)
+                return null;
+
+            return DestinationValidationContext.ForStartPosition(
+                _profile.ProtectionMapNumber,
+                _profile.StartPositionX,
+                _profile.StartPositionY,
+                "town start position (profile)");
+        }
+
+        /// <summary>
         /// Teleports to the city with the profile's teleport key, waits for the game UI
         /// to settle and validates the post-transition position. A screenshot is captured
         /// right after the teleport scroll is triggered (before the town loads) into
@@ -3146,6 +3562,7 @@ namespace DriverScanTester.Services
             byte vk = (byte)_profile.TeleportKey;
             byte scan = (byte)_profile.TeleportScanCode;
 
+            _lastTownTeleportSync = null;
             _positionSync.MarkTransitionImminent("TeleportToCity", requireWRefresh: true);
 
             bool arrived;
@@ -3201,16 +3618,21 @@ namespace DriverScanTester.Services
             }
 
             // The town teleport is validated against its OWN destination: the arrival flag
-            // plus a coherent, fresh position on whatever map the town is. The route start
-            // of the location we teleported AWAY from is never used here.
-            _log($"[Teleport] Waiting for PositionSync after town teleport... InCity={_memoryService.GetIsInCity()}");
-            PositionSyncResult sync = await _positionSync.SynchronizeAsync(expectedMap: 0, token);
+            // plus a coherent, fresh position on whatever map the town is. When the profile
+            // declares its town baseline, that baseline is the destination expectation, so
+            // a same-map teleport to the same spawn with a blocked W is not rejected as
+            // stale merely because the coordinates did not change. The route start of the
+            // location we teleported AWAY from is never used here.
+            DestinationValidationContext? townDestination = CreateTownDestinationValidationContext();
+            _log($"[Teleport] Waiting for PositionSync after town teleport... InCity={_memoryService.GetIsInCity()} Destination={(townDestination != null ? townDestination.Describe() : "none")}");
+            PositionSyncResult sync = await _positionSync.SynchronizeAsync(expectedMap: 0, destination: townDestination, token);
+            _lastTownTeleportSync = sync;
             if (token.IsCancellationRequested)
                 return false;
 
             if (sync.IsReady)
             {
-                _log($"[Teleport] Town destination validated: {sync.State.Describe()} InCity={_memoryService.GetIsInCity()}.");
+                _log($"[Teleport] Town destination validated: {sync.State.Describe()} InCity={_memoryService.GetIsInCity()} DestinationStatus={sync.DestinationStatus}.");
                 return true;
             }
 

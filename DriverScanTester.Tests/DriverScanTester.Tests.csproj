@@ -18,4 +18,12 @@
     <ProjectReference Include="..\DriverScanTester\DriverScanTester.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Real 2026-10-29 incident frame (already tracked in the app project): the death
+         screenshot used as the regression fixture for combat-time other-player detection. -->
+    <None Include="..\DriverScanTester\Screenshots\Dead\2026-10-29_01-47-35.png"
+          Link="Fixtures\incident-2026-10-29_death.png"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

@@ -691,6 +691,7 @@ namespace DriverScanTester.ViewModels
                 FocusGameWindow,
                 wKeyCameraController: _wKeyCameraController);
             Interlocked.Exchange(ref _gameFailureStopHandled, 0);
+            Interlocked.Exchange(ref _standalonePlayerDeathHandled, 0);
             _movementSystem = new MovementSystem(
                 memoryService,
                 AppendBotLog,
@@ -704,7 +705,7 @@ namespace DriverScanTester.ViewModels
                 wKeyCameraController: _wKeyCameraController)
             {
                 MobGroupingPausePredicate = () => PauseController.IsPaused,
-                OnGameUnresponsiveDetected = HandleGameConnectionFailure
+                OnGameUnresponsiveDetected = reason => HandleGameConnectionFailure(reason, movementDerived: true)
             };
             
             _movementBotCts = new CancellationTokenSource();
@@ -719,7 +720,7 @@ namespace DriverScanTester.ViewModels
             // 4. Start Heal/Mana using the values initialized for the Bot Window.
             _healManaSystem = new HealManaSystem(memoryService, AppendBotLog, usePlayerBasedThresholds: false)
             {
-                PlayerDeathDetected = () => HandleGameConnectionFailure("Player death confirmed (HP is zero).")
+                PlayerDeathDetected = HandleStandalonePlayerDeath
             };
             _healManaBotCts = new CancellationTokenSource();
             _isHealManaBotRunning = true;
@@ -743,6 +744,7 @@ namespace DriverScanTester.ViewModels
                 _lootSystem = new LootSystem(memoryService, AppendBotLog, GetSharedCameraControllerForLoot());
                 _lootSystem.ShouldStopOnOtherPlayerMarker = () => StopOnOtherPlayerDetected;
                 Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 0);
+                Interlocked.Exchange(ref _standalonePlayerDeathHandled, 0);
                 _lootSystem.OtherPlayerMarkerDetected =
                     () => HandleStandalonePlayerMarkerDetected(memoryService, profile);
                 if (_isMovementBotRunning && _movementSystem != null)
@@ -3185,6 +3187,8 @@ namespace DriverScanTester.ViewModels
         private CancellationTokenSource? _autoStopCts;
         private DateTime? _autoStopAt;
         private int _gameFailureStopHandled;
+        /// <summary>One-shot latch for the standalone (non-workflow) death response.</summary>
+        private int _standalonePlayerDeathHandled;
         private readonly object _gameConnectionMonitorLock = new();
         private CancellationTokenSource? _gameConnectionMonitorCts;
 
@@ -3450,12 +3454,13 @@ namespace DriverScanTester.ViewModels
             var repotDetector = new RepotDetectorService(AppendBotLog);
             var pathLoader = new SavedPathLoader(AppendBotLog);
             Interlocked.Exchange(ref _gameFailureStopHandled, 0);
+            Interlocked.Exchange(ref _standalonePlayerDeathHandled, 0);
             var pathRunner = new PathRunnerService(
                 memoryService,
                 AppendBotLog,
                 wKeyCameraController: _wKeyCameraController)
             {
-                OnGameUnresponsiveDetected = HandleGameConnectionFailure
+                OnGameUnresponsiveDetected = reason => HandleGameConnectionFailure(reason, movementDerived: true)
             };
             var itemSeller = new ItemSellerService(memoryService, AppendBotLog, _wKeyCameraController);
             var positionSync = new PositionSyncService(
@@ -3488,7 +3493,10 @@ namespace DriverScanTester.ViewModels
                 profile, AppendBotLog, FocusGameWindow, positionSync)
             {
                 PauseController = PauseController,
-                OnPlayerDeathDetected = () => HandleGameConnectionFailure("Player death confirmed (HP is zero)."),
+                // A confirmed death is a recoverable workflow event owned by the coordinator:
+                // it waits five minutes, teleports to town and restarts the whole profile.
+                // It must never be routed into the global connection-failure stop.
+                OnPlayerDeathDetected = () => AppendBotLog("[DeathRecovery] Death confirmed — the workflow waits, teleports to town and restarts the profile automatically."),
                 ShouldStopOnOtherPlayerDetected = () => StopOnOtherPlayerDetected
             };
             pathRunner.PauseController = PauseController;
@@ -3719,9 +3727,21 @@ namespace DriverScanTester.ViewModels
         /// <summary>
         /// Latches a suspected game disconnect/dead state into a stop of every bot task.
         /// The game/client is intentionally left untouched so it can be relaunched/logged in manually.
+        ///
+        /// A CONFIRMED character death is NOT a connection failure and never reaches this method:
+        /// the workflow coordinator owns death recovery (wait → town teleport → profile restart).
+        /// A movement-derived "unresponsive" signal observed while the coordinator is in death
+        /// recovery is ignored, so the watchdog cannot race the death handler and stop the
+        /// coordinator after the recovery state was requested.
         /// </summary>
-        private void HandleGameConnectionFailure(string reason)
+        private void HandleGameConnectionFailure(string reason, bool movementDerived = false)
         {
+            if (movementDerived && _workflowCoordinator?.IsDeathRecoveryActive == true)
+            {
+                AppendBotLog($"[ConnectionWatchdog] Ignoring movement-derived signal during death recovery: {reason}");
+                return;
+            }
+
             if (Interlocked.Exchange(ref _gameFailureStopHandled, 1) != 0)
                 return;
 
@@ -3731,6 +3751,34 @@ namespace DriverScanTester.ViewModels
                 ScreenshotService.ConnectionStatesFolder,
                 AppendBotLog,
                 "[ConnectionWatchdog]");
+        }
+
+        /// <summary>
+        /// Standalone-bot (Bot Window) death response. Unlike the profile workflow there is no
+        /// active profile to restart, so the standalone tasks are stopped and the inputs are
+        /// released WITHOUT treating HP==0 as a fatal connection failure (the game stays
+        /// untouched and the user can start again). Automatic five-minute recovery belongs to the
+        /// workflow coordinator, which is the single owner of death recovery.
+        /// </summary>
+        private void HandleStandalonePlayerDeath()
+        {
+            if (Interlocked.Exchange(ref _standalonePlayerDeathHandled, 1) != 0)
+                return;
+
+            AppendBotLog("[DeathRecovery] Standalone bot: death confirmed — releasing inputs and stopping the standalone actions. " +
+                         "No global connection-failure stop is performed; the profile workflow provides automatic recovery.");
+
+            // Reuse the existing stop-all cleanup (releases 3/W/A/D, stops loot, ends the camera
+            // session). This is deliberately NOT HandleGameConnectionFailure: HP==0 is not a
+            // connection failure and must not latch the global failure stop.
+            try
+            {
+                StopAllBotsInternal();
+            }
+            catch (Exception ex)
+            {
+                AppendBotLog($"[DeathRecovery] Standalone stop cleanup error: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -4389,7 +4437,7 @@ namespace DriverScanTester.ViewModels
                             wKeyCameraController: _wKeyCameraController)
                         {
                             MobGroupingPausePredicate = () => PauseController.IsPaused,
-                            OnGameUnresponsiveDetected = HandleGameConnectionFailure
+                            OnGameUnresponsiveDetected = reason => HandleGameConnectionFailure(reason, movementDerived: true)
                         };
         
                         _movementBotCts = new CancellationTokenSource();
@@ -4447,9 +4495,10 @@ namespace DriverScanTester.ViewModels
                         if (!_isMovementBotRunning && !_isHealManaBotRunning && !_isLootBotRunning &&
                             _workflowCoordinator?.IsRunning != true)
                             Interlocked.Exchange(ref _gameFailureStopHandled, 0);
+                        Interlocked.Exchange(ref _standalonePlayerDeathHandled, 0);
                         _healManaSystem = new HealManaSystem(memoryService, AppendBotLog, usePlayerBasedThresholds: false)
                         {
-                            PlayerDeathDetected = () => HandleGameConnectionFailure("Player death confirmed (HP is zero).")
+                            PlayerDeathDetected = HandleStandalonePlayerDeath
                         };
                         _healManaBotCts = new CancellationTokenSource();
                         _isHealManaBotRunning = true;

@@ -338,6 +338,35 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// Reads the raw 32-bit camera-yaw value. Unlike <see cref="ReadCameraAngleRadians"/>,
+        /// this reports pointer/read failures explicitly so a caller never mistakes a failed
+        /// read for the valid angle 0.
+        /// </summary>
+        public bool TryGetCameraAngleBits(out int angleBits)
+        {
+            angleBits = 0;
+            if (!TryReadPointer(_moduleBase + CameraPtrOffset, out ulong cameraBase) || cameraBase == 0)
+                return false;
+
+            return TryReadInt(cameraBase + (ulong)CameraAngleOffsetLocal, out angleBits);
+        }
+
+        /// <summary>
+        /// Writes and verifies the raw 32-bit camera-yaw value. The exact bits are preserved
+        /// because camera-angle values are stored as a float, not an integer angle.
+        /// </summary>
+        public bool TrySetCameraAngleBits(int angleBits)
+        {
+            if (!TryReadPointer(_moduleBase + CameraPtrOffset, out ulong cameraBase) || cameraBase == 0)
+                return false;
+
+            ulong address = cameraBase + (ulong)CameraAngleOffsetLocal;
+            return WriteInt(address, angleBits) &&
+                   TryReadInt(address, out int actualBits) &&
+                   actualBits == angleBits;
+        }
+
+        /// <summary>
         /// Writes the camera rotation (horizontal yaw) to memory as a
         /// 32-bit float in radians. The caller is expected to pass an angle
         /// in the [0, 2π) range, matching what <see cref="GetCameraAngle"/> returns.
@@ -622,12 +651,23 @@ namespace DriverScanTester.Services
             return ReadInt(playerBase + TargetSelectedOffset);
         }
 
+        /// <summary>
+        /// Raw "an entity is selected" indicator: a positive target id below the legacy
+        /// mob/player boundary. It is NOT proof of a monster (a real player was selected with
+        /// TargetId=718 below that boundary on 2026-10-29), so it must never authorize an
+        /// attack on its own. Use <see cref="CombatTargetSafety"/> for attack permission.
+        /// </summary>
         public bool IsMobSelected()
         {
             return IsMobTargetId(ReadSelectedTargetId());
         }
 
-        /// <summary>Classifies a raw target ID using the game's mob/player ID boundary.</summary>
+        /// <summary>
+        /// Classifies a raw target ID using the game's legacy mob/player ID boundary. A value
+        /// ABOVE the boundary is a confirmed player; a value BELOW it is only a candidate
+        /// monster — never proof. Attack permission additionally requires the independent
+        /// other-player check in <see cref="CombatTargetSafety"/>.
+        /// </summary>
         public static bool IsMobTargetId(int targetId)
         {
             // -1 (0xFFFFFFFF) means no target; valid mob/NPC IDs are positive and below the boundary.

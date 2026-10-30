@@ -1177,8 +1177,16 @@ namespace DriverScanTester.Services
         ///   3. polls the settled post-W position and requires consecutive identical reads,
         ///   4. validates it (unreadable / still in the pre-teleport neighbourhood without
         ///      any response to W => not accepted, bounded retry, then UNCONFIRMED),
+        ///      while accepting a settled position that matches the supplied town
+        ///      destination even when W produced no coordinate change (blocked spawn),
         ///   5. returns the REFRESHED snapshot — the pre-refresh snapshot is never
         ///      reported as the navigation position.
+        ///
+        /// A changed coordinate is not required as the ONLY proof of freshness: a
+        /// teleport can return to the same general coordinates on the same map, and W
+        /// can legitimately be blocked there. The destination expectation is the
+        /// stronger evidence and is evaluated before the unchanged/source-neighbourhood
+        /// guard, so a verified destination is never reclassified as stale.
         /// </summary>
         private async Task<PositionSyncResult> RunMandatoryWRefreshAsync(
             long transitionId,
@@ -1354,15 +1362,36 @@ namespace DriverScanTester.Services
                     lastFailure = $"the post-W position did not settle within {_options.WRefreshSettleTimeoutMs} ms ({stableReads}/{requiredStableReads} consecutive identical reads)";
                     _log($"[PositionSync] Position validation FAILED: {lastFailure} — the coordinates are not stable enough for navigation.");
                 }
+                else if (destinationMatched)
+                {
+                    // A mandatory-refresh transition is validated against its KNOWN
+                    // destination, not against "did W move me?". A town teleport can
+                    // return the player to the same spawn (same map, coordinates that
+                    // remain close to the stuck location) and W can be blocked by
+                    // geometry there, so an unchanged coordinate is not evidence of
+                    // stale memory when the settled position matches the destination.
+                    string evidence = changedFromBefore
+                        ? $"the W press changed the coordinates from ({before.X},{before.Y}) to ({after.X},{after.Y}) and the settled position matches the destination expectation"
+                        : $"the W press produced no coordinate change (movement blocked) but the settled position matches the destination expectation and was stable for {stableReads} consecutive read(s)";
+                    _log($"[PositionSync] Position validation OK: {evidence}; using the refreshed position {(after.MapReadSucceeded ? $"Map={after.Map}" : "Map=unreadable")} {(after.PositionReadSucceeded ? $"({after.X},{after.Y})" : "(unreadable)")}.");
+
+                    return ReadyResult(
+                        after,
+                        transitionId,
+                        $"Position confirmed by the mandatory W refresh and matches the destination expectation ({destination!.Label}).",
+                        destination,
+                        DestinationValidationStatus.MatchedDestination);
+                }
                 else if (!changedFromBefore && withinSourceNeighbourhood)
                 {
-                    // The W press produced no observable change and the reading still sits
+                    // No destination proof, no response to W and the reading still sits
                     // where the player was BEFORE the teleport: indistinguishable from a
-                    // stale read, so it must not become a navigation position.
+                    // stale read, so it must not become a navigation position. This keeps
+                    // the failed-teleport safeguard for profiles without a town baseline.
                     lastFailure = $"the post-W position still sits in the pre-teleport neighbourhood and did not respond to the W press ({after.Describe()})";
                     _log($"[PositionSync] Position validation FAILED: {lastFailure} — treated as stale.");
                 }
-                else if (destination != null && !destinationMatched)
+                else if (destination != null)
                 {
                     // A town teleport is never routed into destructive recovery from here:
                     // the position was refreshed, but it genuinely does not satisfy the
@@ -1380,13 +1409,9 @@ namespace DriverScanTester.Services
                     return ReadyResult(
                         after,
                         transitionId,
-                        destinationMatched
-                            ? $"Position confirmed by the mandatory W refresh and matches the destination expectation ({destination!.Label})."
-                            : "Position confirmed by the mandatory W refresh.",
+                        "Position confirmed by the mandatory W refresh.",
                         destination,
-                        destinationMatched
-                            ? DestinationValidationStatus.MatchedDestination
-                            : DestinationValidationStatus.NoContext);
+                        DestinationValidationStatus.NoContext);
                 }
 
                 if (attempt < _options.MaxWRefreshAttempts)

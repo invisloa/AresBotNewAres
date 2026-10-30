@@ -132,8 +132,16 @@ namespace DriverScanTester.Services
                         {
                             _wasDead = true;
                             _unconfirmedZeroHpLogged = false;
-                            _log("[Death] Player HP is 0 and max HP is readable — player is dead. Stopping bot actions and capturing screenshot.");
-                            PlayerDeathDetected?.Invoke();
+                            _log("[Death] Player HP is 0 and max HP is readable — player is dead. Capturing the death screenshot; the workflow owns recovery.");
+                            try
+                            {
+                                PlayerDeathDetected?.Invoke();
+                            }
+                            catch (Exception ex)
+                            {
+                                // The death screenshot must be saved even when a death handler fails.
+                                _log($"[Death] Death notification handler failed: {ex.Message}");
+                            }
                             CaptureDeathScreenshot();
                         }
                         else if (!_unconfirmedZeroHpLogged)

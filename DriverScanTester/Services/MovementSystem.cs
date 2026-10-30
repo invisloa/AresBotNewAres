@@ -201,6 +201,7 @@ namespace DriverScanTester.Services
         private readonly GameMemoryService _memoryService;
         private readonly Action<string> _log;
         private readonly CombatHandler _combatHandler;
+        private readonly CombatTargetSafety _targetSafety;
         private readonly RepotHelper _repotHelper;
         private readonly bool _enableWaypointSpecialRecoveries;
         private readonly MovementSteeringMode _steeringMode;
@@ -220,6 +221,12 @@ namespace DriverScanTester.Services
 
         public MobGroupingState CurrentMobGroupingState => _mobGroupingController.State;
 
+        /// <summary>
+        /// Central target classifier/authorizer used for every attack decision. Exposed for
+        /// regression tests so the other-player evidence source can be replaced by a fixture
+        /// (the production instance scans the real game client).
+        /// </summary>
+        internal CombatTargetSafety TargetSafety => _targetSafety;
         public string MobGroupingStatus => !MobGroupingRuntimeSettings.Enabled
             ? "Off"
             : CurrentMobGroupingState switch
@@ -425,11 +432,15 @@ namespace DriverScanTester.Services
              (LootSystemRef.IsCollecting || LootSystemRef.IsPinkScanPendingOrActive ||
               (LootPriorityMode && LootSystemRef.IsLootingActive)));
 
-        /// <summary>
-        /// Detector instance for the attack-start player-pixel check. Separate from the
-        /// loot system's instance because each detector owns reusable scan buffers.
-        /// </summary>
-        private readonly PlayerMarkerPixelDetector _attackStartPlayerMarkerDetector = new();
+        // ── Rejected combat target (player / unknown) target-cycle budget ──
+        // TAB must not loop forever on the same forbidden target: after a bounded number of
+        // cycles the bot waits for the selection to change on its own.
+        private int _rejectedTargetId;
+        private int _rejectedTargetTabCount;
+        private DateTime _rejectedTargetFirstSeenAt = DateTime.MinValue;
+        private bool _rejectedTargetTabLimitLogged;
+        /// <summary>Rejected player target already reported to the other-player response (log throttle).</summary>
+        private int _reportedPlayerTargetId = int.MinValue;
 
         /// <summary>
         /// Loot-priority mode (profile flag "Loot Priority"): looting outranks combat
@@ -1004,9 +1015,11 @@ namespace DriverScanTester.Services
         // Consecutive navigation failures for the current unresolved waypoint.
         // This is deliberately NOT a "did the character physically move?" counter:
         // ReverseDiagonalRecovery may successfully walk away from an obstacle and the
-        // bot can still be unable to reach the same waypoint. The counter is reset only
-        // when the waypoint is consumed, a genuinely different route target is activated
-        // or a map/teleport invalidates the navigation context.
+        // bot can still be unable to reach the same waypoint. The counter is reset when
+        // the waypoint is consumed, a genuinely different route target is activated, a
+        // map/teleport invalidates the navigation context, or ordinary route movement
+        // proves real progress toward the waypoint (the previous blockage is resolved).
+        // Recovery displacement alone never resets it.
         private const int STUCK_MAX_ATTEMPTS_OUTSIDE = 3;
         // In the city the unstuck must not hammer the same spot: after 2 failed attempts
         // the route is stopped and the coordinator waits 10 minutes, resets and restarts
@@ -1185,13 +1198,19 @@ namespace DriverScanTester.Services
             bool enableWaypointSpecialRecoveries = true,
             WaypointRecoveryExecutor? waypointRecoveryExecutor = null,
             MovementSteeringMode steeringMode = MovementSteeringMode.KeyboardTurn,
-            WKeyCameraController? wKeyCameraController = null)
+            WKeyCameraController? wKeyCameraController = null,
+            CombatTargetSafety? targetSafety = null)
         {
             _memoryService = memoryService;
             _log = log;
             _wKeyCameraController = wKeyCameraController;
             _wKeyCameraOwner = wKeyCameraController?.CreateOwner("MovementSystem", SendSyntheticForwardKeyEvent);
             _combatHandler = new CombatHandler(log);
+            _targetSafety = targetSafety ?? new CombatTargetSafety(
+                () => memoryService.GetSelectedTargetId(),
+                new ScreenCombatPlayerPresenceScanner(log),
+                () => memoryService.GetIsInCity(),
+                log);
             _mobMarkerDetector = new MobMarkerDetector(log);
             _mobGroupingController = new MobGroupingController(log);
             _repotHelper = new RepotHelper(memoryService, log, StopMoving, () => _goalReached = true);
@@ -2128,13 +2147,25 @@ namespace DriverScanTester.Services
 
             byte currentAction = _memoryService.GetCurrentAction();
             int targetId = _memoryService.GetSelectedTargetId();
+
+            // Raw "some entity is selected" indicator: kept for the existing combat/loot
+            // timing logic. It is NOT proof of a monster (a real player was selected with
+            // TargetId=718 on 2026-10-29), so it is never used to authorize an attack.
             bool mobSelected = _memoryService.IsMobSelected();
+
+            // Central, single-source target classification for this tick. Only a confirmed
+            // monster may be attacked; players/NPCs/unknown targets never are.
+            CombatTargetValidation targetValidation = targetId > 0
+                ? _targetSafety.Validate()
+                : default;
+            bool confirmedMonsterTarget = targetValidation.IsConfirmedMonster;
 
             // Log position every 5 ticks (action bytes included — key for stuck diagnosis:
             // 25=idle, 27/3=running, 28=being hit, 39=attacking).
+            // Mob: is the CONFIRMED monster state; Raw: the raw selected-entity indicator.
             if (_tickCount % 5 == 0)
             {
-                _log($"[Tick {_tickCount}] @ ({currX:F1},{currY:F1}) Act:{currentAction} Mob:{mobSelected} TargetId:{targetId} Cam:{_memoryService.GetCameraAngle()}");
+                _log($"[Tick {_tickCount}] @ ({currX:F1},{currY:F1}) Act:{currentAction} Mob:{confirmedMonsterTarget} Raw:{mobSelected} TargetId:{targetId} Type:{targetValidation.Kind} Cam:{_memoryService.GetCameraAngle()}");
             }
 
             BotMode currentMode = BotMode.OnlyMove;
@@ -2235,26 +2266,13 @@ namespace DriverScanTester.Services
                 if (canUseCombatRetargetSearch && _combatRetargetCameraStage != CombatRetargetCameraStage.None &&
                     LootSystemRef?.IsPinkRescanActive != true)
                 {
-                    if (GameMemoryService.IsMobTargetId(targetId) &&
+                    if (confirmedMonsterTarget &&
                         (!_postKillCloseTargetCheckPending || targetId != _postKillTargetIdBeforeTab))
                     {
-                        _log($"[CombatRetarget] Mob selected at camera {cameraDistanceToApply}. Resuming normal combat.");
+                        // A confirmed monster is selected at the retarget camera: let the
+                        // ordinary combat pipeline acquire/attack it on the next tick.
+                        _log($"[CombatRetarget] Confirmed monster selected at camera {cameraDistanceToApply}. Resuming normal combat.");
                         ClearCombatRetargetSearch();
-                    }
-                    else if (mobSelected &&
-                             (!_postKillCloseTargetCheckPending || targetId != _postKillTargetIdBeforeTab))
-                    {
-                        _log($"[CombatRetarget] Mob selected at camera {cameraDistanceToApply}. Starting attack.");
-                        ClearCombatRetargetSearch();
-                        HoldSkillThree();
-
-                        if (_isMovingForward)
-                        {
-                            StopMoving();
-                        }
-
-                        await Task.Delay(30, token);
-                        return;
                     }
                     else if (!_combatRetargetAwaitingSelection)
                     {
@@ -2371,13 +2389,12 @@ namespace DriverScanTester.Services
             }
 
             // Single authoritative combat-context read for both the active-grouping
-            // cancellation and the observation gate below. It is the same expression
-            // grouping has always used to decide whether a real combat encounter exists,
-            // extended to both supported combat modes.
+            // cancellation and the observation gate below. A combat context exists only for a
+            // CONFIRMED monster target (player/NPC/unknown targets never count).
             bool hasCombatContext =
                 MobGroupingController.IsSupportedCombatMode(CurrentMode) &&
-                MobGroupingController.IsSupportedCombatMode(currentMode) && mobSelected && targetId > 0 &&
-                GameMemoryService.IsMobTargetId(targetId) &&
+                MobGroupingController.IsSupportedCombatMode(currentMode) &&
+                confirmedMonsterTarget &&
                 _combatRetargetCameraStage == CombatRetargetCameraStage.None;
 
             if (IsMobGroupingSequenceActive)
@@ -2394,10 +2411,13 @@ namespace DriverScanTester.Services
                     return;
             }
 
-            var combatAction = _combatHandler.EvaluateCombatAction(_memoryService, currentMode, _isUnstuckRoutineActive, currX, currY);
+            var combatAction = _combatHandler.EvaluateCombatAction(_memoryService, currentMode, _isUnstuckRoutineActive, currX, currY, _targetSafety);
             if (combatAction == CombatAction.Unstuck || combatAction == CombatAction.RepositionAndRetry)
                 CancelMobGrouping($"{combatAction} has priority");
-            if (combatAction != CombatAction.None && combatAction != CombatAction.CombatWait)
+            if (combatAction == CombatAction.TargetRejected)
+                CancelMobGrouping("combat target rejected");
+            if (combatAction != CombatAction.None && combatAction != CombatAction.CombatWait &&
+                combatAction != CombatAction.TargetRejected)
             {
                 _log($"[Tick {_tickCount}] Combat: {combatAction}");
             }
@@ -2412,8 +2432,9 @@ namespace DriverScanTester.Services
                                       combatAction == CombatAction.TabAfterKill ||
                                       combatAction == CombatAction.PotionsUsed ||
                                       combatAction == CombatAction.RepositionAndRetry ||
+                                      combatAction == CombatAction.TargetRejected ||
                                       combatAction == CombatAction.Unstuck;
-            if (mobSelected)
+            if (confirmedMonsterTarget)
             {
                 _lastCombatSeenAt = DateTime.UtcNow;
             }
@@ -2436,6 +2457,7 @@ namespace DriverScanTester.Services
 
             if (combatAction != CombatAction.TabAfterKill &&
                 combatAction != CombatAction.Unstuck && combatAction != CombatAction.RepositionAndRetry &&
+                combatAction != CombatAction.TargetRejected &&
                 TryObserveOrStartMobGrouping(
                     currentMode,
                     hasCombatContext,
@@ -2551,6 +2573,25 @@ namespace DriverScanTester.Services
                     // Walk toward the next waypoint for a short time, then TAB and
                     // attack the (re-selected) target again.
                     await RepositionAndRetryAttack(currX, currY, token);
+                    return;
+
+                case CombatAction.TargetRejected:
+                    // The selected target is not a confirmed monster. Release 3 immediately,
+                    // invalidate the combat context, cancel the pending retry and - for a
+                    // confirmed other player - run the project's existing player response.
+                    CombatTargetValidation rejected = _targetSafety.Validate();
+                    HandleRejectedCombatTarget(rejected);
+                    if (ShouldCycleTargetAwayFromRejectedTarget(rejected.TargetId))
+                    {
+                        _log($"[CombatSafety] Cycling target away from rejected TargetId={rejected.TargetId} " +
+                             $"(attempt {_rejectedTargetTabCount}/{BotConstants.CombatSafety.MaxTargetCycleAttemptsForRejectedTarget}).");
+                        if (TryPressTargetCycleKey())
+                            await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
+                    }
+                    else
+                    {
+                        await Task.Delay(BotConstants.Delays.CombatAttackWaitMs, token);
+                    }
                     return;
 
                 case CombatAction.PotionsUsed:
@@ -2771,8 +2812,10 @@ namespace DriverScanTester.Services
                 // displacement. ReverseDiagonalRecovery can legitimately move the player
                 // 3+ units away from an obstacle and still be unable to reach the same
                 // waypoint; resetting here caused the confirmed infinite city loop.
-                // The counter is preserved until the waypoint is consumed or the route
-                // context genuinely changes (see AdvanceReachedWaypoints / resync / map).
+                // The counter is preserved until the waypoint is consumed, the route
+                // context genuinely changes (see AdvanceReachedWaypoints / resync / map)
+                // or UpdateNavigationProgress confirms route-directed progress toward the
+                // waypoint (the reported NavigationRecovered=True incident).
 
                 // ── Active ReverseDiagonalRecovery ──
                 // A combat-owned recovery may only keep driving W/camera while its Deferred
@@ -2898,7 +2941,7 @@ namespace DriverScanTester.Services
                 {
                     string ghostFlag = IsGhostWaypoint(target) ? " [GHOST]" : "";
                     float brgToWp = GeometryUtils.GetBearingToTargetDeg(currX, currY, target.X, target.Y);
-                    _log($"[Route] T:{_tickCount} WP{ghostFlag}({target.X:F1},{target.Y:F1}) d:{distNow:F2} th:{thresholdNow:F2} Brg:{brgToWp:F1}deg Act:{currentAction} Mob:{mobSelected} M:{target.Mode} P:{target.Precision} Steer:{ResolveSteeringMode(target.SteeringMode, _steeringMode)} Cam:{_memoryService.GetCameraAngle()}");
+                    _log($"[Route] T:{_tickCount} WP{ghostFlag}({target.X:F1},{target.Y:F1}) d:{distNow:F2} th:{thresholdNow:F2} Brg:{brgToWp:F1}deg Act:{currentAction} Mob:{confirmedMonsterTarget} TargetId:{targetId} Type:{targetValidation.Kind} M:{target.Mode} P:{target.Precision} Steer:{ResolveSteeringMode(target.SteeringMode, _steeringMode)} Cam:{_memoryService.GetCameraAngle()}");
                 }
 
                 // Track healthy movement bearing for escape direction
@@ -3050,7 +3093,8 @@ namespace DriverScanTester.Services
                 ResetSpecialRecoveryAttempt();
                 // Reset the navigation failure counter only when the waypoint is
                 // actually consumed. Physical movement / recovery displacement does NOT
-                // prove that the navigation problem is solved, so it must never reset it.
+                // prove that the navigation problem is solved; only route-directed
+                // progress confirmed in UpdateNavigationProgress may reset it earlier.
                 if (_consecutiveStuckAttempts > 0)
                 {
                     _log($"[Unstuck] Navigation failure count reset — waypoint ({target.X:F1},{target.Y:F1}) reached.");
@@ -3294,6 +3338,20 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// Routes yaw writes through the shared camera lease when available. This makes
+        /// external operations such as the NPC scan authoritative for the entire time they
+        /// own the camera, including against direct-camera movement steering.
+        /// </summary>
+        private bool TrySetCameraAngle(float radians)
+        {
+            if (_wKeyCameraController != null)
+                return _wKeyCameraController.TrySetCameraAngle(radians);
+
+            _memoryService.SetCameraAngle(radians);
+            return true;
+        }
+
+        /// <summary>
         /// Legacy direct-camera steering. Its filtering and write state intentionally
         /// remain separate from the feedback-controlled keyboard steering state.
         /// </summary>
@@ -3327,10 +3385,12 @@ namespace DriverScanTester.Services
             if (ShouldUpdateCamera(cameraRadians, isFreshSegment, out _))
             {
                 _log($"[Camera] Apply brg={bearingDeg:F1}deg target={cameraRadians:F4}rad last={_cameraLastAppliedAngle:F4}rad diff={CircularGameAngleDiff(cameraRadians, _cameraLastAppliedAngle):F4}");
-                _memoryService.SetCameraAngle(cameraRadians);
-                _cameraLastAppliedAngle = cameraRadians;
-                _lastCameraUpdateTime = DateTime.Now;
-                _hasCameraHysteresisCandidate = false;
+                if (TrySetCameraAngle(cameraRadians))
+                {
+                    _cameraLastAppliedAngle = cameraRadians;
+                    _lastCameraUpdateTime = DateTime.Now;
+                    _hasCameraHysteresisCandidate = false;
+                }
             }
 
             if (moveForward)
@@ -3716,14 +3776,15 @@ namespace DriverScanTester.Services
         /// Extra player-pixel safety check performed once per newly selected attack target
         /// (right after TAB picked a target and the bot is about to start attacking):
         /// briefly zooms the camera out to the marker-scan distance, captures a fresh game
-        /// client frame and runs the faction-marker (player pixels) detector. When a marker
-        /// is found the loot system runs the same stop/return-to-city behavior as a
-        /// confirmed periodic detection. The camera is always restored afterwards.
+        /// client frame and runs the central combat safety validation (faction-marker player
+        /// detector with the compact local-character exclusion). When a confirmed other player
+        /// is found the loot system runs the same stop/return-to-city behavior as a confirmed
+        /// periodic detection, and the subsequent hold of key 3 is refused by the same central
+        /// validation. The camera is always restored afterwards.
         /// </summary>
         private async Task RunAttackStartPlayerMarkerCheck(CancellationToken token)
         {
-            LootSystem? loot = LootSystemRef;
-            if (loot == null || _memoryService.GetIsInCity())
+            if (_memoryService.GetIsInCity())
                 return;
 
             short normalCameraDistance = _finalStandbyActive
@@ -3735,30 +3796,26 @@ namespace DriverScanTester.Services
             // If the loot system currently owns the camera, do not interfere — the normal
             // attack proceeds and the periodic marker scan stays responsible.
             if (!TryApplyMovementCameraDistance(BotConstants.Camera.OtherPlayerMarkerScanDistance))
-                return;
+            {
+                // The zoom-out is unavailable, but the safety decision is NOT skipped: the
+                // scan below still runs on the current camera frame.
+                _log("[PlayerPixels] Attack-start marker-scan camera distance was not applied; validating the target on the current camera frame.");
+            }
 
             try
             {
                 // Give the client a moment to render the zoomed-out view.
                 await Task.Delay(BotConstants.Camera.PlayerMarkerCheckCameraSettleMs, token);
 
-                using Bitmap? frame = ScreenshotService.CaptureGameClientFrame(out Point referenceClientOrigin);
-                if (frame == null)
-                {
-                    _log("[PlayerPixels] Attack-start player-pixel check: could not capture the game client frame.");
+                CombatTargetValidation validation = _targetSafety.Validate(forcePlayerScan: true);
+                if (validation.Kind != TargetEntityKind.OtherPlayer ||
+                    validation.PlayerMarker is not { } candidate)
                     return;
-                }
 
-                Rectangle characterExclusionArea = PlayerMarkerPixelDetector.GetLootCharacterExclusionArea(
-                    frame.Width, frame.Height, referenceClientOrigin.X, referenceClientOrigin.Y);
-
-                if (!_attackStartPlayerMarkerDetector.TryFindOtherPlayerMarker(
-                        frame, characterExclusionArea, out PlayerMarkerCandidate candidate))
-                {
+                LootSystem? loot = LootSystemRef;
+                if (loot == null)
                     return;
-                }
 
-                ScreenshotService.SavePlayerMarkerDiagnosticScreenshot(frame, candidate, characterExclusionArea);
                 loot.ReportImmediateOtherPlayerMarker(candidate, "Attack-start player-pixel check");
             }
             catch (OperationCanceledException)
@@ -4279,10 +4336,12 @@ namespace DriverScanTester.Services
             if (ShouldUpdateCamera(cameraRadians, isFreshSegment, out _))
             {
                 _log($"[Camera] Apply brg={bearingDeg:F1}deg target={cameraRadians:F4}rad last={_cameraLastAppliedAngle:F4}rad diff={CircularGameAngleDiff(cameraRadians, _cameraLastAppliedAngle):F4} (no W)");
-                _memoryService.SetCameraAngle(cameraRadians);
-                _cameraLastAppliedAngle = cameraRadians;
-                _lastCameraUpdateTime = DateTime.Now;
-                _hasCameraHysteresisCandidate = false;
+                if (TrySetCameraAngle(cameraRadians))
+                {
+                    _cameraLastAppliedAngle = cameraRadians;
+                    _lastCameraUpdateTime = DateTime.Now;
+                    _hasCameraHysteresisCandidate = false;
+                }
             }
             // NOTE: W is NOT pressed here — callers that need W use ApplySteeringBearing instead.
         }
@@ -4862,19 +4921,36 @@ namespace DriverScanTester.Services
             {
                 // Genuine route-directed progress, independent of whether an earlier
                 // unstuck attempt happened. Small fluctuations and recovery detours are
-                // excluded by the 1.0-unit threshold.
+                // excluded by the 1.0-unit threshold. This is the ONLY physical-movement
+                // evidence allowed to resolve the waypoint's failure history: arbitrary
+                // displacement or a successful escape maneuver alone never does.
                 _lastNavigationProgressDistance = distance;
                 if (_lastNavigationProgressTime != DateTime.MinValue)
                     _lastNavigationProgressTime = now;
 
-                if (_awaitingNavigationRecoveryProof)
-                {
-                    _log($"[Navigation] NavigationRecovered=True waypoint={_navigationProgressWaypointId} bestDistance={_bestWaypointDistance:F2}; failure history preserved at {_consecutiveStuckAttempts}.");
+                bool recoveryProven = _awaitingNavigationRecoveryProof;
+                int previousFailures = _consecutiveStuckAttempts;
+                if (recoveryProven)
                     _awaitingNavigationRecoveryProof = false;
-                }
-                else if (_consecutiveStuckAttempts > 0)
+
+                if (previousFailures > 0)
                 {
-                    _log($"[NavigationProgress] waypoint={_navigationProgressWaypointId} bestDistance={_bestWaypointDistance:F2}; failures={_consecutiveStuckAttempts}.");
+                    // The previous blockage is demonstrably resolved: navigation is moving
+                    // toward the destination again. Keeping the old counter made the NEXT
+                    // ActionStuck escalate immediately (2/2 in the incident) even though
+                    // NavigationRecovered=True and the distance had improved 8.25 -> 3.61.
+                    // The next genuine stuck therefore starts a fresh unstuck budget.
+                    _consecutiveStuckAttempts = 0;
+                    _lastStuckAttemptPos = null;
+                }
+
+                if (recoveryProven)
+                {
+                    _log($"[Navigation] NavigationRecovered=True waypoint={_navigationProgressWaypointId} bestDistance={_bestWaypointDistance:F2}; navigation failure count reset (was {previousFailures}) after confirmed route-directed progress.");
+                }
+                else if (previousFailures > 0)
+                {
+                    _log($"[NavigationProgress] waypoint={_navigationProgressWaypointId} bestDistance={_bestWaypointDistance:F2}; route-directed progress confirmed; navigation failure count reset (was {previousFailures}).");
                 }
             }
 
@@ -5039,7 +5115,8 @@ namespace DriverScanTester.Services
                     () => _lootNavigationBarrierHoldsInput,
                     _wKeyCameraController == null
                         ? null
-                        : () => _wKeyCameraController.TrySetStationaryWhenIdle("waypoint mob recovery"));
+                        : () => _wKeyCameraController.TrySetStationaryWhenIdle("waypoint mob recovery"),
+                    () => _targetSafety.IsConfirmedMonster());
                 _waypointMobRecovery.Start(currX, currY, target.StuckRecoveryMobCameraDistance);
                 return;
             }
@@ -5507,6 +5584,13 @@ namespace DriverScanTester.Services
             // stuck detection and presses 3 when a target is selected.
             _combatHandler.ResetState();
 
+            // ── Central attack safety gate ──
+            // The reposition walk can take seconds; the target may have become another player
+            // in the meantime. Revalidate with fresh evidence BEFORE TABbing into the same
+            // target so a rejected target cannot be reactivated by the retry path.
+            if (!IsRetryTargetStillAttackable())
+                return;
+
             _log("[Combat] Retrying attack — TAB, then attack if a target is selected.");
             if (!TryPressTargetCycleKey())
             {
@@ -5514,6 +5598,22 @@ namespace DriverScanTester.Services
                 return;
             }
             await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
+        }
+
+        /// <summary>
+        /// Revalidates the selected target before the RepositionAndRetry retry TAB. A rejected
+        /// target releases combat immediately and the retry TAB is NOT pressed.
+        /// </summary>
+        private bool IsRetryTargetStillAttackable()
+        {
+            CombatTargetValidation validation = _targetSafety.Validate(forcePlayerScan: true);
+            if (validation.AttackAllowed)
+                return true;
+
+            HandleRejectedCombatTarget(validation);
+            _log($"[CombatSafety] RepositionAndRetry cancelled — TargetId={validation.TargetId} " +
+                 $"Reason={validation.Kind} Source={validation.Source}; no retry TAB.");
+            return false;
         }
 
         /// <summary>
@@ -6038,6 +6138,17 @@ namespace DriverScanTester.Services
                 if (Volatile.Read(ref _stopRequested) != 0 || _isSkillThreeHeld)
                     return;
 
+                // ── Central attack safety gate ──
+                // Every code path that presses 3 funnels through here. Only a CONFIRMED
+                // monster may be attacked; a player/NPC/invalid/unknown target never is.
+                // A new target always triggers a fresh other-player scan first.
+                CombatTargetValidation validation = _targetSafety.Validate();
+                if (!validation.AttackAllowed)
+                {
+                    CancelAttackKeyRetry($"target not attackable ({validation.Kind})");
+                    return;
+                }
+
                 _attackRetryTargetId = _memoryService.GetSelectedTargetId();
                 _attackRetryLastMana = _memoryService.TryGetMana(out short mana) ? mana : int.MinValue;
                 _log("[Key] 3 hold (attack skill)");
@@ -6056,18 +6167,34 @@ namespace DriverScanTester.Services
                     return;
 
                 int targetId = _memoryService.GetSelectedTargetId();
-                string? cancelReason = token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0
-                    ? "stop or cancellation"
-                    : !_isSkillThreeHeld ? "attack input released"
-                    : _isUnstuckRoutineActive ? "unstuck active"
-                    : IsMobGroupingSequenceActive ? "grouping owns movement"
-                    : LootSystemRef?.IsCollecting == true || LootSystemRef?.IsPinkScanPendingOrActive == true
-                        ? "loot owns input"
-                    : !GameMemoryService.IsMobTargetId(targetId) || targetId != _attackRetryTargetId
-                        ? "target lost or changed" : null;
+
+                // The one-second retry may never restart an attack on a target that is not a
+                // confirmed monster (e.g. the player that TAB selected next). The current target
+                // is validated even when it changed since the key was pressed.
+                CombatTargetValidation validation = targetId > 0 ? _targetSafety.Validate() : default;
+                bool targetRejected = targetId > 0 && !validation.AttackAllowed;
+
+                string? cancelReason = null;
+                if (token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
+                    cancelReason = "stop or cancellation";
+                else if (!_isSkillThreeHeld)
+                    cancelReason = "attack input released";
+                else if (_isUnstuckRoutineActive)
+                    cancelReason = "unstuck active";
+                else if (IsMobGroupingSequenceActive)
+                    cancelReason = "grouping owns movement";
+                else if (LootSystemRef?.IsCollecting == true || LootSystemRef?.IsPinkScanPendingOrActive == true)
+                    cancelReason = "loot owns input";
+                else if (targetRejected)
+                    cancelReason = $"target not attackable ({validation.Kind}: {validation.Source})";
+                else if (!GameMemoryService.IsMobTargetId(targetId) || targetId != _attackRetryTargetId)
+                    cancelReason = "target lost or changed";
+
                 if (cancelReason != null)
                 {
                     CancelAttackKeyRetry(cancelReason);
+                    if (targetRejected)
+                        ReleaseSkillThree();
                     return;
                 }
 
@@ -6119,6 +6246,85 @@ namespace DriverScanTester.Services
                 SendSkillThreeKeyEvent(keyUp: true);
                 _isSkillThreeHeld = false;
             }
+        }
+
+        /// <summary>
+        /// Central reaction to a target that is not a confirmed monster (player, NPC,
+        /// invalid or unknown/unreadable). Releases the attack key immediately, cancels the
+        /// pending one-second retry, invalidates the combat context and - for a confirmed
+        /// other player - runs the project's existing other-player response. Idempotent.
+        /// </summary>
+        private void HandleRejectedCombatTarget(CombatTargetValidation validation)
+        {
+            bool attackWasHeld = _isSkillThreeHeld;
+
+            ReleaseSkillThree();
+            CancelAttackKeyRetry($"target rejected ({validation.Kind})");
+            _combatHandler.ResetState();
+            CancelMobGrouping("combat target rejected");
+            _resumeCombatSkillAfterGrouping = false;
+            ClearCombatRetargetSearch();
+
+            if (attackWasHeld)
+            {
+                _log($"[CombatSafety] AttackInterrupted TargetId={validation.TargetId} " +
+                     $"Reason={validation.Kind} Source={validation.Source}.");
+            }
+
+            if (validation.Kind == TargetEntityKind.OtherPlayer &&
+                validation.PlayerMarker is { } candidate &&
+                _reportedPlayerTargetId != validation.TargetId)
+            {
+                // Existing project response to a confirmed other player on screen: stop the
+                // EXP loop and return to town (LootSystem owns the stop-on-player policy).
+                // Reported once per rejected player target — this method runs on every combat
+                // tick while the same target stays selected.
+                _reportedPlayerTargetId = validation.TargetId;
+                try
+                {
+                    LootSystemRef?.ReportImmediateOtherPlayerMarker(candidate, "Combat target safety");
+                }
+                catch (Exception ex)
+                {
+                    _log($"[CombatSafety] Other-player response failed: {ex.Message}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Bounded target-cycle policy for a rejected target. TAB is never pressed endlessly
+        /// on the same forbidden target: after
+        /// <see cref="BotConstants.CombatSafety.MaxTargetCycleAttemptsForRejectedTarget"/> the
+        /// bot waits for the selection to change, and only restores the budget after
+        /// <see cref="BotConstants.CombatSafety.RejectedTargetTabCooldownMs"/>.
+        /// </summary>
+        private bool ShouldCycleTargetAwayFromRejectedTarget(int targetId)
+        {
+            DateTime now = DateTime.UtcNow;
+            if (_rejectedTargetId != targetId ||
+                _rejectedTargetFirstSeenAt == DateTime.MinValue ||
+                (now - _rejectedTargetFirstSeenAt).TotalMilliseconds >
+                    BotConstants.CombatSafety.RejectedTargetTabCooldownMs)
+            {
+                _rejectedTargetId = targetId;
+                _rejectedTargetFirstSeenAt = now;
+                _rejectedTargetTabCount = 0;
+                _rejectedTargetTabLimitLogged = false;
+            }
+
+            if (_rejectedTargetTabCount < BotConstants.CombatSafety.MaxTargetCycleAttemptsForRejectedTarget)
+            {
+                _rejectedTargetTabCount++;
+                return true;
+            }
+
+            if (!_rejectedTargetTabLimitLogged)
+            {
+                _rejectedTargetTabLimitLogged = true;
+                _log($"[CombatSafety] Target-cycle budget used for rejected TargetId={targetId} — " +
+                     "no further TAB until the selection changes (avoids an endless TAB/unknown loop).");
+            }
+            return false;
         }
 
         protected virtual void SendSkillThreeKeyEvent(bool keyUp)

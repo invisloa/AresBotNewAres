@@ -238,11 +238,137 @@ namespace DriverScanTester
             public const short DefaultAttackDisengageDistance = 60;
 
             /// <summary>
-            /// Maximum target ID value considered a valid mob/NPC.
-            /// Values above this threshold are player characters and should be skipped.
-            /// Ported from AresTrainerV3_oldBot (isMobSelected &lt; 8300000 = mob, > 8300000 = player).
+            /// Legacy mob/player ID boundary ported from AresTrainerV3_oldBot
+            /// (isMobSelected &lt; 8300000 = mob, > 8300000 = player).
+            ///
+            /// An ID ABOVE this value is a confirmed player (it may only ever BLOCK an attack).
+            /// An ID BELOW it is NOT proof of a monster: on 2026-10-29 another player was
+            /// selected with TargetId=718 and the bot attacked them. Attack permission
+            /// therefore always requires the independent other-player marker check in
+            /// <see cref="Services.CombatTargetSafety"/>; the ID range alone never authorizes.
             /// </summary>
             public const int MaxMobTargetId = 8300000;
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  COMBAT TARGET SAFETY — other-player detection before every attack
+        // ════════════════════════════════════════════════════════════════
+        public static class CombatSafety
+        {
+            /// <summary>
+            /// Minimum interval (ms) between two screen captures of the combat-time
+            /// other-player marker scan. The last answer is reused inside this window so
+            /// the attack loop does not capture a frame on every tick.
+            /// </summary>
+            public const int PlayerScanIntervalMs = 900;
+
+            /// <summary>
+            /// Maximum age (ms) of an other-player scan answer that may authorize an attack.
+            /// Older evidence is reported as unknown and blocks the attack until revalidated.
+            /// </summary>
+            public const int PlayerScanMaxAgeMs = 3000;
+
+            /// <summary>
+            /// Ratio of the client width of the local character anchor used by the combat-time
+            /// faction-marker scan. The character stands at the horizontal centre of the view.
+            /// </summary>
+            public const float LocalCharacterAnchorRatioX = 0.5f;
+
+            /// <summary>
+            /// Ratio of the client height of the local character anchor (slightly below the
+            /// vertical centre, matching the existing loot character-exclusion centre).
+            /// </summary>
+            public const float LocalCharacterAnchorRatioY = 0.52f;
+
+            /// <summary>
+            /// Radius (px at the 840 px reference client height) around the character anchor in
+            /// which a faction marker is treated as the LOCAL player's own marker and ignored.
+            /// Deliberately much smaller than the legacy loot exclusion rectangle (160x170 px):
+            /// that rectangle hid the marker of the other player standing next to the character
+            /// on 2026-10-29 (marker centre ~89 px from the character, nearest marker pixel
+            /// ~57 px), which is exactly how TargetId=718 was attacked.
+            /// </summary>
+            public const float LocalCharacterMarkerExclusionRadiusPx = 56f;
+
+            /// <summary>
+            /// How many consecutive TAB presses may be spent cycling away from the same
+            /// rejected (player/unknown) target before the bot stops pressing TAB and simply
+            /// waits for the selection to change.
+            /// </summary>
+            public const int MaxTargetCycleAttemptsForRejectedTarget = 2;
+
+            /// <summary>
+            /// After this many milliseconds the rejected-target TAB budget is restored, so a
+            /// player that walked away cannot block target selection forever.
+            /// </summary>
+            public const int RejectedTargetTabCooldownMs = 4000;
+
+            // ── Class-emblem player marker (combat safety only) ──
+            // On 2026-10-29 the other player ("Gissel", Alliance) was rendered with a large
+            // green class emblem above the character (a shield/flag silhouette), NOT with the
+            // plain triangular ground faction marker the loot detector was tuned for. The
+            // strict shape validation therefore rejected it and the bot attacked the player.
+            // The combat-time scan additionally accepts these verified class emblems; the loot
+            // scan keeps its original strict behavior unchanged.
+
+            /// <summary>Minimum emblem height (px at the 840 px reference client height).</summary>
+            public const float EmblemMinimumHeightPx = 26f;
+
+            /// <summary>Minimum emblem width (px at the 840 px reference client height).</summary>
+            public const float EmblemMinimumWidthPx = 22f;
+
+            /// <summary>Minimum emblem pixel count (at the 840 px reference client height).</summary>
+            public const float EmblemMinimumPixels = 300f;
+
+            /// <summary>Minimum filled fraction of the emblem's bounding box.</summary>
+            public const float EmblemMinimumFillRatio = 0.30f;
+
+            /// <summary>Maximum width/height aspect ratio of an emblem (perspective tolerant).</summary>
+            public const float EmblemMaximumAspectRatio = 2.4f;
+
+            /// <summary>
+            /// Minimum filled fraction of the emblem's lower half. The verified emblem has a
+            /// solid shield body there; hollow/ring-shaped UI glyphs stay rejected.
+            /// </summary>
+            public const float EmblemMinimumLowerHalfFillRatio = 0.30f;
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  DEATH RECOVERY — recoverable character death, no global shutdown
+        // ════════════════════════════════════════════════════════════════
+        public static class DeathRecovery
+        {
+            /// <summary>
+            /// How long the workflow stays in the death recovery state before it teleports to
+            /// town and restarts the whole profile (5 minutes).
+            /// </summary>
+            public const int WaitMs = 300_000;
+
+            /// <summary>Poll interval (ms) used while waiting for the character to be revived.</summary>
+            public const int RevivalPollMs = 2_000;
+
+            /// <summary>
+            /// Number of bounded recheck rounds after the main wait when the character is still
+            /// dead. Each round waits <see cref="RevivalRecheckWaitMs"/>, then re-reads HP.
+            /// </summary>
+            public const int MaxRevivalRecheckRounds = 5;
+
+            /// <summary>Additional wait (ms) per revival recheck round.</summary>
+            public const int RevivalRecheckWaitMs = 60_000;
+
+            /// <summary>
+            /// Number of additional full waits performed (logged once each) while the game still
+            /// reports a dead character after the recheck rounds. The workflow stays alive in the
+            /// death recovery state — it never teleports, never restarts the profile and never
+            /// starts combat while HP is zero.
+            /// </summary>
+            public const int MaxAdditionalDeathWaits = 3;
+
+            /// <summary>Attempts to perform and verify the town teleport during recovery.</summary>
+            public const int TownTeleportAttempts = 3;
+
+            /// <summary>Delay (ms) between two town-teleport verification attempts.</summary>
+            public const int TownTeleportRetryDelayMs = 2_000;
         }
 
         // ════════════════════════════════════════════════════════════════

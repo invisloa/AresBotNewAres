@@ -374,6 +374,36 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// Writes camera yaw only while no external camera operation owns the view. The
+        /// write shares the ownership lock with external-camera acquisition, so a movement
+        /// update that began before an NPC scan either completes before the scan takes its
+        /// lease or is rejected after that lease is acquired.
+        /// </summary>
+        public bool TrySetCameraAngle(float radians)
+        {
+            lock (_gate)
+            {
+                if (!IsCurrentGeneration() || _closing || _ended || _externalCameraOwners.Count != 0)
+                    return false;
+
+                _memory.SetCameraAngle(radians);
+                return true;
+            }
+        }
+
+        /// <summary>Writes an exact raw camera-yaw bit pattern under the same ownership gate.</summary>
+        public bool TrySetCameraAngleBits(int angleBits)
+        {
+            lock (_gate)
+            {
+                if (!IsCurrentGeneration() || _closing || _ended || _externalCameraOwners.Count != 0)
+                    return false;
+
+                return _memory.TrySetCameraAngleBits(angleBits);
+            }
+        }
+
+        /// <summary>
         /// Releases a protected camera operation. <paramref name="restoreStationary"/>
         /// is authoritative: true requests stationary restoration after the operation
         /// ends, false suppresses restoration for operations that restore their own

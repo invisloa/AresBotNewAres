@@ -70,6 +70,23 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void TrySetCameraAngleBitsRoundTripsTheExactRawYawAndFailsWithoutCameraPointer()
+        {
+            var memory = new MemoryFixture();
+            memory.Set(ModuleBase + BotConstants.MemoryOffsets.CameraPtr, BitConverter.GetBytes(CameraBase));
+            GameMemoryService service = memory.CreateService();
+            int expectedBits = BitConverter.SingleToInt32Bits(1.2345f);
+
+            Assert.True(service.TrySetCameraAngleBits(expectedBits));
+            Assert.True(service.TryGetCameraAngleBits(out int actualBits));
+            Assert.Equal(expectedBits, actualBits);
+
+            GameMemoryService noCamera = new MemoryFixture().CreateService();
+            Assert.False(noCamera.TryGetCameraAngleBits(out _));
+            Assert.False(noCamera.TrySetCameraAngleBits(expectedBits));
+        }
+
+        [Fact]
         public void TrySetSodSopLootScanViewUses17050Distance()
         {
             var memory = new MemoryFixture();

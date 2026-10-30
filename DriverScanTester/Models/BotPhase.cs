@@ -26,6 +26,13 @@ namespace DriverScanTester.Models
         /// <summary>Bot detected that repot is needed; will teleport to city.</summary>
         NeedRepot,
 
+        /// <summary>
+        /// A confirmed character death is being recovered: inputs are released, the workflow
+        /// waits the configured death delay and then restarts the whole active profile. This is
+        /// a recoverable workflow state — it never stops the coordinator.
+        /// </summary>
+        DeathRecovery,
+
         /// <summary>Bot is stopping due to user request.</summary>
         Stopping,
 

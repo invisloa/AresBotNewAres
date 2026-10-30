@@ -1772,7 +1772,8 @@ namespace DriverScanTester.Tests
         private sealed class RecordingMovementSystem : MovementSystem
         {
             public RecordingMovementSystem(GameMemoryService memory, Action<string> log, IEnumerable<Waypoint> path)
-                : base(memory, log, 0, 0, customPath: path)
+                : base(memory, log, 0, 0, customPath: path,
+                    targetSafety: CombatSafetyFixtures.Monster(5000))
             {
             }
 

@@ -5,7 +5,7 @@ using System.Runtime.InteropServices;
 
 namespace DriverScanTester.Services
 {
-    internal readonly record struct PlayerMarkerCandidate(
+    public readonly record struct PlayerMarkerCandidate(
         string Faction,
         Rectangle Bounds,
         int PixelCount,
@@ -56,6 +56,31 @@ namespace DriverScanTester.Services
             Bitmap bitmap,
             Rectangle lootCharacterExclusionArea,
             out PlayerMarkerCandidate candidate)
+            => TryFindOtherPlayerMarker(
+                bitmap, lootCharacterExclusionArea,
+                localCharacterAnchor: null, localCharacterExclusionRadius: 0f,
+                allowClassEmblems: false,
+                out candidate);
+
+        /// <summary>
+        /// Returns true when a shape-valid faction marker is present outside the configured
+        /// loot exclusion rectangle, the known HUD regions and the LOCAL player's own marker
+        /// radius.
+        ///
+        /// The extra anchor/radius parameters exist because the legacy loot exclusion rectangle
+        /// is deliberately large (160x170 px): it hides the faction marker of another player
+        /// standing next to the character, which is exactly how the bot attacked a player on
+        /// 2026-10-29. Combat-time safety checks pass a compact radius around the character
+        /// instead of the whole loot rectangle, so a nearby other player is still detected while
+        /// the local player's own marker stays ignored.
+        /// </summary>
+        public bool TryFindOtherPlayerMarker(
+            Bitmap bitmap,
+            Rectangle lootCharacterExclusionArea,
+            PointF? localCharacterAnchor,
+            float localCharacterExclusionRadius,
+            bool allowClassEmblems,
+            out PlayerMarkerCandidate candidate)
         {
             candidate = default;
             if (bitmap == null || bitmap.Width <= 0 || bitmap.Height <= 0)
@@ -102,7 +127,10 @@ namespace DriverScanTester.Services
                 }
 
                 return TryFindOtherMarkerComponent(
-                    width, height, lootCharacterExclusionArea, out candidate);
+                    width, height, lootCharacterExclusionArea,
+                    localCharacterAnchor, localCharacterExclusionRadius,
+                    allowClassEmblems,
+                    out candidate);
             }
             finally
             {
@@ -113,6 +141,28 @@ namespace DriverScanTester.Services
                 }
                 converted?.Dispose();
             }
+        }
+
+        /// <summary>
+        /// Local character screen anchor used by the combat-time marker scan: horizontal
+        /// centre, slightly below the vertical centre (the same centre the legacy loot
+        /// exclusion rectangle uses).
+        /// </summary>
+        internal static PointF GetCombatLocalCharacterAnchor(int clientWidth, int clientHeight)
+            => new(
+                clientWidth * BotConstants.CombatSafety.LocalCharacterAnchorRatioX,
+                clientHeight * BotConstants.CombatSafety.LocalCharacterAnchorRatioY);
+
+        /// <summary>
+        /// Radius (px) around the local character that is treated as the local player's own
+        /// faction marker, scaled from the 840 px reference client height.
+        /// </summary>
+        internal static float GetCombatLocalCharacterExclusionRadius(int clientHeight)
+        {
+            if (clientHeight <= 0)
+                return 0f;
+            float scale = clientHeight / (float)BotConstants.MobGrouping.ReferenceClientHeightPx;
+            return BotConstants.CombatSafety.LocalCharacterMarkerExclusionRadiusPx * scale;
         }
 
         internal static byte ClassifyPlayerMarkerPixel(int r, int g, int b)
@@ -186,6 +236,9 @@ namespace DriverScanTester.Services
             int width,
             int height,
             Rectangle lootCharacterExclusionArea,
+            PointF? localCharacterAnchor,
+            float localCharacterExclusionRadius,
+            bool allowClassEmblems,
             out PlayerMarkerCandidate candidate)
         {
             candidate = default;
@@ -265,6 +318,20 @@ namespace DriverScanTester.Services
                     IntersectsAny(componentBounds, hudExclusionAreas))
                     continue;
 
+                float centerX = sumX / (float)count;
+                float centerY = sumY / (float)count;
+
+                // The compact combat-time radius ignores the local player's own marker while
+                // keeping another player's marker visible right next to the character.
+                if (localCharacterAnchor.HasValue && localCharacterExclusionRadius > 0f)
+                {
+                    PointF anchor = localCharacterAnchor.Value;
+                    float dx = centerX - anchor.X;
+                    float dy = centerY - anchor.Y;
+                    if ((dx * dx) + (dy * dy) <= localCharacterExclusionRadius * localCharacterExclusionRadius)
+                        continue;
+                }
+
                 int componentWidth = componentBounds.Width;
                 int componentHeight = componentBounds.Height;
                 int largestDimension = Math.Max(componentWidth, componentHeight);
@@ -286,15 +353,21 @@ namespace DriverScanTester.Services
                 // Keep square-like Empire components spatially supported in both axes;
                 // Alliance markers must have a triangular, widening silhouette. This
                 // rejects compact colored UI glyphs that pass color/size tests alone.
-                if (markerKind == EmpireMarker &&
-                    !HasDenseProjection(_queue, tail, width, componentBounds))
+                //
+                // Combat-time safety (allowClassEmblems) additionally accepts the verified
+                // player CLASS EMBLEM: a large, solid, faction-colored shield/flag silhouette
+                // rendered above another player's character. The 2026-10-29 incident player
+                // was rendered exactly like that, and the plain ground-marker shape checks
+                // rejected it. The loot scan does not enable this, so its behavior is unchanged.
+                bool passesStrictShape =
+                    (markerKind == EmpireMarker && HasDenseProjection(_queue, tail, width, componentBounds)) ||
+                    (markerKind == AllianceMarker && HasTriangleProfile(_queue, tail, width, componentBounds));
+                if (!passesStrictShape &&
+                    !(allowClassEmblems &&
+                      IsClassEmblemProfile(
+                          _queue, tail, width,
+                          componentBounds, count, fillRatio, aspectRatio, height)))
                     continue;
-                if (markerKind == AllianceMarker &&
-                    !HasTriangleProfile(_queue, tail, width, componentBounds))
-                    continue;
-
-                float centerX = sumX / (float)count;
-                float centerY = sumY / (float)count;
 
                 candidate = new PlayerMarkerCandidate(
                     markerKind == EmpireMarker ? "Empire/yellow" : "Alliance/green",
@@ -307,6 +380,52 @@ namespace DriverScanTester.Services
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// Verified player class-emblem silhouette check used ONLY by the combat-time safety
+        /// scan. Accepts a large, solid, faction-colored emblem (wide upper body with a solid
+        /// tapering lower half) while still rejecting hollow glyphs and thin UI noise.
+        /// </summary>
+        private static bool IsClassEmblemProfile(
+            int[] componentPixels,
+            int componentPixelCount,
+            int frameWidth,
+            Rectangle bounds,
+            int pixelCount,
+            float fillRatio,
+            float aspectRatio,
+            int frameHeight)
+        {
+            float scale = frameHeight / BotConstants.MobGrouping.ReferenceClientHeightPx;
+            float minimumHeight = BotConstants.CombatSafety.EmblemMinimumHeightPx * scale;
+            float minimumWidth = BotConstants.CombatSafety.EmblemMinimumWidthPx * scale;
+            float minimumPixels = BotConstants.CombatSafety.EmblemMinimumPixels * scale * scale;
+
+            if (bounds.Height < minimumHeight || bounds.Width < minimumWidth)
+                return false;
+            if (pixelCount < minimumPixels)
+                return false;
+            if (fillRatio < BotConstants.CombatSafety.EmblemMinimumFillRatio)
+                return false;
+            if (aspectRatio > BotConstants.CombatSafety.EmblemMaximumAspectRatio)
+                return false;
+
+            int lowerHalfTop = bounds.Top + (bounds.Height / 2);
+            int lowerHalfHeight = bounds.Bottom - lowerHalfTop;
+            if (lowerHalfHeight <= 0)
+                return false;
+
+            int lowerHalfPixels = 0;
+            for (int i = 0; i < componentPixelCount; i++)
+            {
+                int y = (componentPixels[i] / frameWidth) - lowerHalfTop;
+                if (y >= 0)
+                    lowerHalfPixels++;
+            }
+
+            float lowerHalfFill = lowerHalfPixels / (float)(bounds.Width * lowerHalfHeight);
+            return lowerHalfFill >= BotConstants.CombatSafety.EmblemMinimumLowerHalfFillRatio;
         }
 
         private static bool IntersectsAny(Rectangle bounds, Rectangle[] exclusionAreas)

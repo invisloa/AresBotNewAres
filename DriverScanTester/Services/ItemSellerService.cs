@@ -30,6 +30,7 @@ namespace DriverScanTester.Services
         private readonly Action<string> _log;
         private readonly WKeyCameraController? _wKeyCameraController;
         private int _howManyTries;
+        private bool _sellerScanYawRestoreWarningLogged;
 
         /// <summary>
         /// Screen coordinates of the most recent NPC right-click performed by
@@ -115,7 +116,8 @@ namespace DriverScanTester.Services
 
             try
             {
-                SetSellCameraView();
+                if (!SetSellCameraView())
+                    return false;
 
                 if (_memory.IsShopOpen())
                 {
@@ -146,7 +148,7 @@ namespace DriverScanTester.Services
         /// found and right-clicked (or the dialog is already open).
         /// </summary>
         /// <param name="maxFullScans">
-        /// How many full window sweeps to attempt before giving up. Defaults to
+        /// How many sweeps of the camera-safe client interior to attempt before giving up. Defaults to
         /// <see cref="SellerMaxFullScans"/>; pass 1 to make exactly one full scan
         /// (used by the COT entry operations — no NPC found after one sweep = fail).
         /// </param>
@@ -159,7 +161,8 @@ namespace DriverScanTester.Services
 
             try
             {
-                SetSellCameraView();
+                if (!SetSellCameraView())
+                    return false;
 
                 if (_memory.IsShopOpen())
                 {
@@ -208,7 +211,11 @@ namespace DriverScanTester.Services
             //    S_IsSellerPointed == 143850200 and right-click when found.
             // 4. If after 5 full scans no seller mouseover is detected, take a
             //    screenshot and stop gracefully — do not run the old sell logic.
-            SetSellCameraView();
+            if (!SetSellCameraView())
+            {
+                _log("ItemSeller: Verified seller camera view could not be established. Skipping sell.");
+                return;
+            }
 
             if (!_memory.IsShopOpen())
             {
@@ -1194,6 +1201,19 @@ namespace DriverScanTester.Services
         /// scan stays fast. If the NPC is ever missed, raise this value.</summary>
         private const int SellerScanPointDelayMs = 4;
 
+        /// <summary>
+        /// Keep scan points away from the game-client boundary: Ares can rotate the
+        /// camera when the cursor is parked against an edge. This small exclusion band
+        /// prevents the scan itself from changing the view while still covering nearly
+        /// the entire client.
+        /// </summary>
+        private const int SellerScanCameraEdgeGuardPx = 24;
+
+        private const int SellerCameraSetupAttempts = 3;
+        private const int SellerCameraSetupRetryDelayMs = 50;
+        private const int SellerCameraSettleDelayMs = 250;
+        private const int SellerScanYawCheckIntervalPoints = 32;
+
         private bool TryAcquireSellerCamera(out object? owner)
         {
             owner = null;
@@ -1218,21 +1238,48 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Applies the known temporary sell view: distance 16720 and vertical 16160.
-        /// The caller holds the shared external camera lease so no W input can overlap
-        /// this seller-specific calibration; releasing that lease restores stationary view.
+        /// Applies the calibrated seller view (distance 16720, vertical lock 16160),
+        /// verifies both values after the game has had time to settle, and fails closed
+        /// instead of starting a scan with an unknown camera. The caller holds the shared
+        /// external camera lease so bot movement cannot overwrite this view; releasing the
+        /// lease restores the stationary vertical lock.
         /// </summary>
-        private void SetSellCameraView()
+        private bool SetSellCameraView()
         {
-            const short sellCameraDistance = BotConstants.Camera.SellerDistanceLock;
-
+            short sellCameraDistance = BotConstants.Camera.SellerDistanceLock;
             short sellVerticalLock = BotConstants.Camera.SellerVerticalLock;
-            _log($"ItemSeller: Setting sell-view camera (distance={sellCameraDistance}, vertical={sellVerticalLock}).");
-            _memory.SetCameraDistance(sellCameraDistance);
-            if (!_memory.TryGetCameraVerticalLock(out short currentVerticalLock) ||
-                currentVerticalLock != sellVerticalLock)
-                _memory.SetCameraVerticalLock(sellVerticalLock);
+            _log($"ItemSeller: Setting seller top-down view (distance={sellCameraDistance}, vertical lock={sellVerticalLock}).");
+
+            for (int attempt = 1; attempt <= SellerCameraSetupAttempts; attempt++)
+            {
+                if (!_memory.TryGetCameraDistance(out short currentDistance) || currentDistance != sellCameraDistance)
+                    _memory.TrySetCameraDistance(sellCameraDistance);
+
+                if (!_memory.TryGetCameraVerticalLock(out short currentVerticalLock) || currentVerticalLock != sellVerticalLock)
+                    _memory.TrySetCameraVerticalLock(sellVerticalLock);
+
+                if (IsSellCameraViewVerified(sellCameraDistance, sellVerticalLock))
+                {
+                    Thread.Sleep(SellerCameraSettleDelayMs);
+                    if (IsSellCameraViewVerified(sellCameraDistance, sellVerticalLock))
+                    {
+                        _log($"ItemSeller: Seller camera verified and settled (attempt {attempt}/{SellerCameraSetupAttempts}).");
+                        return true;
+                    }
+                }
+
+                _log($"ItemSeller: Seller camera verification failed (attempt {attempt}/{SellerCameraSetupAttempts}); retrying.");
+                if (attempt < SellerCameraSetupAttempts)
+                    Thread.Sleep(SellerCameraSetupRetryDelayMs);
+            }
+
+            _log($"ItemSeller: ERROR — seller camera could not be verified at distance={sellCameraDistance}, vertical lock={sellVerticalLock}; scan aborted.");
+            return false;
         }
+
+        private bool IsSellCameraViewVerified(short expectedDistance, short expectedVerticalLock)
+            => _memory.TryGetCameraDistance(out short actualDistance) && actualDistance == expectedDistance &&
+               _memory.TryGetCameraVerticalLock(out short actualVerticalLock) && actualVerticalLock == expectedVerticalLock;
 
         /// <summary>
         /// Reads the seller-mouseover int at <c>[Ares.exe + 0x4853E8] + 0xC</c>.
@@ -1248,7 +1295,7 @@ namespace DriverScanTester.Services
         /// game window outward in a square spiral, looking for
         /// <see cref="SellerPointedValue"/> from S_IsSellerPointed. When the value is
         /// observed, the mouse is right-clicked and the existing IsShopOpen() check is
-        /// re-evaluated. Up to <see cref="SellerMaxFullScans"/> full window sweeps are
+        /// re-evaluated. Up to <see cref="SellerMaxFullScans"/> camera-safe client sweeps are
         /// attempted. Returns true when IsShopOpen() becomes true at any point.
         ///
         /// Before each full scan starts, the foreground window is checked: when the
@@ -1256,10 +1303,39 @@ namespace DriverScanTester.Services
         /// e.g. to read the log), a <see cref="BotStopRequestedException"/> is thrown
         /// so the workflow stops the bot instead of continuing the sweep.
         ///
-        /// All scan points use the actual game-window client rectangle so this works
-        /// regardless of window position or resolution.
+        /// Scan points use the actual client rectangle and stay outside the edge band
+        /// that can rotate the camera, regardless of window position or resolution.
         /// </summary>
         private bool TryOpenSellerDialogByScanning(bool clickShopOption = true, int maxFullScans = SellerMaxFullScans)
+        {
+            int? stableCameraAngleBits = null;
+            if (_memory.TryGetCameraAngleBits(out int cameraAngleBits) &&
+                float.IsFinite(BitConverter.Int32BitsToSingle(cameraAngleBits)))
+            {
+                stableCameraAngleBits = cameraAngleBits;
+                _log($"ItemSeller: Preserving scan camera yaw (raw=0x{cameraAngleBits:X8}).");
+            }
+            else
+            {
+                _log("ItemSeller: WARNING — camera yaw could not be read; scan will continue without yaw-lock verification.");
+            }
+
+            _sellerScanYawRestoreWarningLogged = false;
+            try
+            {
+                return TryOpenSellerDialogByScanningCore(clickShopOption, maxFullScans, stableCameraAngleBits);
+            }
+            finally
+            {
+                if (stableCameraAngleBits.HasValue)
+                    RestoreSellerScanYaw(stableCameraAngleBits.Value);
+            }
+        }
+
+        private bool TryOpenSellerDialogByScanningCore(
+            bool clickShopOption,
+            int maxFullScans,
+            int? stableCameraAngleBits)
         {
             if (_memory.IsShopOpen())
             {
@@ -1278,7 +1354,7 @@ namespace DriverScanTester.Services
             int step = Math.Max(1, SellerScanStepPx);
             int maxRadius = Math.Max(clientWidth, clientHeight); // spiral upper bound
 
-            _log($"ItemSeller: Starting seller mouseover scan. client=({clientOriginX},{clientOriginY}) size=({clientWidth}x{clientHeight}), step={step}px, maxFullScans={maxFullScans}.");
+            _log($"ItemSeller: Starting seller mouseover scan. client=({clientOriginX},{clientOriginY}) size=({clientWidth}x{clientHeight}), step={step}px, edgeGuard={SellerScanCameraEdgeGuardPx}px, maxFullScans={maxFullScans}.");
 
             for (int scanIndex = 0; scanIndex < maxFullScans; scanIndex++)
             {
@@ -1301,7 +1377,7 @@ namespace DriverScanTester.Services
                 _log($"ItemSeller: Seller scan #{scanIndex + 1}/{maxFullScans} — center-outward spiral.");
 
                 // Square spiral: start at center, then expand outward in concentric squares.
-                // A square spiral guarantees we cover the whole window when radius >= max dim.
+                // The scan-point guard below limits physical cursor moves to the safe client interior.
                 // We sample on a step grid along the spiral path.
                 int pointsThisScan = 0;
                 bool sellerDetectedThisScan = false;
@@ -1310,7 +1386,7 @@ namespace DriverScanTester.Services
                 if (ScanSellerAtClientPoint(centerClientX, centerClientY,
                                             clientOriginX, clientOriginY,
                                             clientWidth, clientHeight,
-                                            scanIndex, pointsThisScan++, clickShopOption))
+                                            scanIndex, pointsThisScan++, stableCameraAngleBits, clickShopOption))
                     return true;
 
                 for (int radius = step; radius <= maxRadius && !sellerDetectedThisScan; radius += step)
@@ -1321,7 +1397,7 @@ namespace DriverScanTester.Services
                         if (ScanSellerAtClientPoint(centerClientX + dx, centerClientY - radius,
                                                     clientOriginX, clientOriginY,
                                                     clientWidth, clientHeight,
-                                                    scanIndex, pointsThisScan++, clickShopOption))
+                                                    scanIndex, pointsThisScan++, stableCameraAngleBits, clickShopOption))
                             return true;
                     }
                     // Right edge: from -radius+step to +radius-step
@@ -1330,7 +1406,7 @@ namespace DriverScanTester.Services
                         if (ScanSellerAtClientPoint(centerClientX + radius, centerClientY + dy,
                                                     clientOriginX, clientOriginY,
                                                     clientWidth, clientHeight,
-                                                    scanIndex, pointsThisScan++, clickShopOption))
+                                                    scanIndex, pointsThisScan++, stableCameraAngleBits, clickShopOption))
                             return true;
                     }
                     // Bottom edge: from +radius-step down to -radius
@@ -1339,7 +1415,7 @@ namespace DriverScanTester.Services
                         if (ScanSellerAtClientPoint(centerClientX + dx, centerClientY + radius,
                                                     clientOriginX, clientOriginY,
                                                     clientWidth, clientHeight,
-                                                    scanIndex, pointsThisScan++, clickShopOption))
+                                                    scanIndex, pointsThisScan++, stableCameraAngleBits, clickShopOption))
                             return true;
                     }
                     // Left edge: from +radius-step up to -radius+step
@@ -1348,7 +1424,7 @@ namespace DriverScanTester.Services
                         if (ScanSellerAtClientPoint(centerClientX - radius, centerClientY + dy,
                                                     clientOriginX, clientOriginY,
                                                     clientWidth, clientHeight,
-                                                    scanIndex, pointsThisScan++, clickShopOption))
+                                                    scanIndex, pointsThisScan++, stableCameraAngleBits, clickShopOption))
                             return true;
                     }
                 }
@@ -1360,23 +1436,53 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Moves the mouse to one client-coordinate point, waits, reads
-        /// S_IsSellerPointed, and — if the seller is detected — right-clicks, then
-        /// clicks the "Shop" option in the seller context-menu dialog exactly like
-        /// the pre-refactor <c>OpenShopWindow()</c> did, and finally checks whether
-        /// the shop window actually opened. Returns true once the shop is open and
-        /// the scan should stop.
+        /// Returns whether a client point stays inside the scan area, away from the edges
+        /// that can rotate the game camera.
+        /// </summary>
+        internal static bool IsSellerScanPointWithinSafeArea(
+            int clientX, int clientY, int clientWidth, int clientHeight)
+        {
+            if (clientWidth <= 0 || clientHeight <= 0)
+                return false;
+
+            int edgeGuard = Math.Min(
+                SellerScanCameraEdgeGuardPx,
+                Math.Max(0, Math.Min(clientWidth, clientHeight) / 2 - 1));
+            return clientX >= edgeGuard && clientY >= edgeGuard &&
+                   clientX < clientWidth - edgeGuard &&
+                   clientY < clientHeight - edgeGuard;
+        }
+
+        /// <summary>
+        /// Moves the mouse to one safe client-coordinate point, waits for the mouseover
+        /// value, then right-clicks a detected NPC and optionally opens its Shop option.
+        /// Returns true when the requested dialog/shop has opened and the scan should stop.
         /// </summary>
         private bool ScanSellerAtClientPoint(int clientX, int clientY,
                                              int clientOriginX, int clientOriginY,
                                              int clientWidth, int clientHeight,
                                              int scanIndex, int pointIndex,
+                                             int? stableCameraAngleBits,
                                              bool clickShopOption)
         {
-            // Skip points outside the game window — the scan must not move the mouse
-            // beyond the actual game client rectangle.
-            if (clientX < 0 || clientY < 0 || clientX >= clientWidth || clientY >= clientHeight)
+            // Skip points outside the client and the edge band where Ares can rotate
+            // the view in response to the cursor. This avoids camera movement caused by
+            // the scan itself while still sampling almost the whole game area.
+            if (!IsSellerScanPointWithinSafeArea(clientX, clientY, clientWidth, clientHeight))
                 return false;
+
+            // Movement steering is also gated by the shared camera lease. This periodic
+            // readback catches any camera yaw changed by the game itself while the scan
+            // moves the cursor; restore the exact pre-scan angle before testing hover.
+            if (stableCameraAngleBits.HasValue && pointIndex % SellerScanYawCheckIntervalPoints == 0 &&
+                _memory.TryGetCameraAngleBits(out int currentAngleBits) &&
+                currentAngleBits != stableCameraAngleBits.Value &&
+                !_memory.TrySetCameraAngleBits(stableCameraAngleBits.Value) &&
+                !_sellerScanYawRestoreWarningLogged)
+            {
+                _sellerScanYawRestoreWarningLogged = true;
+                _log("ItemSeller: WARNING — camera yaw drifted during scan and could not be restored.");
+            }
 
             int screenX = clientOriginX + clientX;
             int screenY = clientOriginY + clientY;
@@ -1451,6 +1557,23 @@ namespace DriverScanTester.Services
 
             _log("ItemSeller: Right-click + Shop-option click sent but shop window did not open — continuing scan.");
             return false;
+        }
+
+        private void RestoreSellerScanYaw(int expectedAngleBits)
+        {
+            if (!_memory.TryGetCameraAngleBits(out int currentAngleBits))
+            {
+                _log("ItemSeller: WARNING — camera yaw could not be read back after scan; it may have changed.");
+                return;
+            }
+
+            if (currentAngleBits == expectedAngleBits)
+                return;
+
+            if (_memory.TrySetCameraAngleBits(expectedAngleBits))
+                _log($"ItemSeller: Restored camera yaw after scan (raw=0x{expectedAngleBits:X8}).");
+            else
+                _log("ItemSeller: WARNING — failed to restore the pre-scan camera yaw.");
         }
 
         /// <summary>

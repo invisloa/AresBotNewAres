@@ -43,7 +43,14 @@ namespace DriverScanTester.Services
         /// reposition: walk toward the next waypoint for a short time, then TAB and attack the
         /// (re-selected) target again.
         /// </summary>
-        RepositionAndRetry
+        RepositionAndRetry,
+
+        /// <summary>
+        /// The selected target is not a confirmed monster (other player, NPC, invalid or
+        /// unknown/unreadable). The caller must release the attack key, cancel any pending
+        /// attack retry, invalidate the combat context and never re-press 3 for this target.
+        /// </summary>
+        TargetRejected
     }
 
     /// <summary>
@@ -103,6 +110,9 @@ namespace DriverScanTester.Services
         private bool _externallySuspended;
         private DateTime _externalSuspensionStartedAt = DateTime.MinValue;
 
+        /// <summary>Last target id for which a player-target diagnostic screenshot was saved.</summary>
+        private int _playerScreenshotTargetId = int.MinValue;
+
         /// <summary>
         /// Minimum ms of continuous idle action (0/25/1) while a target is still selected
         /// before declaring the mob dead and TABbing. Prevents false triggers from brief
@@ -149,13 +159,19 @@ namespace DriverScanTester.Services
         /// <param name="isUnstuckActive">Whether the unstuck routine is currently active.</param>
         /// <param name="currX">Current player X (used by the mana+position stuck detection).</param>
         /// <param name="currY">Current player Y (used by the mana+position stuck detection).</param>
+        /// <param name="targetSafety">
+        /// Central target classifier/authorizer. When supplied, every attack decision uses it;
+        /// only a confirmed monster may be attacked. Null keeps the legacy caller decision (the
+        /// physical key press is still gated by MovementSystem.HoldSkillThree).
+        /// </param>
         /// <returns>A <see cref="CombatAction"/> describing what input to perform next.</returns>
         public CombatAction EvaluateCombatAction(
             GameMemoryService memoryService,
             BotMode currentMode,
             bool isUnstuckActive,
             float currX,
-            float currY)
+            float currY,
+            CombatTargetSafety? targetSafety = null)
         {
             if (_externallySuspended)
                 return CombatAction.None;
@@ -181,11 +197,41 @@ namespace DriverScanTester.Services
 
             if (targetId > 0)
             {
-                // ── Player character check: skip attacking other players ──
-                // Classify the exact target ID read above. Reading a second, separate
-                // pointer chain here could describe a different/stale target.
-                if (GameMemoryService.IsPlayerTargetId(targetId))
+                // ── Central target validation: only a confirmed monster may be attacked ──
+                // The legacy id boundary alone is NOT proof of a monster (a real player was
+                // selected with TargetId=718 on 2026-10-29). The independent other-player
+                // marker scan is mandatory, and an unreadable/stale answer means "unknown",
+                // which never authorizes an attack.
+                if (targetSafety != null)
                 {
+                    CombatTargetValidation validation = targetSafety.Validate();
+                    if (!validation.AttackAllowed)
+                    {
+                        if (validation.Kind == TargetEntityKind.OtherPlayer &&
+                            validation.PlayerMarker == null &&
+                            _playerScreenshotTargetId != targetId)
+                        {
+                            // Preserve the existing player-target diagnostic for the
+                            // player-id-domain case (the marker-based case is captured by
+                            // the presence scanner itself).
+                            _playerScreenshotTargetId = targetId;
+                            CapturePlayerScreenshot();
+                        }
+
+                        _wasAttacking = false;
+                        _combatIdleStartTime = DateTime.MinValue;
+                        _lastManaChangeAt = DateTime.MinValue;
+                        _lastCombatPosChangeAt = DateTime.MinValue;
+                        _lastManaValue = int.MinValue;
+                        _lastCombatPos = null;
+                        _movementProgressAnchor = null;
+                        _lastMovementProgressAt = DateTime.MinValue;
+                        return CombatAction.TargetRejected;
+                    }
+                }
+                else if (GameMemoryService.IsPlayerTargetId(targetId))
+                {
+                    // Legacy caller without the central safety service.
                     CapturePlayerScreenshot();
                     _log($"[Combat] Target ID {targetId} is a player character — skipping attack. TAB.");
                     _wasAttacking = false;

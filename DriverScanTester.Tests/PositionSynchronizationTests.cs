@@ -914,6 +914,131 @@ namespace DriverScanTester.Tests
         }
 
         /// <summary>
+        /// The town teleport can land on the SAME map, near the previous stuck location,
+        /// and the mandatory W refresh may only move a few tiles. The profile's town
+        /// baseline is the destination expectation, so this is NOT SourceNeighbourhood
+        /// staleness and must be accepted by the coordinator's TeleportToCity chain.
+        /// </summary>
+        [Fact]
+        public async Task SameMapTownTeleportToTheNearbySpawnIsValidatedAgainstTheTownDestination()
+        {
+            var memory = new SyncMemory { Map = 35, X = 333, Y = 144, InCity = false };
+            int nudges = 0;
+            var service = CreateService(memory, FastOptions(), _ =>
+            {
+                nudges++;
+                memory.X = 215;
+                memory.Y = 213;
+                return Task.CompletedTask;
+            }, out List<string> log);
+
+            var coordinator = CreateCoordinator(memory, service, log, _ =>
+            {
+                // Same-map town teleport to a position near the town spawn (214,212).
+                memory.InCity = true;
+                memory.Map = 35;
+                memory.X = 219;
+                memory.Y = 213;
+                return Task.FromResult(true);
+            }, profile =>
+            {
+                profile.EnableStartPositionCheck = true;
+                profile.ProtectionMapNumber = 35;
+                profile.StartPositionX = 214;
+                profile.StartPositionY = 212;
+            });
+
+            var task = (Task<bool>?)TeleportToCityMethod.Invoke(
+                coordinator, new object[] { CancellationToken.None });
+            Assert.NotNull(task);
+            bool ready = await task!;
+
+            Assert.True(ready, string.Join(Environment.NewLine, log));
+            Assert.Equal(1, nudges);
+            Assert.Contains(log, line =>
+                line.Contains("[Teleport] Waiting for PositionSync after town teleport") &&
+                line.Contains("(214,212)"));
+            Assert.Contains(log, line =>
+                line.Contains("[Teleport] Town destination validated") &&
+                line.Contains("DestinationStatus=MatchedDestination"));
+            Assert.Contains(log, line =>
+                line.Contains("the W press changed the coordinates") &&
+                line.Contains("matches the destination expectation"));
+        }
+
+        /// <summary>
+        /// A blocked W press at the town spawn must not invalidate a settled position that
+        /// matches the known destination. Coordinate movement is not the ONLY freshness
+        /// proof; the mandatory W press still runs and the settled destination is used.
+        /// </summary>
+        [Fact]
+        public async Task MandatoryTownTeleportAcceptsAStableTownDestinationWhenWIsBlocked()
+        {
+            var memory = new SyncMemory { Map = 35, X = 219, Y = 211, InCity = true };
+            int nudges = 0;
+            var service = CreateService(memory, FastOptions(), _ =>
+            {
+                nudges++;
+                // Movement is blocked: the post-W position is unchanged.
+                return Task.CompletedTask;
+            }, out List<string> log);
+
+            var destination = DestinationValidationContext.ForStartPosition(
+                35, 214, 212, "town start position (profile)");
+
+            service.MarkTransitionImminent("TeleportToCity", requireWRefresh: true);
+            memory.Map = 35;
+            memory.X = 215;
+            memory.Y = 213;
+
+            PositionSyncResult result = await service.SynchronizeAsync(0, destination, CancellationToken.None);
+
+            Assert.True(result.IsReady, string.Join(Environment.NewLine, log));
+            Assert.Equal(DestinationValidationStatus.MatchedDestination, result.DestinationStatus);
+            Assert.Equal(1, nudges);
+            Assert.Equal(215, result.State.X);
+            Assert.Equal(213, result.State.Y);
+            Assert.Contains(log, line => line.Contains("Mandatory W refresh starting"));
+            Assert.Contains(log, line =>
+                line.Contains("the W press produced no coordinate change") &&
+                line.Contains("matches the destination expectation"));
+        }
+
+        /// <summary>
+        /// The destination expectation must still reject an unchanged stuck-spot position:
+        /// a blocked W is never accepted unconditionally, only when the settled position
+        /// really matches the known town destination.
+        /// </summary>
+        [Fact]
+        public async Task MandatoryTownTeleportWithBlockedWAndNonMatchingDestinationStaysUnconfirmed()
+        {
+            var memory = new SyncMemory { Map = 35, X = 100, Y = 100, InCity = true };
+            int nudges = 0;
+            var service = CreateService(memory, FastOptions(), _ =>
+            {
+                nudges++;
+                return Task.CompletedTask;
+            }, out List<string> log);
+
+            var destination = DestinationValidationContext.ForStartPosition(
+                35, 214, 212, "town start position (profile)");
+
+            service.MarkTransitionImminent("TeleportToCity", requireWRefresh: true);
+            memory.Map = 35;
+            memory.X = 101;
+            memory.Y = 100; // still inside the stuck location neighbourhood
+
+            PositionSyncResult result = await service.SynchronizeAsync(0, destination, CancellationToken.None);
+
+            Assert.False(result.IsReady);
+            Assert.Equal(PositionSyncResultKind.Unconfirmed, result.Kind);
+            Assert.Equal(DestinationValidationStatus.Unconfirmed, result.DestinationStatus);
+            Assert.Equal(2, nudges);
+            Assert.True(service.HasPendingTransition);
+            Assert.Contains(log, line => line.Contains("still sits in the pre-teleport neighbourhood"));
+        }
+
+        /// <summary>
         /// TEST A — the confirmed incident reproduced end to end through the coordinator's
         /// town teleport: (333,143) -> teleport -> the game reports (333,213) (only Y
         /// updated, X still belongs to the COT entrance) -> the real town position
@@ -1417,13 +1542,15 @@ namespace DriverScanTester.Tests
             SyncMemory memory,
             PositionSyncService positionSync,
             List<string> log,
-            Func<CancellationToken, Task<bool>>? townTeleport = null)
+            Func<CancellationToken, Task<bool>>? townTeleport = null,
+            Action<BotProfile>? configureProfile = null)
         {
             GameMemoryService memoryService = memory.CreateMemory(log.Add);
             var pathLoader = new SavedPathLoader(log.Add);
             var pathRunner = new PathRunnerService(memoryService, log.Add);
             var itemSeller = new ItemSellerService(memoryService, log.Add);
             var profile = new BotProfile();
+            configureProfile?.Invoke(profile);
             var context = new OperationContext(
                 memoryService,
                 pathRunner,

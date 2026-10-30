@@ -12,10 +12,12 @@ namespace DriverScanTester.Tests
         private sealed class Rig : MovementSystem
         {
             public readonly List<bool> Events = new();
-            public Rig(GameMemoryService memory) : base(memory, _ => { }, 5000, 5000,
+            public Rig(Memory memoryStub) : base(memoryStub.Create(), _ => { }, 5000, 5000,
                 MovementPrecision.Medium, customPath: new List<Waypoint> {
                     new Waypoint(5000, 5000, MovementPrecision.Medium, BotMode.MoveAndAttack) },
-                initialMode: BotMode.MoveAndAttack, loopPath: true) { }
+                initialMode: BotMode.MoveAndAttack, loopPath: true,
+                targetSafety: CombatSafetyFixtures.WithPresence(
+                    () => memoryStub.Target, new StubCombatPlayerPresenceScanner())) { }
             protected override void SendSkillThreeKeyEvent(bool keyUp) => Events.Add(keyUp);
             protected override void SendSyntheticForwardKeyEvent(bool keyUp) { }
             protected override void SendSyntheticBackwardKeyEvent(bool keyUp) { }
@@ -56,7 +58,7 @@ namespace DriverScanTester.Tests
         [Fact]
         public void NoConsumption_RetriesOnceWithRealReleaseAndPress()
         {
-            var memory = new Memory(); var rig = new Rig(memory.Create());
+            var memory = new Memory(); var rig = new Rig(memory);
             Invoke(rig, "HoldSkillThree"); Age(rig); Check(rig); Check(rig);
             Assert.Equal(new[] { false, true, false }, rig.Events);
             Assert.True(rig.IsAttackKeyHeld);
@@ -65,7 +67,7 @@ namespace DriverScanTester.Tests
         [Fact]
         public void UnchangedManaBeforeDeadline_DoesNotRetry()
         {
-            var memory = new Memory(); var rig = new Rig(memory.Create());
+            var memory = new Memory(); var rig = new Rig(memory);
             Invoke(rig, "HoldSkillThree"); Check(rig);
             Assert.Equal(new[] { false }, rig.Events);
         }
@@ -73,7 +75,7 @@ namespace DriverScanTester.Tests
         [Fact]
         public void ConsumptionBeforeDeadline_PreventsRetry()
         {
-            var memory = new Memory(); var rig = new Rig(memory.Create());
+            var memory = new Memory(); var rig = new Rig(memory);
             Invoke(rig, "HoldSkillThree"); memory.Mana--; Age(rig); Check(rig); Check(rig);
             Assert.Equal(new[] { false }, rig.Events);
         }
@@ -81,7 +83,7 @@ namespace DriverScanTester.Tests
         [Fact]
         public void ReleaseAndNewAttack_StartsFreshWindow()
         {
-            var memory = new Memory(); var rig = new Rig(memory.Create());
+            var memory = new Memory(); var rig = new Rig(memory);
             Invoke(rig, "HoldSkillThree"); rig.ReleaseCombatKeys(); Check(rig);
             Invoke(rig, "HoldSkillThree"); Check(rig); Age(rig); Check(rig);
             Assert.Equal(new[] { false, true, false, true, false }, rig.Events);
@@ -90,7 +92,7 @@ namespace DriverScanTester.Tests
         [Fact]
         public void LostOrChangedTarget_CancelsRetry()
         {
-            var memory = new Memory(); var rig = new Rig(memory.Create());
+            var memory = new Memory(); var rig = new Rig(memory);
             Invoke(rig, "HoldSkillThree"); Age(rig); memory.Target = 0; Check(rig);
             memory.Target = 5000; Check(rig);
             Assert.Equal(new[] { false }, rig.Events);
@@ -99,7 +101,7 @@ namespace DriverScanTester.Tests
         [Fact]
         public void UnreadableInitialMana_DoesNotCauseAnUnfoundedRetry()
         {
-            var memory = new Memory { ManaUnavailable = true }; var rig = new Rig(memory.Create());
+            var memory = new Memory { ManaUnavailable = true }; var rig = new Rig(memory);
             Invoke(rig, "HoldSkillThree"); Age(rig); Check(rig);
             memory.ManaUnavailable = false; Check(rig);
             Assert.Equal(new[] { false }, rig.Events);
@@ -110,7 +112,7 @@ namespace DriverScanTester.Tests
         [Fact]
         public void ChangedMob_CancelsTheOldAttemptsRetry()
         {
-            var memory = new Memory(); var rig = new Rig(memory.Create());
+            var memory = new Memory(); var rig = new Rig(memory);
             Invoke(rig, "HoldSkillThree"); Age(rig); memory.Target = 5001; Check(rig);
             Assert.Equal(new[] { false }, rig.Events);
             rig.ReleaseCombatKeys(); Invoke(rig, "HoldSkillThree"); Age(rig); Check(rig);
@@ -120,7 +122,7 @@ namespace DriverScanTester.Tests
         [Fact]
         public void Cancellation_CancelsRetry()
         {
-            var memory = new Memory(); var rig = new Rig(memory.Create());
+            var memory = new Memory(); var rig = new Rig(memory);
             Invoke(rig, "HoldSkillThree"); Age(rig);
             Invoke(rig, "CheckAttackKeyRetry", new CancellationToken(true)); Check(rig);
             Assert.Equal(new[] { false }, rig.Events);

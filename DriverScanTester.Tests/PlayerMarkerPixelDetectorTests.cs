@@ -126,6 +126,148 @@ namespace DriverScanTester.Tests
             Assert.False(new PlayerMarkerPixelDetector().ContainsOtherPlayerMarker(frame, Rectangle.Empty));
         }
 
+        /// <summary>
+        /// 2026-10-29 incident fixture: the other player's Alliance/green marker stood ~89 px
+        /// from the local character anchor, with its nearest pixel only ~57 px away. The legacy
+        /// loot exclusion rectangle (160x170 px) hid it; the compact combat radius must detect it.
+        /// </summary>
+        /// <summary>
+        /// The REAL 2026-10-29 death frame: the adjacent other player ("Gissel", Alliance) was
+        /// rendered with a large green CLASS EMBLEM (shield silhouette) above the character, not
+        /// with the plain triangular ground marker. Combat-time detection must find it; the
+        /// legacy loot exclusion rectangle hides it (root cause) and the strict loot shape
+        /// validation rejects it.
+        /// </summary>
+        [Fact]
+        public void RealIncidentFrame_CombatScanFindsTheOtherPlayerClassEmblem()
+        {
+            string fixturePath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "incident-2026-10-29_death.png");
+            Assert.True(File.Exists(fixturePath),
+                $"incident fixture missing: {fixturePath} (check the test project's fixture item)");
+
+            using Bitmap frame = new Bitmap(fixturePath);
+            PointF anchor = PlayerMarkerPixelDetector.GetCombatLocalCharacterAnchor(frame.Width, frame.Height);
+            float radius = PlayerMarkerPixelDetector.GetCombatLocalCharacterExclusionRadius(frame.Height);
+
+            bool combatFound = new PlayerMarkerPixelDetector().TryFindOtherPlayerMarker(
+                frame, Rectangle.Empty, anchor, radius, allowClassEmblems: true,
+                out PlayerMarkerCandidate candidate);
+
+            Assert.True(combatFound, "the combat-time scan must detect the other player's class emblem");
+            Assert.Equal("Alliance/green", candidate.Faction);
+            Assert.Equal(new Rectangle(429, 296, 41, 51), candidate.Bounds);
+            Assert.True(candidate.Center.X < anchor.X && candidate.Center.Y < anchor.Y,
+                "the emblem belongs to the other player up-left of the character anchor");
+
+            // Root cause evidence: the legacy loot exclusion rectangle (431,315,161,171) covers
+            // this marker, so the pre-fix attack-start check could not see the player.
+            Assert.False(new PlayerMarkerPixelDetector().TryFindOtherPlayerMarker(
+                frame, new Rectangle(431, 315, 161, 171), out _));
+
+            // The strict loot shape validation still rejects the emblem (loot behavior unchanged).
+            Assert.False(new PlayerMarkerPixelDetector().TryFindOtherPlayerMarker(
+                frame, Rectangle.Empty, anchor, radius, allowClassEmblems: false, out _));
+        }
+
+        [Fact]
+        public void CombatScanAcceptsAVerifiedClassEmblemShape()
+        {
+            using Bitmap frame = CreateFrame(1024, 768);
+            PointF anchor = PlayerMarkerPixelDetector.GetCombatLocalCharacterAnchor(1024, 768);
+            float radius = PlayerMarkerPixelDetector.GetCombatLocalCharacterExclusionRadius(768);
+
+            int centerX = (int)Math.Round(anchor.X) - 63;
+            int centerY = (int)Math.Round(anchor.Y) - 63;
+            FillClassEmblem(frame, centerX - 20, centerY - 25, Color.FromArgb(0, 255, 0));
+
+            bool combatFound = new PlayerMarkerPixelDetector().TryFindOtherPlayerMarker(
+                frame, Rectangle.Empty, anchor, radius, allowClassEmblems: true, out _);
+
+            Assert.True(combatFound);
+        }
+
+        [Fact]
+        public void CombatScanRejectsAHollowColoredRingAsAnEmblem()
+        {
+            using Bitmap frame = CreateFrame(1024, 768);
+            PointF anchor = PlayerMarkerPixelDetector.GetCombatLocalCharacterAnchor(1024, 768);
+            float radius = PlayerMarkerPixelDetector.GetCombatLocalCharacterExclusionRadius(768);
+
+            int centerX = (int)Math.Round(anchor.X) - 63;
+            int centerY = (int)Math.Round(anchor.Y) - 63;
+            using (Graphics graphics = Graphics.FromImage(frame))
+            using (var pen = new Pen(Color.FromArgb(0, 255, 0), 2f))
+            {
+                graphics.DrawEllipse(pen, centerX - 20, centerY - 25, 40, 50);
+            }
+
+            bool found = new PlayerMarkerPixelDetector().TryFindOtherPlayerMarker(
+                frame, Rectangle.Empty, anchor, radius, allowClassEmblems: true, out _);
+
+            Assert.False(found);
+        }
+
+        [Fact]
+        public void CombatExclusionDetectsTheAdjacentOtherPlayerMarkerFromTheIncident()
+        {
+            using Bitmap frame = CreateFrame(1024, 768);
+            PointF anchor = PlayerMarkerPixelDetector.GetCombatLocalCharacterAnchor(1024, 768);
+            float radius = PlayerMarkerPixelDetector.GetCombatLocalCharacterExclusionRadius(768);
+
+            int centerX = (int)Math.Round(anchor.X) - 63;
+            int centerY = (int)Math.Round(anchor.Y) - 63;
+            FillTriangle(frame, x: centerX - 20, y: centerY - 20, size: 41, Color.FromArgb(0, 255, 0));
+
+            var detector = new PlayerMarkerPixelDetector();
+            bool found = detector.TryFindOtherPlayerMarker(
+                frame, Rectangle.Empty, anchor, radius, allowClassEmblems: true,
+                out PlayerMarkerCandidate candidate);
+
+            Assert.True(found);
+            float distance = MathF.Sqrt(
+                MathF.Pow(candidate.Center.X - anchor.X, 2) +
+                MathF.Pow(candidate.Center.Y - anchor.Y, 2));
+            Assert.True(distance > radius,
+                $"candidate must be outside the compact own-marker radius ({distance:F1} vs {radius:F1})");
+        }
+
+        [Fact]
+        public void CombatExclusionStillIgnoresTheLocalPlayersOwnMarker()
+        {
+            using Bitmap frame = CreateFrame(1024, 768);
+            PointF anchor = PlayerMarkerPixelDetector.GetCombatLocalCharacterAnchor(1024, 768);
+            float radius = PlayerMarkerPixelDetector.GetCombatLocalCharacterExclusionRadius(768);
+
+            FillTriangle(frame,
+                x: (int)Math.Round(anchor.X) - 12,
+                y: (int)Math.Round(anchor.Y) - 12,
+                size: 24,
+                Color.FromArgb(0, 255, 0));
+
+            var detector = new PlayerMarkerPixelDetector();
+            bool found = detector.TryFindOtherPlayerMarker(
+                frame, Rectangle.Empty, anchor, radius, allowClassEmblems: true, out _);
+
+            Assert.False(found);
+        }
+
+        [Fact]
+        public void LootExclusionRectangleStillHidesTheAdjacentMarker()
+        {
+            // Documents the root cause: the legacy loot rectangle (translated into this frame)
+            // covers the adjacent player's marker, which is why combat safety needs the compact
+            // radius instead of the loot exclusion.
+            using Bitmap frame = CreateFrame(1024, 768);
+            PointF anchor = PlayerMarkerPixelDetector.GetCombatLocalCharacterAnchor(1024, 768);
+            int centerX = (int)Math.Round(anchor.X) - 63;
+            int centerY = (int)Math.Round(anchor.Y) - 63;
+            FillTriangle(frame, x: centerX - 20, y: centerY - 20, size: 41, Color.FromArgb(0, 255, 0));
+
+            Rectangle legacyExclusion = new(431, 315, 161, 171);
+            Assert.False(new PlayerMarkerPixelDetector().TryFindOtherPlayerMarker(
+                frame, legacyExclusion, out _));
+        }
+
         [Fact]
         public void DetectsOccludedEmpireMarkerMatchingLiveRendering()
         {
@@ -213,6 +355,27 @@ namespace DriverScanTester.Tests
             for (int y = rectangle.Top; y < rectangle.Bottom; y++)
             for (int x = rectangle.Left; x < rectangle.Right; x++)
                 bitmap.SetPixel(x, y, color);
+        }
+
+        /// <summary>
+        /// Draws the verified class-emblem silhouette: a wide upper body with a solid,
+        /// tapering lower half (the 2026-10-29 other player's marker).
+        /// </summary>
+        private static void FillClassEmblem(Bitmap bitmap, int x, int y, Color color)
+        {
+            // Upper flag/body: 40 px wide, 20 px tall.
+            for (int row = 0; row < 20; row++)
+            for (int px = x; px < x + 40; px++)
+                bitmap.SetPixel(px, y + row, color);
+
+            // Solid tapering lower body: 31 rows narrowing from 34 px to 4 px.
+            for (int row = 0; row < 31; row++)
+            {
+                int width = 34 - (row * 30 / 30);
+                int left = x + (40 - width) / 2;
+                for (int px = left; px < left + width; px++)
+                    bitmap.SetPixel(px, y + 20 + row, color);
+            }
         }
 
         private static void FillTriangle(Bitmap bitmap, int x, int y, int size, Color color)

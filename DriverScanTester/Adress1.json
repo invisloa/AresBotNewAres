@@ -104,7 +104,7 @@
     "LockGroup": 0
   },
   {
-    "AddressText": "[Ares.exe \u002B 0x486BC8] \u002B 0x47e",
+    "AddressText": "[Ares.exe \u002B 0x489BC8] \u002B 0x47e",
     "NameText": "A_attack2",
     "ValueText": "16671",
     "ValueType": 1,

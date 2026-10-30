@@ -30,6 +30,12 @@ namespace DriverScanTester.Services
         private readonly Action _releaseSkillThree;
         private readonly Func<bool>? _cameraControlBlocked;
         private readonly Func<bool>? _applyStationaryCameraLock;
+        /// <summary>
+        /// Central attack-safety predicate: true only for a CONFIRMED monster target. When
+        /// null the legacy raw mob-selected indicator is used. TAB/attack decisions use it so
+        /// this recovery can never select or keep attacking another player.
+        /// </summary>
+        private readonly Func<bool>? _isConfirmedMonsterTarget;
 
         private RecoveryStage _stage;
         private DateTime _startedAt;
@@ -47,7 +53,8 @@ namespace DriverScanTester.Services
             Action holdSkillThree,
             Action releaseSkillThree,
             Func<bool>? cameraControlBlocked = null,
-            Func<bool>? applyStationaryCameraLock = null)
+            Func<bool>? applyStationaryCameraLock = null,
+            Func<bool>? isConfirmedMonsterTarget = null)
         {
             _memoryService = memoryService ?? throw new ArgumentNullException(nameof(memoryService));
             _log = log ?? throw new ArgumentNullException(nameof(log));
@@ -56,7 +63,12 @@ namespace DriverScanTester.Services
             _releaseSkillThree = releaseSkillThree ?? throw new ArgumentNullException(nameof(releaseSkillThree));
             _cameraControlBlocked = cameraControlBlocked;
             _applyStationaryCameraLock = applyStationaryCameraLock;
+            _isConfirmedMonsterTarget = isConfirmedMonsterTarget;
         }
+
+        /// <summary>True only when the currently selected target may be attacked.</summary>
+        private bool HasAttackableTarget()
+            => _isConfirmedMonsterTarget?.Invoke() ?? _memoryService.IsMobSelected();
 
         public void Start(float currX, float currY, short cameraDistance)
         {
@@ -103,7 +115,7 @@ namespace DriverScanTester.Services
                     if ((now - _stageStartedAt).TotalMilliseconds < BotConstants.Delays.PostCameraRetargetMs)
                         return WaypointMobRecoveryResult.InProgress;
 
-                    if (_memoryService.IsMobSelected())
+                    if (HasAttackableTarget())
                     {
                         BeginAttack();
                     }
@@ -116,7 +128,7 @@ namespace DriverScanTester.Services
                     return WaypointMobRecoveryResult.InProgress;
 
                 case RecoveryStage.Searching:
-                    if (_memoryService.IsMobSelected())
+                    if (HasAttackableTarget())
                     {
                         BeginAttack();
                         return WaypointMobRecoveryResult.InProgress;
@@ -133,7 +145,7 @@ namespace DriverScanTester.Services
                     return WaypointMobRecoveryResult.InProgress;
 
                 case RecoveryStage.Attacking:
-                    if (!_memoryService.IsMobSelected())
+                    if (!HasAttackableTarget())
                     {
                         _releaseSkillThree();
                         _stage = RecoveryStage.Searching;

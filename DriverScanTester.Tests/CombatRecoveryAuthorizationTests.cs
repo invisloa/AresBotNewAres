@@ -110,8 +110,14 @@ namespace DriverScanTester.Tests
 
         private sealed class TestMovementSystem : MovementSystem
         {
-            public TestMovementSystem(GameMemoryService memory, Action<string> log, IEnumerable<Waypoint> path)
-                : base(memory, log, 1000, 1000, customPath: path, loopPath: false)
+            public TestMovementSystem(
+                GameMemoryService memory,
+                Action<string> log,
+                IEnumerable<Waypoint> path,
+                Func<int>? targetId = null)
+                : base(memory, log, 1000, 1000, customPath: path, loopPath: false,
+                    targetSafety: CombatSafetyFixtures.WithPresence(
+                        targetId ?? (() => 5000), new StubCombatPlayerPresenceScanner()))
             {
             }
 
@@ -153,7 +159,7 @@ namespace DriverScanTester.Tests
                 Waypoint[] waypoints = path.Length > 0
                     ? path
                     : new[] { new Waypoint(1000, 1000, MovementPrecision.Medium, mode) };
-                Movement = new TestMovementSystem(memory, Log.Add, waypoints)
+                Movement = new TestMovementSystem(memory, Log.Add, waypoints, () => Stub.TargetId)
                 {
                     LootSystemRef = Loot,
                     InternalRepotEnabled = false

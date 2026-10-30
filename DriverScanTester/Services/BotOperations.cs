@@ -396,14 +396,8 @@ namespace DriverScanTester.Services
             ctx.Log("[Operation] EtanaRepotUnstuck: starting (hardcoded camera + 2s walk). ");
             ctx.FocusGameWindow();
 
-            // 1. Point the camera at the hardcoded captured value (exact bits).
-            ctx.Log($"[Operation] EtanaRepotUnstuck: setting camera to hardcoded 0x{EtanaRepotCameraAngleBits:X8}.");
-            ctx.Memory.WriteCameraAngleInt(EtanaRepotCameraAngleBits);
-            await Task.Delay(100, token);
-
-            // 2. Walk forward for 2 seconds. W is released in the finally block so
-            //    the key can never get stuck down on cancel/timeout.
-            ctx.Log("[Operation] EtanaRepotUnstuck: walking forward for 2s (W down). ");
+            // 1. Point the camera at the hardcoded captured value (exact bits). Use the
+            //    shared camera lease so this operation cannot alter yaw during an NPC scan.
             WKeyCameraController? cameraController = ctx.WCameraController;
             if (cameraController == null)
             {
@@ -411,6 +405,17 @@ namespace DriverScanTester.Services
                 return false;
             }
 
+            ctx.Log($"[Operation] EtanaRepotUnstuck: setting camera to hardcoded 0x{EtanaRepotCameraAngleBits:X8}.");
+            if (!cameraController.TrySetCameraAngleBits(EtanaRepotCameraAngleBits))
+            {
+                ctx.Log("[Operation] EtanaRepotUnstuck: camera yaw write blocked or could not be verified.");
+                return false;
+            }
+            await Task.Delay(100, token);
+
+            // 2. Walk forward for 2 seconds. W is released in the finally block so
+            //    the key can never get stuck down on cancel/timeout.
+            ctx.Log("[Operation] EtanaRepotUnstuck: walking forward for 2s (W down). ");
             WKeyCameraOwner cameraOwner = cameraController.CreateOwner(
                 "EtanaRepotUnstuck", ctx.SendWKeyEvent);
             if (!cameraController.TryAcquireW(cameraOwner))
