@@ -153,6 +153,8 @@ namespace DriverScanTester.ViewModels
                     OnPropertyChanged(nameof(WhiteBuyTarget));
                     OnPropertyChanged(nameof(DryRunRepot));
                     OnPropertyChanged(nameof(LootPriority));
+                    OnPropertyChanged(nameof(DisableAllLoot));
+                    OnPropertyChanged(nameof(LootPriorityEditable));
                     OnPropertyChanged(nameof(TeleportKey));
                     OnPropertyChanged(nameof(TeleportScanCode));
                     OnPropertyChanged(nameof(MaxTeleportRetries));
@@ -256,6 +258,31 @@ namespace DriverScanTester.ViewModels
             get => CurrentProfile?.LootPriority ?? false;
             set { if (CurrentProfile != null) { CurrentProfile.LootPriority = value; OnPropertyChanged(); } }
         }
+
+        /// <summary>
+        /// Profile-level policy: when true, ALL automatic looting for this profile is
+        /// disabled (normal scans, SOD/SOP scans, loot camera/screenshots, collection,
+        /// loot barriers). Movement, combat and recovery continue normally.
+        /// </summary>
+        public bool DisableAllLoot
+        {
+            get => CurrentProfile?.DisableAllLoot ?? false;
+            set
+            {
+                if (CurrentProfile == null || CurrentProfile.DisableAllLoot == value)
+                    return;
+
+                CurrentProfile.DisableAllLoot = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(LootPriorityEditable));
+            }
+        }
+
+        /// <summary>
+        /// Loot Priority has no effect while <see cref="DisableAllLoot"/> is selected;
+        /// the control is disabled visually, but the saved value is not modified.
+        /// </summary>
+        public bool LootPriorityEditable => !DisableAllLoot;
 
         public int TeleportKey
         {
@@ -468,6 +495,7 @@ namespace DriverScanTester.ViewModels
                 WhiteBuyTarget = BotConstants.Repot.WhiteBuyTarget,
                 DryRunRepot = false,
                 LootPriority = false,
+                DisableAllLoot = false,
                 TeleportKey = BotConstants.Workflow.DefaultTeleportKey,
                 TeleportScanCode = BotConstants.Workflow.DefaultTeleportScanCode,
                 MaxTeleportRetries = BotConstants.Repot.MaxTeleportRetries,

@@ -705,7 +705,10 @@ namespace DriverScanTester.ViewModels
                 wKeyCameraController: _wKeyCameraController)
             {
                 MobGroupingPausePredicate = () => PauseController.IsPaused,
-                OnGameUnresponsiveDetected = reason => HandleGameConnectionFailure(reason, movementDerived: true)
+                OnGameUnresponsiveDetected = reason => HandleGameConnectionFailure(reason, movementDerived: true),
+                // "Run This Path" is a standalone run: the path's own waypoints carry the
+                // path-level disable policy. No loaded profile setting is projected onto it.
+                DisableAllLootOverride = false
             };
             
             _movementBotCts = new CancellationTokenSource();
@@ -735,13 +738,17 @@ namespace DriverScanTester.ViewModels
             // (big region, pink pixels, after each kill) instead of the normal loot cycle.
             bool needsLoot = path.Exists(p => p.Mode == Services.BotMode.MoveAndAttackAndLoot ||
                                               p.Mode == Services.BotMode.MoveAndAttack);
+            bool disableAllLootByPath = path.Count > 0 && path.TrueForAll(p => p.DisableAllLoot);
             if (!needsLoot)
             {
                 AppendBotLog("Loot Bot not started (OnlyMove-only path — mandatory move, no loot/attack).");
             }
             else if (!_isLootBotRunning)
             {
-                _lootSystem = new LootSystem(memoryService, AppendBotLog, GetSharedCameraControllerForLoot());
+                _lootSystem = new LootSystem(memoryService, AppendBotLog, GetSharedCameraControllerForLoot())
+                {
+                    AutomaticLootDisabled = disableAllLootByPath
+                };
                 _lootSystem.ShouldStopOnOtherPlayerMarker = () => StopOnOtherPlayerDetected;
                 Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 0);
                 Interlocked.Exchange(ref _standalonePlayerDeathHandled, 0);
@@ -749,12 +756,22 @@ namespace DriverScanTester.ViewModels
                     () => HandleStandalonePlayerMarkerDetected(memoryService, profile);
                 if (_isMovementBotRunning && _movementSystem != null)
                     _movementSystem.LootSystemRef = _lootSystem;
-                _lootBotCts = new CancellationTokenSource();
-                _isLootBotRunning = true;
-                var lootToken = _lootBotCts.Token;
-                LootSystem lootForTask = _lootSystem;
-                _lootBotTask = Task.Run(() => LootBotLoop(lootToken, lootForTask), lootToken);
-                AppendBotLog("Loot Bot started.");
+
+                if (disableAllLootByPath)
+                {
+                    // Keep the disabled component attached for the existing player-marker
+                    // safety callbacks, but start no scanning task at all.
+                    AppendBotLog("Loot Bot not started (path disables all automatic loot — including SOD/SOP). Player safety detection stays active.");
+                }
+                else
+                {
+                    _lootBotCts = new CancellationTokenSource();
+                    _isLootBotRunning = true;
+                    var lootToken = _lootBotCts.Token;
+                    LootSystem lootForTask = _lootSystem;
+                    _lootBotTask = Task.Run(() => LootBotLoop(lootToken, lootForTask), lootToken);
+                    AppendBotLog("Loot Bot started.");
+                }
             }
 
             StartGameConnectionMonitor();
@@ -4526,6 +4543,14 @@ namespace DriverScanTester.ViewModels
                         if (BlockNormalActionForMovementDiagnostic("Start Loot Bot"))
                             return;
 
+                        // An active path/profile with automatic loot disabled is authoritative:
+                        // a manual Loot Bot start must not silently bypass that policy.
+                        if (_isMovementBotRunning && _movementSystem?.IsAutomaticLootDisabled == true)
+                        {
+                            AppendBotLog("[LootBot] Start refused: the active path/profile disables all automatic loot (including SOD/SOP). Player safety detection remains active.");
+                            return;
+                        }
+
                         ulong baseAddr = FindModuleInScanner("Ares.exe", false);
                         if (baseAddr == 0)
                         {
@@ -4723,6 +4748,22 @@ namespace DriverScanTester.ViewModels
                                 if (token.IsCancellationRequested) break;
                                 continue;
                             }
+
+                            // Profile/path policy is authoritative for this tick. A path that
+                            // disables all loot (including a disabled portion of a mixed route)
+                            // cancels pending scans and never starts a new one.
+                            bool automaticLootDisabled =
+                                _movementSystem?.IsAutomaticLootDisabled == true;
+                            lootForTask.AutomaticLootDisabled = automaticLootDisabled;
+                            if (automaticLootDisabled)
+                            {
+                                lootForTask.PinkLootOnlyMode = false;
+                                lootForTask.MoveAndAttackAndLootMode = false;
+                                lootForTask.PlayerMarkerScanEnabled = false;
+                                await PauseController.PausableDelayAsync(10, token);
+                                continue;
+                            }
+
                             // OnlyMove is mandatory above all movement-option actions:
                             // never try to loot while the current waypoint is OnlyMove.
                             // Heal stays always on (separate HealMana task).

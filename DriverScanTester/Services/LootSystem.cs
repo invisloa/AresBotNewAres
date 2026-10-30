@@ -284,6 +284,13 @@ namespace DriverScanTester.Services
         private volatile bool _pinkRescanActive;
         private volatile bool _pinkLootOnlyMode;
 
+        // ── Automatic-loot disable policy (profile/path) ──
+        // One authoritative switch for every automatic loot operation. It is set by the
+        // host from the effective profile/path policy before any automatic work may run.
+        // Safety notifications (ReportImmediateOtherPlayerMarker) remain available while
+        // this is true: Disable All Loot must never disable player detection.
+        private volatile bool _automaticLootDisabled;
+
         // ── Mandatory loot requests (MoveAndAttackAndLoot navigation barrier) ──
         // The movement system owns the navigation obligation; these requests are the
         // authoritative lifecycle. Only a verified complete empty scan transitions a
@@ -445,6 +452,40 @@ namespace DriverScanTester.Services
             set => _moveAndAttackAndLootMode = value;
         }
 
+        /// <summary>
+        /// Effective profile/path automatic-loot policy. When true, no automatic loot
+        /// work may start: no normal or SOD/SOP scans, no passive pre-scan, no mandatory
+        /// request, no loot camera/screenshot ownership and no item collection. Enabling
+        /// it cancels pending/queued work, releases the loot camera/cursor and cancels
+        /// any mandatory navigation obligation without ever marking it completed.
+        /// Player-marker safety notifications stay functional.
+        /// </summary>
+        public bool AutomaticLootDisabled
+        {
+            get => _automaticLootDisabled;
+            set
+            {
+                lock (_cameraCursorOwnershipGate)
+                {
+                    if (_automaticLootDisabled == value)
+                        return;
+                    _automaticLootDisabled = value;
+                }
+
+                if (value)
+                {
+                    StopScanSpacebarSpam();
+                    ResetPlayerMarkerConfirmation();
+                    CancelAllLootWork("automatic loot disabled by profile/path policy");
+                    _log("[Loot] Automatic loot DISABLED by profile/path policy — no scans, loot camera changes, loot screenshots or collection; movement/combat continue.");
+                }
+                else
+                {
+                    _log("[Loot] Automatic loot enabled by profile/path policy.");
+                }
+            }
+        }
+
         /// <summary>True when a mandatory request still owns the navigation obligation.</summary>
         public bool HasActiveMandatoryLootRequest
         {
@@ -517,6 +558,9 @@ namespace DriverScanTester.Services
         {
             lock (_cameraCursorOwnershipGate)
             {
+                if (_automaticLootDisabled)
+                    return 0;
+
                 if (_activeMandatoryLootRequest != null &&
                     IsMandatoryRequestActiveLocked(_activeMandatoryLootRequest))
                 {
@@ -769,6 +813,9 @@ namespace DriverScanTester.Services
             DateTime now = DateTime.UtcNow;
             lock (_cameraCursorOwnershipGate)
             {
+                if (_automaticLootDisabled)
+                    return;
+
                 if (!_pinkLootOnlyMode)
                     return;
 
@@ -790,6 +837,9 @@ namespace DriverScanTester.Services
             DateTime now = DateTime.UtcNow;
             lock (_cameraCursorOwnershipGate)
             {
+                if (_automaticLootDisabled)
+                    return;
+
                 if (!_pinkLootOnlyMode)
                     return;
 
@@ -851,9 +901,10 @@ namespace DriverScanTester.Services
             ArgumentNullException.ThrowIfNull(action);
             lock (_cameraCursorOwnershipGate)
             {
-                bool pinkOwnsTargeting = _pinkScanRequested || _pinkScanOwnsCameraCursor ||
-                                         _pinkRescanActive || _isCollecting ||
-                                         _lootState == LootMachineState.PinkScan;
+                bool pinkOwnsTargeting = !_automaticLootDisabled &&
+                                         (_pinkScanRequested || _pinkScanOwnsCameraCursor ||
+                                          _pinkRescanActive || _isCollecting ||
+                                          _lootState == LootMachineState.PinkScan);
                 if (pinkOwnsTargeting)
                     return false;
                 action();
@@ -862,8 +913,9 @@ namespace DriverScanTester.Services
         }
 
         private bool LootOwnsCameraOrCursorLocked()
-            => _pinkScanRequested || _pinkScanOwnsCameraCursor || _pinkRescanActive ||
-               _lootScanCameraOwned || _isCollecting || IsLootCycleActive;
+            => !_automaticLootDisabled &&
+               (_pinkScanRequested || _pinkScanOwnsCameraCursor || _pinkRescanActive ||
+                _lootScanCameraOwned || _isCollecting || IsLootCycleActive);
 
         private void CancelPinkModeWorkLocked()
         {
@@ -1518,6 +1570,18 @@ namespace DriverScanTester.Services
                 return;
             }
 
+            // ── Authoritative profile/path policy gate ──
+            // No automatic work may start here: no capture, no camera write, no scan, no
+            // collection and no mandatory request. Releasing any residual ownership is
+            // permitted cleanup, never a completed scan.
+            if (_automaticLootDisabled)
+            {
+                StopScanSpacebarSpam();
+                CancelAllLootWork("automatic loot disabled by profile/path policy");
+                await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                return;
+            }
+
             // ── Focus guard: resolve the current game handle before checking focus.
             //    Do not capture or click if another window is foreground. ──
             if (!IsGameWindowFocused())
@@ -2116,7 +2180,7 @@ namespace DriverScanTester.Services
         private void StartScanSpacebarSpam()
         {
             StopScanSpacebarSpam(); // Ensure any previous spam task is stopped.
-            if (!LootRuntimeSettings.SpacebarLootEnabled)
+            if (_automaticLootDisabled || !LootRuntimeSettings.SpacebarLootEnabled)
                 return;
 
             _scanSpacebarCts = new CancellationTokenSource();
@@ -2195,6 +2259,9 @@ namespace DriverScanTester.Services
         /// </summary>
         private void RunPassiveLootPreScanIfDue()
         {
+            if (_automaticLootDisabled)
+                return;
+
             DateTime now = DateTime.UtcNow;
             if (now < _nextPassivePreScanAt)
                 return;
@@ -2254,6 +2321,13 @@ namespace DriverScanTester.Services
 
         private LootPreScanResult CaptureAndAnalyzePassiveLootFrame()
         {
+            if (_automaticLootDisabled)
+            {
+                return new LootPreScanResult(
+                    LootPreScanOutcome.CaptureUnavailable, 0, 0, Rectangle.Empty,
+                    "automatic loot disabled");
+            }
+
             int xStart = Math.Clamp(bigX[0] - _referenceClientOriginX, 0, Math.Max(_clientWidth - 1, 0));
             int xEnd = Math.Clamp(bigX[1] - _referenceClientOriginX, 0, _clientWidth);
             int yStart = Math.Clamp(bigY[0] - _referenceClientOriginY, 0, Math.Max(_clientHeight - 1, 0));
@@ -2270,6 +2344,13 @@ namespace DriverScanTester.Services
                 return new LootPreScanResult(
                     LootPreScanOutcome.CaptureUnavailable, 0, 0, Rectangle.Empty,
                     $"capture failed status={_lastCaptureResult.Status}");
+            }
+
+            if (_automaticLootDisabled)
+            {
+                return new LootPreScanResult(
+                    LootPreScanOutcome.CaptureUnavailable, 0, 0, Rectangle.Empty,
+                    "automatic loot disabled");
             }
 
             if (_bitmap == null || _lastStableCaptureGeometry == null)
@@ -2453,6 +2534,29 @@ namespace DriverScanTester.Services
         /// </summary>
         private void ServiceMandatoryLootRequest(bool isMobSelected)
         {
+            if (_automaticLootDisabled)
+            {
+                lock (_cameraCursorOwnershipGate)
+                {
+                    if (_activeMandatoryLootRequest != null &&
+                        IsMandatoryRequestActiveLocked(_activeMandatoryLootRequest))
+                    {
+                        MandatoryLootRequest cancelledRequest = _activeMandatoryLootRequest;
+                        cancelledRequest.State = LootRequestState.Cancelled;
+                        cancelledRequest.Detail = "automatic loot disabled by profile/path policy";
+                        cancelledRequest.UpdatedAtUtc = DateTime.UtcNow;
+                        _activeMandatoryLootRequest = null;
+                        if (_activeTravelCandidate?.RequestId == cancelledRequest.Id)
+                            _activeTravelCandidate = null;
+                        if (_combatRecoveryMovementRequestId == cancelledRequest.Id)
+                            _combatRecoveryMovementRequestId = 0;
+                        ReleaseLootScanCameraLocked("automatic loot disabled");
+                        _log($"[LootBarrier] Cancelled request={cancelledRequest.Id} reason={cancelledRequest.Detail}");
+                    }
+                }
+                return;
+            }
+
             MandatoryLootRequest? request;
             lock (_cameraCursorOwnershipGate)
             {
@@ -2801,6 +2905,12 @@ namespace DriverScanTester.Services
             long requestId = _activeMandatoryLootRequest?.Id ?? 0;
             lock (_cameraCursorOwnershipGate)
             {
+                if (_automaticLootDisabled)
+                {
+                    detail = "automatic loot disabled by profile/path policy";
+                    return false;
+                }
+
                 if (!_lootScanCameraOwned && _wKeyCameraController != null)
                 {
                     if (!_wKeyCameraController.TryAcquireExternalCameraOwner(_wKeyCameraOwner))
@@ -2827,6 +2937,12 @@ namespace DriverScanTester.Services
             {
                 lock (_cameraCursorOwnershipGate)
                 {
+                    if (_automaticLootDisabled)
+                    {
+                        detail = "automatic loot disabled by profile/path policy";
+                        return false;
+                    }
+
                     _memoryService.SetCameraDistance(requestedDistance);
                     if (!_memoryService.TryGetCameraVerticalLock(out short currentVerticalLock) ||
                         currentVerticalLock != requestedVerticalLock)
@@ -3022,6 +3138,9 @@ namespace DriverScanTester.Services
         /// </summary>
         private PinkRescanPassOutcome RunPinkRescan(PinkRescanTicket ticket)
         {
+            if (_automaticLootDisabled)
+                return PinkRescanPassOutcome.Cancelled;
+
             short previousCameraDistance = 0;
             bool havePreviousCameraDistance = false;
             _log($"[Loot] SOD/SOP background rescan starting for kill generation {ticket.Generation}; later kills remain queued.");
@@ -3029,6 +3148,9 @@ namespace DriverScanTester.Services
             {
                 lock (_cameraCursorOwnershipGate)
                 {
+                    if (_automaticLootDisabled)
+                        return PinkRescanPassOutcome.Cancelled;
+
                     _pinkRescanActive = true;
                     havePreviousCameraDistance = _memoryService.TryGetCameraDistance(out previousCameraDistance);
                     if (!havePreviousCameraDistance)
@@ -3040,7 +3162,7 @@ namespace DriverScanTester.Services
                     _memoryService.SetCameraDistance(BotConstants.Camera.SodSopLootScanDistance);
                 }
 
-                if (_scanToken.IsCancellationRequested || !PinkLootOnlyMode)
+                if (_scanToken.IsCancellationRequested || _automaticLootDisabled || !PinkLootOnlyMode)
                     return PinkRescanPassOutcome.Cancelled;
                 if (_scanToken.WaitHandle.WaitOne(BotConstants.Delays.SodSopCameraSettleMs))
                     return PinkRescanPassOutcome.Cancelled;
@@ -3320,6 +3442,12 @@ namespace DriverScanTester.Services
             {
                 lock (_cameraCursorOwnershipGate)
                 {
+                    if (_automaticLootDisabled)
+                    {
+                        failureResult = LootScanPassResult.Cancelled;
+                        return false;
+                    }
+
                     if (!VerifyLootScanCamera(out short actualDistance, out short actualVerticalLock, out string detail))
                     {
                         _log($"[LootCamera] {regionName}: capture refused — camera not verified ({detail}).");
@@ -3404,6 +3532,9 @@ namespace DriverScanTester.Services
 
             try
             {
+                if (_automaticLootDisabled)
+                    return FinishRegion(LootScanPassResult.Cancelled, "automatic-loot-disabled");
+
                 if (!IsLootScanModeAuthorized(scanMode, PinkLootOnlyMode))
                 {
                     return FinishRegion(LootScanPassResult.Cancelled, "pink-only-mode-disabled");
@@ -3418,6 +3549,8 @@ namespace DriverScanTester.Services
                         LogPinkCaptureFailureDiagnostics(scanStartedUtc, scanReason, _lastCaptureResult);
                     return FinishRegion(captureFailure, diagnosticOutcome);
                 }
+                if (_automaticLootDisabled)
+                    return FinishRegion(LootScanPassResult.Cancelled, "automatic-loot-disabled");
                 if (_bitmap == null || _clientWidth <= 0 || _clientHeight <= 0 ||
                     _lastStableCaptureGeometry == null)
                 {
@@ -3766,7 +3899,7 @@ namespace DriverScanTester.Services
                     ClearLootProbeProgress();
 
                 // Write exactly one annotated image for this actual loot-scan pass.
-                if (diagnosticFrame != null)
+                if (diagnosticFrame != null && !_automaticLootDisabled)
                 {
                     ScreenshotService.SaveLootScanFrame(
                         diagnosticFrame, regionName, diagnosticOutcome, _log,
@@ -4043,6 +4176,7 @@ namespace DriverScanTester.Services
                 _scanCompleteUntil = DateTime.MinValue;
                 _lastKillAt = DateTime.MinValue;
                 _wasMobSelectedPrev = false;
+                _isCollecting = false;
                 IsLootingActive = false;
                 ReleaseLootScanCameraLocked($"all loot work cleared: {reason}");
             }
@@ -4094,6 +4228,9 @@ namespace DriverScanTester.Services
         {
             lock (_cameraCursorOwnershipGate)
             {
+                if (_automaticLootDisabled)
+                    return;
+
                 if (!_pinkScanRestoreDistance.HasValue)
                 {
                     if (_memoryService.TryGetCameraDistance(out short previousDistance))
@@ -5025,7 +5162,7 @@ namespace DriverScanTester.Services
 
         private LootProbeResult CheckProbeCaptureOwnership(LootScanMode scanMode)
         {
-            if (_scanToken.IsCancellationRequested || ShouldAbortLoot() ||
+            if (_automaticLootDisabled || _scanToken.IsCancellationRequested || ShouldAbortLoot() ||
                 !IsLootScanModeAuthorized(scanMode, PinkLootOnlyMode))
                 return LootProbeResult.Cancelled;
 
@@ -5138,6 +5275,8 @@ namespace DriverScanTester.Services
                 guard = CheckProbeCaptureOwnership(scanMode);
                 if (guard != LootProbeResult.Miss)
                     return guard;
+                if (_automaticLootDisabled)
+                    return LootProbeResult.Cancelled;
                 CollectionClick();
                 return LootProbeResult.Collected;
             }
@@ -5222,6 +5361,9 @@ namespace DriverScanTester.Services
         /// </summary>
         private void MakeRoomForScrollIfFull()
         {
+            if (_automaticLootDisabled)
+                return;
+
             var (currentWeight, maxWeight) = _memoryService.GetWeight();
             if (!NeedsWeightReliefForScroll(currentWeight, maxWeight))
                 return;
@@ -5252,7 +5394,7 @@ namespace DriverScanTester.Services
             do
             {
                 Thread.Sleep(BotConstants.Delays.WeightReliefPollMs);
-                if (_scanToken.IsCancellationRequested || ShouldAbortLoot())
+                if (_automaticLootDisabled || _scanToken.IsCancellationRequested || ShouldAbortLoot())
                     return;
                 (currentWeight, maxWeight) = _memoryService.GetWeight();
             }
@@ -5296,6 +5438,9 @@ namespace DriverScanTester.Services
 
         private void CollectionClick()
         {
+            if (_automaticLootDisabled)
+                return;
+
             long attemptId = Interlocked.Increment(ref _nextLootCollectionAttemptId);
             int positionBeforeClick = GetPositionX();
             var beforePosition = TryGetDiagnosticPlayerPosition("CollectionStart");
@@ -5318,11 +5463,16 @@ namespace DriverScanTester.Services
             {
             // Release any held right button, then capture inventory before issuing the collection click.
             MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.RightUp);
+            if (_automaticLootDisabled)
+                return;
             bool inventoryBeforeValid = TryCaptureInventorySnapshot("BeforeClick", out var inventoryBefore);
             collectionDiagnostics.InventoryBeforeValid = inventoryBeforeValid;
             collectionDiagnostics.InventoryBefore = inventoryBefore;
             int checksumBefore = _memoryService.ComputeInventoryChecksum();
             int checksumAtCollectionStart = checksumBefore;
+
+            if (_automaticLootDisabled)
+                return;
 
             MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.LeftDown);
             leftButtonDown = true;
@@ -5361,7 +5511,7 @@ namespace DriverScanTester.Services
                 // only aborts the spacebar spam outside loot-priority mode — in
                 // priority mode the walk to the clicked loot item must finish.
                 bool scanCancelled = _scanToken.IsCancellationRequested;
-                bool lootAborted = !scanCancelled && ShouldAbortLoot();
+                bool lootAborted = !scanCancelled && (_automaticLootDisabled || ShouldAbortLoot());
                 bool focusLost = !scanCancelled && !lootAborted && !IsGameWindowFocused();
                 string? abortReason = DetectCollectionAbortReason(scanCancelled, lootAborted, focusLost);
                 if (abortReason != null)
@@ -5377,7 +5527,8 @@ namespace DriverScanTester.Services
                     GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                 Thread.Sleep(30);
                 bool scanCancelledAfterSleep = _scanToken.IsCancellationRequested;
-                bool lootAbortedAfterSleep = !scanCancelledAfterSleep && ShouldAbortLoot();
+                bool lootAbortedAfterSleep = !scanCancelledAfterSleep &&
+                    (_automaticLootDisabled || ShouldAbortLoot());
                 bool focusLostAfterSleep = !scanCancelledAfterSleep && !lootAbortedAfterSleep && !IsGameWindowFocused();
                 string? abortReasonAfterSleep = DetectCollectionAbortReason(
                     scanCancelledAfterSleep, lootAbortedAfterSleep, focusLostAfterSleep);
@@ -5468,6 +5619,13 @@ namespace DriverScanTester.Services
             collectionDiagnostics.StableChecksRequired = stableRequired;
             collectionDiagnostics.EmptyRounds = emptyRounds;
             collectionDiagnostics.MaxEmptyRounds = maxEmptyRounds;
+
+            if (_automaticLootDisabled)
+            {
+                collectionDiagnostics.ExitReason = "AutomaticLootDisabled";
+                _log("[Loot] Automatic loot disabled during collection — aborting without unstuck, inventory verification or post-click capture.");
+                return;
+            }
 
             Thread.Sleep(BotConstants.Delays.CollectAnimationMs); // Wait for collection animation/movement
 

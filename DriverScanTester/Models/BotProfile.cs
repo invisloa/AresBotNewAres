@@ -91,6 +91,16 @@ namespace DriverScanTester.Models
         /// </summary>
         public bool LootPriority { get; set; } = false;
 
+        /// <summary>
+        /// When true, ALL automatic looting for this profile is disabled: no loot pixel
+        /// scans, SOD/SOP pink scans, loot camera changes, loot screenshots, item
+        /// collection, passive pre-scans, mandatory loot barriers or loot-priority holds.
+        /// Movement, combat, targeting, recovery and repot continue normally. This
+        /// overrides every per-path loot setting and takes precedence over
+        /// <see cref="LootPriority"/>.
+        /// </summary>
+        public bool DisableAllLoot { get; set; } = false;
+
         /// <summary>Virtual-key code for town teleport (default 0x36 = '6').</summary>
         public int TeleportKey { get; set; } = BotConstants.Workflow.DefaultTeleportKey;
         /// <summary>Scan code for teleport key (default 0x07 for '6').</summary>

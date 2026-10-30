@@ -119,6 +119,19 @@ namespace DriverScanTester.ViewModels
             set => SetProperty(ref _loopRoute, value);
         }
 
+        private bool _disableAllLoot = false;
+        /// <summary>
+        /// Path-level policy: when true, running this path performs no automatic loot
+        /// work (normal scans, SOD/SOP scans, loot camera/screenshots, collection).
+        /// Persisted in <see cref="PathSegment.DisableAllLoot"/> and applied to every
+        /// waypoint generated from the editor's points.
+        /// </summary>
+        public bool DisableAllLoot
+        {
+            get => _disableAllLoot;
+            set => SetProperty(ref _disableAllLoot, value);
+        }
+
         /// <summary>Global runtime-only mob grouping toggle, shared with the main window.</summary>
         public bool MobGroupingEnabled
         {
@@ -393,6 +406,7 @@ namespace DriverScanTester.ViewModels
                     Precision = SegmentPrecision,
                     Mode = SegmentBotMode,
                     LoopRoute = LoopRoute,
+                    DisableAllLoot = DisableAllLoot,
                     ZoneRestriction = SegmentZoneRestriction,
                     Points = Points.ToList()
                 };
@@ -471,6 +485,7 @@ namespace DriverScanTester.ViewModels
                     SegmentPrecision = loaded.Precision;
                     SegmentBotMode = loaded.Mode;
                     LoopRoute = loaded.LoopRoute;
+                    DisableAllLoot = loaded.DisableAllLoot;
                     SegmentZoneRestriction = loaded.ZoneRestriction;
                     if (loadedPoints.Count > 0)
                     {
@@ -514,7 +529,8 @@ namespace DriverScanTester.ViewModels
                 p.StuckRecoveryMobCameraDistance,
                 p.OnArrivalOperation ?? "",
                 p.IsOperationStep,
-                p.SteeringMode)).ToList();
+                p.SteeringMode,
+                DisableAllLoot)).ToList();
             OnRunPath?.Invoke(list, LoopRoute);
             StatusText = "Running current editor path...";
         }

@@ -164,6 +164,9 @@
                                 <StackPanel>
                                     <CheckBox Content="Loop Path" IsChecked="{Binding LoopRoute}" Margin="2,2,2,6"
                                               ToolTip="Start over from first point when finished"/>
+                                    <CheckBox Content="Disable All Loot (including SOD/SOP)" IsChecked="{Binding DisableAllLoot}"
+                                              Margin="2,2,2,6"
+                                              ToolTip="When this path runs, ignore all ground loot. Do not perform normal loot scans, SOD/SOP scans, loot camera changes, loot screenshots or item collection."/>
                                     <Label Content="Path Name (Save As):" Padding="2"/>
                                     <TextBox Text="{Binding SegmentName, UpdateSourceTrigger=PropertyChanged}" Margin="2,2,2,5" Padding="3"/>
                                     <Button Content="Save Path" Command="{Binding SaveSegmentCommand}"
@@ -617,6 +620,7 @@
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
                                     </Grid.RowDefinitions>
 
                                     <CheckBox Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2" Content="Dry Run Repot"
@@ -624,23 +628,27 @@
                                               ToolTip="Skip the actual sell/buy repot sequence (just log it)."/>
 
                                     <CheckBox Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Content="Loot Priority (loot over attack)"
-                                              IsChecked="{Binding LootPriority}" Margin="2" VerticalAlignment="Center"
+                                              IsChecked="{Binding LootPriority}" IsEnabled="{Binding LootPriorityEditable}" Margin="2" VerticalAlignment="Center"
                                               ToolTip="During the ExpLoop step, looting outranks combat and waypoint movement. When a loot item is found the bot loots it first."/>
 
-                                    <Label Grid.Row="2" Grid.Column="0" Content="Teleport Key:"/>
-                                    <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding TeleportKey, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="2" HorizontalAlignment="Left"/>
+                                    <CheckBox Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2" Content="Disable All Loot (including SOD/SOP)"
+                                              IsChecked="{Binding DisableAllLoot}" Margin="2" VerticalAlignment="Center"
+                                              ToolTip="Completely disables automatic loot scans, item collection and loot-related camera/screenshot operations for this profile. Movement and combat continue normally."/>
 
-                                    <Label Grid.Row="3" Grid.Column="0" Content="Teleport Scan Code:"/>
-                                    <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding TeleportScanCode, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="2" HorizontalAlignment="Left"/>
+                                    <Label Grid.Row="3" Grid.Column="0" Content="Teleport Key:"/>
+                                    <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding TeleportKey, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="2" HorizontalAlignment="Left"/>
 
-                                    <Label Grid.Row="4" Grid.Column="0" Content="Max Teleport Retries:"/>
-                                    <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding MaxTeleportRetries, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="2" HorizontalAlignment="Left"/>
+                                    <Label Grid.Row="4" Grid.Column="0" Content="Teleport Scan Code:"/>
+                                    <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding TeleportScanCode, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="2" HorizontalAlignment="Left"/>
 
-                                    <Label Grid.Row="5" Grid.Column="0" Content="Window Offset X:"/>
-                                    <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding WindowOffsetX, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="2" HorizontalAlignment="Left"/>
+                                    <Label Grid.Row="5" Grid.Column="0" Content="Max Teleport Retries:"/>
+                                    <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding MaxTeleportRetries, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="2" HorizontalAlignment="Left"/>
 
-                                    <Label Grid.Row="6" Grid.Column="0" Content="Window Offset Y:"/>
-                                    <TextBox Grid.Row="6" Grid.Column="1" Text="{Binding WindowOffsetY, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="2" HorizontalAlignment="Left"/>
+                                    <Label Grid.Row="6" Grid.Column="0" Content="Window Offset X:"/>
+                                    <TextBox Grid.Row="6" Grid.Column="1" Text="{Binding WindowOffsetX, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="2" HorizontalAlignment="Left"/>
+
+                                    <Label Grid.Row="7" Grid.Column="0" Content="Window Offset Y:"/>
+                                    <TextBox Grid.Row="7" Grid.Column="1" Text="{Binding WindowOffsetY, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="2" HorizontalAlignment="Left"/>
                                 </Grid>
                             </Expander>
                         </StackPanel>

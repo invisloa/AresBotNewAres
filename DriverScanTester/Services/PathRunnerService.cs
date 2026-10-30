@@ -80,13 +80,17 @@ namespace DriverScanTester.Services
         /// <param name="expectedMap">Route map invariant (route ProtectionMapNumber).
         /// 0 = no restriction (multi-map travel compatibility).</param>
         /// <param name="routeLabel">Optional route name used in [ExpMapGuard] diagnostics.</param>
+        /// <param name="disableAllLoot">Profile-level override: when true this run performs
+        /// no automatic loot work. The per-waypoint path-level flags are carried on the
+        /// waypoints themselves and are never written back into saved path data.</param>
         /// <returns>True if the path completed normally (non-loop); false if cancelled.</returns>
         public async Task<bool> RunPathAsync(
             List<Waypoint> waypoints,
             bool loop,
             CancellationToken token,
             int expectedMap = 0,
-            string routeLabel = "")
+            string routeLabel = "",
+            bool disableAllLoot = false)
         {
             LastStopReason = PathRunStopReason.None;
             if (waypoints == null || waypoints.Count == 0)
@@ -127,7 +131,8 @@ namespace DriverScanTester.Services
                     // Route map invariant: a route with an expected map must never keep
                     // navigating old-map waypoints after the player leaves that map.
                     ExpectedMap = expectedMap,
-                    RouteLabel = routeLabel
+                    RouteLabel = routeLabel,
+                    DisableAllLootOverride = disableAllLoot
                 };
             }
             catch

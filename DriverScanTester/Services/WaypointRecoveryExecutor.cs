@@ -14,6 +14,7 @@ namespace DriverScanTester.Services
     public sealed class WaypointRecoveryExecutor
     {
         private readonly SavedPathLoader _pathLoader;
+        private readonly BotProfile _profile;
         private readonly Action<string> _log;
         private readonly PathRunnerService _auxiliaryPathRunner;
         private readonly OperationRunnerService _operationRunner;
@@ -30,6 +31,7 @@ namespace DriverScanTester.Services
         {
             if (memoryService == null) throw new ArgumentNullException(nameof(memoryService));
             _pathLoader = pathLoader ?? throw new ArgumentNullException(nameof(pathLoader));
+            _profile = profile ?? throw new ArgumentNullException(nameof(profile));
             _log = log ?? throw new ArgumentNullException(nameof(log));
 
             _auxiliaryPathRunner = new PathRunnerService(
@@ -87,7 +89,8 @@ namespace DriverScanTester.Services
                 return false;
 
             token.ThrowIfCancellationRequested();
-            bool completed = await _auxiliaryPathRunner.RunPathAsync(waypoints, loop: false, token);
+            bool completed = await _auxiliaryPathRunner.RunPathAsync(
+                waypoints, loop: false, token, disableAllLoot: _profile.DisableAllLoot);
             token.ThrowIfCancellationRequested();
             return completed;
         }

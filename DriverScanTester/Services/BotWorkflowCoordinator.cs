@@ -1388,22 +1388,29 @@ namespace DriverScanTester.Services
                 loop: true,
                 token: expToken,
                 expectedMap: route.ProtectionMapNumber,
-                routeLabel: route.PathFile);
+                routeLabel: route.PathFile,
+                disableAllLoot: _profile.DisableAllLoot);
 
             // The EXP route is a hunting route: run the loot system in parallel so drops
             // are collected while walking and after kills. MoveAndAttackAndLoot routes use
             // the normal white-pixel loot cycle; MoveAndAttack routes use the SOD/SOP
             // pink-only post-kill scan (single big region, repeated until no pink left).
+            // A profile-level or path-level Disable All Loot policy suppresses every
+            // automatic loot operation while keeping the component available for the
+            // existing player-marker safety callbacks.
             LootSystem? lootSystem = null;
             Task? lootTask = null;
             bool hasAttackLootRoute = waypoints.Any(w => w.Mode == BotMode.MoveAndAttackAndLoot);
             bool hasAttackOnlyRoute = waypoints.Any(w => w.Mode == BotMode.MoveAndAttack);
+            bool pathDisablesAllLoot = waypoints.TrueForAll(w => w.DisableAllLoot);
+            bool disableAllLoot = _profile.DisableAllLoot || pathDisablesAllLoot;
             if (hasAttackLootRoute || hasAttackOnlyRoute)
             {
                 lootSystem = new LootSystem(_memoryService, _log, _pathRunner.WCameraController)
                 {
-                    LootPriorityMode = _profile.LootPriority,
+                    LootPriorityMode = _profile.LootPriority && !disableAllLoot,
                     PinkLootOnlyMode = !hasAttackLootRoute && hasAttackOnlyRoute,
+                    AutomaticLootDisabled = disableAllLoot,
                     ShouldStopOnOtherPlayerMarker = () => ShouldStopOnOtherPlayerDetected?.Invoke() ?? true,
                     OtherPlayerMarkerDetected = () =>
                     {
@@ -1423,73 +1430,96 @@ namespace DriverScanTester.Services
                     _pathRunner.CurrentMovement.LootPriorityMode = _profile.LootPriority;
                 }
 
-                lootTask = Task.Run(async () =>
+                if (disableAllLoot)
                 {
-                    try
+                    _log("[ExpLoop] Automatic loot disabled by profile/path policy — no loot scans, camera changes, screenshots or collection. Movement and combat continue; player safety detection stays active.");
+                }
+                else
+                {
+                    lootTask = Task.Run(async () =>
                     {
-                        while (!expToken.IsCancellationRequested && lootSystem != null)
+                        try
                         {
-                            // OnlyMove is mandatory above all movement-option actions:
-                            // never try to loot (or attack) while the current waypoint
-                            // is OnlyMove. Heal stays always on (separate task).
-                            if (_pathRunner.CurrentMovement?.IsMoveOnlyActive == true)
+                            while (!expToken.IsCancellationRequested && lootSystem != null)
                             {
-                                lootSystem.PinkLootOnlyMode = false;
-                                lootSystem.MoveAndAttackAndLootMode = false;
-                                lootSystem.PlayerMarkerScanEnabled = false;
-                                await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
-                                continue;
-                            }
-                            if (_pathRunner.CurrentMovement?.IsRecoveryInputOwnershipActive == true)
-                            {
-                                // Recovery (reverse diagonal, waypoint special recovery,
-                                // map-transition hold) owns movement and camera exclusively:
-                                // no new scan may start, and the MovementSystem has already
-                                // quiesced any in-flight scan when it took ownership.
-                                lootSystem.PinkLootOnlyMode = false;
-                                lootSystem.MoveAndAttackAndLootMode = false;
-                                lootSystem.PlayerMarkerScanEnabled = false;
-                                await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
-                                continue;
-                            }
-                            if (_pathRunner.CurrentMovement?.IsWaypointSpecialRecoveryActive == true)
-                            {
-                                lootSystem.PinkLootOnlyMode = false;
-                                lootSystem.MoveAndAttackAndLootMode = false;
-                                lootSystem.PlayerMarkerScanEnabled = false;
-                                await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
-                                continue;
-                            }
+                                // Profile/path policy is authoritative for this tick. It is
+                                // re-evaluated so a mixed path can suspend loot on a disabled
+                                // waypoint and resume normally on an enabled one.
+                                bool automaticLootDisabled =
+                                    _profile.DisableAllLoot ||
+                                    _pathRunner.CurrentMovement?.IsAutomaticLootDisabled == true;
+                                lootSystem.AutomaticLootDisabled = automaticLootDisabled;
+                                if (automaticLootDisabled)
+                                {
+                                    lootSystem.PinkLootOnlyMode = false;
+                                    lootSystem.MoveAndAttackAndLootMode = false;
+                                    lootSystem.PlayerMarkerScanEnabled = false;
+                                    await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
+                                    continue;
+                                }
 
-                            // Track the current waypoint mode: MoveAndAttack waypoints use
-                            // the SOD/SOP pink-only scan; MoveAndAttackAndLoot is
-                            // request-driven (passive moving pre-scan + post-kill scans).
-                            BotMode? currentMode = _pathRunner.CurrentMovement?.CurrentMode;
-                            lootSystem.PinkLootOnlyMode = currentMode == BotMode.MoveAndAttack;
-                            lootSystem.MoveAndAttackAndLootMode =
-                                currentMode == BotMode.MoveAndAttackAndLoot;
-                            lootSystem.PlayerMarkerScanEnabled =
-                                currentMode == BotMode.MoveAndAttack || currentMode == BotMode.MoveAndAttackAndLoot;
+                                // OnlyMove is mandatory above all movement-option actions:
+                                // never try to loot (or attack) while the current waypoint
+                                // is OnlyMove. Heal stays always on (separate task).
+                                if (_pathRunner.CurrentMovement?.IsMoveOnlyActive == true)
+                                {
+                                    lootSystem.PinkLootOnlyMode = false;
+                                    lootSystem.MoveAndAttackAndLootMode = false;
+                                    lootSystem.PlayerMarkerScanEnabled = false;
+                                    await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
+                                    continue;
+                                }
+                                if (_pathRunner.CurrentMovement?.IsRecoveryInputOwnershipActive == true)
+                                {
+                                    // Recovery (reverse diagonal, waypoint special recovery,
+                                    // map-transition hold) owns movement and camera exclusively:
+                                    // no new scan may start, and the MovementSystem has already
+                                    // quiesced any in-flight scan when it took ownership.
+                                    lootSystem.PinkLootOnlyMode = false;
+                                    lootSystem.MoveAndAttackAndLootMode = false;
+                                    lootSystem.PlayerMarkerScanEnabled = false;
+                                    await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
+                                    continue;
+                                }
+                                if (_pathRunner.CurrentMovement?.IsWaypointSpecialRecoveryActive == true)
+                                {
+                                    lootSystem.PinkLootOnlyMode = false;
+                                    lootSystem.MoveAndAttackAndLootMode = false;
+                                    lootSystem.PlayerMarkerScanEnabled = false;
+                                    await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
+                                    continue;
+                                }
 
-                            await lootSystem.Update(expToken);
-                            await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
+                                // Track the current waypoint mode: MoveAndAttack waypoints use
+                                // the SOD/SOP pink-only scan; MoveAndAttackAndLoot is
+                                // request-driven (passive moving pre-scan + post-kill scans).
+                                BotMode? currentMode = _pathRunner.CurrentMovement?.CurrentMode;
+                                lootSystem.PinkLootOnlyMode = currentMode == BotMode.MoveAndAttack;
+                                lootSystem.MoveAndAttackAndLootMode =
+                                    currentMode == BotMode.MoveAndAttackAndLoot;
+                                lootSystem.PlayerMarkerScanEnabled =
+                                    currentMode == BotMode.MoveAndAttack || currentMode == BotMode.MoveAndAttackAndLoot;
+
+                                await lootSystem.Update(expToken);
+                                await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
+                            }
                         }
-                    }
-                    catch (OperationCanceledException) { }
-                    catch (Exception ex)
-                    {
-                        _log($"[ExpLoop] Loot system error: {ex.Message}");
-                    }
-                    finally
-                    {
-                        lootSystem?.Stop();
-                    }
-                }, expToken);
-                _log(hasAttackLootRoute
-                    ? "[ExpLoop] Loot system started (MoveAndAttackAndLoot route — normal white-pixel loot)."
-                    : "[ExpLoop] Loot system started (MoveAndAttack route — SOD/SOP pink-pixel scan only, big region, after each kill).");
-                if (_profile.LootPriority)
-                    _log("[ExpLoop] LOOT PRIORITY MODE ON — looting outranks combat; attack and waypoint movement are suspended while loot is being scanned/collected.");
+                        catch (OperationCanceledException) { }
+                        catch (Exception ex)
+                        {
+                            _log($"[ExpLoop] Loot system error: {ex.Message}");
+                        }
+                        finally
+                        {
+                            lootSystem?.Stop();
+                        }
+                    }, expToken);
+                    _log(hasAttackLootRoute
+                        ? "[ExpLoop] Loot system started (MoveAndAttackAndLoot route — normal white-pixel loot)."
+                        : "[ExpLoop] Loot system started (MoveAndAttack route — SOD/SOP pink-pixel scan only, big region, after each kill).");
+                    if (_profile.LootPriority)
+                        _log("[ExpLoop] LOOT PRIORITY MODE ON — looting outranks combat; attack and waypoint movement are suspended while loot is being scanned/collected.");
+                }
             }
 
             bool repotNeeded = false;
@@ -1630,6 +1660,12 @@ namespace DriverScanTester.Services
                     await lootTask;
                 }
                 catch (OperationCanceledException) { }
+            }
+            else
+            {
+                // Disabled loot keeps its component only for safety notifications; it is
+                // stopped at the phase boundary so no ownership can leak into Repot.
+                lootSystem?.Stop();
             }
 
             // Phase-boundary guarantee: the EXP loop may have been interrupted while
@@ -2234,7 +2270,8 @@ namespace DriverScanTester.Services
                 return RouteRunResult.MissingSegment;
             }
 
-            bool completed = await _pathRunner.RunPathAsync(waypoints, loop: false, token);
+            bool completed = await _pathRunner.RunPathAsync(
+                waypoints, loop: false, token, disableAllLoot: _profile.DisableAllLoot);
             if (completed)
                 _log($"[Coordinator] {stageName}: path completed.");
             else
@@ -2308,7 +2345,8 @@ namespace DriverScanTester.Services
             if (step.CompletionMode != TravelRouteCompletionMode.ExpectedMapReached)
             {
                 // FinalWaypoint: normal non-loop execution.
-                bool completed = await _pathRunner.RunPathAsync(waypoints, loop: false, token);
+                bool completed = await _pathRunner.RunPathAsync(
+                    waypoints, loop: false, token, disableAllLoot: _profile.DisableAllLoot);
                 if (token.IsCancellationRequested) return TravelRouteRunResult.Cancelled;
 
                 if (completed)
@@ -2375,7 +2413,8 @@ namespace DriverScanTester.Services
             // it reflects the player's position just before the portal is crossed.
             PlayerStateSnapshot? lastSourceState = _positionSync.CaptureCurrentState();
 
-            var pathTask = _pathRunner.RunPathAsync(waypoints, loop: false, routeToken);
+            var pathTask = _pathRunner.RunPathAsync(
+                waypoints, loop: false, routeToken, disableAllLoot: _profile.DisableAllLoot);
 
             int consecutiveDestReads = 0;
             bool destinationConfirmed = false;

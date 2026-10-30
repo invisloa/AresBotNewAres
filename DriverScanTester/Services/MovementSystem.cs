@@ -104,6 +104,13 @@ namespace DriverScanTester.Services
         /// </summary>
         public bool IsOperationStep { get; set; }
 
+        /// <summary>
+        /// True when the owning path/profile disables all automatic loot. Carried on every
+        /// generated waypoint so the effective policy is available for the active waypoint
+        /// (including final-waypoint standby) and survives path advancement/loops.
+        /// </summary>
+        public bool DisableAllLoot { get; set; }
+
         public Waypoint(
             float x,
             float y,
@@ -118,7 +125,8 @@ namespace DriverScanTester.Services
             short stuckRecoveryMobCameraDistance = DefaultCameraDistanceLock,
             string onArrivalOperation = "",
             bool isOperationStep = false,
-            MovementSteeringMode? steeringMode = null)
+            MovementSteeringMode? steeringMode = null,
+            bool disableAllLoot = false)
         {
             X = x;
             Y = y;
@@ -134,6 +142,7 @@ namespace DriverScanTester.Services
             OnArrivalOperation = onArrivalOperation;
             IsOperationStep = isOperationStep;
             SteeringMode = steeringMode;
+            DisableAllLoot = disableAllLoot;
         }
     }
 
@@ -400,11 +409,53 @@ namespace DriverScanTester.Services
         public LootSystem? LootSystemRef { get; set; }
 
         /// <summary>
+        /// Profile-level override for the current run. When true this MovementSystem
+        /// performs no automatic loot work regardless of the per-waypoint path flag.
+        /// Set by the host before the first movement update; it is never written back
+        /// into saved path data.
+        /// </summary>
+        public bool DisableAllLootOverride { get; set; }
+
+        /// <summary>
+        /// Effective automatic-loot policy for the active waypoint/profile. True when the
+        /// profile override is set or the current waypoint (including final-waypoint
+        /// standby) carries the path-level disable flag. Movement, combat, targeting and
+        /// recovery are unaffected; only automatic loot is suppressed.
+        /// </summary>
+        public bool IsAutomaticLootDisabled =>
+            DisableAllLootOverride || CurrentWaypointDisableAllLoot;
+
+        /// <summary>
+        /// Path-level flag of the effective waypoint. Standby uses the final waypoint that
+        /// entered standby, so the policy can never become stale after the queue empties.
+        /// </summary>
+        private bool CurrentWaypointDisableAllLoot
+        {
+            get
+            {
+                try
+                {
+                    if (_finalStandbyActive)
+                        return _finalStandbyWaypoint.DisableAllLoot;
+                    if (_waypoints.Count > 0)
+                        return _waypoints.Peek().DisableAllLoot;
+                }
+                catch (InvalidOperationException)
+                {
+                    // Queue raced from a parallel reader — safest default is "no loot".
+                    return true;
+                }
+                return false;
+            }
+        }
+
+        /// <summary>
         /// True while the mandatory MoveAndAttackAndLoot loot obligation still blocks
         /// ordinary waypoint navigation. False only after a verified Completed request
-        /// (or when no obligation is armed).
+        /// (or when no obligation is armed, or loot is disabled by policy).
         /// </summary>
-        public bool IsLootNavigationBlocked => _lootBarrier.IsBlockingNavigation;
+        public bool IsLootNavigationBlocked =>
+            !IsAutomaticLootDisabled && _lootBarrier.IsBlockingNavigation;
 
         /// <summary>Barrier state exposed for regression tests and host diagnostics.</summary>
         internal LootNavigationBarrier LootBarrier => _lootBarrier;
@@ -420,17 +471,20 @@ namespace DriverScanTester.Services
         /// with no active collection still forbids grouping movement.
         /// </summary>
         internal bool IsMandatoryLootBarrierActive =>
+            !IsAutomaticLootDisabled &&
             RequiresMandatoryLootBarrier(CurrentMode) && _lootBarrier.IsBlockingNavigation;
 
         /// <summary>
         /// Authoritative "loot owns movement/camera" condition for mob grouping: an active
         /// collection/pink scan, loot-priority looting, or the mandatory navigation barrier.
+        /// Disabled loot never blocks grouping.
         /// </summary>
         internal bool IsMobGroupingLootHoldActive =>
-            IsMandatoryLootBarrierActive ||
-            (LootSystemRef != null &&
-             (LootSystemRef.IsCollecting || LootSystemRef.IsPinkScanPendingOrActive ||
-              (LootPriorityMode && LootSystemRef.IsLootingActive)));
+            !IsAutomaticLootDisabled &&
+            (IsMandatoryLootBarrierActive ||
+             (LootSystemRef != null &&
+              (LootSystemRef.IsCollecting || LootSystemRef.IsPinkScanPendingOrActive ||
+               (LootPriorityMode && LootSystemRef.IsLootingActive))));
 
         // ── Rejected combat target (player / unknown) target-cycle budget ──
         // TAB must not loop forever on the same forbidden target: after a bounded number of
@@ -1290,11 +1344,86 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// Releases any loot-owned navigation/camera state when the effective policy is
+        /// "automatic loot disabled". Idempotent: a stale request id is cancelled, the
+        /// barrier is abandoned (never marked as a completed scan) and all loot hold
+        /// bookkeeping is cleared so ordinary navigation/combat resume immediately.
+        /// </summary>
+        private void ApplyAutomaticLootDisabledPolicy()
+        {
+            if (!IsAutomaticLootDisabled)
+                return;
+
+            if (_combatRecoveryMovementAuthorized)
+                EndCombatRecoveryMovement("automatic loot disabled by profile/path policy");
+
+            ReleaseLootBarrierForDisabledPolicy("automatic loot disabled by profile/path policy");
+
+            _lootWaitActive = false;
+            _lootWaitDeadline = DateTime.MinValue;
+            _lootPriorityHoldActive = false;
+            _lootPriorityHoldSince = DateTime.MinValue;
+            _lootPriorityHoldTimedOut = false;
+            _pinkScanHoldActive = false;
+            _pinkScanHoldSince = DateTime.MinValue;
+            _pinkScanHoldTimedOut = false;
+            _postPinkScanTargetCheckPending = false;
+            _postKillCloseTargetCheckPending = false;
+        }
+
+        /// <summary>
+        /// Pushes the effective profile/path policy into the attached loot component at
+        /// the actual waypoint transition boundary. The host loop also re-evaluates it
+        /// every tick, but this makes a newly active disabled waypoint cancel pending
+        /// loot work immediately instead of one host poll later.
+        /// </summary>
+        private void SynchronizeAutomaticLootPolicy()
+        {
+            LootSystem? loot = LootSystemRef;
+            if (loot == null)
+                return;
+
+            bool disabled = IsAutomaticLootDisabled;
+            if (loot.AutomaticLootDisabled != disabled)
+                loot.AutomaticLootDisabled = disabled;
+        }
+
+        /// <summary>
+        /// Cancels the exact armed obligation (when one exists) and abandons the local
+        /// barrier without ever producing a success state. The release is idempotent and
+        /// clears the input-hold flag so movement/camera ownership is handed back.
+        /// </summary>
+        private void ReleaseLootBarrierForDisabledPolicy(string reason)
+        {
+            bool hadOwnership = _lootNavigationBarrierHoldsInput ||
+                                _lootBarrier.IsActive ||
+                                _lootBarrier.HasTerminalFailure;
+            if (!hadOwnership)
+                return;
+
+            if (_lootBarrier.TryGetRequestId(out long requestId))
+                LootSystemRef?.CancelMandatoryLootRequest(requestId, reason);
+
+            _lootBarrier.Abandon(reason);
+            SetLootNavigationBarrierHoldsInput(false);
+            _lootBarrierBlockedLogged = false;
+            _lootBarrierFailureLogged = false;
+            _lootTargetCycleSuppressedLogged = false;
+            _log($"[LootBarrier] Released — {reason}; navigation continues.");
+        }
+
+        /// <summary>
         /// Arms the explicit navigation barrier and creates/coalesces the authoritative
         /// LootSystem request. StopMoving releases W/A/D before any loot work starts.
         /// </summary>
         private void ArmMandatoryLootBarrier(LootBarrierReason reason)
         {
+            if (IsAutomaticLootDisabled)
+            {
+                ReleaseLootBarrierForDisabledPolicy("automatic loot disabled by profile/path policy");
+                return;
+            }
+
             if (!RequiresMandatoryLootBarrier(CurrentMode))
                 return;
 
@@ -1371,6 +1500,12 @@ namespace DriverScanTester.Services
         /// </summary>
         private void RefreshLootBarrier()
         {
+            if (IsAutomaticLootDisabled)
+            {
+                ReleaseLootBarrierForDisabledPolicy("automatic loot disabled by profile/path policy");
+                return;
+            }
+
             if (!RequiresMandatoryLootBarrier(CurrentMode))
             {
                 if (_lootBarrier.IsActive || _lootBarrier.HasTerminalFailure)
@@ -1461,6 +1596,12 @@ namespace DriverScanTester.Services
         /// </summary>
         private async Task<bool> HoldNavigationForMandatoryLootAsync(CancellationToken token)
         {
+            if (IsAutomaticLootDisabled)
+            {
+                ReleaseLootBarrierForDisabledPolicy("automatic loot disabled by profile/path policy");
+                return false;
+            }
+
             if (!_lootBarrier.IsBlockingNavigation)
                 return false;
 
@@ -1506,6 +1647,9 @@ namespace DriverScanTester.Services
         /// </summary>
         private bool TryBeginCombatRecoveryMovement(string reason)
         {
+            if (IsAutomaticLootDisabled)
+                return false;
+
             if (!RequiresMandatoryLootBarrier(CurrentMode))
                 return false;
 
@@ -1551,7 +1695,8 @@ namespace DriverScanTester.Services
             if (!_combatRecoveryMovementAuthorized)
                 return false;
 
-            if (!RequiresMandatoryLootBarrier(CurrentMode) ||
+            if (IsAutomaticLootDisabled ||
+                !RequiresMandatoryLootBarrier(CurrentMode) ||
                 _gameUnresponsiveDetected || _isCityStuckFatal)
                 return false;
 
@@ -1692,6 +1837,9 @@ namespace DriverScanTester.Services
         /// </summary>
         private bool ShouldSuppressPeriodicTargetCycle(CombatAction action)
         {
+            if (IsAutomaticLootDisabled)
+                return false;
+
             if (action != CombatAction.TabTarget ||
                 CurrentMode != BotMode.MoveAndAttackAndLoot ||
                 !_lootBarrier.IsActive)
@@ -1730,6 +1878,13 @@ namespace DriverScanTester.Services
                 ReleaseCombatKeys();
                 return;
             }
+
+            // A profile/path disable policy must release stale loot ownership BEFORE any
+            // navigation, combat, standby or recovery code can observe it. Keeping the
+            // attached LootSystem in sync here also closes the gap between a waypoint
+            // transition and the host's next loot-loop tick.
+            SynchronizeAutomaticLootPolicy();
+            ApplyAutomaticLootDisabledPolicy();
 
             _tickCount++;
 
@@ -1918,7 +2073,7 @@ namespace DriverScanTester.Services
                         _log($"[Tick {_tickCount}] OnlyMove active — ignoring loot (mandatory move, no loot/attack).");
                 }
             }
-            else
+            else if (!IsAutomaticLootDisabled)
             {
             // ── Loot collection interrupts combat/movement ──
             // The loot system scans for ground items WHILE the character keeps attacking
@@ -2256,7 +2411,8 @@ namespace DriverScanTester.Services
                 // SOD/SOP pink scan, or the delayed SOD/SOP rescan), do NOT override the camera:
                 // the pixel scan needs its zoomed view to detect drops. Camera distance is
                 // restored before target cycling resumes.
-                bool lootScanning = (currentMode == BotMode.MoveAndAttackAndLoot ||
+                bool lootScanning = !IsAutomaticLootDisabled &&
+                                    (currentMode == BotMode.MoveAndAttackAndLoot ||
                                      currentMode == BotMode.MoveAndAttack) &&
                                     LootSystemRef != null &&
                                     (LootSystemRef.IsLootCycleActive || LootSystemRef.IsPinkRescanActive);
@@ -2264,7 +2420,7 @@ namespace DriverScanTester.Services
                     TryApplyMovementCameraDistance(cameraDistanceToApply);
 
                 if (canUseCombatRetargetSearch && _combatRetargetCameraStage != CombatRetargetCameraStage.None &&
-                    LootSystemRef?.IsPinkRescanActive != true)
+                    (IsAutomaticLootDisabled || LootSystemRef?.IsPinkRescanActive != true))
                 {
                     if (confirmedMonsterTarget &&
                         (!_postKillCloseTargetCheckPending || targetId != _postKillTargetIdBeforeTab))
@@ -2286,6 +2442,25 @@ namespace DriverScanTester.Services
                     }
                     else if (_postKillCloseTargetCheckPending)
                     {
+                        if (IsAutomaticLootDisabled)
+                        {
+                            // The close-camera TAB is combat retargeting, not loot. With
+                            // automatic loot disabled there is no SOD/SOP scan to run:
+                            // continue the ordinary retarget ladder instead of pausing.
+                            _postKillCloseTargetCheckPending = false;
+                            _combatRetargetCameraStage = CombatRetargetCameraStage.LowSearch;
+                            _combatRetargetAwaitingSelection = false;
+                            _log("[CombatRetarget] No close mob selected — automatic loot disabled, continuing retarget search.");
+                            if (!TryApplyMovementCameraDistance(CombatRetargetLowCameraDistance))
+                                return;
+                            ReleaseSkillThree();
+                            if (!await PressTargetTabAfterCameraSettle(token))
+                                return;
+                            _combatRetargetAwaitingSelection = true;
+                            await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
+                            return;
+                        }
+
                         _log($"[CombatRetarget] No close mob selected at {CombatRetargetVeryLowCameraDistance} — starting SOD/SOP loot scan.");
                         ReleaseSkillThree();
                         ClearCombatRetargetSearch();
@@ -2342,7 +2517,7 @@ namespace DriverScanTester.Services
             // The delayed SOD/SOP sweep owns the zoomed camera and cursor. Let any
             // current attack finish, but do not run target cycling while the camera is
             // at loot distance; resume watchdog timing after the sweep is done.
-            if (LootSystemRef?.IsPinkRescanActive == true)
+            if (!IsAutomaticLootDisabled && LootSystemRef?.IsPinkRescanActive == true)
             {
                 lock (_inputLock)
                     CancelAttackKeyRetry("loot rescan owns input");
@@ -2474,7 +2649,8 @@ namespace DriverScanTester.Services
                     // Explicit kill signal — arm/refresh the mandatory obligation before
                     // any retarget TAB. Consecutive kills coalesce into the same request.
                     ArmMandatoryLootBarrier(LootBarrierReason.PostKill);
-                    if (currentMode == BotMode.MoveAndAttack && LootSystemRef?.PinkLootOnlyMode == true)
+                    if (!IsAutomaticLootDisabled &&
+                        currentMode == BotMode.MoveAndAttack && LootSystemRef?.PinkLootOnlyMode == true)
                     {
                         // First cycle TAB at the closest retarget camera. Keep fighting if
                         // that finds a nearby mob; only request the SOD/SOP scan when the
@@ -2494,7 +2670,8 @@ namespace DriverScanTester.Services
                         return;
                     }
 
-                    LootSystemRef?.RequestPinkScan();
+                    if (!IsAutomaticLootDisabled)
+                        LootSystemRef?.RequestPinkScan();
                     goto case CombatAction.TabTarget;
 
                 case CombatAction.TabTarget:
@@ -2520,7 +2697,8 @@ namespace DriverScanTester.Services
                     ReleaseSkillThree();
                     if (!TryPressTargetCycleKey())
                     {
-                        _postPinkScanTargetCheckPending = currentMode == BotMode.MoveAndAttack;
+                        _postPinkScanTargetCheckPending =
+                            !IsAutomaticLootDisabled && currentMode == BotMode.MoveAndAttack;
                         _combatHandler.SuspendForExternalMovement();
                         return;
                     }
@@ -2627,7 +2805,8 @@ namespace DriverScanTester.Services
             // barrier above and never starts a loot wait from IsLootCycleActive=false.
             // Skipped entirely while the unstuck routine is active — the recovery runs
             // uninterrupted in the movement section below.
-            if (currentMode == BotMode.MoveAndAttack && !_isUnstuckRoutineActive)
+            if (currentMode == BotMode.MoveAndAttack && !_isUnstuckRoutineActive &&
+                !IsAutomaticLootDisabled)
             {
                 bool isCombatStillActive = combatAction == CombatAction.Attack ||
                                            combatAction == CombatAction.CombatWait ||
@@ -2721,7 +2900,9 @@ namespace DriverScanTester.Services
             // ── Route resync after combat ──
             // The resync request is preserved while loot is pending; this branch can only
             // run after the mandatory barrier released navigation.
-            if (CanRunRouteResyncAfterCombat(_routeResyncPendingAfterCombat, _lootBarrier.IsBlockingNavigation))
+            if (CanRunRouteResyncAfterCombat(
+                    _routeResyncPendingAfterCombat,
+                    !IsAutomaticLootDisabled && _lootBarrier.IsBlockingNavigation))
             {
                 _log($"[RouteResync] executing: pos=({currX:F1},{currY:F1}) waypoints={_waypoints.Count}");
                 var resyncResult = RouteResyncFromCurrentPosition(currX, currY);
@@ -3025,7 +3206,8 @@ namespace DriverScanTester.Services
                 bool advanced = await AdvanceReachedWaypoints(currX, currY, token);
                 // Returning true only stops this tick. If the mandatory loot barrier
                 // prevented advancement, later ticks re-enter the same check.
-                return advanced || _goalReached || _lootBarrier.IsBlockingNavigation;
+                return advanced || _goalReached ||
+                       (!IsAutomaticLootDisabled && _lootBarrier.IsBlockingNavigation);
             }
 
             if (_tickCount % _stateLogInterval == 0 && distToTarget <= FINAL_GOAL_SOFT_RADIUS)
@@ -3119,6 +3301,9 @@ namespace DriverScanTester.Services
                     _finalStandbySteeringMode = target.SteeringMode;
                     _finalStandbyWaypoint = target;
                     _finalStandbyActive = true;
+                    // Standby must carry the final waypoint's path policy immediately.
+                    SynchronizeAutomaticLootPolicy();
+                    ApplyAutomaticLootDisabledPolicy();
 
                     HandleEmptyWaypointQueueAfterAdvance();
                     if (_goalReached)
@@ -3126,6 +3311,11 @@ namespace DriverScanTester.Services
                 }
             }
 
+            // The next waypoint is now authoritative for the path-level policy. Release
+            // any loot ownership on the same tick so navigation cannot stall waiting for
+            // a scan that this waypoint forbids.
+            SynchronizeAutomaticLootPolicy();
+            ApplyAutomaticLootDisabledPolicy();
             return advanced;
         }
 
@@ -3758,7 +3948,7 @@ namespace DriverScanTester.Services
 
         private bool TryApplyMovementCameraDistance(short distance)
         {
-            if (_lootNavigationBarrierHoldsInput)
+            if (!IsAutomaticLootDisabled && _lootNavigationBarrierHoldsInput)
                 return false;
 
             void Apply() => _memoryService.SetCameraDistance(distance);
@@ -3852,6 +4042,9 @@ namespace DriverScanTester.Services
         {
             try
             {
+                if (IsAutomaticLootDisabled)
+                    return false;
+
                 LootSystem? loot = LootSystemRef;
                 if (loot == null)
                     return false;
@@ -4640,7 +4833,8 @@ namespace DriverScanTester.Services
         /// True while an in-flight loot collection (mouse left-click, character walking
         /// to the item) still owns movement/cursor. Recovery input must wait for it.
         /// </summary>
-        private bool LootCollectionStillOwnsInput() => LootSystemRef?.IsCollecting == true;
+        private bool LootCollectionStillOwnsInput() =>
+            !IsAutomaticLootDisabled && LootSystemRef?.IsCollecting == true;
 
         private void LogRecoveryDeferredForLoot()
         {
@@ -6183,7 +6377,8 @@ namespace DriverScanTester.Services
                     cancelReason = "unstuck active";
                 else if (IsMobGroupingSequenceActive)
                     cancelReason = "grouping owns movement";
-                else if (LootSystemRef?.IsCollecting == true || LootSystemRef?.IsPinkScanPendingOrActive == true)
+                else if (!IsAutomaticLootDisabled &&
+                         (LootSystemRef?.IsCollecting == true || LootSystemRef?.IsPinkScanPendingOrActive == true))
                     cancelReason = "loot owns input";
                 else if (targetRejected)
                     cancelReason = $"target not attackable ({validation.Kind}: {validation.Source})";
