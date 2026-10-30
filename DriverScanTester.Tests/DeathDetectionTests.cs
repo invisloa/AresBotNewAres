@@ -28,7 +28,7 @@ namespace DriverScanTester.Tests
                     count = 0;
                     byte[]? value = address switch
                     {
-                        0x486BC8 => BitConverter.GetBytes(PlayerBase),
+                        0x489BC8 => BitConverter.GetBytes(PlayerBase),
                         PlayerBase + BotConstants.MemoryOffsets.Hp => BitConverter.GetBytes(Hp),
                         PlayerBase + BotConstants.MemoryOffsets.Mana => BitConverter.GetBytes((short)500),
                         PlayerBase + BotConstants.MemoryOffsets.MaxHp => MaxHpUnreadable ? null : BitConverter.GetBytes(MaxHp),

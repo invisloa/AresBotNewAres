@@ -33,7 +33,7 @@ namespace DriverScanTester.Tests
                 GameMemoryService.ReadMemoryDelegate read = (uint pid, ulong address, byte[] buffer, out uint count) =>
                 {
                     byte[]? value = address switch {
-                        0x486BC8 => BitConverter.GetBytes(0x100000UL),
+                        0x489BC8 => BitConverter.GetBytes(0x100000UL),
                         0x100060 => BitConverter.GetBytes(Target),
                         0x100C58 => ManaUnavailable ? null : BitConverter.GetBytes(Mana),
                         _ => null

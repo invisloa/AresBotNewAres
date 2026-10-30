@@ -33,7 +33,7 @@ namespace DriverScanTester.Tests
                 {
                     byte[]? value = address switch
                     {
-                        0x486BC8 => BitConverter.GetBytes(0x100000UL),
+                        0x489BC8 => BitConverter.GetBytes(0x100000UL),
                         0x100060 => BitConverter.GetBytes(Target),
                         0x100C58 => BitConverter.GetBytes(Mana),
                         0x1003B0 => new[] { Action },

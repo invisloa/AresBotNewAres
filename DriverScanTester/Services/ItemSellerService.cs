@@ -1282,7 +1282,7 @@ namespace DriverScanTester.Services
                _memory.TryGetCameraVerticalLock(out short actualVerticalLock) && actualVerticalLock == expectedVerticalLock;
 
         /// <summary>
-        /// Reads the seller-mouseover int at <c>[Ares.exe + 0x4853E8] + 0xC</c>.
+        /// Reads the seller-mouseover int at <c>[Ares.exe + 0x4883E8] + 0xC</c>.
         /// 0 is treated as "not pointed" (also returned if the pointer chain fails).
         /// </summary>
         private int ReadIsSellerPointed()

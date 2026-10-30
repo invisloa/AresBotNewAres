@@ -171,7 +171,7 @@ namespace DriverScanTester.ViewModels
         public Action? OnStopBot;
 
         // Offsets
-        private const ulong PlayerPtrOffset = 0x486BC8;
+        private const ulong PlayerPtrOffset = BotConstants.MemoryOffsets.PlayerPtr;
         private const ulong XOffset = 0x144;
         private const ulong YOffset = 0xEE8;
 

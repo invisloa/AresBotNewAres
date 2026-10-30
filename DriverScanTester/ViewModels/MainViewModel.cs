@@ -1071,7 +1071,7 @@ namespace DriverScanTester.ViewModels
                         AppendLog)
                     {
                         NameText = "Camera Vertical Angle",
-                        AddressText = "[Ares.exe + 0x4853F0] + 0x1BE",
+                        AddressText = "[Ares.exe + 0x4883F0] + 0x1BE",
                         ValueType = LockValueType.Short,
                         ValueText = BotConstants.Camera.StationaryVerticalLock.ToString()
                     });

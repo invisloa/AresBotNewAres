@@ -29,7 +29,7 @@ namespace DriverScanTester.Tests
     /// </summary>
     public sealed class CombatManaStuckTests
     {
-        private const ulong PlayerPtrOffset = 0x486BC8;
+        private const ulong PlayerPtrOffset = BotConstants.MemoryOffsets.PlayerPtr;
         private const ulong PlayerBase = 0x100000;
         private const ulong TargetSelectedOffset = 0x60;
         private const ulong CurrentActionOffset = 0x3B0;
