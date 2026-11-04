@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using DriverScanTester.Services;
+using DriverScanTester.Utils;
 using static DriverScanTester.Services.LootSystem;
 using Xunit;
 
@@ -146,6 +147,8 @@ namespace DriverScanTester.Tests
 
         private sealed class ReturnTestMovementSystem : MovementSystem
         {
+            private readonly ReturnMemoryStub _stub;
+
             public ReturnTestMovementSystem(
                 GameMemoryService memory,
                 Action<string> log,
@@ -153,11 +156,23 @@ namespace DriverScanTester.Tests
                 ReturnMemoryStub stub,
                 StubCombatPlayerPresenceScanner presence)
                 : base(memory, log, ProductionWaypointX, ProductionWaypointY, customPath: path, loopPath: false,
+                    steeringMode: MovementSteeringMode.DirectCamera,
                     targetSafety: CombatSafetyFixtures.WithPresence(() => stub.TargetId, presence))
             {
+                _stub = stub;
             }
 
             public bool Foreground { get; set; } = true;
+            public bool ReleaseTargetOnLeftUp { get; set; } = true;
+            public int ClientLeft { get; set; } = 448;
+            public int ClientTop { get; set; } = 131;
+            public int ClientWidth { get; set; } = 1024;
+            public int ClientHeight { get; set; } = 768;
+            private int _cursorX;
+            private int _cursorY;
+            private bool _cursorKnown;
+            public List<string> MouseActions { get; } = new();
+            public List<string> InputOrder { get; } = new();
 
             public int ForwardKeyDowns { get; private set; }
             public int ForwardKeyUps { get; private set; }
@@ -167,8 +182,47 @@ namespace DriverScanTester.Tests
 
             protected override bool IsGameClientForegroundForRecovery() => Foreground;
 
+            protected override bool TryResolveCombatGateClientArea(
+                out nint hwnd, out int clientScreenLeft, out int clientScreenTop,
+                out int clientWidth, out int clientHeight)
+            {
+                hwnd = Foreground ? (nint)1 : nint.Zero;
+                clientScreenLeft = ClientLeft;
+                clientScreenTop = ClientTop;
+                clientWidth = ClientWidth;
+                clientHeight = ClientHeight;
+                return Foreground && ClientWidth > 0 && ClientHeight > 0;
+            }
+
+            protected override bool IsCombatGateClientForeground(nint hwnd) => Foreground && hwnd != nint.Zero;
+
+            protected override void MoveCombatGateMouseCursor(int screenX, int screenY)
+            {
+                MouseActions.Add($"Move:{screenX},{screenY}");
+                InputOrder.Add($"MouseMove:{screenX},{screenY}");
+                _cursorX = screenX;
+                _cursorY = screenY;
+                _cursorKnown = true;
+            }
+
+            protected override bool TryGetCombatGateCursorPosition(out int screenX, out int screenY)
+            {
+                screenX = _cursorX;
+                screenY = _cursorY;
+                return _cursorKnown;
+            }
+
+            protected override void SendCombatGateMouseEvent(MouseOperations.MouseEventFlags flags)
+            {
+                MouseActions.Add(flags.ToString());
+                InputOrder.Add($"Mouse:{flags}");
+                if (flags == MouseOperations.MouseEventFlags.LeftUp && ReleaseTargetOnLeftUp)
+                    _stub.TargetId = 0;
+            }
+
             protected override void SendSyntheticForwardKeyEvent(bool keyUp)
             {
+                InputOrder.Add(keyUp ? "WUp" : "WDown");
                 if (keyUp)
                     ForwardKeyUps++;
                 else
@@ -181,6 +235,7 @@ namespace DriverScanTester.Tests
 
             protected override void SendSkillThreeKeyEvent(bool keyUp)
             {
+                InputOrder.Add(keyUp ? "AttackUp" : "AttackDown");
                 if (!keyUp)
                     SkillThreeDowns++;
             }
@@ -207,15 +262,18 @@ namespace DriverScanTester.Tests
                 float playerX = ProductionPlayerX,
                 float playerY = ProductionPlayerY,
                 short attackDisengageDistance = ProductionAttackDisengageDistance,
-                BotMode mode = BotMode.MoveAndAttackAndLoot)
+                BotMode mode = BotMode.MoveAndAttackAndLoot,
+                float waypointX = ProductionWaypointX,
+                float waypointY = ProductionWaypointY,
+                int targetId = ProductionMobTargetId)
             {
-                Stub = new ReturnMemoryStub { X = playerX, Y = playerY };
+                Stub = new ReturnMemoryStub { X = playerX, Y = playerY, TargetId = targetId };
                 GameMemoryService memory = Stub.Create(Log.Add);
                 Loot = new LootSystem(memory, Log.Add);
                 var presence = new StubCombatPlayerPresenceScanner();
                 var path = new[]
                 {
-                    new Waypoint(ProductionWaypointX, ProductionWaypointY, MovementPrecision.Medium, mode,
+                    new Waypoint(waypointX, waypointY, MovementPrecision.Medium, mode,
                         attackDisengageDistance: attackDisengageDistance)
                 };
 
@@ -338,7 +396,93 @@ namespace DriverScanTester.Tests
             Assert.True(condition(), "condition was not reached in time");
         }
 
-        // ── A. Production deadlock: the pipeline now requests authorized W ──────
+        // ── A. Overshoot releases the selected target before navigation ────────
+
+        [Fact]
+        public async Task OvershootReleasesAttackAndClicksDynamicClientCenterBeforeW()
+        {
+            using var scenario = new ReturnScenario(
+                playerX: 124f, playerY: 175f, mode: BotMode.MoveAndAttackAndLoot,
+                waypointX: 139f, waypointY: 156f, targetId: 16401);
+            scenario.ArmPostKill();
+            scenario.DeferForCombat();
+            Invoke(scenario.Movement, "HoldSkillThree");
+            Assert.True(scenario.Movement.IsAttackKeyHeld);
+
+            await scenario.TickAsync();
+
+            Assert.Contains(scenario.Log, l => l.Contains("[CombatGate] Overshoot d:", StringComparison.Ordinal) &&
+                                               l.Contains(" > 33", StringComparison.Ordinal));
+            Assert.Contains(scenario.Log, l => l.Contains("[CombatGate] Overshoot detected", StringComparison.Ordinal));
+            Assert.Contains(scenario.Log, l => l.Contains("[CombatGate] Target before release: 16401", StringComparison.Ordinal));
+            Assert.Equal(new[] { "Move:960,515", "LeftDown", "LeftUp" }, scenario.Movement.MouseActions);
+            Assert.Equal(0, scenario.Stub.TargetId);
+            Assert.False(scenario.Movement.IsAttackKeyHeld);
+            Assert.Contains(scenario.Log, l => l.Contains("Target release result: Cleared", StringComparison.Ordinal));
+
+            int leftUpIndex = scenario.Movement.InputOrder.IndexOf("Mouse:LeftUp");
+            int forwardDownIndex = scenario.Movement.InputOrder.IndexOf("WDown");
+            Assert.True(leftUpIndex >= 0 && forwardDownIndex > leftUpIndex,
+                "the left-button release must complete before route movement starts");
+            Assert.True(scenario.Movement.InputOrder.IndexOf("AttackUp") <
+                        scenario.Movement.InputOrder.IndexOf("MouseMove:960,515"),
+                "the held attack skill must be released before the target click");
+        }
+
+        [Fact]
+        public async Task NoOvershootLeavesCombatAndMouseInputUnchanged()
+        {
+            using var scenario = new ReturnScenario(
+                playerX: 125f, playerY: 175f, mode: BotMode.MoveAndAttack,
+                waypointX: 139f, waypointY: 156f, targetId: 16401);
+
+            await scenario.TickAsync();
+
+            Assert.Empty(scenario.Movement.MouseActions);
+            Assert.Equal(16401, scenario.Stub.TargetId);
+            Assert.Contains(scenario.Log, l => l.Contains("Combat: Attack", StringComparison.Ordinal));
+            Assert.True(scenario.Movement.SkillThreeDowns > 0);
+        }
+
+        [Fact]
+        public async Task OvershootUsesTheCurrentClientRectangleRatherThanFixedCoordinates()
+        {
+            using var scenario = new ReturnScenario(
+                playerX: 124f, playerY: 175f, mode: BotMode.MoveAndAttack,
+                waypointX: 139f, waypointY: 156f, targetId: 16401);
+            scenario.Movement.ClientLeft = 701;
+            scenario.Movement.ClientTop = 88;
+            scenario.Movement.ClientWidth = 803;
+            scenario.Movement.ClientHeight = 607;
+
+            await scenario.TickAsync();
+
+            Assert.Equal(new[] { "Move:1102,391", "LeftDown", "LeftUp" }, scenario.Movement.MouseActions);
+            Assert.Contains(scenario.Log, l => l.Contains("client=(401,303) screen=(1102,391)", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public async Task LostForegroundDefersTargetClickAndMovement()
+        {
+            using var scenario = new ReturnScenario(
+                playerX: 124f, playerY: 175f, mode: BotMode.MoveAndAttack,
+                waypointX: 139f, waypointY: 156f, targetId: 16401);
+            scenario.Movement.Foreground = false;
+
+            await scenario.TickAsync();
+
+            Assert.Empty(scenario.Movement.MouseActions);
+            Assert.Equal(16401, scenario.Stub.TargetId);
+            Assert.Equal(0, scenario.Movement.ForwardKeyDowns);
+            Assert.Contains(scenario.Log, l => l.Contains("Target release deferred", StringComparison.Ordinal));
+
+            scenario.Movement.Stop();
+            Assert.Empty(scenario.Movement.MouseActions);
+            Assert.False(scenario.Movement.IsAttackKeyHeld);
+            Assert.Equal(0, (int)GetField(scenario.Movement, "_combatGateSuppressedTargetId")!);
+        }
+
+        // ── B. Production deadlock: the pipeline now requests authorized W ──────
 
         [Fact]
         public async Task ProductionDeadlockNowRequestsAuthorizedWaypointReturnMovement()
@@ -351,12 +495,20 @@ namespace DriverScanTester.Tests
             await scenario.TickAsync();
 
             // The CombatGate still suppresses the attack (unchanged behaviour).
-            Assert.Contains(scenario.Log, l => l.Contains("[CombatGate] Overshoot", StringComparison.Ordinal));
+            Assert.Contains(scenario.Log, l => l.Contains("[CombatGate] Overshoot detected", StringComparison.Ordinal));
+            Assert.Equal(new[] { "Move:960,515", "LeftDown", "LeftUp" }, scenario.Movement.MouseActions);
+            Assert.Equal(0, scenario.Stub.TargetId);
 
             // The dedicated return takes the existing combat-recovery handoff for THIS request.
             Assert.Contains(scenario.Log, l => l.Contains("[CombatGateReturn] START", StringComparison.Ordinal));
             Assert.Contains(scenario.Log, l => l.Contains("[CombatGateReturn] Authorization granted", StringComparison.Ordinal));
             Assert.Contains(scenario.Log, l => l.Contains("[CombatGateReturn] W accepted", StringComparison.Ordinal));
+            await scenario.TickAsync();
+            Assert.Equal(1, scenario.Movement.MouseActions.Count(action => action == "LeftDown"));
+            Assert.Equal(1, scenario.Movement.MouseActions.Count(action => action == "LeftUp"));
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+            Assert.Equal(0, scenario.Movement.SkillThreeDowns);
+            Assert.Single(scenario.Log.Where(l => l.Contains("[CombatGateReturn] START", StringComparison.Ordinal)));
             Assert.True(scenario.ReturnActive);
             Assert.Equal(scenario.RequestId, scenario.ReturnRequestId);
             Assert.True(scenario.Movement.IsCombatRecoveryMovementAuthorized);
@@ -424,10 +576,47 @@ namespace DriverScanTester.Tests
             Assert.Equal(scenario.RequestId, status.RequestId);
             Assert.False(status.CameraVerified);
 
-            // Combat can resume: the same confirmed monster is attacked on the next tick.
+            // The disengaged monster remains suppressed after arrival. A later selection is
+            // released once instead of restarting the same attack/return oscillation.
+            scenario.Stub.TargetId = ProductionMobTargetId;
             await scenario.TickAsync();
-            Assert.Contains(scenario.Log, l => l.Contains("Combat: Attack", StringComparison.Ordinal));
-            Assert.True(scenario.Movement.SkillThreeDowns > 0, "combat must resume once the waypoint is reached");
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("Combat: Attack", StringComparison.Ordinal));
+            Assert.Equal(2, scenario.Movement.MouseActions.Count(action => action == "LeftDown"));
+            Assert.Equal(2, scenario.Movement.MouseActions.Count(action => action == "LeftUp"));
+            Assert.False(scenario.ReturnActive, "suppression must not start another return for the same target");
+            Assert.False(scenario.Movement.IsCombatRecoveryMovementAuthorized,
+                "releasing a reselected suppressed target must not strand a second loot handoff");
+            Assert.Contains(scenario.Log, l => l.Contains("Target 16346 skipped: disengagement suppression active", StringComparison.Ordinal));
+
+            await scenario.TickAsync();
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+            Assert.Equal(2, scenario.Movement.MouseActions.Count(action => action == "LeftDown"));
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("[CombatGate] TAB suppressed", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public async Task SuppressionDoesNotBlockAnotherConfirmedMonsterAfterRecovery()
+        {
+            using var scenario = new ReturnScenario(
+                playerX: 124f, playerY: 175f, mode: BotMode.MoveAndAttack,
+                waypointX: 139f, waypointY: 156f, targetId: 16401);
+
+            await scenario.TickAsync();
+            Assert.Equal(0, scenario.Stub.TargetId);
+            Assert.Equal(1, scenario.Movement.MouseActions.Count(action => action == "LeftDown"));
+
+            scenario.Stub.X = 139f;
+            scenario.Stub.Y = 156f;
+            await scenario.TickAsync();
+            await scenario.TickAsync();
+            scenario.Stub.TargetId = 20001;
+            await scenario.TickAsync();
+
+            Assert.True(scenario.Log.Any(l => l.Contains("Combat: Attack", StringComparison.Ordinal)),
+                string.Join(Environment.NewLine, scenario.Log));
+            Assert.True(scenario.Movement.SkillThreeDowns > 0);
+            Assert.Equal(1, scenario.Movement.MouseActions.Count(action => action == "LeftDown"));
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("Target 20001 skipped", StringComparison.Ordinal));
         }
 
         // ── C. No movement: bounded stall, diagnostics, existing recovery ───────
@@ -436,12 +625,15 @@ namespace DriverScanTester.Tests
         public async Task StaticPositionStallsWithinTheWindowAndStartsTheExistingRecovery()
         {
             using var scenario = new ReturnScenario();
+            scenario.Movement.ReleaseTargetOnLeftUp = false;
             scenario.ArmPostKill();
             scenario.DeferForCombat();
 
-            await scenario.TickAsync();
+            await TickUntilAsync(scenario, () => scenario.ReturnActive);
             Assert.True(GetBoolField(scenario.Movement, "_isMovingForward"));
             DateTime returnStarted = GetDateTimeField(scenario.Movement, "_combatGateReturnStartedAt");
+            Assert.Equal(2, scenario.Movement.MouseActions.Count(action => action == "LeftDown"));
+            Assert.Contains(scenario.Log, l => l.Contains("Target release FAILED", StringComparison.Ordinal));
 
             await TickUntilAsync(scenario, () => scenario.Log.Any(l => l.Contains("[CombatGateReturn] STALLED", StringComparison.Ordinal)));
 
@@ -498,7 +690,7 @@ namespace DriverScanTester.Tests
         // ── E. Target disappears ────────────────────────────────────────────────
 
         [Fact]
-        public async Task TargetLossReleasesInputAndLetsTheStationaryScanResume()
+        public async Task ClearedTargetDoesNotAbortTheAuthorizedWaypointReturn()
         {
             using var scenario = new ReturnScenario();
             scenario.ArmPostKill();
@@ -506,24 +698,19 @@ namespace DriverScanTester.Tests
 
             await scenario.TickAsync();
             Assert.True(GetBoolField(scenario.Movement, "_isMovingForward"));
+            Assert.Equal(0, scenario.Stub.TargetId);
 
-            scenario.Stub.TargetId = 0;
             await scenario.TickAsync();
 
-            Assert.Contains(scenario.Log, l => l.Contains("[CombatGateReturn] ABORT reason=TargetLost", StringComparison.Ordinal));
-            Assert.False(GetBoolField(scenario.Movement, "_isMovingForward"));
-            Assert.False(scenario.ReturnActive);
-            Assert.False(scenario.Movement.IsCombatRecoveryMovementAuthorized);
-            Assert.False(scenario.Loot.IsCombatRecoveryMovementActiveFor(scenario.RequestId));
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("[CombatGateReturn] ABORT reason=TargetLost", StringComparison.Ordinal));
+            Assert.True(GetBoolField(scenario.Movement, "_isMovingForward"));
+            Assert.True(scenario.ReturnActive);
+            Assert.True(scenario.Movement.IsCombatRecoveryMovementAuthorized);
+            Assert.True(scenario.Loot.IsCombatRecoveryMovementActiveFor(scenario.RequestId));
             Assert.Equal(0, scenario.Movement.TargetCyclePresses);
             Assert.DoesNotContain(scenario.Log, l => l.Contains("[CombatGateReturn] COMPLETE", StringComparison.Ordinal));
 
-            // The same mandatory generation resumes its stationary verification normally.
             Assert.Equal(LootRequestState.Deferred, scenario.Status().State);
-            scenario.Loot.NotifyNavigationHeld(scenario.RequestId);
-            Invoke(scenario.Loot, "ServiceMandatoryLootRequest", false);
-            Assert.Equal(LootRequestState.Running, scenario.Status().State);
-            Assert.Equal(scenario.RequestId, scenario.Status().RequestId);
         }
 
         // ── F. Target becomes another player ────────────────────────────────────
@@ -550,8 +737,8 @@ namespace DriverScanTester.Tests
             Assert.Equal(0, scenario.Movement.SkillThreeDowns);
             Assert.DoesNotContain(scenario.Log, l => l.Contains("Combat: Attack", StringComparison.Ordinal));
 
-            // The existing bounded rejected-target policy cycled once — never an endless TAB loop.
-            Assert.Equal(1, scenario.Movement.TargetCyclePresses);
+            // CombatGateReturn never TABs while its waypoint recovery owns the tick.
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
 
             // No unsafe continuation on later ticks either.
             int pressesAfterAbort = scenario.Movement.TargetCyclePresses;
@@ -718,8 +905,9 @@ namespace DriverScanTester.Tests
             await scenario.TickAsync();
 
             Assert.False(scenario.ReturnActive);
-            Assert.Equal(0, scenario.Movement.ForwardKeyDowns);
-            Assert.False(GetBoolField(scenario.Movement, "_isMovingForward"));
+            Assert.Equal(new[] { "Move:960,515", "LeftDown", "LeftUp" }, scenario.Movement.MouseActions);
+            Assert.True(scenario.Movement.ForwardKeyDowns > 0,
+                "with mandatory loot disabled, ordinary waypoint navigation proceeds after target release");
             Assert.DoesNotContain(scenario.Log, l => l.Contains("[CombatGateReturn] START", StringComparison.Ordinal));
             Assert.False(scenario.Movement.IsLootNavigationBlocked);
             Assert.False(GetBoolField(scenario.Movement, "_lootNavigationBarrierHoldsInput"));
@@ -772,14 +960,14 @@ namespace DriverScanTester.Tests
         // ── L2. Unobtainable handoff: diagnosed once, then bounded escalation ──
 
         [Fact]
-        public async Task UnavailableHandoffIsDiagnosedOnceAndEscalatesAfterTheBoundedWindow()
+        public async Task TargetReleaseWaitsWhileLootOwnsTheCursorThenStartsRecovery()
         {
             using var scenario = new ReturnScenario();
             scenario.ArmPostKill();
             scenario.DeferForCombat();
 
-            // An active loot scan owns the camera, so no physical handoff may be taken even though
-            // the obligation itself stays Deferred — nothing is completed by a timeout.
+            // A running scan owns the cursor. The target click must wait rather than race loot,
+            // and neither the deferred obligation nor waypoint recovery may be faked as complete.
             FieldInfo lootStateField = typeof(LootSystem).GetField("_lootState", PrivateInstance)!;
             object scanState = Enum.Parse(lootStateField.FieldType, "Scan");
             lootStateField.SetValue(scenario.Loot, scanState);
@@ -787,30 +975,22 @@ namespace DriverScanTester.Tests
             await scenario.TickAsync();
             await scenario.TickAsync();
 
-            Assert.Contains(scenario.Log, l => l.Contains("[CombatGateReturn] ABORT reason=HandoffUnavailable", StringComparison.Ordinal));
-            Assert.Single(scenario.Log.Where(l => l.Contains("[CombatGateReturn] ABORT reason=HandoffUnavailable", StringComparison.Ordinal)));
+            Assert.Empty(scenario.Movement.MouseActions);
+            Assert.Contains(scenario.Log, l => l.Contains("Target release deferred: mouse cursor is owned by the loot workflow", StringComparison.Ordinal));
             Assert.False(scenario.ReturnActive);
             Assert.Equal(0, scenario.Movement.ForwardKeyDowns);
+            Assert.Equal(ProductionMobTargetId, scenario.Stub.TargetId);
             Assert.Equal(LootRequestState.Deferred, scenario.Status().State);
-            Assert.False(scenario.Movement.IsNavigationFailureEscalationRequested);
 
-            // The same deadlock persisting beyond the bounded window escalates safely.
-            SetField(scenario.Movement, "_combatGateReturnDeadlockSince", DateTime.UtcNow.AddSeconds(-30));
+            lootStateField.SetValue(scenario.Loot, Enum.Parse(lootStateField.FieldType, "Idle"));
             await scenario.TickAsync();
 
-            Assert.Contains(scenario.Log, l => l.Contains("[CombatGateReturn] ABORT reason=DeadlockWindowExpired", StringComparison.Ordinal));
-            Assert.True(scenario.Movement.FailureScreenshotCalls > 0, "the deadlock window must capture diagnostics");
-            Assert.True(scenario.Movement.IsNavigationFailureEscalationRequested);
-            Assert.Equal(0, scenario.Movement.ForwardKeyDowns);
-            Assert.False(GetBoolField(scenario.Movement, "_isMovingForward"));
-            Assert.NotEqual(LootRequestState.Completed, scenario.Status().State);
-            Assert.DoesNotContain(scenario.Log, l => l.Contains("[CombatGateReturn] COMPLETE", StringComparison.Ordinal));
-
-            // The simulated scan state must not change the obligation either.
-            lootStateField.SetValue(scenario.Loot, Enum.Parse(lootStateField.FieldType, "Idle"));
-            LootRequestStatus status = scenario.Status();
-            Assert.Equal(scenario.RequestId, status.RequestId);
-            Assert.False(status.CameraVerified);
+            Assert.Equal(new[] { "Move:960,515", "LeftDown", "LeftUp" }, scenario.Movement.MouseActions);
+            Assert.Equal(0, scenario.Stub.TargetId);
+            Assert.True(scenario.ReturnActive);
+            Assert.True(GetBoolField(scenario.Movement, "_isMovingForward"));
+            Assert.Equal(LootRequestState.Deferred, scenario.Status().State);
+            Assert.False(scenario.Status().CameraVerified);
         }
 
         // ── M. Repeated failures escalate instead of looping forever ────────────

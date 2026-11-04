@@ -270,9 +270,9 @@ namespace DriverScanTester
         /// <summary>
         /// Bounds of the dedicated CombatGate waypoint return recovery. The operation exists
         /// only for one exact interaction: CombatGate suppressed attacks because the player is
-        /// outside the waypoint's AttackDisengageDistance, a Deferred PostKill loot obligation
-        /// blocks ordinary navigation, and a confirmed monster is still selected. Without it the
-        /// bot could neither attack nor navigate and no camera-verified scan could ever run
+        /// outside the waypoint's AttackDisengageDistance and a Deferred PostKill loot obligation
+        /// blocks ordinary navigation. CombatGate releases the target before this return so the
+        /// camera-verified scan can resume after the waypoint is reached.
         /// (2026-11-04 02:06 MoveAndAttackAndLoot deadlock).
         /// </summary>
         public static class CombatGateReturn

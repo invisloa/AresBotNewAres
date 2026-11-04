@@ -429,15 +429,16 @@ namespace DriverScanTester.Services
 
         // ── CombatGate waypoint return recovery ──
         // CombatGate sets _attackSuppressedForCurrentWaypoint once the player is outside the
-        // current waypoint's AttackDisengageDistance. That latch is only cleared when the
-        // waypoint leg ends — but a Deferred post-kill loot obligation blocks ordinary
-        // navigation, so the bot stood still forever: the gate forbade attacking, the barrier
-        // forbade navigating and the selected mob deferred the mandatory scan (2026-11-04
-        // 02:06 deadlock). This is a narrowly scoped, tick-driven return to the CURRENT
+        // current waypoint's AttackDisengageDistance. Without the deferred-post-kill return,
+        // the loot obligation blocks ordinary navigation while the CombatGate latch suppresses
+        // attacks. The target is released before this return takes the existing
+        // combat-recovery handoff, so the deferred mandatory scan can resume afterward
+        // (2026-11-04 02:06 deadlock). This is a narrowly scoped, tick-driven return to the CURRENT
         // waypoint that reuses the existing combat-recovery handoff. It never advances the
         // waypoint, never completes the loot obligation and is cancelled by every lifecycle
         // reset (stop, map change, teleport, waypoint replacement, route failure).
         private bool _combatGateReturnActive;
+        private bool _combatGateReturnHandoffReserved;
         private long _combatGateReturnRequestId;
         private int _combatGateReturnTargetId;
         private float _combatGateReturnWaypointX;
@@ -457,6 +458,26 @@ namespace DriverScanTester.Services
         private DateTime _combatGateReturnDeadlockSince = DateTime.MinValue;
         private string _combatGateReturnDeadlockDetail = string.Empty;
         private bool _combatGateReturnDeadlockEscalated;
+
+        // A target selected when CombatGate disengages is released once and kept out of
+        // combat until the route has advanced beyond that waypoint and 15 seconds have elapsed.
+        private const int CombatGateTargetReleaseMaximumClicks = 2;
+        private const int CombatGateTargetReleaseRetryDelayMs = 200;
+        private const int CombatGateTargetSuppressionSeconds = 15;
+        private int _combatGateSuppressedTargetId;
+        private Waypoint _combatGateSuppressedWaypoint;
+        private DateTime _combatGateTargetDisengagedAtUtc = DateTime.MinValue;
+        private bool _combatGateSuppressionWaypointReached;
+        private bool _combatGateSuppressionRouteProgressed;
+        private bool _combatGateSuppressedTargetTabAttempted;
+        private bool _combatGateSuppressedTabSuppressionLogged;
+        private bool _combatGateSuppressionSelectionHandled;
+        private bool _combatGateTargetReleasePending;
+        private int _combatGateTargetReleaseTargetId;
+        private int _combatGateTargetReleaseClickCount;
+        private DateTime _combatGateTargetReleaseRetryAtUtc = DateTime.MinValue;
+        private bool _combatGateTargetReleaseWaitLogged;
+        private bool _combatGateTargetReleaseVerified;
 
         // ── Post-kill SOD/SOP pink-scan hold (MoveAndAttack) ──
         // After a kill, first TAB at the closest camera distance. A nearby mob takes
@@ -1829,9 +1850,10 @@ namespace DriverScanTester.Services
         internal bool IsCombatRecoveryMovementAuthorized => _combatRecoveryMovementAuthorized;
 
         /// <summary>
-        /// Grants the narrow combat-recovery authorization: a selected valid mob, the exact
-        /// armed request still Deferred with a PostKill reason, no in-flight loot collection
-        /// and an atomic handoff through <see cref="LootSystem"/>. Ordinary navigation and
+        /// Grants the narrow combat-recovery authorization: the exact armed request remains
+        /// Deferred with a PostKill reason, no in-flight loot collection, and an atomic handoff
+        /// through <see cref="LootSystem"/>. The CombatGate return may use its captured target
+        /// after the release click clears selection. Ordinary navigation and
         /// ordinary stuck recovery never call this, so the barrier stays fully in force for
         /// them.
         /// </summary>
@@ -1848,7 +1870,18 @@ namespace DriverScanTester.Services
                 _lootBarrier.Reason != LootBarrierReason.PostKill)
                 return false;
 
-            if (!_memoryService.IsMobSelected())
+            bool isCombatGateReturn = string.Equals(reason, "CombatGate waypoint return", StringComparison.Ordinal);
+            bool isCombatGateTargetRelease = string.Equals(reason, "CombatGate target release", StringComparison.Ordinal);
+            bool targetReleaseBelongsToActiveGate =
+                isCombatGateTargetRelease && _attackSuppressedForCurrentWaypoint;
+            bool combatGateReturnHasReleasedTarget =
+                (isCombatGateReturn || targetReleaseBelongsToActiveGate) &&
+                _waypoints.Count > 0 &&
+                IsCombatGateTargetSuppressionActive &&
+                (isCombatGateTargetRelease || !_combatGateTargetReleasePending) &&
+                Math.Abs(_combatGateSuppressedWaypoint.X - _waypoints.Peek().X) <= 0.01f &&
+                Math.Abs(_combatGateSuppressedWaypoint.Y - _waypoints.Peek().Y) <= 0.01f;
+            if (!_memoryService.IsMobSelected() && !combatGateReturnHasReleasedTarget)
                 return false;
 
             if (LootCollectionStillOwnsInput())
@@ -1860,6 +1893,10 @@ namespace DriverScanTester.Services
                 status.State != LootRequestState.Deferred ||
                 status.Reason != LootBarrierReason.PostKill)
                 return false;
+
+            if (isCombatGateReturn && _combatGateReturnHandoffReserved &&
+                _combatRecoveryMovementAuthorized && _combatRecoveryMovementRequestId == requestId)
+                return true;
 
             if (!loot.TryBeginCombatRecoveryMovement(requestId))
                 return false;
@@ -1875,8 +1912,9 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Revalidates the active combat-recovery authorization against live state. It stays
-        /// valid only while the same post-kill generation is still Deferred, a mob is still
-        /// selected and the game client still owns the foreground. Target loss, a request
+        /// valid only while the same post-kill generation is still Deferred and the game client
+        /// still owns the foreground. Other combat recoveries still require a selected mob; the
+        /// CombatGate return is the narrow exception after its captured target is released. A request
         /// phase transition or supersession, focus loss, stop and route-fatal states all
         /// revoke it; the loot obligation itself is never touched here.
         /// </summary>
@@ -1896,7 +1934,12 @@ namespace DriverScanTester.Services
                 _lootBarrier.Reason != LootBarrierReason.PostKill)
                 return false;
 
-            if (!_memoryService.IsMobSelected())
+            bool combatGateReturnOwnsTargetRelease =
+                _combatGateReturnActive &&
+                _combatGateReturnTargetId > 0 &&
+                _combatGateReturnTargetId == _combatGateSuppressedTargetId &&
+                !_combatGateTargetReleasePending;
+            if (!_memoryService.IsMobSelected() && !combatGateReturnOwnsTargetRelease)
                 return false;
 
             LootSystem? loot = LootSystemRef;
@@ -1906,7 +1949,9 @@ namespace DriverScanTester.Services
                 !loot.IsCombatRecoveryMovementActiveFor(requestId))
                 return false;
 
-            return IsGameClientForegroundForRecovery();
+            return _combatGateReturnActive
+                ? TryResolveCombatGateClientArea(out _, out _, out _, out _, out _)
+                : IsGameClientForegroundForRecovery();
         }
 
         /// <summary>
@@ -1917,9 +1962,13 @@ namespace DriverScanTester.Services
         private void EndCombatRecoveryMovement(string reason)
         {
             if (!_combatRecoveryMovementAuthorized)
+            {
+                _combatGateReturnHandoffReserved = false;
                 return;
+            }
 
             long requestId = _combatRecoveryMovementRequestId;
+            _combatGateReturnHandoffReserved = false;
             _combatRecoveryMovementAuthorized = false;
             _combatRecoveryMovementRequestId = 0;
             _combatRecoveryMovementDeniedLogged = false;
@@ -2011,6 +2060,321 @@ namespace DriverScanTester.Services
         //  CombatGate waypoint return recovery
         // ========================================================================
 
+        private bool IsCombatGateTargetSuppressionActive =>
+            _combatGateSuppressedTargetId > 0 &&
+            _combatGateTargetDisengagedAtUtc != DateTime.MinValue;
+
+        private void BeginCombatGateTargetSuppression(int targetId, Waypoint waypoint)
+        {
+            if (targetId <= 0)
+                return;
+
+            _combatGateSuppressedTargetId = targetId;
+            _combatGateSuppressedWaypoint = waypoint;
+            _combatGateTargetDisengagedAtUtc = DateTime.UtcNow;
+            _combatGateSuppressionWaypointReached = false;
+            _combatGateSuppressionRouteProgressed = false;
+            _combatGateSuppressedTargetTabAttempted = false;
+            _combatGateSuppressedTabSuppressionLogged = false;
+            _combatGateSuppressionSelectionHandled = false;
+            _combatGateTargetReleaseVerified = false;
+            BeginCombatGateTargetRelease(targetId);
+        }
+
+        private void BeginCombatGateTargetRelease(int targetId)
+        {
+            if (targetId <= 0 || _combatGateTargetReleasePending)
+                return;
+
+            _combatGateTargetReleasePending = true;
+            _combatGateTargetReleaseTargetId = targetId;
+            _combatGateTargetReleaseClickCount = 0;
+            _combatGateTargetReleaseRetryAtUtc = DateTime.MinValue;
+            _combatGateTargetReleaseWaitLogged = false;
+        }
+
+        /// <summary>
+        /// Processes one bounded target-release interaction. False means input is not yet
+        /// authorized or the single verification interval has not elapsed; callers must keep
+        /// combat and movement paused for this tick. True means release was verified or the
+        /// bounded attempts failed and the existing safe recovery path may continue.
+        /// </summary>
+        private bool ProcessCombatGateTargetRelease(CancellationToken token)
+        {
+            if (!_combatGateTargetReleasePending)
+                return true;
+
+            token.ThrowIfCancellationRequested();
+            if (Volatile.Read(ref _stopRequested) != 0)
+                return false;
+
+            int targetId = _combatGateTargetReleaseTargetId;
+            int currentTargetId = _memoryService.GetSelectedTargetId();
+            CombatTargetValidation validation = _targetSafety.Validate();
+            if (currentTargetId != targetId || validation.TargetId != targetId)
+            {
+                CompleteCombatGateTargetRelease(targetId,
+                    $"selection changed to {currentTargetId}/{validation.Kind}", verified: true);
+                return true;
+            }
+
+            DateTime now = DateTime.UtcNow;
+            if (_combatGateTargetReleaseRetryAtUtc != DateTime.MinValue &&
+                now < _combatGateTargetReleaseRetryAtUtc)
+                return false;
+
+            if (_combatGateTargetReleaseClickCount >= CombatGateTargetReleaseMaximumClicks)
+            {
+                CompleteCombatGateTargetRelease(targetId, "target still selected after bounded attempts", verified: false);
+                return true;
+            }
+
+            if (!TryClickCombatGateClientCenter(token, out bool clickAttempted, out string failure))
+            {
+                if (clickAttempted)
+                {
+                    _combatGateTargetReleaseClickCount++;
+                    if (_combatGateTargetReleaseClickCount >= CombatGateTargetReleaseMaximumClicks)
+                    {
+                        CompleteCombatGateTargetRelease(targetId, failure, verified: false);
+                        return true;
+                    }
+                    _combatGateTargetReleaseRetryAtUtc = DateTime.UtcNow.AddMilliseconds(CombatGateTargetReleaseRetryDelayMs);
+                }
+                else if (!_combatGateTargetReleaseWaitLogged)
+                {
+                    _combatGateTargetReleaseWaitLogged = true;
+                    _log($"[CombatGate] Target release deferred: {failure}.");
+                }
+                return false;
+            }
+
+            _combatGateTargetReleaseClickCount++;
+            _combatGateTargetReleaseWaitLogged = false;
+            int targetAfterClick = _memoryService.GetSelectedTargetId();
+            CombatTargetValidation afterClick = _targetSafety.Validate();
+            if (targetAfterClick != targetId || afterClick.TargetId != targetId)
+            {
+                CompleteCombatGateTargetRelease(targetId,
+                    $"selection changed to {targetAfterClick}/{afterClick.Kind}", verified: true);
+                return true;
+            }
+
+            if (_combatGateTargetReleaseClickCount < CombatGateTargetReleaseMaximumClicks)
+            {
+                _combatGateTargetReleaseRetryAtUtc = DateTime.UtcNow.AddMilliseconds(CombatGateTargetReleaseRetryDelayMs);
+                return false;
+            }
+
+            CompleteCombatGateTargetRelease(targetId, "target still selected after bounded attempts", verified: false);
+            return true;
+        }
+
+        private void CompleteCombatGateTargetRelease(int targetId, string detail, bool verified)
+        {
+            _combatGateTargetReleasePending = false;
+            _combatGateTargetReleaseRetryAtUtc = DateTime.MinValue;
+            _combatGateTargetReleaseVerified = verified;
+            _combatGateSuppressionSelectionHandled = true;
+
+            if (verified)
+            {
+                _log($"[CombatGate] Target release result: Cleared ({detail}).");
+                _log($"[CombatGate] Suppressed target={targetId} for route recovery.");
+            }
+            else
+            {
+                _log($"[CombatGate] Target release FAILED: {detail}.");
+                _log($"[CombatGate] Suppressed target={targetId} for route recovery despite unconfirmed release.");
+            }
+        }
+
+        private bool TryClickCombatGateClientCenter(
+            CancellationToken token,
+            out bool clickAttempted,
+            out string failure)
+        {
+            clickAttempted = false;
+            failure = string.Empty;
+            bool clickSent = false;
+            bool localClickAttempted = false;
+            string localFailure = string.Empty;
+
+            lock (_inputLock)
+            {
+                if (token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
+                {
+                    failure = "bot stopped or operation cancelled";
+                    return false;
+                }
+
+                bool cursorActionRan = TryRunMovementCursorAction(() =>
+                {
+                    if (token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
+                    {
+                        localFailure = "bot stopped or operation cancelled";
+                        return;
+                    }
+
+                    if (!TryResolveCombatGateClientArea(
+                            out nint hwnd, out int clientLeft, out int clientTop,
+                            out int clientWidth, out int clientHeight))
+                    {
+                        localFailure = "game client is unavailable or not foreground";
+                        return;
+                    }
+
+                    int centerX = clientLeft + clientWidth / 2;
+                    int centerY = clientTop + clientHeight / 2;
+                    bool leftDownAttempted = false;
+                    bool leftDownCompleted = false;
+                    bool leftUpCompleted = false;
+                    bool cursorMoveAttempted = false;
+
+                    try
+                    {
+                        cursorMoveAttempted = true;
+                        MoveCombatGateMouseCursor(centerX, centerY);
+                        if (!TryGetCombatGateCursorPosition(out int cursorX, out int cursorY) ||
+                            cursorX != centerX || cursorY != centerY)
+                        {
+                            localClickAttempted = true;
+                            localFailure = $"cursor did not reach client center ({centerX},{centerY})";
+                            return;
+                        }
+
+                        if (!IsCombatGateClientForeground(hwnd))
+                        {
+                            localFailure = "game client lost foreground before click";
+                            return;
+                        }
+
+                        if (token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
+                        {
+                            localFailure = "bot stopped or operation cancelled";
+                            return;
+                        }
+                        if (!IsCombatGateClientForeground(hwnd))
+                        {
+                            localFailure = "game client lost foreground before click";
+                            return;
+                        }
+
+                        _log($"[CombatGate] LeftClick center client=({clientWidth / 2},{clientHeight / 2}) " +
+                             $"screen=({centerX},{centerY})");
+                        localClickAttempted = true;
+                        leftDownAttempted = true;
+                        SendCombatGateMouseEvent(MouseOperations.MouseEventFlags.LeftDown);
+                        leftDownCompleted = true;
+                        Thread.Sleep(50);
+                    }
+                    catch (Exception ex)
+                    {
+                        if (cursorMoveAttempted)
+                            localClickAttempted = true;
+                        localFailure = $"left-click input failed: {ex.Message}";
+                    }
+                    finally
+                    {
+                        if (leftDownAttempted)
+                        {
+                            try
+                            {
+                                SendCombatGateMouseEvent(MouseOperations.MouseEventFlags.LeftUp);
+                                leftUpCompleted = true;
+                            }
+                            catch (Exception ex)
+                            {
+                                localFailure = string.IsNullOrEmpty(localFailure)
+                                    ? $"left-button release failed: {ex.Message}"
+                                    : $"{localFailure}; left-button release failed: {ex.Message}";
+                                try
+                                {
+                                    SendCombatGateMouseEvent(MouseOperations.MouseEventFlags.LeftUp);
+                                    leftUpCompleted = true;
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                    clickSent = leftDownCompleted && leftUpCompleted;
+                    if (leftDownAttempted &&
+                        _memoryService.GetSelectedTargetId() != _combatGateTargetReleaseTargetId &&
+                        !_combatGateReturnHandoffReserved &&
+                        TryBeginCombatRecoveryMovement("CombatGate target release"))
+                    {
+                        _combatGateReturnHandoffReserved = true;
+                        _log("[CombatRecovery] CombatGate return handoff reserved after target release, before loot can reclaim input.");
+                    }
+                });
+
+                if (!cursorActionRan)
+                    localFailure = "mouse cursor is owned by the loot workflow";
+            }
+
+            clickAttempted = localClickAttempted;
+            failure = localFailure;
+            return clickSent;
+        }
+
+        private void UpdateCombatGateTargetSuppression(float playerX, float playerY)
+        {
+            if (!IsCombatGateTargetSuppressionActive)
+                return;
+
+            Waypoint recoveryWaypoint = _combatGateSuppressedWaypoint;
+            float reachThreshold = GetEffectiveWaypointReachThreshold(recoveryWaypoint);
+            if (GeometryUtils.Distance(playerX, playerY, recoveryWaypoint.X, recoveryWaypoint.Y) <= reachThreshold)
+                _combatGateSuppressionWaypointReached = true;
+
+            if (_combatGateSuppressionWaypointReached)
+            {
+                bool routeMovedBeyondWaypoint = false;
+                if (_waypoints.Count > 0)
+                {
+                    Waypoint current = _waypoints.Peek();
+                    routeMovedBeyondWaypoint = current.IsOperationStep ||
+                        Math.Abs(current.X - recoveryWaypoint.X) > 0.01f ||
+                        Math.Abs(current.Y - recoveryWaypoint.Y) > 0.01f;
+                }
+                else if (_finalStandbyActive)
+                {
+                    routeMovedBeyondWaypoint =
+                        Math.Abs(_finalStandbyX - recoveryWaypoint.X) > 0.01f ||
+                        Math.Abs(_finalStandbyY - recoveryWaypoint.Y) > 0.01f;
+                }
+
+                if (routeMovedBeyondWaypoint)
+                    _combatGateSuppressionRouteProgressed = true;
+            }
+
+            if (_combatGateSuppressionRouteProgressed &&
+                (DateTime.UtcNow - _combatGateTargetDisengagedAtUtc).TotalSeconds >= CombatGateTargetSuppressionSeconds)
+            {
+                int releasedTarget = _combatGateSuppressedTargetId;
+                ClearCombatGateTargetSuppression();
+                _log($"[CombatGate] Target suppression expired after route progression and {CombatGateTargetSuppressionSeconds}s: target={releasedTarget}.");
+            }
+        }
+
+        private void ClearCombatGateTargetSuppression()
+        {
+            _combatGateSuppressedTargetId = 0;
+            _combatGateSuppressedWaypoint = default;
+            _combatGateTargetDisengagedAtUtc = DateTime.MinValue;
+            _combatGateSuppressionWaypointReached = false;
+            _combatGateSuppressionRouteProgressed = false;
+            _combatGateSuppressedTargetTabAttempted = false;
+            _combatGateSuppressedTabSuppressionLogged = false;
+            _combatGateSuppressionSelectionHandled = false;
+            _combatGateTargetReleasePending = false;
+            _combatGateTargetReleaseTargetId = 0;
+            _combatGateTargetReleaseClickCount = 0;
+            _combatGateTargetReleaseRetryAtUtc = DateTime.MinValue;
+            _combatGateTargetReleaseWaitLogged = false;
+            _combatGateTargetReleaseVerified = false;
+        }
+
         /// <summary>
         /// Effective attack-disengage boundary of a waypoint. A non-positive or non-finite
         /// configured value falls back to the project default: an impossible boundary would
@@ -2083,7 +2447,8 @@ namespace DriverScanTester.Services
 
             return $"pos=({x:F1},{y:F1}) waypoint={(waypoint.X):F1},{(waypoint.Y):F1} distance={distance:F2} manhattan={manhattan:F1} " +
                    $"attackDisengage={disengage:F1} request={_lootBarrier.RequestId}/{_lootBarrier.Phase}/{_lootBarrier.Reason} " +
-                   $"target={_combatGateReturnTargetId} lootInput={lootInput} recoveryInput={recoveryInput} " +
+                   $"target={_combatGateReturnTargetId} targetReleased={_combatGateTargetReleaseVerified} " +
+                   $"lootInput={lootInput} recoveryInput={recoveryInput} " +
                    $"camera={camera} w={_isMovingForward}";
         }
 
@@ -2242,7 +2607,16 @@ namespace DriverScanTester.Services
                 return false;
             }
 
-            if (targetId <= 0 || !confirmedMonsterTarget)
+            bool capturedTargetForThisWaypoint =
+                IsCombatGateTargetSuppressionActive &&
+                !_combatGateTargetReleasePending &&
+                Math.Abs(_combatGateSuppressedWaypoint.X - waypoint.X) <= 0.01f &&
+                Math.Abs(_combatGateSuppressedWaypoint.Y - waypoint.Y) <= 0.01f;
+            if (capturedTargetForThisWaypoint)
+            {
+                targetId = _combatGateSuppressedTargetId;
+            }
+            else if (targetId <= 0 || !confirmedMonsterTarget)
             {
                 denialReason = $"selected target is not a confirmed monster (TargetId={targetId})";
                 return false;
@@ -2306,13 +2680,16 @@ namespace DriverScanTester.Services
                 return false;
             }
 
-            if (!IsGameClientForegroundForRecovery())
+            if (!TryResolveCombatGateClientArea(out _, out _, out _, out _, out _))
             {
-                denialReason = "game client is not in the foreground";
+                denialReason = "game client is unavailable or not foreground";
                 return false;
             }
 
-            if (!TryBeginCombatRecoveryMovement("CombatGate waypoint return"))
+            if (!(_combatGateReturnHandoffReserved &&
+                  _combatRecoveryMovementAuthorized &&
+                  _combatRecoveryMovementRequestId == requestId) &&
+                !TryBeginCombatRecoveryMovement("CombatGate waypoint return"))
             {
                 denialReason = "combat-recovery handoff refused (request/target/camera ownership)";
                 return false;
@@ -2320,6 +2697,7 @@ namespace DriverScanTester.Services
 
             DateTime now = DateTime.UtcNow;
             _combatGateReturnActive = true;
+            _combatGateReturnHandoffReserved = false;
             _combatGateReturnRequestId = requestId;
             _combatGateReturnTargetId = targetId;
             _combatGateReturnWaypointX = waypoint.X;
@@ -2343,6 +2721,7 @@ namespace DriverScanTester.Services
             // the waypoint bearing immediately instead of waiting for hysteresis.
             ResetBearingState();
 
+            _log("[CombatGateReturn] Starting waypoint recovery after target release.");
             _log($"[CombatGateReturn] START reason=CombatGateOvershootUnderDeferredPostKill {DescribeCombatGateReturnContext(currX, currY)}.");
             _log($"[CombatGateReturn] Authorization granted request={requestId} state={status.State} reason={status.Reason} " +
                  $"target={targetId} waypoint=({waypoint.X:F1},{waypoint.Y:F1}) " +
@@ -2368,6 +2747,11 @@ namespace DriverScanTester.Services
             {
                 if (!TryStartCombatGateWaypointReturn(currX, currY, confirmedMonsterTarget, targetId, out string denialReason))
                 {
+                    if (_combatGateReturnHandoffReserved)
+                    {
+                        _combatGateReturnHandoffReserved = false;
+                        EndCombatRecoveryMovement($"CombatGate return did not start: {denialReason}");
+                    }
                     ObserveCombatGateReturnDeadlock(currX, currY, confirmedMonsterTarget, targetId, denialReason, token);
                     return false;
                 }
@@ -2396,28 +2780,17 @@ namespace DriverScanTester.Services
                 _combatGateReturnLastY = sampleY;
             }
 
-            // ── Safety first: movement never outranks target validity ──
+            // The selected monster was deliberately released before this return began. A
+            // cleared selection is therefore expected; a different non-monster selection still
+            // follows the established safety abort, but recovery itself never TABs or attacks.
             CombatTargetValidation validation = _targetSafety.Validate();
-            if (validation.TargetId <= 0 || validation.Kind == TargetEntityKind.None)
+            if (validation.TargetId > 0 && !validation.IsConfirmedMonster)
             {
                 string context = DescribeCombatGateReturnContext(sampleX, sampleY);
-                CancelCombatGateWaypointReturn("selected target disappeared");
-                _log($"[CombatGateReturn] ABORT reason=TargetLost observedTarget={validation.TargetId}/{validation.Kind} {context}; " +
-                     "W released, handoff released, loot obligation preserved for the stationary scan.");
-                return true;
-            }
-
-            if (!validation.IsConfirmedMonster)
-            {
-                string context = DescribeCombatGateReturnContext(sampleX, sampleY);
-                // Release movement input BEFORE the player-safety response runs, so no W is ever
-                // held across a rejected/other-player handling path.
                 CancelCombatGateWaypointReturn($"target rejected ({validation.Kind})");
                 HandleRejectedCombatTarget(validation);
                 _log($"[CombatGateReturn] ABORT reason=TargetRejected {validation.Describe()} {context}; " +
-                     "no attack and no unsafe continuation.");
-                if (ShouldCycleTargetAwayFromRejectedTarget(validation.TargetId) && TryPressTargetCycleKey())
-                    await Task.Delay(BotConstants.Delays.PreTabWaitMs, CancellationToken.None);
+                     "no TAB, no attack, and no unsafe continuation.");
                 return true;
             }
 
@@ -2564,16 +2937,18 @@ namespace DriverScanTester.Services
 
             // 5./6. Clear the gate latch and reset the combat handler for reacquisition.
             _attackSuppressedForCurrentWaypoint = false;
+            _combatGateSuppressionWaypointReached = true;
             _combatHandler.ResetState();
             ClearCombatRetargetSearch();
             _resumeCombatSkillAfterGrouping = false;
 
-            _log($"[CombatGateReturn] REACHED pos=({x:F1},{y:F1}) waypoint=({waypointX:F1},{waypointY:F1}) " +
+            _log($"[CombatGateReturn] REACHED waypoint pos=({x:F1},{y:F1}) waypoint=({waypointX:F1},{waypointY:F1}) " +
                  $"distance={distance:F2} reachThreshold={reachThreshold:F2} manhattan={manhattan:F1} " +
                  $"attackDisengage={attackDisengage:F1} elapsed={elapsedMs:F0}ms request={requestId} target={targetId}.");
             _log($"[CombatGateReturn] COMPLETE request={requestId} state=Deferred waypoint=({waypointX:F1},{waypointY:F1}) " +
                  $"elapsed={elapsedMs:F0}ms — W released, handoff released, CombatGate cleared; " +
                  "waypoint unchanged and loot obligation preserved (camera-verified completion still required).");
+            _log("[CombatGate] Recovery complete; pending loot handling continues.");
         }
 
         /// <summary>
@@ -2688,7 +3063,7 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Narrow deadlock monitor for exactly this interaction: CombatGate active, Deferred
-        /// PostKill obligation, monster still selected, no combat action, no waypoint-directed
+        /// PostKill obligation, captured target release complete, no combat action, no waypoint-directed
         /// movement and no other valid recovery. When the handoff cannot be obtained the precise
         /// reason is logged once (never per tick); if the same state persists beyond the bounded
         /// window, diagnostics are captured and the established route-failure escalation runs.
@@ -2718,8 +3093,11 @@ namespace DriverScanTester.Services
                 _lootBarrier.IsActive &&
                 _lootBarrier.Phase == LootBarrierPhase.Deferred &&
                 _lootBarrier.Reason == LootBarrierReason.PostKill &&
-                confirmedMonsterTarget &&
-                targetId > 0 &&
+                ((confirmedMonsterTarget && targetId > 0) ||
+                 (IsCombatGateTargetSuppressionActive &&
+                  !_combatGateTargetReleasePending &&
+                  Math.Abs(_combatGateSuppressedWaypoint.X - _waypoints.Peek().X) <= 0.01f &&
+                  Math.Abs(_combatGateSuppressedWaypoint.Y - _waypoints.Peek().Y) <= 0.01f)) &&
                 !otherRecoveryActive;
 
             if (!exactDeadlock)
@@ -2810,6 +3188,8 @@ namespace DriverScanTester.Services
                 // A cancelled tick must never leave the CombatGate return holding W, the turn
                 // keys or the loot handoff; release exactly its own ownership before cancelling.
                 CancelCombatGateWaypointReturn("operation cancelled");
+                EndCombatRecoveryMovement("operation cancelled");
+                ClearCombatGateTargetSuppression();
                 token.ThrowIfCancellationRequested();
             }
 
@@ -3282,6 +3662,7 @@ namespace DriverScanTester.Services
                 ? _targetSafety.Validate()
                 : default;
             bool confirmedMonsterTarget = targetValidation.IsConfirmedMonster;
+            UpdateCombatGateTargetSuppression(currX, currY);
 
             // Log position every 5 ticks (action bytes included — key for stuck diagnosis:
             // 25=idle, 27/3=running, 28=being hit, 39=attacking).
@@ -3338,6 +3719,8 @@ namespace DriverScanTester.Services
                 manhattanDistanceToTarget = GeometryUtils.ManhattanDistance(currX, currY, currentWaypoint.X, currentWaypoint.Y);
 
                 bool isAttackMode = currentWaypoint.Mode == BotMode.MoveAndAttack || currentWaypoint.Mode == BotMode.MoveAndAttackAndLoot;
+                bool targetAlreadySuppressed = IsCombatGateTargetSuppressionActive &&
+                                               targetId == _combatGateSuppressedTargetId;
                 if (isAttackMode && manhattanDistanceToTarget > currentWaypoint.AttackDisengageDistance &&
                     !IsMobGroupingSequenceActive)
                 {
@@ -3347,7 +3730,17 @@ namespace DriverScanTester.Services
                         _combatHandler.ResetState();
                         ReleaseSkillThree();
                         ClearCombatRetargetSearch();
-                        _log($"[CombatGate] Overshoot d:{manhattanDistanceToTarget:F1} > {currentWaypoint.AttackDisengageDistance:F1} at ({currentWaypoint.X:F1},{currentWaypoint.Y:F1}) — attack disabled until waypoint is reached.");
+                        if (confirmedMonsterTarget && targetId > 0 && !targetAlreadySuppressed)
+                        {
+                            _log($"[CombatGate] Overshoot d:{manhattanDistanceToTarget:F1} > {currentWaypoint.AttackDisengageDistance:F1} at ({currentWaypoint.X:F1},{currentWaypoint.Y:F1}).");
+                            _log("[CombatGate] Overshoot detected. Releasing combat target.");
+                            _log($"[CombatGate] Target before release: {targetId}");
+                            BeginCombatGateTargetSuppression(targetId, currentWaypoint);
+                        }
+                        else
+                        {
+                            _log($"[CombatGate] Overshoot d:{manhattanDistanceToTarget:F1} > {currentWaypoint.AttackDisengageDistance:F1} at ({currentWaypoint.X:F1},{currentWaypoint.Y:F1}) — attack disabled until waypoint is reached.");
+                        }
                     }
 
                     currentMode = BotMode.OnlyMove;
@@ -3355,7 +3748,43 @@ namespace DriverScanTester.Services
                 else if (_attackSuppressedForCurrentWaypoint && isAttackMode &&
                          !IsMobGroupingSequenceActive)
                 {
+                    if (confirmedMonsterTarget && targetId > 0 && !targetAlreadySuppressed)
+                    {
+                        _combatHandler.ResetState();
+                        ReleaseSkillThree();
+                        ClearCombatRetargetSearch();
+                        _log("[CombatGate] Monster selected while disengaged; releasing combat target.");
+                        _log($"[CombatGate] Target before release: {targetId}");
+                        BeginCombatGateTargetSuppression(targetId, currentWaypoint);
+                    }
                     currentMode = BotMode.OnlyMove;
+                }
+
+                if (_combatGateTargetReleasePending && !ProcessCombatGateTargetRelease(token))
+                    return;
+
+                if (IsCombatGateTargetSuppressionActive && targetId == _combatGateSuppressedTargetId)
+                {
+                    if (!_combatGateSuppressionSelectionHandled)
+                    {
+                        _log($"[CombatGate] Target {targetId} skipped: disengagement suppression active.");
+                        ReleaseSkillThree();
+                        _combatHandler.ResetState();
+                        ClearCombatRetargetSearch();
+                        BeginCombatGateTargetRelease(targetId);
+                        if (!ProcessCombatGateTargetRelease(token))
+                            return;
+
+                        // The local target snapshot predates the click. Do not let this same tick
+                        // feed that stale selection to CombatHandler or start another TAB cycle.
+                        return;
+                    }
+
+                    currentMode = BotMode.OnlyMove;
+                }
+                else if (IsCombatGateTargetSuppressionActive)
+                {
+                    _combatGateSuppressionSelectionHandled = false;
                 }
 
                 if (IsMobGroupingSequenceActive &&
@@ -3482,6 +3911,30 @@ namespace DriverScanTester.Services
 
             // ── Combat mode handling ──
         RUN_COMBAT_ONLY:
+            if (IsCombatGateTargetSuppressionActive && targetId == _combatGateSuppressedTargetId)
+            {
+                if (!_combatGateSuppressionSelectionHandled)
+                {
+                    _log($"[CombatGate] Target {targetId} skipped: disengagement suppression active.");
+                    ReleaseSkillThree();
+                    _combatHandler.ResetState();
+                    ClearCombatRetargetSearch();
+                    BeginCombatGateTargetRelease(targetId);
+                    if (!ProcessCombatGateTargetRelease(token))
+                        return;
+
+                    // The current target snapshot predates the click. No combat/TAB action may
+                    // reuse it on this tick, even when the release could not be confirmed.
+                    return;
+                }
+
+                currentMode = BotMode.OnlyMove;
+            }
+            else if (IsCombatGateTargetSuppressionActive)
+            {
+                _combatGateSuppressionSelectionHandled = false;
+            }
+
             // The delayed SOD/SOP sweep owns the zoomed camera and cursor. Let any
             // current attack finish, but do not run target cycling while the camera is
             // at loot distance; resume watchdog timing after the sweep is done.
@@ -3593,6 +4046,25 @@ namespace DriverScanTester.Services
 
             if (ShouldSuppressPeriodicTargetCycle(combatAction))
                 combatAction = CombatAction.None;
+
+            if (combatAction == CombatAction.TabTarget && IsCombatGateTargetSuppressionActive)
+            {
+                if (!_combatGateSuppressedTargetTabAttempted)
+                {
+                    // Allow one normal acquisition attempt so another valid monster can still be
+                    // selected. If it finds only the disengaged target, do not TAB forever.
+                    _combatGateSuppressedTargetTabAttempted = true;
+                }
+                else
+                {
+                    combatAction = CombatAction.None;
+                    if (!_combatGateSuppressedTabSuppressionLogged)
+                    {
+                        _combatGateSuppressedTabSuppressionLogged = true;
+                        _log($"[CombatGate] TAB suppressed while target {_combatGateSuppressedTargetId} remains in disengagement suppression.");
+                    }
+                }
+            }
 
             // If any combat action interrupts movement, mark route resync as pending
             if (combatAction != CombatAction.None && !_routeResyncPendingAfterCombat)
@@ -3762,9 +4234,9 @@ namespace DriverScanTester.Services
 
             // ── CombatGate waypoint return ──
             // The exact interaction this operation exists for: CombatGate suppressed the attack
-            // (player outside the waypoint's AttackDisengageDistance), a Deferred PostKill loot
-            // obligation blocks ordinary navigation and a confirmed monster is still selected.
-            // The return runs BEFORE the mandatory hold because that hold stops all movement; it
+            // (player outside the waypoint's AttackDisengageDistance), released the selected
+            // monster, and a Deferred PostKill loot obligation blocks ordinary navigation. The
+            // return runs BEFORE the mandatory hold because that hold stops all movement; it
             // is tick-driven, keeps the waypoint and the obligation untouched, and owns the tick
             // exclusively so no navigation/resync/grouping runs concurrently.
             if (await TickCombatGateWaypointReturnUnderLootBarrierAsync(currX, currY, confirmedMonsterTarget, targetId, token))
@@ -5274,6 +5746,47 @@ namespace DriverScanTester.Services
             return foreground != nint.Zero && foreground == client.Hwnd;
         }
 
+        /// <summary>
+        /// Resolves the live drawable client rectangle and requires the game client itself to
+        /// own foreground focus. CombatGate target release must never click a different window.
+        /// </summary>
+        protected virtual bool TryResolveCombatGateClientArea(
+            out nint hwnd,
+            out int clientScreenLeft,
+            out int clientScreenTop,
+            out int clientWidth,
+            out int clientHeight)
+        {
+            hwnd = nint.Zero;
+            clientScreenLeft = 0;
+            clientScreenTop = 0;
+            clientWidth = 0;
+            clientHeight = 0;
+
+            if (!TryResolveKeyboardFastTurnClient(out KeyboardFastTurnClient client) ||
+                !IsKeyboardFastTurnGameForeground(client))
+                return false;
+
+            hwnd = client.Hwnd;
+            clientScreenLeft = client.Left;
+            clientScreenTop = client.Top;
+            clientWidth = client.Right - client.Left + 1;
+            clientHeight = client.Bottom - client.Top + 1;
+            return clientWidth > 0 && clientHeight > 0;
+        }
+
+        protected virtual bool IsCombatGateClientForeground(nint hwnd)
+            => hwnd != nint.Zero && GetForegroundWindow() == hwnd;
+
+        protected virtual void MoveCombatGateMouseCursor(int screenX, int screenY)
+            => MouseOperations.SetCursorPositionAbsolute(screenX, screenY);
+
+        protected virtual bool TryGetCombatGateCursorPosition(out int screenX, out int screenY)
+            => MouseOperations.TryGetCursorPosition(out screenX, out screenY);
+
+        protected virtual void SendCombatGateMouseEvent(MouseOperations.MouseEventFlags flags)
+            => MouseOperations.MouseEvent(flags);
+
         /// <summary>Validated game window handle and client rectangle in screen coordinates.</summary>
         private readonly struct KeyboardFastTurnClient
         {
@@ -6070,6 +6583,7 @@ namespace DriverScanTester.Services
             _combatGateReturnDeadlockEscalated = false;
             _routeResyncPendingAfterCombat = false;
             _attackSuppressedForCurrentWaypoint = false;
+            ClearCombatGateTargetSuppression();
             _combatHandler.ResetState();
             _resumeCombatSkillAfterGrouping = false;
             ClearCombatRetargetSearch();
@@ -7291,6 +7805,7 @@ namespace DriverScanTester.Services
         public void Stop()
         {
             Interlocked.Exchange(ref _stopRequested, 1);
+            ClearCombatGateTargetSuppression();
             ReleaseStoppedInputs();
             void TryCleanup(Action cleanup, string action)
             {
