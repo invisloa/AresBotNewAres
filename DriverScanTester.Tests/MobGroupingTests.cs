@@ -14,10 +14,13 @@ namespace DriverScanTester.Tests
     {
         private const BindingFlags PrivateInstance = BindingFlags.Instance | BindingFlags.NonPublic;
         private static readonly MobPoint Player = new(100, 60);
+
+        /// <summary>Three wide, non-converged markers: no compact pair anywhere.</summary>
         private static readonly MobPoint[] ScatteredPoints =
         {
             new(20, 60), new(180, 60), new(100, 0)
         };
+        /// <summary>Three tightly grouped markers (a compact local group already exists).</summary>
         private static readonly MobPoint[] ClusteredPoints =
         {
             new(95, 60), new(100, 65), new(105, 60)
@@ -33,13 +36,42 @@ namespace DriverScanTester.Tests
         {
             new(20, 60), new(110, 20), new(180, 60), new(60, 110), new(150, 110)
         };
+        /// <summary>Three tightly grouped markers plus one distant (ranged-like) outlier.</summary>
+        private static readonly MobPoint[] ThreeCompactPlusOutlier =
+        {
+            new(95, 60), new(100, 65), new(105, 60), new(0, 60)
+        };
+        /// <summary>One compact pair plus two distant markers that will never converge.</summary>
+        private static readonly MobPoint[] TwoCompactPlusOutliers =
+        {
+            new(95, 60), new(105, 60), new(0, 60), new(190, 60)
+        };
+        /// <summary>Very wide scattered markers: they stay non-compact for many observations.</summary>
+        private static readonly MobPoint[] WideScattered =
+        {
+            new(0, 60), new(280, 60), new(140, 0)
+        };
+        /// <summary>Two distant (ranged-like) markers that keep their separation.</summary>
+        private static readonly MobPoint[] TwoDistant =
+        {
+            new(20, 60), new(180, 60)
+        };
 
         private static MobGroupAnalysis Analyze(params MobPoint[] points)
+            => AnalyzeWithRadius(BotConstants.MobGrouping.ExpectedMarkerRadiusPx, points);
+
+        private static MobGroupAnalysis AnalyzeWithRadius(float radius, params MobPoint[] points)
         {
             var markers = points.Select(point => new MobMarker(
-                point, BotConstants.MobGrouping.ExpectedMarkerRadiusPx, 1f, MobMarkerSource.CyanCenter));
+                point, radius, 1f, MobMarkerSource.CyanCenter));
             return MobGroupAnalyzer.Analyze(markers, Player);
         }
+
+        private static MobGroupAnalysis AnalyzeMarkers(params MobMarker[] markers)
+            => MobGroupAnalyzer.Analyze(markers, Player);
+
+        private static DateTime Utc(int milliseconds = 0) =>
+            new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(milliseconds);
 
         private static MobGroupingTickInput Input(
             DateTime now,
@@ -58,99 +90,1179 @@ namespace DriverScanTester.Tests
             float playerX = 0,
             float playerY = 0,
             bool gatherNav = true,
-            float gatherTargetX = 0,
-            float gatherTargetY = 0,
+            float gatherTargetX = 5000,
+            float gatherTargetY = 5000,
             MovementSteeringMode gatherSteering = MovementSteeringMode.KeyboardTurn,
-            bool lootBarrier = false)
+            bool lootBarrier = false,
+            float cameraYawDegrees = 90f,
+            bool hasCameraYaw = true,
+            int clientWidth = 1400,
+            int clientHeight = 900)
             => new(now, enabled, mode, combat, paused, stopping, transition, recovery,
                 lootHold, window, sample, analysis, positionValid, playerX, playerY, gatherNav,
-                gatherTargetX, gatherTargetY, gatherSteering, lootBarrier);
+                gatherTargetX, gatherTargetY, gatherSteering, lootBarrier,
+                cameraYawDegrees * (MathF.PI / 180f), hasCameraYaw, clientWidth, clientHeight);
 
-        private static DateTime Utc(int milliseconds = 0) =>
-            new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(milliseconds);
-
-        private static MobGroupAnalysis AnalyzeWithRadius(float radius, params MobPoint[] points)
+        /// <summary>
+        /// Deterministic synthetic encounter driver. It contains no game memory, no screenshot
+        /// and no client: the player walks along the direction to the live waypoint, the camera
+        /// and the client size stay stable, and the detected formation converges by
+        /// <see cref="Convergence"/> per observation (1.0 = static, &lt;1 = converging,
+        /// &gt;1 = diverging).
+        /// </summary>
+        private sealed class Encounter
         {
-            var markers = points.Select(point => new MobMarker(
-                point, radius, 1f, MobMarkerSource.CyanCenter));
-            return MobGroupAnalyzer.Analyze(markers, Player);
-        }
-
-        private static MobGroupAnalysis AnalyzeMarkers(params MobMarker[] markers)
-            => MobGroupAnalyzer.Analyze(markers, Player);
-
-        private static MobGroupingDecision Trigger(MobGroupingController controller, DateTime start)
-        {
-            MobGroupingDecision decision = default;
-            foreach (int offset in new[] { 0, 225, 450, 675, 900, 1200 })
-                decision = controller.Tick(Input(start.AddMilliseconds(offset), Analyze(ScatteredPoints), sample: true));
-            return decision;
-        }
-
-        private static MobGroupingDecision TriggerWith(
-            MobGroupingController controller, DateTime start, params MobPoint[] points)
-        {
-            MobGroupingDecision decision = default;
-            foreach (int offset in new[] { 0, 225, 450, 675, 900, 1200 })
-                decision = controller.Tick(Input(start.AddMilliseconds(offset), Analyze(points), sample: true));
-            return decision;
-        }
-
-        /// <summary>Deterministic gather trigger for one explicit combat mode.</summary>
-        private static MobGroupingDecision TriggerInMode(
-            MobGroupingController controller, DateTime start, BotMode mode, bool lootBarrier = false)
-        {
-            MobGroupingDecision decision = default;
-            foreach (int offset in new[] { 0, 225, 450, 675, 900, 1200 })
-                decision = controller.Tick(Input(start.AddMilliseconds(offset),
-                    Analyze(ScatteredPoints), sample: true, mode: mode, lootBarrier: lootBarrier));
-            return decision;
-        }
-
-        /// <summary>Returns the first StartMove directive observed from <paramref name="start"/>.</summary>
-        private static MobGroupingDecision? FindStartMove(
-            MobGroupingController controller, DateTime start, BotMode mode)
-        {
-            foreach (int offset in new[] { 0, 225, 450, 675, 900, 1200, 1425, 1650, 1875 })
+            public Encounter(
+                MobGroupingController? controller = null,
+                MobPoint[]? markers = null,
+                Action<string>? log = null)
             {
-                MobGroupingDecision decision = controller.Tick(Input(
-                    start.AddMilliseconds(offset), Analyze(ScatteredPoints), sample: true, mode: mode));
-                if (decision.Directive == MobGroupingDirective.StartMove)
-                    return decision;
+                Controller = controller ?? new MobGroupingController(log);
+                Markers = (MobPoint[])(markers ?? ScatteredPoints).Clone();
             }
-            return null;
-        }
 
-        private static MobGroupingController MakeController(int gatherDurationMs)
-            => new(null, new FixedDurationRandom(gatherDurationMs));
+            public MobGroupingController Controller { get; }
+            public DateTime Now { get; private set; } = Utc();
+            /// <summary>Current marker centers in client coordinates (before the next step).</summary>
+            public MobPoint[] Markers { get; set; }
+            /// <summary>Per-observation scale toward the formation centroid.</summary>
+            public float Convergence { get; set; } = 0.95f;
+            /// <summary>World displacement per observation (eligibility needs real progress).</summary>
+            public float StepX { get; set; } = 0.3f;
+            public float StepY { get; set; } = 0.3f;
+            public float PlayerX { get; private set; }
+            public float PlayerY { get; private set; }
+            public float WaypointX { get; set; } = 5000f;
+            public float WaypointY { get; set; } = 5000f;
+            public int StepMs { get; set; } = 225;
+            public float CameraYawDegrees { get; set; } = 90f;
+            public bool HasCameraYaw { get; set; } = true;
+            public int ClientWidth { get; set; } = 1400;
+            public int ClientHeight { get; set; } = 900;
+            /// <summary>True when a detection sample is taken on this tick.</summary>
+            public bool CaptureSample { get; set; } = true;
+            /// <summary>True when the detector produced a result (false = failed capture).</summary>
+            public bool Detect { get; set; } = true;
+            public bool Combat { get; set; } = true;
+            public bool Enabled { get; set; } = true;
+            public bool Paused { get; set; }
+            public bool Stopping { get; set; }
+            public bool Transition { get; set; }
+            public bool Recovery { get; set; }
+            public bool LootHold { get; set; }
+            public bool LootBarrier { get; set; }
+            public bool Window { get; set; } = true;
+            public bool PlayerPositionValid { get; set; } = true;
+            public bool GatherNav { get; set; } = true;
+            public BotMode Mode { get; set; } = BotMode.MoveAndAttack;
+            public float Radius { get; set; } = BotConstants.MobGrouping.ExpectedMarkerRadiusPx;
+            public float Confidence { get; set; } = 1f;
+            public MobGroupingDecision LastDecision { get; private set; }
+            public List<MobGroupingDecision> Decisions { get; } = new();
 
-        /// <summary>Deterministic gather-duration source for the timing tests.</summary>
-        private sealed class FixedDurationRandom : Random
-        {
-            private readonly int _durationMs;
-
-            public FixedDurationRandom(int durationMs) => _durationMs = durationMs;
-
-            public override int Next(int minValue, int maxValue)
-                => Math.Clamp(_durationMs, minValue, Math.Max(minValue, maxValue - 1));
-        }
-
-        /// <summary>Sequence random source that also counts how many deadlines were requested.</summary>
-        private sealed class SequenceRandom : Random
-        {
-            private readonly Queue<int> _values;
-
-            public int CallCount { get; private set; }
-
-            public SequenceRandom(params int[] values) => _values = new Queue<int>(values);
-
-            public override int Next(int minValue, int maxValue)
+            public MobGroupAnalysis CurrentAnalysis()
             {
-                CallCount++;
-                int value = _values.Count > 0 ? _values.Dequeue() : minValue;
-                return Math.Clamp(value, minValue, Math.Max(minValue, maxValue - 1));
+                MobMarker[] markers = Markers
+                    .Select(point => new MobMarker(point, Radius, Confidence, MobMarkerSource.CyanCenter))
+                    .ToArray();
+                return MobGroupAnalyzer.Analyze(markers, Player);
+            }
+
+            private MobGroupingTickInput BuildInput()
+            {
+                MobGroupAnalysis? analysis = Detect ? CurrentAnalysis() : null;
+                return new MobGroupingTickInput(
+                    Now, Enabled, Mode, Combat, Paused, Stopping, Transition, Recovery,
+                    LootHold, Window, CaptureSample, analysis, PlayerPositionValid,
+                    PlayerX, PlayerY, GatherNav, WaypointX, WaypointY,
+                    MovementSteeringMode.KeyboardTurn, LootBarrier,
+                    CameraYawDegrees * (MathF.PI / 180f), HasCameraYaw,
+                    ClientWidth, ClientHeight);
+            }
+
+            public MobGroupingDecision Tick()
+            {
+                Now = Now.AddMilliseconds(StepMs);
+                PlayerX += StepX;
+                PlayerY += StepY;
+                if (Math.Abs(Convergence - 1f) > 0.0001f)
+                    Markers = Scale(Markers, Convergence);
+
+                LastDecision = Controller.Tick(BuildInput());
+                Decisions.Add(LastDecision);
+                return LastDecision;
+            }
+
+            public void Tick(int count)
+            {
+                for (int i = 0; i < count; i++)
+                    Tick();
+            }
+
+            /// <summary>Runs until the first StartMove (returns it) or the tick budget expires.</summary>
+            public MobGroupingDecision RunUntilStartMove(int maxTicks = 20)
+            {
+                for (int i = 0; i < maxTicks; i++)
+                {
+                    MobGroupingDecision decision = Tick();
+                    if (decision.Directive == MobGroupingDirective.StartMove)
+                        return decision;
+                }
+                return LastDecision;
             }
         }
+
+        private static MobPoint[] Scale(MobPoint[] points, float factor)
+        {
+            if (points.Length == 0)
+                return points;
+
+            float centreX = points.Average(point => point.X);
+            float centreY = points.Average(point => point.Y);
+            return points
+                .Select(point => new MobPoint(
+                    centreX + (point.X - centreX) * factor,
+                    centreY + (point.Y - centreY) * factor))
+                .ToArray();
+        }
+
+        /// <summary>Starts a gather through the production decision path and returns the driver.</summary>
+        private static Encounter StartGather(
+            MobGroupingController controller, List<string>? log = null, BotMode mode = BotMode.MoveAndAttack)
+        {
+            var encounter = new Encounter(controller, ScatteredPoints);
+            encounter.Mode = mode;
+            MobGroupingDecision decision = encounter.RunUntilStartMove();
+            Assert.Equal(MobGroupingDirective.StartMove, decision.Directive);
+            Assert.Equal(MobGroupingState.GroupingMove, controller.State);
+            return encounter;
+        }
+
+        private static void AssertNeverStartsGathering(Encounter encounter, int ticks)
+        {
+            for (int i = 0; i < ticks; i++)
+                Assert.NotEqual(MobGroupingDirective.StartMove, encounter.Tick().Directive);
+
+            Assert.Equal(0, encounter.Controller.GroupingsThisEncounter);
+            Assert.Equal(0, encounter.Controller.MovesStarted);
+        }
+
+        // ── Two-mob behaviour (mandatory) ──────────────────────────────────────
+
+        [Fact]
+        public void ExactlyTwoDistantMarkersNeverStartGathering()
+        {
+            // Scenario A: two ranged enemies that keep their attack distance. They may never
+            // converge, so any gather walk is pure time loss. No W press, no turning.
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            var encounter = new Encounter(controller, TwoDistant) { Convergence = 1f };
+
+            AssertNeverStartsGathering(encounter, 30);
+            Assert.NotEqual(MobGroupingState.GroupingMove, controller.State);
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.TwoMobNoGather, StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void ExactlyTwoCompactMarkersNeverStartGathering()
+        {
+            // Scenario B: one melee and one ranged marker at different apparent distances.
+            // Even a compact pair never justifies a separate movement.
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            var encounter = new Encounter(controller, new[] { new MobPoint(95, 60), new MobPoint(105, 60) })
+            {
+                Convergence = 1f
+            };
+
+            AssertNeverStartsGathering(encounter, 20);
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.TwoMobNoGather, StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void ThreeCompactMarkersPlusOutlierNeverStartGathering()
+        {
+            // Scenario D: the three nearby enemies are already a useful local group. Chasing
+            // the distant outlier would give up a good attack for a speculative one.
+            MobGroupAnalysis analysis = Analyze(ThreeCompactPlusOutlier);
+
+            Assert.Equal(4, analysis.DetectedMobCount);
+            Assert.True(analysis.IsScattered);
+            Assert.True(analysis.HasCompactLocalGroup);
+            Assert.Equal(3, analysis.BestLocalClusterSize);
+            Assert.True(analysis.IsMovementSampleReliable);
+
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            var encounter = new Encounter(controller, ThreeCompactPlusOutlier) { Convergence = 1f };
+
+            AssertNeverStartsGathering(encounter, 20);
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.CompactLocalGroup, StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void TwoCompactMarkersPlusDistantOutliersNeverStartGathering()
+        {
+            // Scenario C: a useful local pair exists; the outliers are never chased.
+            MobGroupAnalysis analysis = Analyze(TwoCompactPlusOutliers);
+
+            Assert.Equal(4, analysis.DetectedMobCount);
+            Assert.True(analysis.HasCompactLocalGroup);
+            Assert.Equal(2, analysis.BestLocalClusterSize);
+
+            var controller = new MobGroupingController();
+            var encounter = new Encounter(controller, TwoCompactPlusOutliers) { Convergence = 1f };
+            AssertNeverStartsGathering(encounter, 20);
+        }
+
+        // ── No speculative movement ────────────────────────────────────────────
+
+        [Fact]
+        public void ThreeScatteredStationaryMarkersDoNotStartSpeculativeMovement()
+        {
+            // Scenario F: no convergence and no movement progress. The bot keeps attacking.
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            var encounter = new Encounter(controller, ScatteredPoints)
+            {
+                Convergence = 1f,
+                StepX = 0f,
+                StepY = 0f
+            };
+
+            AssertNeverStartsGathering(encounter, 20);
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.NoConvergenceEvidence, StringComparison.Ordinal) ||
+                line.Contains(MobGroupingReason.NoMovementProgress, StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void ThreeScatteredMarkersWithUnreliableDetectionDoNotStartMovement()
+        {
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            var encounter = new Encounter(controller, ScatteredPoints)
+            {
+                Confidence = BotConstants.MobGrouping.MinimumDetectionConfidence * 0.5f
+            };
+
+            AssertNeverStartsGathering(encounter, 20);
+            Assert.False(encounter.CurrentAnalysis().IsMovementSampleReliable);
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.DetectionUnreliable, StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void TooManyMarkersForAReliableMovementDecisionSuppressGathering()
+        {
+            // Clutter must never be reduced to a favourable subset: the sample is simply
+            // declared unreliable and normal combat continues.
+            var many = new List<MobPoint>();
+            int markerCount = BotConstants.MobGrouping.MaximumMarkersForEvaluation + 1;
+            for (int i = 0; i < markerCount; i++)
+            {
+                double angle = 2 * Math.PI * i / markerCount;
+                many.Add(new MobPoint(
+                    100f + 200f * (float)Math.Cos(angle),
+                    60f + 200f * (float)Math.Sin(angle)));
+            }
+
+            MobGroupAnalysis analysis = Analyze(many.ToArray());
+            Assert.False(analysis.IsMovementSampleReliable);
+
+            var controller = new MobGroupingController();
+            AssertNeverStartsGathering(new Encounter(controller, many.ToArray()), 15);
+        }
+
+        // ── Positive convergence ───────────────────────────────────────────────
+
+        [Fact]
+        public void StableRouteCompatibleConvergenceQualifiesOneShortGather()
+        {
+            // Scenario E: three scattered enemies converge while the bot already walks toward
+            // its waypoint. Exactly one short, bounded gather is allowed.
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            var encounter = new Encounter(controller, ScatteredPoints);
+
+            MobGroupingDecision started = encounter.RunUntilStartMove();
+
+            Assert.Equal(MobGroupingDirective.StartMove, started.Directive);
+            Assert.Equal(1, controller.GroupingsThisEncounter);
+            Assert.Equal(1, controller.MovesStarted);
+            Assert.Equal(MobGroupingState.GroupingMove, controller.State);
+            Assert.True(controller.LastTrend.IsImproving);
+            Assert.Contains(lines, line => line.Contains("gather started", StringComparison.Ordinal) &&
+                line.Contains("localCluster=", StringComparison.Ordinal) &&
+                line.Contains("quality=", StringComparison.Ordinal) &&
+                line.Contains("waypoint=", StringComparison.Ordinal) &&
+                line.Contains($"budget={BotConstants.MobGrouping.MaximumGatherDurationMs}ms",
+                    StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void ImprovementBelowTheNoiseThresholdDoesNotQualifyGathering()
+        {
+            // Slow convergence: the accumulated change stays inside the noise tolerance, so the
+            // trend is not treated as positive evidence.
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            var encounter = new Encounter(controller, ScatteredPoints) { Convergence = 0.999f };
+
+            AssertNeverStartsGathering(encounter, 20);
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.NoConvergenceEvidence, StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void CameraAngleDiscontinuityInvalidatesTemporalConvergence()
+        {
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            var encounter = new Encounter(controller, ScatteredPoints);
+
+            // Three improving observations, then a 25 degree camera turn: screen-space geometry
+            // is no longer comparable, so the earlier evidence is invalidated. Only two
+            // post-jump observations exist, which is not enough for a positive trend.
+            encounter.Tick(3);
+            MobGroupingController controllerUnderTest = encounter.Controller;
+            encounter.CameraYawDegrees += 25f;
+            encounter.Tick(2);
+
+            Assert.NotEqual(MobGroupingState.GroupingMove, controllerUnderTest.State);
+            Assert.Equal(0, controllerUnderTest.GroupingsThisEncounter);
+            Assert.NotEqual(MobFormationTrend.Improving, controllerUnderTest.LastTrend.Trend);
+            Assert.DoesNotContain(lines, line => line.Contains("gather started", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void SuddenMarkerCountDecreaseDoesNotCountAsFormationImprovement()
+        {
+            // Losing a marker from the ROI shrinks the visible count AND can make the mean
+            // nearest-neighbour distance drop sharply (here the measured quality would jump by
+            // far more than the noise tolerance). That is not evidence that the local group
+            // improved, so it must never qualify a gather walk.
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            var encounter = new Encounter(controller, new[]
+            {
+                new MobPoint(10, 60), new MobPoint(190, 60),
+                new MobPoint(100, 10), new MobPoint(100, 110)
+            })
+            {
+                Convergence = 1f
+            };
+
+            float qualityBefore = encounter.CurrentAnalysis().FormationQuality;
+            encounter.Tick(6);
+            Assert.Equal(4, encounter.CurrentAnalysis().DetectedMobCount);
+
+            // Four markers become three; the remaining formation looks much more compact.
+            encounter.Markers = new[] { new MobPoint(55, 60), new MobPoint(145, 60), new MobPoint(100, 25) };
+            float qualityAfter = encounter.CurrentAnalysis().FormationQuality;
+            Assert.True(qualityAfter > qualityBefore * 1.4f);
+
+            for (int i = 0; i < 12; i++)
+            {
+                MobGroupingDecision decision = encounter.Tick();
+                Assert.NotEqual(MobGroupingDirective.StartMove, decision.Directive);
+                Assert.NotEqual(MobFormationTrend.Improving, controller.LastTrend.Trend);
+            }
+
+            Assert.Equal(0, controller.GroupingsThisEncounter);
+        }
+
+        [Fact]
+        public void WaypointIncompatibleMovementDirectionPreventsGathering()
+        {
+            // The player is already walking, but away from the live waypoint: gathering must not
+            // invent a new travel direction.
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            var encounter = new Encounter(controller, ScatteredPoints)
+            {
+                StepX = -0.3f,
+                StepY = -0.3f
+            };
+
+            AssertNeverStartsGathering(encounter, 20);
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.MovementNotAligned, StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void StationaryPlayerNeverStartsAGatherRun()
+        {
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            var encounter = new Encounter(controller, ScatteredPoints) { StepX = 0f, StepY = 0f };
+
+            AssertNeverStartsGathering(encounter, 20);
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.NoMovementProgress, StringComparison.Ordinal));
+        }
+
+        // ── Active gather stop conditions ──────────────────────────────────────
+
+        [Fact]
+        public void ActiveGatherStopsWhenFormationQualityDeteriorates()
+        {
+            // Scenario G: the enemies separate further while the player moves.
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            Encounter encounter = StartGather(controller, lines);
+
+            encounter.Convergence = 1.15f;
+            encounter.Tick(5);
+
+            Assert.Equal(MobGroupingState.ResumeCombat, controller.State);
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.FormationDeteriorated, StringComparison.Ordinal));
+            Assert.Contains(encounter.Decisions, decision =>
+                decision.Directive == MobGroupingDirective.ResumeCombat);
+        }
+
+        [Fact]
+        public void ActiveGatherStopsWhenImprovementStagnates()
+        {
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            Encounter encounter = StartGather(controller, lines);
+
+            encounter.Convergence = 1f;
+            encounter.Tick(5);
+
+            Assert.Equal(MobGroupingState.ResumeCombat, controller.State);
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.NoFormationImprovement, StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void ActiveGatherStopsWhenDurationBudgetExpires()
+        {
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            Encounter encounter = StartGather(controller, lines);
+
+            // Keep converging (so no stagnation stop) while walking slowly enough to stay
+            // inside the displacement budget.
+            encounter.StepX = 0.15f;
+            encounter.StepY = 0.15f;
+
+            DateTime startedAt = encounter.Now;
+            encounter.Tick(8);
+
+            Assert.Equal(MobGroupingState.ResumeCombat, controller.State);
+            Assert.True((encounter.Now - startedAt).TotalMilliseconds >
+                        BotConstants.MobGrouping.MaximumGatherDurationMs);
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.TimeBudgetReached, StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void ActiveGatherStopsWhenDisplacementBudgetExpires()
+        {
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            Encounter encounter = StartGather(controller, lines);
+
+            encounter.StepX = 0.6f;
+            encounter.StepY = 0.6f;
+            encounter.Tick(3);
+
+            Assert.Equal(MobGroupingState.ResumeCombat, controller.State);
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.DistanceBudgetReached, StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void ActiveGatherStopsWhenACompactLocalGroupForms()
+        {
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            Encounter encounter = StartGather(controller, lines);
+
+            encounter.Convergence = 1f;
+            encounter.Markers = ClusteredPoints;
+            encounter.Tick();
+
+            Assert.Equal(MobGroupingState.ResumeCombat, controller.State);
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.CompactLocalGroup, StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("improved=", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void ActiveGatherStopsWhenTheWaypointIsReached()
+        {
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            Encounter encounter = StartGather(controller, lines);
+
+            encounter.GatherNav = false;
+            encounter.Tick();
+
+            Assert.Equal(MobGroupingState.ResumeCombat, controller.State);
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.WaypointReached, StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void ActiveGatherStopsWhenPlayerPositionBecomesUnavailable()
+        {
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            Encounter encounter = StartGather(controller, lines);
+
+            encounter.PlayerPositionValid = false;
+            encounter.Tick();
+
+            Assert.Equal(MobGroupingState.ResumeCombat, controller.State);
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.DetectionUnreliable, StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void ActiveGatherStopsWhenThePlayerStopsMakingProgress()
+        {
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            Encounter encounter = StartGather(controller, lines);
+
+            encounter.StepX = 0f;
+            encounter.StepY = 0f;
+            encounter.Tick(4);
+
+            Assert.Equal(MobGroupingState.ResumeCombat, controller.State);
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.NoMovementProgress, StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void ActiveGatherStopsAfterTwoConsecutiveUnreliableSamples()
+        {
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            Encounter encounter = StartGather(controller, lines);
+
+            encounter.CaptureSample = true;
+            encounter.Detect = false;
+            encounter.Tick();
+            Assert.Equal(MobGroupingState.GroupingMove, controller.State);
+
+            encounter.Tick();
+            Assert.Equal(MobGroupingState.ResumeCombat, controller.State);
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.DetectionUnreliable, StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void OneLostSampleDoesNotEndTheGatherButInvalidatedEvidenceDoes()
+        {
+            // A single failed capture is tolerated (occlusion is normal). The next reliable
+            // sample, however, can no longer confirm the earlier convergence trend, and a walk
+            // that cannot prove it is improving must stop instead of continuing speculatively.
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            Encounter encounter = StartGather(controller, lines);
+
+            encounter.Detect = false;
+            encounter.Tick();
+            Assert.Equal(MobGroupingState.GroupingMove, controller.State);
+
+            encounter.Detect = true;
+            encounter.Tick();
+
+            Assert.Equal(MobGroupingState.ResumeCombat, controller.State);
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.NoConvergenceEvidence, StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void GatherNeverExtendsItsDeadlineAndNeverReplans()
+        {
+            var controller = new MobGroupingController();
+            Encounter encounter = StartGather(controller);
+            DateTime startedAt = encounter.Now;
+
+            // Deadline is fixed at start + MaximumGatherDurationMs and no rescan can move it.
+            for (int i = 0; i < 6; i++)
+            {
+                encounter.Tick();
+                if (controller.State != MobGroupingState.GroupingMove)
+                    break;
+                Assert.True((encounter.Now - startedAt).TotalMilliseconds <=
+                            BotConstants.MobGrouping.MaximumGatherDurationMs);
+            }
+
+            Assert.NotEqual(MobGroupingState.GroupingMove, controller.State);
+            Assert.Equal(1, controller.MovesStarted);
+            Assert.False(controller.NeedsGatherRescan(encounter.Now));
+        }
+
+        [Fact]
+        public void GatherRescansUseTheBoundedIntervalAndNeverRunPastTheDeadline()
+        {
+            var controller = new MobGroupingController();
+            Encounter encounter = StartGather(controller);
+            DateTime startedAt = encounter.Now;
+
+            DateTime deadline = startedAt.AddMilliseconds(
+                BotConstants.MobGrouping.MaximumGatherDurationMs);
+            Assert.False(controller.NeedsGatherRescan(
+                startedAt.AddMilliseconds(BotConstants.MobGrouping.GatherRescanIntervalMs - 1)));
+            Assert.True(controller.NeedsGatherRescan(
+                startedAt.AddMilliseconds(BotConstants.MobGrouping.GatherRescanIntervalMs)));
+            Assert.False(controller.NeedsGatherRescan(deadline));
+            Assert.False(controller.NeedsGatherRescan(deadline.AddMilliseconds(500)));
+        }
+
+        // ── Encounter lifecycle ────────────────────────────────────────────────
+
+        [Fact]
+        public void OnlyOneGatherAttemptIsAllowedPerEncounter()
+        {
+            var controller = new MobGroupingController();
+            Encounter encounter = StartGather(controller);
+            DateTime deadline = encounter.Now.AddMilliseconds(5000);
+
+            encounter.Convergence = 1f;
+            encounter.Tick(5);
+            Assert.Equal(MobGroupingState.ResumeCombat, controller.State);
+            controller.CompleteResume(encounter.Now);
+
+            // Back to a perfectly eligible, converging, route-compatible situation.
+            encounter.Convergence = 0.95f;
+            encounter.Markers = (MobPoint[])ScatteredPoints.Clone();
+            int beforeRetry = encounter.Decisions.Count;
+            encounter.Tick(BotConstants.MobGrouping.CooldownMs / encounter.StepMs + 8);
+
+            Assert.Equal(1, controller.GroupingsThisEncounter);
+            Assert.DoesNotContain(encounter.Decisions.Skip(beforeRetry), decision =>
+                decision.Directive == MobGroupingDirective.StartMove);
+            Assert.True(encounter.Now > deadline);
+        }
+
+        [Fact]
+        public void FailedGatherNeverRestartsWithinTheSameEncounter()
+        {
+            // Requirement: no start/cancel/restart cycling on a scattered formation.
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            Encounter encounter = StartGather(controller, lines);
+
+            encounter.Convergence = 1f;
+            encounter.Tick(3);
+            controller.CompleteResume(encounter.Now);
+
+            int starts = encounter.Decisions.Count(decision =>
+                decision.Directive == MobGroupingDirective.StartMove);
+            encounter.Tick(60);
+
+            Assert.Equal(1, starts);
+            Assert.Equal(1, controller.GroupingsThisEncounter);
+            Assert.Equal(1, encounter.Decisions.Count(decision =>
+                decision.Directive == MobGroupingDirective.StartMove));
+        }
+
+        [Fact]
+        public void EncounterBudgetResetsAfterTheContinuousQuietInterval()
+        {
+            var controller = new MobGroupingController();
+            Encounter encounter = StartGather(controller);
+            encounter.Convergence = 1f;
+            encounter.Tick(3);
+            controller.CompleteResume(encounter.Now);
+            Assert.Equal(1, controller.GroupingsThisEncounter);
+
+            // No combat context for the whole quiet interval resets the encounter budget.
+            encounter.Combat = false;
+            encounter.CaptureSample = false;
+            encounter.Tick(BotConstants.MobGrouping.EncounterQuietResetMs / encounter.StepMs + 3);
+            Assert.Equal(0, controller.GroupingsThisEncounter);
+
+            encounter.Combat = true;
+            encounter.CaptureSample = true;
+            encounter.Convergence = 0.95f;
+            encounter.Markers = (MobPoint[])WideScattered.Clone();
+            encounter.StepX = 0.3f;
+            encounter.StepY = 0.3f;
+            // The cooldown must expire first; combat-minimum/persistence restart from scratch.
+            MobGroupingDecision decision = encounter.RunUntilStartMove(30);
+            Assert.Equal(MobGroupingDirective.StartMove, decision.Directive);
+            Assert.Equal(1, controller.GroupingsThisEncounter);
+        }
+
+        [Fact]
+        public void StableQuietPeriodResetsEncounterGroupingCount()
+        {
+            var controller = new MobGroupingController();
+            StartGather(controller);
+            controller.Cancel(Utc(1300), "test cleanup");
+            Assert.Equal(1, controller.GroupingsThisEncounter);
+
+            // The encounter reset is driven by combat-context absence, regardless of
+            // whether marker detection is still running.
+            for (int time = 1400; time <= 3900; time += 500)
+                controller.Tick(Input(Utc(time), Analyze(), sample: true, combat: false));
+
+            Assert.Equal(0, controller.GroupingsThisEncounter);
+        }
+
+        [Fact]
+        public void NormalCombatResumesAfterAnUnsuccessfulGather()
+        {
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            Encounter encounter = StartGather(controller, lines);
+
+            encounter.Convergence = 1f;
+            MobGroupingDecision resumed = default;
+            for (int i = 0; i < 5; i++)
+            {
+                MobGroupingDecision decision = encounter.Tick();
+                if (decision.Directive == MobGroupingDirective.ResumeCombat)
+                {
+                    resumed = decision;
+                    break;
+                }
+            }
+
+            Assert.Equal(MobGroupingDirective.ResumeCombat, resumed.Directive);
+            // MovementSystem completes the resume on the directive tick; only then does the
+            // sequence stop owning the update.
+            controller.CompleteResume(encounter.Now);
+            Assert.False(controller.IsSequenceActive);
+            Assert.Equal(MobGroupingState.Cooldown, controller.State);
+            Assert.NotEqual(MobGroupingDirective.StartMove,
+                controller.Tick(Input(encounter.Now.AddMilliseconds(10),
+                    Analyze(ScatteredPoints), sample: true)).Directive);
+        }
+
+        [Fact]
+        public void ResumeCombatDecisionRestoresSkillThreeThroughTheOwnershipPath()
+        {
+            // The controller hands back control with the production ResumeCombat directive and
+            // MovementSystem restores the attack hold on the following combat tick.
+            var path = new List<Waypoint>
+            {
+                new(5000, 5000, MovementPrecision.Medium, BotMode.MoveAndAttack)
+            };
+            var movement = new RecordingMovementSystem(CreateStubMemory(), _ => { }, path);
+            try
+            {
+                typeof(MovementSystem).GetField("_isSkillThreeHeld", PrivateInstance)!
+                    .SetValue(movement, true);
+                typeof(MovementSystem).GetField("_isMovingForward", PrivateInstance)!
+                    .SetValue(movement, true);
+                SetGroupingState(movement, MobGroupingState.GroupingMove);
+
+                InvokePrivate(movement, "ApplyMobGroupingDecision",
+                    new MobGroupingDecision(MobGroupingDirective.StartMove, MobGroupingDirection.North, 1),
+                    Utc());
+                Assert.False(movement.IsAttackKeyHeld);
+                Assert.Equal(1, movement.SkillThreeUps);
+                Assert.False(IsMovingForward(movement));
+
+                // A failed gather finishes with ResumeCombat (never with StopMovement).
+                SetGroupingState(movement, MobGroupingState.ResumeCombat);
+                InvokePrivate(movement, "ApplyMobGroupingDecision",
+                    new MobGroupingDecision(MobGroupingDirective.ResumeCombat, MoveNumber: 1,
+                        Reason: MobGroupingReason.Describe(
+                            MobGroupingReason.NoFormationImprovement, "no improvement"),
+                        Code: MobGroupingReason.NoFormationImprovement),
+                    Utc(1200));
+
+                Assert.False(CombatSuspended(movement));
+                Assert.False(movement.IsAttackKeyHeld);
+                InvokePrivate(movement, "HoldSkillThree");
+                Assert.True(movement.IsAttackKeyHeld);
+                Assert.Equal(1, movement.SkillThreeDowns);
+            }
+            finally
+            {
+                movement.DisposeMobGroupingDetector();
+            }
+        }
+
+        // ── Cancellation / ownership ───────────────────────────────────────────
+
+        [Fact]
+        public void LootOwnershipCancelsGroupingImmediately()
+        {
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            Encounter encounter = StartGather(controller, lines);
+
+            encounter.LootBarrier = true;
+            MobGroupingDecision cancelled = encounter.Tick();
+
+            Assert.Equal(MobGroupingDirective.Cancelled, cancelled.Directive);
+            Assert.Equal(MobGroupingReason.LootOwnership, cancelled.Code);
+            Assert.Equal(MobGroupingController.LootBarrierBlockReason, cancelled.Reason);
+            Assert.False(controller.IsSequenceActive);
+            Assert.Equal(MobGroupingState.Cooldown, controller.State);
+            Assert.Contains(lines, line => line.Contains(
+                "grouping cancelled", StringComparison.Ordinal));
+        }
+
+        [Theory]
+        [InlineData(BotMode.MoveAndAttack)]
+        [InlineData(BotMode.MoveAndAttackAndLoot)]
+        public void RepotRecoveryPauseStopAndDeathCancellationRemainCorrect(BotMode mode)
+        {
+            var scenarios = new (string Name, Action<Encounter> Apply, string Code)[]
+            {
+                ("pause", e => e.Paused = true, MobGroupingReason.PauseOwnership),
+                ("stop", e => e.Stopping = true, MobGroupingReason.PauseOwnership),
+                ("repot", e => e.Transition = true, MobGroupingReason.TransitionOwnership),
+                ("recovery", e => e.Recovery = true, MobGroupingReason.RecoveryOwnership),
+                ("loot", e => e.LootHold = true, MobGroupingReason.LootOwnership),
+                ("death", e => e.Combat = false, MobGroupingReason.CombatContextLost)
+            };
+
+            foreach (var scenario in scenarios)
+            {
+                var controller = new MobGroupingController();
+                Encounter encounter = StartGather(controller, null, mode);
+                scenario.Apply(encounter);
+
+                MobGroupingDecision cancelled = encounter.Tick();
+                Assert.True(cancelled.Directive == MobGroupingDirective.Cancelled,
+                    $"{scenario.Name} must cancel the gather");
+                Assert.Equal(scenario.Code, cancelled.Code);
+                Assert.False(controller.IsSequenceActive);
+            }
+        }
+
+        [Fact]
+        public void UnfocusedGameWindowBothBlocksAndCancelsGrouping()
+        {
+            var controller = new MobGroupingController();
+            var encounter = new Encounter(controller, ScatteredPoints) { Window = false };
+            AssertNeverStartsGathering(encounter, 15);
+
+            Encounter active = StartGather(new MobGroupingController());
+            active.Window = false;
+            Assert.Equal(MobGroupingDirective.Cancelled, active.Tick().Directive);
+        }
+
+        [Fact]
+        public void DisabledGroupingTogglePreventsAllGroupingMovement()
+        {
+            var controller = new MobGroupingController();
+            var encounter = new Encounter(controller, ScatteredPoints) { Enabled = false };
+            AssertNeverStartsGathering(encounter, 20);
+            Assert.Equal(MobGroupingState.Idle, controller.State);
+
+            // Disabling during an active gather cancels it.
+            Encounter active = StartGather(new MobGroupingController());
+            active.Enabled = false;
+            Assert.Equal(MobGroupingDirective.Cancelled, active.Tick().Directive);
+        }
+
+        [Fact]
+        public void OnlyMoveNeverInvokesGrouping()
+        {
+            var controller = new MobGroupingController();
+            var encounter = new Encounter(controller, ScatteredPoints) { Mode = BotMode.OnlyMove };
+            AssertNeverStartsGathering(encounter, 20);
+            Assert.NotEqual(MobGroupingState.GroupingMove, controller.State);
+
+            Encounter active = StartGather(new MobGroupingController());
+            active.Mode = BotMode.OnlyMove;
+            MobGroupingDecision cancelled = active.Tick();
+            Assert.Equal(MobGroupingDirective.Cancelled, cancelled.Directive);
+            Assert.Equal(MobGroupingReason.ModeUnsupported, cancelled.Code);
+        }
+
+        [Theory]
+        [InlineData(BotMode.MoveAndAttack)]
+        [InlineData(BotMode.MoveAndAttackAndLoot)]
+        public void BothSupportedCombatModesBehaveConsistently(BotMode mode)
+        {
+            var controller = new MobGroupingController();
+            var encounter = new Encounter(controller, ScatteredPoints) { Mode = mode };
+
+            MobGroupingDecision started = encounter.RunUntilStartMove();
+            Assert.Equal(MobGroupingDirective.StartMove, started.Directive);
+            Assert.Equal(1, controller.GroupingsThisEncounter);
+
+            encounter.Convergence = 1f;
+            encounter.Tick(3);
+            Assert.Equal(MobGroupingState.ResumeCombat, controller.State);
+        }
+
+        [Fact]
+        public void MovingMarkersWithNoConvergenceNeverStartInEitherMode()
+        {
+            foreach (BotMode mode in new[] { BotMode.MoveAndAttack, BotMode.MoveAndAttackAndLoot })
+            {
+                var controller = new MobGroupingController();
+                var encounter = new Encounter(controller, ScatteredPoints)
+                {
+                    Mode = mode,
+                    Convergence = 1f
+                };
+                AssertNeverStartsGathering(encounter, 20);
+            }
+        }
+
+        [Fact]
+        public void LootHoldAndBarrierBlockNewGathersWithoutConsumingAttempts()
+        {
+            var lootHold = new Encounter(new MobGroupingController(), ScatteredPoints) { LootHold = true };
+            AssertNeverStartsGathering(lootHold, 20);
+
+            var barrier = new Encounter(new MobGroupingController(), ScatteredPoints)
+            {
+                Mode = BotMode.MoveAndAttackAndLoot,
+                LootBarrier = true
+            };
+            AssertNeverStartsGathering(barrier, 20);
+
+            Assert.Equal(0, lootHold.Controller.GroupingsThisEncounter);
+            Assert.Equal(0, barrier.Controller.GroupingsThisEncounter);
+            Assert.Equal(0, lootHold.Controller.MovesStarted);
+            Assert.Equal(0, barrier.Controller.MovesStarted);
+        }
+
+        // ── Determinism / bounded work ─────────────────────────────────────────
+
+        [Fact]
+        public void AlgorithmRemainsDeterministicWithSyntheticObservationSequences()
+        {
+            List<string> first = RunScenario();
+            List<string> second = RunScenario();
+
+            Assert.Equal(first, second);
+        }
+
+        private static List<string> RunScenario()
+        {
+            var results = new List<string>();
+            var controller = new MobGroupingController();
+            var encounter = new Encounter(controller, ScatteredPoints);
+
+            for (int i = 0; i < 20; i++)
+            {
+                MobGroupingDecision decision = encounter.Tick();
+                MobGroupAnalysis analysis = encounter.CurrentAnalysis();
+                results.Add($"{decision.Directive}|{decision.Code}|" +
+                            $"{analysis.BestLocalClusterSize}|" +
+                            $"{analysis.BestPairDistanceNormalized:F4}|" +
+                            $"{analysis.FormationQuality:F4}|" +
+                            $"{controller.LastTrend.Trend}|{controller.State}");
+            }
+            return results;
+        }
+
+        [Fact]
+        public void ScatteredFormationCannotCauseEndlessStartCancelRestartCycling()
+        {
+            var controller = new MobGroupingController();
+            var encounter = new Encounter(controller, ScatteredPoints);
+
+            for (int i = 0; i < 200; i++)
+            {
+                encounter.Tick();
+                if (controller.State == MobGroupingState.ResumeCombat)
+                    controller.CompleteResume(encounter.Now);
+            }
+
+            Assert.True(encounter.Decisions.Count(decision =>
+                decision.Directive == MobGroupingDirective.StartMove) <=
+                BotConstants.MobGrouping.MaxGroupingsPerEncounter);
+            Assert.True(controller.GroupingsThisEncounter <=
+                        BotConstants.MobGrouping.MaxGroupingsPerEncounter);
+        }
+
+        // ── Analyzer: local cluster assessment ─────────────────────────────────
+
+        [Fact]
+        public void AnalyzerFindsTheMostCompactLocalPairAndItsNeighborhood()
+        {
+            MobGroupAnalysis analysis = Analyze(ScatteredPoints);
+            Assert.Equal(2, analysis.BestLocalClusterSize);
+            Assert.Equal(100f, analysis.BestPairDistancePx, 1);
+            Assert.Equal(100f / analysis.EffectiveMarkerRadius,
+                analysis.BestPairDistanceNormalized, 3);
+            Assert.False(analysis.HasCompactLocalGroup);
+
+            MobGroupAnalysis compact = Analyze(ThreeCompactPlusOutlier);
+            Assert.True(compact.HasCompactLocalGroup);
+            Assert.Equal(3, compact.BestLocalClusterSize);
+        }
+
+        [Fact]
+        public void AnalyzerNormalizesCompactPairDistanceByMarkerRadius()
+        {
+            // 60 px separation: compact at a 36 px marker radius (1.67r), not at 18 px (3.33r).
+            MobPoint[] markers = { new(70, 60), new(130, 60), new(100, 0) };
+
+            Assert.True(AnalyzeWithRadius(36f, markers).HasCompactLocalGroup);
+            Assert.False(AnalyzeWithRadius(18f, markers).HasCompactLocalGroup);
+        }
+
+        [Fact]
+        public void AnalyzerIgnoresOutliersWhenJudgingTheLocalGroup()
+        {
+            // Adding remote outliers must not remove an existing compact local group.
+            MobGroupAnalysis withoutOutlier = Analyze(new MobPoint(95, 60), new MobPoint(105, 60));
+            MobGroupAnalysis withOutliers = Analyze(TwoCompactPlusOutliers);
+
+            Assert.True(withoutOutlier.HasCompactLocalGroup);
+            Assert.True(withOutliers.HasCompactLocalGroup);
+            Assert.Equal(2, withOutliers.BestLocalClusterSize);
+        }
+
+        [Fact]
+        public void AnalyzerRejectsNonFiniteMarkersBeforeClusterAnalysis()
+        {
+            var markers = new List<MobMarker>
+            {
+                new(new MobPoint(float.NaN, 60), 18f, 1f, MobMarkerSource.CyanCenter),
+                new(new MobPoint(95, 60), 18f, 1f, MobMarkerSource.CyanCenter),
+                new(new MobPoint(105, 60), 18f, 1f, MobMarkerSource.CyanCenter),
+                new(new MobPoint(100, 60), 18f, 0f, MobMarkerSource.CyanCenter)
+            };
+
+            MobGroupAnalysis analysis = AnalyzeMarkers(markers.ToArray());
+            Assert.Equal(2, analysis.DetectedMobCount);
+            Assert.True(analysis.HasCompactLocalGroup);
+            // Two reliable markers are not enough for a movement decision.
+            Assert.False(analysis.IsMovementSampleReliable);
+        }
+
+        [Fact]
+        public void GatherSuccessRequiresACompactLocalGroupAndIsNotAMarkerCount()
+        {
+            Assert.True(MobGroupingController.IsGatheringComplete(Analyze(ClusteredPoints)));
+            Assert.True(MobGroupingController.IsGatheringComplete(Analyze(AttackReadyClusterWithOutliers)));
+            Assert.False(MobGroupingController.IsGatheringComplete(Analyze(ScatteredPoints)));
+            Assert.False(MobGroupingController.IsGatheringComplete(Analyze()));
+            Assert.False(MobGroupingController.IsGatheringComplete(
+                Analyze(ScatteredPoints.Take(1).ToArray())));
+        }
+
+        [Fact]
+        public void GatherCandidateRequiresScatterAndNoCompactLocalGroup()
+        {
+            Assert.True(MobGroupingController.IsGatherCandidate(Analyze(ScatteredPoints)));
+            Assert.False(MobGroupingController.IsGatherCandidate(Analyze(ClusteredPoints)));
+            Assert.False(MobGroupingController.IsGatherCandidate(Analyze(ThreeCompactPlusOutlier)));
+            Assert.False(MobGroupingController.IsGatherCandidate(Analyze(TwoDistant)));
+        }
+
+        // ── Temporal trend (pure, bounded) ─────────────────────────────────────
+
+        [Fact]
+        public void FormationHistoryRequiresTwoConsecutiveImprovementSteps()
+        {
+            var history = new MobFormationHistory();
+            AddObservation(history, 0, 0.10f);
+            AddObservation(history, 225, 0.13f);
+
+            Assert.Equal(MobFormationTrend.Unknown, history.Evaluate(Utc(225)).Trend);
+
+            AddObservation(history, 450, 0.16f);
+            MobFormationTrendResult trend = history.Evaluate(Utc(450));
+            Assert.Equal(MobFormationTrend.Improving, trend.Trend);
+            Assert.Equal(3, trend.ComparableObservations);
+            Assert.True(trend.RelativeChange > 0.10f);
+        }
+
+        [Fact]
+        public void FormationHistoryReportsStagnationAndDeterioration()
+        {
+            var stagnant = new MobFormationHistory();
+            AddObservation(stagnant, 0, 0.20f);
+            AddObservation(stagnant, 225, 0.20f);
+            AddObservation(stagnant, 450, 0.20f);
+            Assert.Equal(MobFormationTrend.Stagnant, stagnant.Evaluate(Utc(450)).Trend);
+
+            var worsening = new MobFormationHistory();
+            AddObservation(worsening, 0, 0.20f);
+            AddObservation(worsening, 225, 0.18f);
+            AddObservation(worsening, 450, 0.15f);
+            Assert.Equal(MobFormationTrend.Deteriorating, worsening.Evaluate(Utc(450)).Trend);
+        }
+
+        [Fact]
+        public void FormationHistoryInvalidatesAcrossCameraChanges()
+        {
+            var history = new MobFormationHistory();
+            AddObservation(history, 0, 0.10f);
+            AddObservation(history, 225, 0.13f);
+            AddObservation(history, 450, 0.16f, cameraYawDegrees: 130f);
+
+            MobFormationTrendResult trend = history.Evaluate(Utc(450));
+            Assert.Equal(MobFormationTrend.Unknown, trend.Trend);
+        }
+
+        [Fact]
+        public void FormationHistoryInvalidatesAcrossClientSizeChanges()
+        {
+            var history = new MobFormationHistory();
+            AddObservation(history, 0, 0.10f);
+            AddObservation(history, 225, 0.13f);
+            AddObservation(history, 450, 0.16f, clientHeight: 1080);
+
+            Assert.Equal(MobFormationTrend.Unknown, history.Evaluate(Utc(450)).Trend);
+        }
+
+        [Fact]
+        public void FormationHistoryNeverTreatsAMarkerCountDecreaseAsImprovement()
+        {
+            var history = new MobFormationHistory();
+            AddObservation(history, 0, 0.10f, markerCount: 4);
+            AddObservation(history, 225, 0.30f, markerCount: 3);
+            AddObservation(history, 450, 0.45f, markerCount: 2);
+
+            Assert.NotEqual(MobFormationTrend.Improving, history.Evaluate(Utc(450)).Trend);
+        }
+
+        [Fact]
+        public void FormationHistoryIsBounded()
+        {
+            var history = new MobFormationHistory();
+            for (int i = 0; i < 100; i++)
+                AddObservation(history, i * 100, 0.1f + i * 0.001f);
+
+            Assert.True(history.Count <= BotConstants.MobGrouping.FormationHistoryMaxObservations);
+        }
+
+        [Fact]
+        public void FormationHistoryIgnoresUnreliableSamples()
+        {
+            var history = new MobFormationHistory();
+            history.Add(new MobFormationObservation(Utc(0), true, 0.10f, 3, 1f, true, 0f, 0f,
+                true, 90f, 1400, 900));
+            history.Add(new MobFormationObservation(Utc(225), true, 0.14f, 3, 1f, true, 0f, 0f,
+                true, 90f, 1400, 900));
+            history.Add(new MobFormationObservation(Utc(450), false, 0f, 0, 0f, true, 0f, 0f,
+                true, 90f, 1400, 900));
+
+            Assert.Equal(MobFormationTrend.Unknown, history.Evaluate(Utc(450)).Trend);
+        }
+
+        private static void AddObservation(
+            MobFormationHistory history,
+            int milliseconds,
+            float quality,
+            int markerCount = 3,
+            float cameraYawDegrees = 90f,
+            int clientHeight = 900)
+        {
+            history.Add(new MobFormationObservation(
+                Utc(milliseconds), true, quality, markerCount, 1f, true, 0f, 0f,
+                true, cameraYawDegrees, 1400, clientHeight));
+        }
+
+        // ── Input / state transition plumbing ─────────────────────────────────
 
         [Fact]
         public void Disabled_NeverGroups()
@@ -164,517 +1276,88 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void OnlyMoveNeverGroups()
-        {
-            var controller = new MobGroupingController();
-            MobGroupingDecision decision = controller.Tick(Input(
-                Utc(), Analyze(ScatteredPoints), sample: true, mode: BotMode.OnlyMove));
-
-            Assert.Equal(MobGroupingDirective.None, decision.Directive);
-            Assert.NotEqual(MobGroupingState.GroupingMove, controller.State);
-        }
-
-        [Theory]
-        [InlineData(BotMode.MoveAndAttack)]
-        [InlineData(BotMode.MoveAndAttackAndLoot)]
-        public void BothCombatModesTriggerTheSameGatherSequence(BotMode mode)
-        {
-            var controller = MakeController(2000);
-
-            Assert.Equal(MobGroupingDirective.StartMove,
-                TriggerInMode(controller, Utc(), mode).Directive);
-            Assert.Equal(MobGroupingState.GroupingMove, controller.State);
-            Assert.Equal(1, controller.GroupingsThisEncounter);
-            Assert.Equal(1, controller.MovesStarted);
-        }
-
-        [Theory]
-        [InlineData(BotMode.MoveAndAttack)]
-        [InlineData(BotMode.MoveAndAttackAndLoot)]
-        public void BothCombatModesUseTheSameThresholdsAndPersistence(BotMode mode)
-        {
-            // Scattered mobs below the persistence/combat-minimum window must not trigger,
-            // and the trigger must land on exactly the same tick in both combat modes.
-            var controller = new MobGroupingController();
-            MobGroupingDecision early = default;
-            foreach (int offset in new[] { 0, 225, 450, 675, 900 })
-                early = controller.Tick(Input(Utc(offset), Analyze(ScatteredPoints),
-                    sample: true, mode: mode));
-            Assert.NotEqual(MobGroupingDirective.StartMove, early.Directive);
-
-            MobGroupingDecision atMinimum = controller.Tick(Input(
-                Utc(BotConstants.MobGrouping.MinimumCombatTimeMs), Analyze(ScatteredPoints),
-                sample: true, mode: mode));
-            Assert.Equal(MobGroupingDirective.StartMove, atMinimum.Directive);
-
-            // Already clustered mobs never need a gather walk in either mode.
-            var clustered = new MobGroupingController();
-            for (int i = 0; i < 10; i++)
-            {
-                Assert.NotEqual(MobGroupingDirective.StartMove, clustered.Tick(Input(
-                    Utc(i * 225), Analyze(ClusteredPoints), sample: true, mode: mode)).Directive);
-            }
-        }
-
-        [Theory]
-        [InlineData(BotMode.MoveAndAttack)]
-        [InlineData(BotMode.MoveAndAttackAndLoot)]
-        public void DisabledGroupingNeverStartsInEitherCombatMode(BotMode mode)
-        {
-            var controller = new MobGroupingController();
-            for (int i = 0; i < 10; i++)
-            {
-                Assert.NotEqual(MobGroupingDirective.StartMove, controller.Tick(Input(
-                    Utc(i * 225), Analyze(ScatteredPoints), sample: true,
-                    enabled: false, mode: mode)).Directive);
-            }
-
-            Assert.Equal(0, controller.GroupingsThisEncounter);
-            Assert.Equal(MobGroupingState.Idle, controller.State);
-        }
-
-        [Fact]
         public void BelowMinimumMobCount_NeverGroups()
         {
             var controller = new MobGroupingController();
-            MobPoint[] points = ScatteredPoints.Take(BotConstants.MobGrouping.MinimumMobs - 1).ToArray();
             for (int i = 0; i < 8; i++)
             {
                 MobGroupingDecision decision = controller.Tick(Input(
-                    Utc(i * 225), Analyze(points), sample: true));
+                    Utc(i * 225), Analyze(new MobPoint(100, 60)), sample: true));
                 Assert.NotEqual(MobGroupingDirective.StartMove, decision.Directive);
             }
-        }
-
-        [Fact]
-        public void TwoScatteredMobsAfterPersistenceAndCombatMinimum_TriggerGather()
-        {
-            // MinimumMobs is now 2: two sufficiently scattered mobs can need gathering.
-            var controller = MakeController(2000);
-            DateTime start = Utc();
-            MobGroupingDecision decision = default;
-            foreach (int offset in new[] { 0, 225, 450, 675, 900, 1200 })
-                decision = controller.Tick(Input(
-                    start.AddMilliseconds(offset), Analyze(ScatteredPoints.Take(2).ToArray()), sample: true));
-
-            Assert.Equal(MobGroupingDirective.StartMove, decision.Directive);
-            Assert.Equal(1, controller.GroupingsThisEncounter);
-        }
-
-        [Fact]
-        public void TwoClusteredMobs_NeverGroups()
-        {
-            var controller = new MobGroupingController();
-            for (int i = 0; i < 10; i++)
-            {
-                MobGroupingDecision decision = controller.Tick(Input(
-                    Utc(i * 225), Analyze(new MobPoint(95, 60), new MobPoint(105, 60)), sample: true));
-                Assert.NotEqual(MobGroupingDirective.StartMove, decision.Directive);
-            }
-        }
-
-        [Fact]
-        public void AttackReadyClusterWithOutliers_AttacksInsteadOfGathering()
-        {
-            // Four mobs already form a valid AOE cluster; the two outliers must not keep
-            // the gatherer chasing perfect clustering forever.
-            var controller = new MobGroupingController();
-            for (int i = 0; i < 10; i++)
-            {
-                MobGroupingDecision decision = controller.Tick(Input(
-                    Utc(i * 225), Analyze(AttackReadyClusterWithOutliers), sample: true));
-                Assert.NotEqual(MobGroupingDirective.StartMove, decision.Directive);
-            }
-            Assert.Equal(0, controller.GroupingsThisEncounter);
-        }
-
-        [Fact]
-        public void GatherStopsEarlyWhenAttackReadyClusterAppears()
-        {
-            // Deadline is 3000 ms, but a rescan already finds a compact four-mob subset
-            // while outliers remain, so the walk must stop and attack the local cluster.
-            var controller = MakeController(3000);
-            Assert.Equal(MobGroupingDirective.StartMove, Trigger(controller, Utc()).Directive);
-
-            DateTime earlyStop = Utc(1200 + 1000);
-            MobGroupingDecision resumed = controller.Tick(Input(
-                earlyStop, Analyze(AttackReadyClusterWithOutliers), sample: true, playerX: 10f));
-
-            Assert.Equal(MobGroupingDirective.ResumeCombat, resumed.Directive);
-        }
-
-        [Fact]
-        public void GatherDoesNotStartWithoutNavigationTarget()
-        {
-            var controller = new MobGroupingController();
-            for (int i = 0; i < 8; i++)
-            {
-                MobGroupingDecision decision = controller.Tick(Input(
-                    Utc(i * 225), Analyze(ScatteredPoints), sample: true, gatherNav: false));
-                Assert.NotEqual(MobGroupingDirective.StartMove, decision.Directive);
-            }
-        }
-
-        [Fact]
-        public void GatherEndsCleanlyWhenNavigationTargetIsReached()
-        {
-            var controller = MakeController(3000);
-            Assert.Equal(MobGroupingDirective.StartMove, Trigger(controller, Utc()).Directive);
-
-            MobGroupingDecision resumed = controller.Tick(Input(
-                Utc(1400), Analyze(ScatteredPoints), sample: true, playerX: 10f, gatherNav: false));
-
-            Assert.Equal(MobGroupingDirective.ResumeCombat, resumed.Directive);
-            Assert.Equal(1, resumed.MoveNumber);
-            controller.CompleteResume(Utc(1400));
-            Assert.Equal(MobGroupingState.Cooldown, controller.State);
         }
 
         [Fact]
         public void ThreeTightlyGroupedMobs_NeverGroups()
         {
             var controller = new MobGroupingController();
-            for (int i = 0; i < 10; i++)
-            {
-                MobGroupingDecision decision = controller.Tick(Input(
-                    Utc(i * 225), Analyze(ClusteredPoints), sample: true));
-                Assert.NotEqual(MobGroupingDirective.StartMove, decision.Directive);
-            }
+            var encounter = new Encounter(controller, ClusteredPoints) { Convergence = 1f };
+            AssertNeverStartsGathering(encounter, 15);
         }
 
         [Fact]
         public void ScatteredFormationShorterThanPersistence_DoesNotTrigger()
         {
             var controller = new MobGroupingController();
-            controller.Tick(Input(Utc(), Analyze(ScatteredPoints), sample: true));
-            controller.Tick(Input(Utc(500), Analyze(ScatteredPoints), sample: true));
+            var encounter = new Encounter(controller, ScatteredPoints);
+            encounter.Tick(2);
 
             Assert.Equal(MobGroupingState.Observing, controller.State);
             Assert.Equal(0, controller.GroupingsThisEncounter);
         }
 
         [Fact]
-        public void OneFailedDetectionFrameGetsGraceButCombatPresenceMinimumStillApplies()
+        public void GatherDoesNotStartWithoutNavigationTarget()
         {
             var controller = new MobGroupingController();
-            controller.Tick(Input(Utc(), Analyze(ScatteredPoints), sample: true));
-            controller.Tick(Input(Utc(225), Analyze(ScatteredPoints), sample: true));
-            controller.Tick(Input(Utc(450), Analyze(ScatteredPoints), sample: true));
-            controller.Tick(Input(Utc(675), analysis: null, sample: true));
-
-            MobGroupingDecision beforeCombatMinimum = controller.Tick(Input(
-                Utc(900), Analyze(ScatteredPoints), sample: true));
-            Assert.Equal(MobGroupingDirective.None, beforeCombatMinimum.Directive);
-
-            MobGroupingDecision afterCombatMinimum = controller.Tick(Input(
-                Utc(1200), Analyze(ScatteredPoints), sample: true));
-            Assert.Equal(MobGroupingDirective.StartMove, afterCombatMinimum.Directive);
-        }
-
-        [Fact]
-        public void PersistedScatteredFormationAfterCombatMinimum_Triggers()
-        {
-            var controller = new MobGroupingController();
-            MobGroupingDecision decision = Trigger(controller, Utc());
-
-            Assert.Equal(MobGroupingDirective.StartMove, decision.Directive);
-            Assert.Equal(1, decision.MoveNumber);
-            Assert.Equal(1, controller.GroupingsThisEncounter);
-            Assert.Equal(MobGroupingState.GroupingMove, controller.State);
-        }
-
-        [Fact]
-        public void GatherStopsEarlyWhenMobsBecomeClustered()
-        {
-            // Deadline is 3000 ms, but a 1000 ms rescan already reports a compact
-            // formation, so the walk must stop immediately and resume combat.
-            var controller = MakeController(3000);
-            MobGroupingDecision started = Trigger(controller, Utc());
-            Assert.Equal(MobGroupingDirective.StartMove, started.Directive);
-
-            DateTime earlyStop = Utc(1200 + 1000);
-            MobGroupingDecision resumed = controller.Tick(Input(
-                earlyStop, Analyze(ClusteredPoints), sample: true, playerX: 10f));
-
-            Assert.Equal(MobGroupingDirective.ResumeCombat, resumed.Directive);
-            Assert.Equal(1, resumed.MoveNumber);
-            Assert.Equal(1, started.MoveNumber);
-
-            controller.CompleteResume(earlyStop);
-            Assert.Equal(MobGroupingState.Cooldown, controller.State);
-            Assert.Equal(MobGroupingDirective.None, controller.Tick(Input(
-                earlyStop.AddMilliseconds(BotConstants.MobGrouping.CooldownMs - 1),
-                Analyze(ScatteredPoints), sample: true)).Directive);
-        }
-
-        [Fact]
-        public void GatherDeadlineStopsMovementAndResumesCombat()
-        {
-            var controller = MakeController(2200);
-            Trigger(controller, Utc());
-            DateTime moveStart = Utc(1200);
-            DateTime deadline = moveStart.AddMilliseconds(2200);
-
-            // The rescans never satisfy the grouping condition; the walk still ends at
-            // the selected deadline without waiting for another scan cadence.
-            foreach (int offset in new[] { 500, 1000, 1500, 2000 })
-            {
-                MobGroupingDecision scan = controller.Tick(Input(
-                    moveStart.AddMilliseconds(offset), Analyze(ScatteredPoints), sample: true,
-                    playerX: offset / 100f));
-                Assert.Equal(MobGroupingDirective.None, scan.Directive);
-                Assert.Equal(MobGroupingState.GroupingMove, controller.State);
-            }
-
-            MobGroupingDecision resumed = controller.Tick(Input(deadline, playerX: 25f));
-            Assert.Equal(MobGroupingDirective.ResumeCombat, resumed.Directive);
-            Assert.Equal(1, resumed.MoveNumber);
-            Assert.Equal(1, controller.MovesStarted);
-
-            controller.CompleteResume(deadline);
-            Assert.Equal(MobGroupingState.Cooldown, controller.State);
-        }
-
-        [Fact]
-        public void GatherUsesOneDeadlineAndNeverStartsASecondMove()
-        {
-            // The sequence random would report a much shorter duration if the controller
-            // re-rolled on a rescan, and CallCount proves the deadline was chosen once.
-            var random = new SequenceRandom(3000, 1000, 1000, 1000);
-            var controller = new MobGroupingController(null, random);
-            Trigger(controller, Utc());
-            DateTime moveStart = Utc(1200);
-
-            // Several rescans pass without grouping; the deadline must stay 3000 ms and
-            // must NOT be re-randomized or extended by the rescan loop.
-            foreach (int offset in new[] { 500, 1000, 1500, 2000, 2500 })
-            {
-                controller.Tick(Input(moveStart.AddMilliseconds(offset),
-                    Analyze(ScatteredPoints), sample: true, playerX: offset / 100f));
-            }
-
-            MobGroupingDecision beforeDeadline = controller.Tick(Input(
-                moveStart.AddMilliseconds(2999), playerX: 30f));
-            Assert.Equal(MobGroupingDirective.None, beforeDeadline.Directive);
-            Assert.Equal(MobGroupingState.GroupingMove, controller.State);
-            Assert.Equal(1, random.CallCount);
-
-            MobGroupingDecision atDeadline = controller.Tick(Input(
-                moveStart.AddMilliseconds(3000), playerX: 30f));
-            Assert.Equal(MobGroupingDirective.ResumeCombat, atDeadline.Directive);
-            Assert.Equal(1, atDeadline.MoveNumber);
-            Assert.Equal(1, controller.MovesStarted);
-            Assert.Equal(1, random.CallCount);
-        }
-
-        [Fact]
-        public void GatherSuccessPredicateRequiresMinimumMobsAndClustering()
-        {
-            // Single source of truth: enough mobs AND the existing clustering condition.
-            Assert.True(MobGroupingController.IsGatheringComplete(Analyze(ClusteredPoints)));
-            Assert.False(MobGroupingController.IsGatheringComplete(Analyze(ScatteredPoints)));
-            Assert.False(MobGroupingController.IsGatheringComplete(Analyze()));
-            Assert.False(MobGroupingController.IsGatheringComplete(
-                Analyze(ScatteredPoints.Take(BotConstants.MobGrouping.MinimumMobs - 1).ToArray())));
+            var encounter = new Encounter(controller, ScatteredPoints) { GatherNav = false };
+            AssertNeverStartsGathering(encounter, 20);
         }
 
         [Fact]
         public void CooldownBlocksRetrigger()
         {
-            var controller = MakeController(2000);
-            Trigger(controller, Utc());
-            DateTime moveStart = Utc(1200);
-            DateTime deadline = moveStart.AddMilliseconds(2000);
-
-            MobGroupingDecision resumed = controller.Tick(Input(deadline, playerX: 30f));
-            Assert.Equal(MobGroupingDirective.ResumeCombat, resumed.Directive);
-            controller.CompleteResume(deadline);
+            var controller = new MobGroupingController();
+            Encounter encounter = StartGather(controller);
+            encounter.Convergence = 1f;
+            encounter.Tick(3);
+            controller.CompleteResume(encounter.Now);
 
             MobGroupingDecision decision = controller.Tick(Input(
-                deadline.AddMilliseconds(BotConstants.MobGrouping.CooldownMs - 1),
-                Analyze(ScatteredPoints), sample: true, playerX: 30f));
+                encounter.Now.AddMilliseconds(BotConstants.MobGrouping.CooldownMs - 1),
+                Analyze(ScatteredPoints), sample: true, playerX: 30f, playerY: 30f));
 
             Assert.Equal(MobGroupingDirective.None, decision.Directive);
             Assert.Equal(MobGroupingState.Cooldown, controller.State);
         }
 
         [Fact]
-        public void EncounterLimitBlocksThirdGroupingUntilStableQuietReset()
-        {
-            var controller = MakeController(2000);
-            DateTime time = Utc();
-
-            for (int grouping = 0; grouping < BotConstants.MobGrouping.MaxGroupingsPerEncounter; grouping++)
-            {
-                MobGroupingDecision start;
-                DateTime moveStart;
-                if (grouping == 0)
-                {
-                    start = Trigger(controller, time);
-                    moveStart = time.AddMilliseconds(1200);
-                }
-                else
-                {
-                    (start, moveStart) = TriggerAfterCooldown(controller, time);
-                }
-                Assert.Equal(MobGroupingDirective.StartMove, start.Directive);
-
-                DateTime deadline = moveStart.AddMilliseconds(2000);
-                MobGroupingDecision resumed = controller.Tick(Input(deadline, playerX: grouping + 1f));
-                Assert.Equal(MobGroupingDirective.ResumeCombat, resumed.Directive);
-                controller.CompleteResume(deadline);
-                time = deadline.AddMilliseconds(BotConstants.MobGrouping.CooldownMs);
-            }
-
-            (MobGroupingDecision blocked, _) = TriggerAfterCooldown(controller, time);
-            Assert.Equal(MobGroupingDirective.None, blocked.Directive);
-            Assert.Equal(BotConstants.MobGrouping.MaxGroupingsPerEncounter, controller.GroupingsThisEncounter);
-        }
-
-        [Fact]
-        public void GatherDurationStaysWithinNominalPlusMinusVariation()
-        {
-            var controller = new MobGroupingController(null, new Random(20260101));
-            int min = BotConstants.MobGrouping.GatherMoveNominalDurationMs -
-                      BotConstants.MobGrouping.GatherMoveDurationVariationMs;
-            int max = BotConstants.MobGrouping.GatherMoveNominalDurationMs +
-                      BotConstants.MobGrouping.GatherMoveDurationVariationMs;
-
-            for (int i = 0; i < 500; i++)
-                Assert.InRange(controller.ChooseGatherDurationMs(), min, max);
-        }
-
-        [Fact]
-        public void GatherRescanIsDueEveryConfiguredIntervalAndNeverPastTheDeadline()
-        {
-            var controller = MakeController(3000);
-            Trigger(controller, Utc());
-            DateTime moveStart = Utc(1200);
-
-            Assert.False(controller.NeedsGatherRescan(moveStart.AddMilliseconds(499)));
-            Assert.True(controller.NeedsGatherRescan(moveStart.AddMilliseconds(500)));
-
-            controller.Tick(Input(moveStart.AddMilliseconds(500), Analyze(ScatteredPoints),
-                sample: true, playerX: 5f));
-            Assert.False(controller.NeedsGatherRescan(moveStart.AddMilliseconds(999)));
-            Assert.True(controller.NeedsGatherRescan(moveStart.AddMilliseconds(1000)));
-
-            // The deadline always wins over the rescan cadence: no rescan is due at or
-            // past it, so the deadline stop can never be delayed by a pending scan.
-            Assert.False(controller.NeedsGatherRescan(moveStart.AddMilliseconds(3000)));
-            Assert.False(controller.NeedsGatherRescan(moveStart.AddMilliseconds(4200)));
-        }
-
-        [Fact]
-        public void GatherStartLogIncludesWaypointSteeringAndDuration()
-        {
-            var lines = new List<string>();
-            var controller = new MobGroupingController(lines.Add, new FixedDurationRandom(2374));
-            DateTime start = Utc();
-            MobGroupingDecision decision = default;
-            foreach (int offset in new[] { 0, 225, 450, 675, 900, 1200 })
-            {
-                decision = controller.Tick(Input(
-                    start.AddMilliseconds(offset), Analyze(ScatteredPoints), sample: true,
-                    playerX: 12.5f, playerY: -3.5f,
-                    gatherTargetX: 123.4f, gatherTargetY: 456.7f,
-                    gatherSteering: MovementSteeringMode.KeyboardTurn));
-            }
-
-            Assert.Equal(MobGroupingDirective.StartMove, decision.Directive);
-            string started = Assert.Single(lines, line => line.Contains("gather started:"));
-            Assert.Contains("mobs=3", started);
-            Assert.Contains("attackReadyCluster=False", started);
-            Assert.Contains(string.Format(System.Globalization.CultureInfo.CurrentCulture,
-                "waypoint=({0:F1},{1:F1})", 123.4f, 456.7f), started);
-            Assert.Contains("steering=KeyboardTurn", started);
-            Assert.Contains("duration=2374ms", started);
-            Assert.Contains("rescan=500ms", started);
-        }
-
-        [Fact]
-        public void GatherRescanLogIncludesFormationState()
-        {
-            var lines = new List<string>();
-            var controller = new MobGroupingController(lines.Add, new FixedDurationRandom(3000));
-            Assert.Equal(MobGroupingDirective.StartMove, Trigger(controller, Utc()).Directive);
-
-            controller.Tick(Input(Utc(1700), Analyze(ScatteredPoints), sample: true, playerX: 5f));
-
-            string rescan = Assert.Single(lines, line => line.Contains("gather rescan:"));
-            Assert.Contains("mobs=3", rescan);
-            Assert.Contains("wholeClustered=False", rescan);
-            Assert.Contains("attackReadyCluster=False", rescan);
-        }
-
-        [Fact]
-        public void GatherCompletionLogDistinguishesWholeFormationFromAttackReadyCluster()
-        {
-            var wholeLines = new List<string>();
-            var wholeController = new MobGroupingController(wholeLines.Add, new FixedDurationRandom(3000));
-            Assert.Equal(MobGroupingDirective.StartMove, Trigger(wholeController, Utc()).Directive);
-            wholeController.Tick(Input(Utc(2200), Analyze(ClusteredPoints), sample: true, playerX: 10f));
-            Assert.Contains(wholeLines, line =>
-                line.Contains("gather finished early") && line.Contains("whole formation sufficiently clustered"));
-
-            var clusterLines = new List<string>();
-            var clusterController = new MobGroupingController(clusterLines.Add, new FixedDurationRandom(3000));
-            Assert.Equal(MobGroupingDirective.StartMove, Trigger(clusterController, Utc()).Directive);
-            clusterController.Tick(Input(Utc(2200), Analyze(AttackReadyClusterWithOutliers), sample: true, playerX: 10f));
-            Assert.Contains(clusterLines, line =>
-                line.Contains("gather finished early") && line.Contains("attack-ready cluster of 4 detected"));
-        }
-
-        [Fact]
         public void NoStaleRescanOrGatherWorkAfterTheGatherCompletes()
         {
-            var controller = MakeController(3000);
-            Trigger(controller, Utc());
-            DateTime moveStart = Utc(1200);
-            DateTime earlyStop = moveStart.AddMilliseconds(1000);
+            var controller = new MobGroupingController();
+            Encounter encounter = StartGather(controller);
+            encounter.Convergence = 1f;
+            encounter.Tick(3);
+            Assert.Equal(MobGroupingState.ResumeCombat, controller.State);
 
-            MobGroupingDecision resumed = controller.Tick(Input(
-                earlyStop, Analyze(ClusteredPoints), sample: true, playerX: 10f));
-            Assert.Equal(MobGroupingDirective.ResumeCombat, resumed.Directive);
-            controller.CompleteResume(earlyStop);
+            controller.CompleteResume(encounter.Now);
             Assert.Equal(MobGroupingState.Cooldown, controller.State);
-            Assert.False(controller.NeedsGatherRescan(earlyStop));
-            Assert.False(controller.NeedsGatherRescan(earlyStop.AddMilliseconds(500)));
+            Assert.False(controller.NeedsGatherRescan(encounter.Now));
+            Assert.False(controller.NeedsGatherRescan(encounter.Now.AddMilliseconds(
+                BotConstants.MobGrouping.GatherRescanIntervalMs)));
 
             MobGroupingDecision late = controller.Tick(Input(
-                earlyStop.AddMilliseconds(600), Analyze(ScatteredPoints), sample: true, playerX: 10f));
+                encounter.Now.AddMilliseconds(600), Analyze(ScatteredPoints), sample: true));
             Assert.Equal(MobGroupingDirective.None, late.Directive);
             Assert.Equal(MobGroupingState.Cooldown, controller.State);
         }
 
         [Fact]
-        public void EmptyDetectionDoesNotEndGatherEarly()
-        {
-            // A rescan that finds no markers (occlusion/out of view) must not be mistaken
-            // for "mobs are grouped"; only the bounded deadline ends this attempt.
-            var controller = MakeController(2000);
-            Trigger(controller, Utc());
-            DateTime moveStart = Utc(1200);
-
-            foreach (int offset in new[] { 500, 1000, 1500 })
-            {
-                MobGroupingDecision scan = controller.Tick(Input(
-                    moveStart.AddMilliseconds(offset), Analyze(), sample: true, playerX: offset / 100f));
-                Assert.Equal(MobGroupingDirective.None, scan.Directive);
-                Assert.Equal(MobGroupingState.GroupingMove, controller.State);
-            }
-
-            MobGroupingDecision resumed = controller.Tick(Input(
-                moveStart.AddMilliseconds(2000), playerX: 20f));
-            Assert.Equal(MobGroupingDirective.ResumeCombat, resumed.Directive);
-        }
-
-        [Fact]
         public void CancellingGatherStopsTheRescanLoopWithoutResumingThroughGather()
         {
-            var controller = MakeController(3000);
-            Trigger(controller, Utc());
-            DateTime cancelAt = Utc(1700);
+            var controller = new MobGroupingController();
+            Encounter encounter = StartGather(controller);
+            DateTime cancelAt = encounter.Now.AddMilliseconds(100);
 
             MobGroupingDecision cancelled = controller.Cancel(cancelAt, "test cancel");
 
@@ -684,52 +1367,19 @@ namespace DriverScanTester.Tests
             Assert.False(controller.NeedsGatherRescan(cancelAt.AddMilliseconds(500)));
         }
 
-        private static (MobGroupingDecision Decision, DateTime StartedAt) TriggerAfterCooldown(
-            MobGroupingController controller, DateTime start)
-        {
-            MobGroupingDecision decision = default;
-            foreach (int offset in new[] { 0, 225, 450, 675, 900, 1200 })
-            {
-                DateTime now = start.AddMilliseconds(offset);
-                decision = controller.Tick(Input(now, Analyze(ScatteredPoints), sample: true));
-                if (decision.Directive == MobGroupingDirective.StartMove)
-                {
-                    return (decision, now);
-                }
-            }
-            return (decision, DateTime.MinValue);
-        }
-
-        [Fact]
-        public void StableQuietPeriodResetsEncounterGroupingCount()
-        {
-            var controller = new MobGroupingController();
-            Trigger(controller, Utc());
-            controller.Cancel(Utc(1300), "test cleanup");
-            Assert.Equal(1, controller.GroupingsThisEncounter);
-
-            // The encounter reset is driven by combat-context absence, regardless of
-            // whether marker detection is still running.
-            for (int time = 1400; time <= 3900; time += 500)
-                controller.Tick(Input(Utc(time), Analyze(), sample: true, combat: false));
-
-            Assert.Equal(0, controller.GroupingsThisEncounter);
-        }
-
         [Fact]
         public void ActiveGroupingCancelsImmediatelyWhenCombatContextEnds()
         {
             var controller = new MobGroupingController();
-            Trigger(controller, Utc());
+            Encounter encounter = StartGather(controller);
 
-            MobGroupingDecision cancelled = controller.Tick(Input(
-                Utc(1300), Analyze(ScatteredPoints), sample: true, combat: false));
+            encounter.Combat = false;
+            MobGroupingDecision cancelled = encounter.Tick();
 
             Assert.Equal(MobGroupingDirective.Cancelled, cancelled.Directive);
             Assert.Equal("combat context ended", cancelled.Reason);
+            Assert.Equal(MobGroupingReason.CombatContextLost, cancelled.Code);
             Assert.Equal(MobGroupingState.Cooldown, controller.State);
-            // The sequence must not be active on the cancellation tick, so MovementSystem's
-            // same-tick handoff runs the ordinary combat pipeline immediately.
             Assert.False(controller.IsSequenceActive);
         }
 
@@ -783,7 +1433,7 @@ namespace DriverScanTester.Tests
         public void EncounterCountResetsAcrossModeChangeAndWhileFeatureDisabled()
         {
             var controller = new MobGroupingController();
-            SetGroupingsThisEncounter(controller, 2);
+            SetGroupingsThisEncounter(controller, 1);
 
             DateTime modeStart = Utc();
             controller.Tick(Input(modeStart, mode: BotMode.OnlyMove, combat: false));
@@ -793,7 +1443,7 @@ namespace DriverScanTester.Tests
 
             // Combat returns and re-arms the lifecycle before the disabled scenario.
             controller.Tick(Input(modeStart.AddSeconds(5), combat: true));
-            SetGroupingsThisEncounter(controller, 2);
+            SetGroupingsThisEncounter(controller, 1);
 
             DateTime disabledStart = modeStart.AddSeconds(10);
             controller.Tick(Input(disabledStart, enabled: false, combat: false));
@@ -803,210 +1453,119 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void DisablingDuringGroupingCancelsSequence()
-        {
-            var controller = new MobGroupingController();
-            Trigger(controller, Utc());
-
-            MobGroupingDecision cancelled = controller.Tick(Input(
-                Utc(1300), Analyze(ScatteredPoints), enabled: false));
-
-            Assert.Equal(MobGroupingDirective.Cancelled, cancelled.Directive);
-            Assert.Equal(MobGroupingState.Cooldown, controller.State);
-        }
-
-        [Fact]
-        public void ModeChangeDuringGroupingCancelsSequence()
-        {
-            var controller = new MobGroupingController();
-            Trigger(controller, Utc());
-
-            MobGroupingDecision cancelled = controller.Tick(Input(
-                Utc(1300), Analyze(ScatteredPoints), mode: BotMode.OnlyMove));
-
-            Assert.Equal(MobGroupingDirective.Cancelled, cancelled.Directive);
-            Assert.Equal("mode changed to OnlyMove", cancelled.Reason);
-        }
-
-        [Theory]
-        [InlineData(true, false, false, false)]
-        [InlineData(false, true, false, false)]
-        [InlineData(false, false, true, false)]
-        [InlineData(false, false, false, true)]
-        public void RecoveryPauseStopAndLootHoldsCancelGrouping(
-            bool recovery, bool paused, bool stopping, bool lootHold)
-        {
-            var controller = new MobGroupingController();
-            Trigger(controller, Utc());
-
-            MobGroupingDecision cancelled = controller.Tick(Input(
-                Utc(1300), Analyze(ScatteredPoints), recovery: recovery, paused: paused,
-                stopping: stopping, lootHold: lootHold));
-
-            Assert.Equal(MobGroupingDirective.Cancelled, cancelled.Directive);
-        }
-
-        [Fact]
-        public void RepotOrUnfocusedWindowCancelsGrouping()
-        {
-            var controller = new MobGroupingController();
-            Trigger(controller, Utc());
-            Assert.Equal(MobGroupingDirective.Cancelled,
-                controller.Tick(Input(Utc(1300), transition: true)).Directive);
-
-            controller = new MobGroupingController();
-            Trigger(controller, Utc());
-            Assert.Equal(MobGroupingDirective.Cancelled,
-                controller.Tick(Input(Utc(1300), window: false)).Directive);
-        }
-
-        [Theory]
-        [InlineData(BotMode.MoveAndAttack)]
-        [InlineData(BotMode.MoveAndAttackAndLoot)]
-        public void CombatContextLossCancelsGatherInBothCombatModes(BotMode mode)
-        {
-            var controller = MakeController(2000);
-            Assert.Equal(MobGroupingDirective.StartMove,
-                TriggerInMode(controller, Utc(), mode).Directive);
-
-            MobGroupingDecision cancelled = controller.Tick(Input(
-                Utc(1300), Analyze(ScatteredPoints), sample: true, mode: mode, combat: false));
-
-            Assert.Equal(MobGroupingDirective.Cancelled, cancelled.Directive);
-            Assert.Equal("combat context ended", cancelled.Reason);
-            Assert.False(controller.IsSequenceActive);
-        }
-
-        [Theory]
-        [InlineData(BotMode.MoveAndAttack)]
-        [InlineData(BotMode.MoveAndAttackAndLoot)]
-        public void HigherPriorityOwnersCancelGatherInBothCombatModes(BotMode mode)
-        {
-            var owners = new[]
-            {
-                (Recovery: true, Paused: false, Stopping: false, LootHold: false),
-                (Recovery: false, Paused: true, Stopping: false, LootHold: false),
-                (Recovery: false, Paused: false, Stopping: true, LootHold: false),
-                (Recovery: false, Paused: false, Stopping: false, LootHold: true)
-            };
-
-            foreach (var owner in owners)
-            {
-                var controller = MakeController(2000);
-                Assert.Equal(MobGroupingDirective.StartMove,
-                    TriggerInMode(controller, Utc(), mode).Directive);
-
-                MobGroupingDecision cancelled = controller.Tick(Input(
-                    Utc(1300), Analyze(ScatteredPoints), sample: true, mode: mode,
-                    recovery: owner.Recovery, paused: owner.Paused,
-                    stopping: owner.Stopping, lootHold: owner.LootHold));
-
-                Assert.Equal(MobGroupingDirective.Cancelled, cancelled.Directive);
-                Assert.False(controller.IsSequenceActive);
-            }
-        }
-
-        // ── Loot integration ───────────────────────────────────────────────────
-
-        [Theory]
-        [InlineData(BotMode.MoveAndAttack)]
-        [InlineData(BotMode.MoveAndAttackAndLoot)]
-        public void ActiveLootCollectionHoldBlocksGatherStartInBothModes(BotMode mode)
-        {
-            var controller = new MobGroupingController();
-            for (int i = 0; i < 12; i++)
-            {
-                Assert.NotEqual(MobGroupingDirective.StartMove, controller.Tick(Input(
-                    Utc(i * 225), Analyze(ScatteredPoints), sample: true,
-                    mode: mode, lootHold: true)).Directive);
-            }
-
-            Assert.Equal(0, controller.GroupingsThisEncounter);
-            Assert.Equal(0, controller.MovesStarted);
-        }
-
-        [Fact]
-        public void MandatoryLootBarrierBlocksGatherStartWithoutConsumingAnEncounterAttempt()
-        {
-            var controller = new MobGroupingController();
-
-            // A full persistence/combat window with the barrier active: no group start and
-            // no consumed encounter attempt, because physical movement was prohibited.
-            for (int i = 0; i < 12; i++)
-            {
-                Assert.NotEqual(MobGroupingDirective.StartMove, controller.Tick(Input(
-                    Utc(i * 225), Analyze(ScatteredPoints), sample: true,
-                    mode: BotMode.MoveAndAttackAndLoot, lootBarrier: true)).Directive);
-            }
-
-            Assert.Equal(0, controller.GroupingsThisEncounter);
-            Assert.Equal(0, controller.MovesStarted);
-
-            // Once the verified obligation completes, the same formation groups normally
-            // through the ordinary conditions (persistence + minimum combat time).
-            Assert.NotNull(FindStartMove(controller, Utc(2700), BotMode.MoveAndAttackAndLoot));
-            Assert.Equal(1, controller.GroupingsThisEncounter);
-        }
-
-        [Fact]
-        public void MandatoryLootBarrierBlockLogIsEventDrivenNotPerTick()
+        public void SuppressionLoggingIsEventDrivenNotPerObservation()
         {
             var lines = new List<string>();
             var controller = new MobGroupingController(lines.Add);
+            var encounter = new Encounter(controller, TwoDistant) { Convergence = 1f };
 
-            for (int i = 0; i < 12; i++)
-            {
-                controller.Tick(Input(Utc(i * 225), Analyze(ScatteredPoints), sample: true,
-                    mode: BotMode.MoveAndAttackAndLoot, lootBarrier: true));
-            }
+            encounter.Tick(30);
 
-            Assert.Single(lines, line => line.Contains("gather blocked", StringComparison.Ordinal));
-
-            // Barrier released, then a new obligation arrives: one more log line.
-            controller.Tick(Input(Utc(2700), Analyze(ScatteredPoints), sample: true,
-                mode: BotMode.MoveAndAttackAndLoot));
-            controller.Tick(Input(Utc(2925), Analyze(ScatteredPoints), sample: true,
-                mode: BotMode.MoveAndAttackAndLoot, lootBarrier: true));
-
-            Assert.Equal(2, lines.Count(line =>
-                line.Contains("gather blocked", StringComparison.Ordinal)));
+            Assert.Single(lines, line =>
+                line.Contains(MobGroupingReason.TwoMobNoGather, StringComparison.Ordinal));
         }
 
         [Fact]
-        public void LootOwnershipDuringGatherCancelsTheSequenceAndReleasesMovement()
+        public void GatherStartLogRecordsEveryDiagnosticField()
         {
             var lines = new List<string>();
-            var controller = new MobGroupingController(lines.Add, new FixedDurationRandom(2000));
-            Assert.Equal(MobGroupingDirective.StartMove,
-                TriggerInMode(controller, Utc(), BotMode.MoveAndAttackAndLoot).Directive);
+            var controller = new MobGroupingController(lines.Add);
+            var encounter = new Encounter(controller, ScatteredPoints);
+            encounter.RunUntilStartMove();
 
-            MobGroupingDecision cancelled = controller.Tick(Input(
-                Utc(1300), Analyze(ScatteredPoints), sample: true,
-                mode: BotMode.MoveAndAttackAndLoot, lootBarrier: true));
-
-            Assert.Equal(MobGroupingDirective.Cancelled, cancelled.Directive);
-            Assert.Equal(MobGroupingController.LootBarrierBlockReason, cancelled.Reason);
-            Assert.False(controller.IsSequenceActive);
-            Assert.Equal(MobGroupingState.Cooldown, controller.State);
-            Assert.Contains(lines, line => line.Contains(
-                "grouping cancelled: mandatory loot barrier", StringComparison.Ordinal));
+            string started = Assert.Single(lines, line => line.Contains("gather started"));
+            Assert.Contains("localCluster=", started);
+            Assert.Contains("bestPair=", started);
+            Assert.Contains("quality=", started);
+            Assert.Contains("player=(", started);
+            Assert.Contains("waypoint=(", started);
+            Assert.Contains($"budget={BotConstants.MobGrouping.MaximumGatherDurationMs}ms", started);
+            Assert.Contains($"rescan={BotConstants.MobGrouping.GatherRescanIntervalMs}ms", started);
+            Assert.Contains("steering=KeyboardTurn", started);
+            Assert.Contains("trend=", started);
         }
 
         [Fact]
-        public void GroupingBecomesEligibleAgainAfterLootOwnershipEnds()
+        public void GatherFinishLogRecordsDurationDisplacementAndImprovement()
         {
-            var controller = MakeController(2000);
-            Assert.Equal(MobGroupingDirective.StartMove,
-                TriggerInMode(controller, Utc(), BotMode.MoveAndAttackAndLoot).Directive);
-            Assert.Equal(MobGroupingDirective.Cancelled, controller.Tick(Input(
-                Utc(1300), Analyze(ScatteredPoints), sample: true,
-                mode: BotMode.MoveAndAttackAndLoot, lootBarrier: true)).Directive);
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            Encounter encounter = StartGather(controller, lines);
 
-            DateTime restart = Utc(1300 + BotConstants.MobGrouping.CooldownMs);
-            Assert.NotNull(FindStartMove(controller, restart, BotMode.MoveAndAttackAndLoot));
-            Assert.Equal(2, controller.GroupingsThisEncounter);
+            encounter.Convergence = 1f;
+            encounter.Tick(3);
+
+            string finished = Assert.Single(lines, line => line.Contains("gather finished"));
+            Assert.Contains("duration=", finished);
+            Assert.Contains("displacement=", finished);
+            Assert.Contains("quality=", finished);
+            Assert.Contains("improved=", finished);
+            Assert.Contains("localCluster=", finished);
         }
 
+        [Fact]
+        public void GatherRescanLogIncludesLocalClusterAndTrend()
+        {
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            Encounter encounter = StartGather(controller, lines);
+
+            encounter.Tick();
+
+            string rescan = Assert.Single(lines, line => line.Contains("gather rescan:"));
+            Assert.Contains("mobs=3", rescan);
+            Assert.Contains("localCluster=", rescan);
+            Assert.Contains("bestPair=", rescan);
+            Assert.Contains("quality=", rescan);
+            Assert.Contains("trend=", rescan);
+            Assert.Contains("displacement=", rescan);
+        }
+
+        [Fact]
+        public void GatherNeverDequeuesOrAdvancesTheWaypoint()
+        {
+            var path = new List<Waypoint>
+            {
+                new(5000, 5000, MovementPrecision.Medium, BotMode.MoveAndAttack,
+                    steeringMode: MovementSteeringMode.DirectCamera),
+                new(6000, 6000, MovementPrecision.Medium, BotMode.MoveAndAttack,
+                    steeringMode: MovementSteeringMode.DirectCamera)
+            };
+            MovementSystem movement = new(CreateStubMemory(), _ => { }, 0, 0, customPath: path);
+            try
+            {
+                SetGroupingState(movement, MobGroupingState.GroupingMove);
+                var queue = (Queue<Waypoint>)typeof(MovementSystem)
+                    .GetField("_waypoints", PrivateInstance)!.GetValue(movement)!;
+                Waypoint headBefore = queue.Peek();
+                float headX = headBefore.X;
+                float headY = headBefore.Y;
+                int countBefore = queue.Count;
+
+                // Keep W logically held so the gather step never synthesizes a keydown.
+                typeof(MovementSystem).GetField("_isMovingForward", PrivateInstance)!
+                    .SetValue(movement, true);
+                InvokePrivate(movement, "ApplyGatherMovement", 0f, 0f);
+                InvokePrivate(movement, "ApplyGatherMovement", 0.5f, 0.5f);
+
+                Assert.Equal(headX, queue.Peek().X);
+                Assert.Equal(headY, queue.Peek().Y);
+                Assert.Equal(countBefore, queue.Count);
+                Assert.False(movement.IsGoalReached);
+            }
+            finally
+            {
+                movement.DisposeMobGroupingDetector();
+            }
+        }
+
+        [Fact]
+        public void OnlyMoveNeverInvokesGroupingThroughTheMovementSystemGate()
+        {
+            Assert.False(MobGroupingController.IsSupportedCombatMode(BotMode.OnlyMove));
+            Assert.True(MobGroupingController.IsSupportedCombatMode(BotMode.MoveAndAttack));
+            Assert.True(MobGroupingController.IsSupportedCombatMode(BotMode.MoveAndAttackAndLoot));
+        }
         [Fact]
         public void AnalyzerFindsAttackReadyClusterAmongOutliers()
         {
@@ -1062,11 +1621,12 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void ExactlyFourMobsWithOneOutlierDoNotFormAttackReadyClusterButStillGather()
+        public void ExactlyFourMobsWithOneOutlierDoNotFormAnAttackReadyClusterAndNeverGather()
         {
-            // With exactly four detected mobs the whole formation IS the candidate: no
-            // four-mob subset rule applies, so a scattered formation with one outlier
-            // must still go through the normal gather path.
+            // Regression for the old behaviour: three clustered mobs plus one distant marker
+            // used to trigger a gather walk because no four-mob subset existed. The local
+            // cluster assessment now suppresses it: the compact trio is already the useful
+            // local group and the outlier is never chased.
             MobPoint[] threeGroupedAndOutlier =
             {
                 new(95, 60), new(100, 65), new(105, 60), new(0, 60)
@@ -1078,10 +1638,18 @@ namespace DriverScanTester.Tests
             Assert.False(analysis.IsSufficientlyClustered);
             Assert.False(analysis.HasAttackReadyCluster);
             Assert.Equal(0, analysis.AttackReadyClusterMobCount);
+            Assert.True(analysis.HasCompactLocalGroup);
+            Assert.Equal(3, analysis.BestLocalClusterSize);
 
-            var controller = MakeController(2000);
-            Assert.Equal(MobGroupingDirective.StartMove,
-                TriggerWith(controller, Utc(), threeGroupedAndOutlier).Directive);
+            var controller = new MobGroupingController();
+            for (int i = 0; i < 12; i++)
+            {
+                MobGroupingDecision decision = controller.Tick(Input(
+                    Utc(i * 225), analysis, sample: true, playerX: i * 0.3f, playerY: i * 0.3f));
+                Assert.NotEqual(MobGroupingDirective.StartMove, decision.Directive);
+            }
+            Assert.Equal(0, controller.GroupingsThisEncounter);
+            Assert.Equal(0, controller.MovesStarted);
         }
 
         [Fact]
@@ -1372,17 +1940,14 @@ namespace DriverScanTester.Tests
         private static (float TargetX, float TargetY, MovementSteeringMode Steering, float AppliedBearing)
             CaptureGatherMovement(MobGroupingDirection direction)
         {
-            MobGroupAnalysis analysis = Analyze(ScatteredPoints) with
-            {
-                RecommendedEscapeDirection = direction
-            };
-            var controller = MakeController(2000);
-            MobGroupingDecision decision = default;
-            foreach (int offset in new[] { 0, 225, 450, 675, 900, 1200 })
-                decision = controller.Tick(Input(Utc(offset), analysis, sample: true));
-
-            Assert.Equal(MobGroupingDirective.StartMove, decision.Directive);
-            Assert.Equal(direction, decision.Direction);
+            // The gather is started through the production decision path (converging
+            // formation + route-compatible movement), then only the diagnostic direction
+            // carried by the decision is varied.
+            var encounter = new Encounter(new MobGroupingController(), ScatteredPoints);
+            Assert.Equal(MobGroupingDirective.StartMove,
+                encounter.RunUntilStartMove().Directive);
+            var decision = new MobGroupingDecision(
+                MobGroupingDirective.StartMove, direction, 1);
 
             var path = new List<Waypoint>
             {

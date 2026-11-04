@@ -264,6 +264,69 @@ namespace DriverScanTester
         }
 
         // ════════════════════════════════════════════════════════════════
+        //  COMBATGATE WAYPOINT RETURN — authorized return to the current
+        //  waypoint while a Deferred post-kill loot obligation blocks navigation
+        // ════════════════════════════════════════════════════════════════
+        /// <summary>
+        /// Bounds of the dedicated CombatGate waypoint return recovery. The operation exists
+        /// only for one exact interaction: CombatGate suppressed attacks because the player is
+        /// outside the waypoint's AttackDisengageDistance, a Deferred PostKill loot obligation
+        /// blocks ordinary navigation, and a confirmed monster is still selected. Without it the
+        /// bot could neither attack nor navigate and no camera-verified scan could ever run
+        /// (2026-11-04 02:06 MoveAndAttackAndLoot deadlock).
+        /// </summary>
+        public static class CombatGateReturn
+        {
+            /// <summary>
+            /// Waypoint-directed progress (game-coordinate units) that counts as real movement.
+            /// A coordinate change that does not reduce the distance to the waypoint never resets
+            /// the stall window.
+            /// </summary>
+            public const float MeaningfulProgressUnits = 1.0f;
+
+            /// <summary>
+            /// Safety margin kept INSIDE the attack-disengage boundary for the return completion,
+            /// so coordinate noise cannot immediately re-trigger the CombatGate after W is released.
+            /// </summary>
+            public const float CompletionMargin = 1.0f;
+
+            /// <summary>
+            /// No waypoint-directed progress for this long ends the current return attempt with
+            /// <c>STALLED</c>. This is the movement validation the ordinary stuck detector cannot
+            /// provide here, because the mandatory loot barrier normally prevents reaching it.
+            /// </summary>
+            public const int StallTimeoutMs = 2500;
+
+            /// <summary>
+            /// Maximum duration of ONE return attempt. A maximum, never a fixed waiting period:
+            /// a successful return terminates immediately.
+            /// </summary>
+            public const int AttemptBudgetMs = 30_000;
+
+            /// <summary>Consecutive refused forward-input requests that end the attempt with <c>INPUT_DENIED</c>.</summary>
+            public const int MaximumInputDenials = 3;
+
+            /// <summary>
+            /// Failed return attempts (each followed by the existing combat unstuck recovery) that
+            /// reach the project's established navigation-failure escalation instead of retrying.
+            /// </summary>
+            public const int MaximumFailedAttempts = 3;
+
+            /// <summary>Throttle for <c>PROGRESS</c> diagnostics.</summary>
+            public const int ProgressLogIntervalMs = 750;
+
+            /// <summary>
+            /// How long the exact deadlock may persist without a usable recovery handoff before
+            /// diagnostics are captured and the safe route-failure escalation runs. No obligation
+            /// is ever released by a timeout.
+            /// </summary>
+            public const int DeadlockDiagnosticWindowMs = 15_000;
+
+            /// <summary>Pause after a failed attempt before control returns to the pipeline.</summary>
+            public const int FailureSettleMs = 50;
+        }
+
+        // ════════════════════════════════════════════════════════════════
         //  COMBAT TARGET SAFETY — other-player detection before every attack
         // ════════════════════════════════════════════════════════════════
         public static class CombatSafety
@@ -392,10 +455,17 @@ namespace DriverScanTester
             /// <summary>Global runtime toggle default. Never serialized with profiles or paths.</summary>
             public const bool EnabledDefault = false;
             /// <summary>
-            /// Minimum visible mobs for gathering to make sense. A single mob never needs a
-            /// gather walk, while two sufficiently scattered mobs can need one.
+            /// Minimum visible mobs for the whole-formation spread metrics to be meaningful.
+            /// This is NOT the gather eligibility count: <see cref="MinimumGatherMarkers"/> is.
             /// </summary>
             public const int MinimumMobs = 2;
+            /// <summary>
+            /// Minimum RELIABLY detected visible markers before an active gather walk may start.
+            /// Two visible mobs never justify a separate grouping movement: both may be ranged,
+            /// their preferred attack distances may never converge, and following the route may
+            /// even increase their separation. Natural combat/route approach is unaffected.
+            /// </summary>
+            public const int MinimumGatherMarkers = 3;
             /// <summary>
             /// When many mobs are visible this is how many properly clustered mobs are enough
             /// to stop gathering and attack the local cluster instead of chasing every outlier.
@@ -409,25 +479,88 @@ namespace DriverScanTester
             public const int BadFormationGraceMs = 450;
             public const int MinimumCombatTimeMs = 1200;
             /// <summary>
-            /// Nominal gather movement duration. Each gather attempt selects ONE random deadline of
-            /// this duration +/- <see cref="GatherMoveDurationVariationMs"/> and keeps it for the
-            /// entire attempt (it is never re-rolled by the periodic rescans).
+            /// Hard upper bound of ONE gather movement. There is no randomness any more: the
+            /// attempt is a short, predictable, route-compatible walk that is never extended.
             /// </summary>
-            public const int GatherMoveNominalDurationMs = 2000;
-            /// <summary>
-            /// Symmetric random variation applied once per gather attempt.
-            /// Nominal 2000 ms +/- 1000 ms gives a per-attempt deadline in 1000..3000 ms.
-            /// </summary>
-            public const int GatherMoveDurationVariationMs = 1000;
+            public const int MaximumGatherDurationMs = 1200;
             /// <summary>
             /// Interval between in-move grouping-quality rescans while the gather walk is active.
             /// The gather deadline always wins over this cadence: no rescan is started at or
             /// after the deadline.
             /// </summary>
-            public const int GatherRescanIntervalMs = 500;
+            public const int GatherRescanIntervalMs = 350;
+            /// <summary>
+            /// Maximum additional world-coordinate displacement a single gather attempt may
+            /// spend. Checked every tick, so the walk stops as soon as it is exhausted.
+            /// </summary>
+            public const float MaximumGatherDisplacement = 2.0f;
+            /// <summary>
+            /// One gather attempt per encounter. A failed attempt is never retried in the same
+            /// encounter, so scattered mobs can never cause start/cancel/restart cycling.
+            /// </summary>
+            public const int MaxGroupingsPerEncounter = 1;
             public const int CooldownMs = 5000;
-            public const int MaxGroupingsPerEncounter = 2;
             public const int EncounterQuietResetMs = 2500;
+
+            // ── Local cluster assessment ────────────────────────────────────────────
+            /// <summary>Two markers this close (normalized by marker radius) form a compact pair.</summary>
+            public const float CompactPairDistanceFactor = 2.75f;
+            /// <summary>Neighborhood radius (normalized by marker radius) around the best pair.</summary>
+            public const float CompactClusterNeighborhoodFactor = 3.0f;
+            /// <summary>A compact local group this large already suppresses any gather movement.</summary>
+            public const int MinimumCompactClusterSize = 2;
+            /// <summary>
+            /// Above this many visible markers the sample is treated as unreliable for a movement
+            /// decision (over-detection / clutter). Markers are never silently dropped to make a
+            /// formation look favourable.
+            /// </summary>
+            public const int MaximumMarkersForEvaluation = 12;
+            /// <summary>Minimum mean marker confidence for a movement decision.</summary>
+            public const float MinimumDetectionConfidence = 0.45f;
+
+            // ── Temporal formation trend ────────────────────────────────────────────
+            /// <summary>Bounded formation observation window (screen-space trends only).</summary>
+            public const int FormationHistoryWindowMs = 1000;
+            /// <summary>Hard cap of retained formation observations.</summary>
+            public const int FormationHistoryMaxObservations = 12;
+            /// <summary>Relative local-formation-quality improvement that counts as meaningful.</summary>
+            public const float FormationImprovementNoise = 0.10f;
+            /// <summary>
+            /// Screen-space geometry changes with camera rotation, so formation trends are not
+            /// compared across camera moves larger than this angular difference.
+            /// </summary>
+            public const float CameraYawToleranceDegrees = 8f;
+            /// <summary>
+            /// A marker-count difference larger than this invalidates the trend comparison.
+            /// A marker COUNT DECREASE never counts as formation improvement (a distant outlier
+            /// leaving the ROI is not evidence that the local group became better).
+            /// </summary>
+            public const int MaximumMarkerCountDeltaForTrend = 1;
+            /// <summary>Two consecutive improvement steps (three observations) are required.</summary>
+            public const int MinimumTrendObservations = 3;
+
+            // ── World-space movement evaluation ────────────────────────────────────
+            /// <summary>Window over which "the player is already making progress" is measured.</summary>
+            public const int PlayerProgressWindowMs = 750;
+            /// <summary>Hard cap of retained player-position samples.</summary>
+            public const int PlayerProgressMaxSamples = 16;
+            /// <summary>Minimum world-coordinate span of the progress window that is usable.</summary>
+            public const int MinimumPlayerProgressSpanMs = 500;
+            /// <summary>Minimum world-coordinate progress inside the window before gathering.</summary>
+            public const float MinimumMovementProgressForGather = 0.5f;
+            /// <summary>
+            /// Minimum dot product between the recent player displacement and the direction to the
+            /// live route waypoint: gathering may only continue an already route-compatible walk.
+            /// </summary>
+            public const float MinimumDirectionAlignmentDot = 0.8f;
+            /// <summary>Earliest elapsed time at which a stagnant gather is declared unproductive.</summary>
+            public const int GatherProgressCheckDelayMs = 500;
+            /// <summary>
+            /// Fraction of the eligibility progress RATE a gather must keep up with before it is
+            /// declared "no meaningful progress" (rate = MinimumMovementProgressForGather per
+            /// PlayerProgressWindowMs).
+            /// </summary>
+            public const float GatherProgressTolerance = 0.5f;
 
             /// <summary>
             /// Initial conservative spread thresholds at the reference marker size (pixels).
@@ -472,9 +605,6 @@ namespace DriverScanTester
             /// <summary>ROI half-sizes, as client ratios around the player anchor; right-side UI is mostly excluded.</summary>
             public const float RoiHalfWidthRatio = 0.40f;
             public const float RoiHalfHeightRatio = 0.39f;
-
-            /// <summary>Abort a grouping move if it makes less than this much world-coordinate progress.</summary>
-            public const float MinimumMoveProgress = 0.75f;
         }
 
         // ════════════════════════════════════════════════════════════════

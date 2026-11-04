@@ -13,7 +13,9 @@ namespace DriverScanTester.Services
             MobMarkerDetectionResult detection,
             MobGroupAnalysis analysis,
             string state,
-            Action<string> log)
+            Action<string> log,
+            string? decisionReason = null,
+            MobFormationTrendResult? trend = null)
         {
             try
             {
@@ -23,6 +25,7 @@ namespace DriverScanTester.Services
                 using (var centerBrush = new SolidBrush(Color.Yellow))
                 using (var playerPen = new Pen(Color.DeepSkyBlue, 2f))
                 using (var centroidPen = new Pen(Color.Gold, 2f))
+                using (var clusterPen = new Pen(Color.OrangeRed, 2f))
                 using (var font = new Font(FontFamily.GenericSansSerif, 11f, FontStyle.Bold))
                 using (var textBrush = new SolidBrush(Color.White))
                 using (var textBack = new SolidBrush(Color.FromArgb(190, 0, 0, 0)))
@@ -46,15 +49,40 @@ namespace DriverScanTester.Services
                         graphics.DrawEllipse(centroidPen, centroidX - 5, centroidY - 5, 10, 10);
                     }
 
+                    // Best local cluster (the movement-suppression signal), drawn as the
+                    // normalized compact neighborhood around the most compact pair.
+                    if (analysis.DetectedMobCount >= 2 && analysis.EffectiveMarkerRadius > 0)
+                    {
+                        float clusterX = analysis.BestLocalClusterCenter.X - detection.RoiClient.Left;
+                        float clusterY = analysis.BestLocalClusterCenter.Y - detection.RoiClient.Top;
+                        float clusterRadius = Math.Max(4f,
+                            BotConstants.MobGrouping.CompactClusterNeighborhoodFactor *
+                            analysis.EffectiveMarkerRadius);
+                        graphics.DrawEllipse(clusterPen, clusterX - clusterRadius,
+                            clusterY - clusterRadius, clusterRadius * 2, clusterRadius * 2);
+                    }
+
                     // Movement diagnostics show the analysis state only. There is deliberately
                     // no escape-direction arrow: gather movement follows the live route waypoint
                     // (resolved by MovementSystem), never RecommendedEscapeDirection.
-                    string caption = $"{state} | mobs={analysis.DetectedMobCount} | avg={analysis.AverageSpread:F1}px | " +
-                                     $"max={analysis.MaximumSpread:F1}px | wholeClustered={analysis.IsSufficientlyClustered} | " +
-                                     $"attackReadyCluster={analysis.HasAttackReadyCluster}";
+                    string caption = $"{state} | mobs={analysis.DetectedMobCount} | " +
+                                     $"localCluster={analysis.BestLocalClusterSize} | " +
+                                     $"pair={analysis.BestPairDistanceNormalized:F2}r | " +
+                                     $"quality={analysis.FormationQuality:F3} | " +
+                                     $"compact={analysis.HasCompactLocalGroup} | " +
+                                     $"reliable={analysis.IsMovementSampleReliable}";
+                    string second = (trend.HasValue
+                                        ? $"trend={trend.Value.Trend} ({trend.Value.RelativeChange:P0}) | "
+                                        : "") +
+                                    $"wholeClustered={analysis.IsSufficientlyClustered} | " +
+                                    $"attackReadyCluster={analysis.HasAttackReadyCluster} | " +
+                                    $"reason={decisionReason ?? "-"}";
                     SizeF size = graphics.MeasureString(caption, font);
-                    graphics.FillRectangle(textBack, 5, 5, size.Width + 10, size.Height + 6);
+                    SizeF size2 = graphics.MeasureString(second, font);
+                    float width = Math.Max(size.Width, size2.Width) + 10;
+                    graphics.FillRectangle(textBack, 5, 5, width, size.Height + size2.Height + 6);
                     graphics.DrawString(caption, font, textBrush, 10, 8);
+                    graphics.DrawString(second, font, textBrush, 10, 8 + size.Height);
                 }
 
                 string directory = ResolveDebugDirectory();

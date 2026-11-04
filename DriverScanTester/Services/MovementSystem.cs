@@ -250,6 +250,13 @@ namespace DriverScanTester.Services
         private DateTime _nextMobGroupingDetectionAt = DateTime.MinValue;
         private MobGroupAnalysis? _lastMobGroupingAnalysis;
         private bool _lastMobGroupingCaptureSucceeded;
+        /// <summary>Camera yaw at the moment of the last mob-grouping detection sample.</summary>
+        private float _lastMobGroupingCameraYawRadians;
+        /// <summary>False when the camera yaw could not be read; the trend comparison is then skipped.</summary>
+        private bool _lastMobGroupingHasCameraYaw;
+        /// <summary>Client size of the last mob-grouping detection sample (trend validity).</summary>
+        private int _lastMobGroupingClientWidth;
+        private int _lastMobGroupingClientHeight;
         private bool _mobGroupingOwnsMovement;
         private bool _resumeCombatSkillAfterGrouping;
         private bool _mobGroupingDisposed;
@@ -419,6 +426,37 @@ namespace DriverScanTester.Services
         private bool _combatRecoveryMovementAuthorized;
         private long _combatRecoveryMovementRequestId;
         private bool _combatRecoveryMovementDeniedLogged;
+
+        // ── CombatGate waypoint return recovery ──
+        // CombatGate sets _attackSuppressedForCurrentWaypoint once the player is outside the
+        // current waypoint's AttackDisengageDistance. That latch is only cleared when the
+        // waypoint leg ends — but a Deferred post-kill loot obligation blocks ordinary
+        // navigation, so the bot stood still forever: the gate forbade attacking, the barrier
+        // forbade navigating and the selected mob deferred the mandatory scan (2026-11-04
+        // 02:06 deadlock). This is a narrowly scoped, tick-driven return to the CURRENT
+        // waypoint that reuses the existing combat-recovery handoff. It never advances the
+        // waypoint, never completes the loot obligation and is cancelled by every lifecycle
+        // reset (stop, map change, teleport, waypoint replacement, route failure).
+        private bool _combatGateReturnActive;
+        private long _combatGateReturnRequestId;
+        private int _combatGateReturnTargetId;
+        private float _combatGateReturnWaypointX;
+        private float _combatGateReturnWaypointY;
+        private float _combatGateReturnStartX;
+        private float _combatGateReturnStartY;
+        private float _combatGateReturnLastX;
+        private float _combatGateReturnLastY;
+        private DateTime _combatGateReturnStartedAt = DateTime.MinValue;
+        private DateTime _combatGateReturnLastProgressAt = DateTime.MinValue;
+        private DateTime _combatGateReturnLastProgressLogAt = DateTime.MinValue;
+        private float _combatGateReturnBestDistance = float.MaxValue;
+        private int _combatGateReturnFailedAttempts;
+        private int _combatGateReturnInputDenials;
+        private bool _combatGateReturnWAcceptedLogged;
+        private bool _combatGateReturnInputDeniedLogged;
+        private DateTime _combatGateReturnDeadlockSince = DateTime.MinValue;
+        private string _combatGateReturnDeadlockDetail = string.Empty;
+        private bool _combatGateReturnDeadlockEscalated;
 
         // ── Post-kill SOD/SOP pink-scan hold (MoveAndAttack) ──
         // After a kill, first TAB at the closest camera distance. A nearby mob takes
@@ -677,12 +715,14 @@ namespace DriverScanTester.Services
 
                 _lastMobGroupingAnalysis = MobGroupAnalyzer.Analyze(result.Markers, result.PlayerAnchor);
                 return MobGroupingDebugRenderer.Save(
-                    frame, result, _lastMobGroupingAnalysis, CurrentMobGroupingState.ToString(), _log);
+                    frame, result, _lastMobGroupingAnalysis, CurrentMobGroupingState.ToString(), _log,
+                    _mobGroupingController.LastDecisionReason, _mobGroupingController.LastTrend);
             }
         }
 
         private void StartMobGroupingMove(MobGroupingDecision decision)
         {
+            CancelCombatGateWaypointReturn("mob grouping owns movement");
             ReleaseSkillThree();
             StopMoving();
             _combatHandler.SuspendForExternalMovement();
@@ -944,11 +984,37 @@ namespace DriverScanTester.Services
             MobGroupAnalysis? analysis = result.Success
                 ? MobGroupAnalyzer.Analyze(result.Markers, result.PlayerAnchor)
                 : null;
+            // Camera yaw is only read once per logical observation (never per tick), so the
+            // bounded formation history can invalidate trends across large camera changes
+            // without adding a second capture or memory-read bottleneck.
+            float cameraYawRadians = 0f;
+            bool hasCameraYaw = result.Success && TryReadCameraYawRadians(out cameraYawRadians);
+            if (!hasCameraYaw)
+                cameraYawRadians = 0f;
             lock (_mobGroupingLock)
             {
                 _nextMobGroupingDetectionAt = DateTime.UtcNow.AddMilliseconds(BotConstants.MobGrouping.DetectionIntervalMs);
                 _lastMobGroupingCaptureSucceeded = result.Success;
                 _lastMobGroupingAnalysis = analysis;
+                _lastMobGroupingHasCameraYaw = hasCameraYaw;
+                _lastMobGroupingCameraYawRadians = cameraYawRadians;
+                _lastMobGroupingClientWidth = result.ClientWidth;
+                _lastMobGroupingClientHeight = result.ClientHeight;
+            }
+        }
+
+        /// <summary>Reads the camera yaw for a grouping observation; never throws.</summary>
+        private bool TryReadCameraYawRadians(out float radians)
+        {
+            radians = 0f;
+            try
+            {
+                radians = _memoryService.GetCameraAngle();
+                return !float.IsNaN(radians) && !float.IsInfinity(radians);
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -1002,7 +1068,11 @@ namespace DriverScanTester.Services
                 gatherTargetX,
                 gatherTargetY,
                 gatherSteeringMode,
-                mandatoryLootBarrier);
+                mandatoryLootBarrier,
+                _lastMobGroupingCameraYawRadians,
+                _lastMobGroupingHasCameraYaw,
+                _lastMobGroupingClientWidth,
+                _lastMobGroupingClientHeight);
         }
 
         private void ApplyMobGroupingDecision(MobGroupingDecision decision, DateTime nowUtc)
@@ -1453,6 +1523,7 @@ namespace DriverScanTester.Services
 
             _gameUnresponsiveDetected = true;
             _log($"[ConnectionWatchdog] {reason} Stopping movement and requesting a full bot stop.");
+            CancelCombatGateWaypointReturn("game connection watchdog");
             CancelMobGrouping("game connection watchdog");
             EndCombatRecoveryMovement("game connection watchdog");
             StopMoving();
@@ -1470,6 +1541,8 @@ namespace DriverScanTester.Services
         {
             if (!IsAutomaticLootDisabled)
                 return;
+
+            CancelCombatGateWaypointReturn("automatic loot disabled by profile/path policy");
 
             if (_combatRecoveryMovementAuthorized)
                 EndCombatRecoveryMovement("automatic loot disabled by profile/path policy");
@@ -1934,6 +2007,763 @@ namespace DriverScanTester.Services
             }
         }
 
+        // ========================================================================
+        //  CombatGate waypoint return recovery
+        // ========================================================================
+
+        /// <summary>
+        /// Effective attack-disengage boundary of a waypoint. A non-positive or non-finite
+        /// configured value falls back to the project default: an impossible boundary would
+        /// otherwise turn the return into an endless start/finish loop instead of a bounded
+        /// attempt that escalates through the existing navigation-failure path.
+        /// </summary>
+        internal static float GetEffectiveAttackDisengageDistance(Waypoint waypoint)
+            => GetEffectiveAttackDisengageDistance((float)waypoint.AttackDisengageDistance);
+
+        /// <summary>Effective attack-disengage boundary for a raw configured value.</summary>
+        internal static float GetEffectiveAttackDisengageDistance(float configured)
+        {
+            if (float.IsNaN(configured) || float.IsInfinity(configured) || configured <= 0f)
+                return Waypoint.DefaultAttackDisengageDistance;
+            return configured;
+        }
+
+        /// <summary>
+        /// Completion contract of the return: BOTH the waypoint's existing reach threshold AND
+        /// the attack-disengage boundary must be satisfied. The boundary is reduced by a small
+        /// safety margin so floating-point/coordinate noise cannot immediately re-trigger the
+        /// CombatGate after W is released. Elapsed time and animation bytes are never proof of
+        /// arrival.
+        /// </summary>
+        internal static bool IsCombatGateReturnComplete(
+            float distanceToWaypoint,
+            float manhattanDistanceToWaypoint,
+            float reachThreshold,
+            float attackDisengageDistance)
+        {
+            if (float.IsNaN(distanceToWaypoint) || float.IsNaN(manhattanDistanceToWaypoint))
+                return false;
+
+            if (distanceToWaypoint > reachThreshold)
+                return false;
+
+            float boundary = Math.Max(0f, GetEffectiveAttackDisengageDistance(attackDisengageDistance) -
+                                           BotConstants.CombatGateReturn.CompletionMargin);
+            return manhattanDistanceToWaypoint <= boundary;
+        }
+
+        /// <summary>
+        /// One-line diagnostic context shared by every <c>[CombatGateReturn]</c> event. It only
+        /// reads state that is already available for the tick; it never moves, scans or blocks.
+        /// </summary>
+        private string DescribeCombatGateReturnContext(float x, float y)
+        {
+            Waypoint waypoint = _waypoints.Count > 0 ? _waypoints.Peek() : default;
+            float distance = _waypoints.Count > 0
+                ? GeometryUtils.Distance(x, y, waypoint.X, waypoint.Y)
+                : 0f;
+            float manhattan = _waypoints.Count > 0
+                ? GeometryUtils.ManhattanDistance(x, y, waypoint.X, waypoint.Y)
+                : 0f;
+            float disengage = _waypoints.Count > 0
+                ? GetEffectiveAttackDisengageDistance(waypoint)
+                : Waypoint.DefaultAttackDisengageDistance;
+
+            bool lootInput = _lootNavigationBarrierHoldsInput || LootCollectionStillOwnsInput();
+            bool recoveryInput = _recoveryOwnershipHeld ||
+                                 _isUnstuckRoutineActive ||
+                                 _reverseDiagonalRecovery.IsActive ||
+                                 _isWaypointSpecialRecoveryActive ||
+                                 _waypointMobRecovery?.IsActive == true;
+            string camera = _wKeyCameraController == null
+                ? "none"
+                : _wKeyCameraController.IsAcceptingOperations
+                    ? $"ready(owners={_wKeyCameraController.ActiveWOwnerCount})"
+                    : $"blocked(owners={_wKeyCameraController.ActiveWOwnerCount})";
+
+            return $"pos=({x:F1},{y:F1}) waypoint={(waypoint.X):F1},{(waypoint.Y):F1} distance={distance:F2} manhattan={manhattan:F1} " +
+                   $"attackDisengage={disengage:F1} request={_lootBarrier.RequestId}/{_lootBarrier.Phase}/{_lootBarrier.Reason} " +
+                   $"target={_combatGateReturnTargetId} lootInput={lootInput} recoveryInput={recoveryInput} " +
+                   $"camera={camera} w={_isMovingForward}";
+        }
+
+        /// <summary>
+        /// True while the mandatory loot obligation still permits this exact return: the same
+        /// Deferred PostKill generation, the same current waypoint, the same authorized handoff
+        /// and an unchanged combat mode. A new request id, a terminal state, a waypoint change or
+        /// a released handoff invalidates the return immediately.
+        /// </summary>
+        private bool IsCombatGateReturnAuthorizationValid(out string failure)
+        {
+            failure = string.Empty;
+
+            if (!_combatGateReturnActive)
+            {
+                failure = "return operation is not active";
+                return false;
+            }
+
+            if (!_combatRecoveryMovementAuthorized ||
+                _combatRecoveryMovementRequestId != _combatGateReturnRequestId)
+            {
+                failure = "combat-recovery handoff is no longer held";
+                return false;
+            }
+
+            if (!IsCombatRecoveryMovementStillValid())
+            {
+                failure = "authorization revalidation failed (request/target/focus/mode)";
+                return false;
+            }
+
+            LootSystem? loot = LootSystemRef;
+            if (loot == null ||
+                !loot.TryGetMandatoryLootRequestStatus(_combatGateReturnRequestId, out LootRequestStatus status) ||
+                status.State != LootRequestState.Deferred ||
+                status.Reason != LootBarrierReason.PostKill ||
+                !loot.IsCombatRecoveryMovementActiveFor(_combatGateReturnRequestId))
+            {
+                failure = "loot request generation/phase changed or handoff released";
+                return false;
+            }
+
+            if (_waypoints.Count == 0)
+            {
+                failure = "waypoint queue is empty";
+                return false;
+            }
+
+            Waypoint current = _waypoints.Peek();
+            if (current.IsOperationStep ||
+                !RequiresMandatoryLootBarrier(current.Mode) ||
+                Math.Abs(current.X - _combatGateReturnWaypointX) > 0.01f ||
+                Math.Abs(current.Y - _combatGateReturnWaypointY) > 0.01f)
+            {
+                failure = "current waypoint changed";
+                return false;
+            }
+
+            if (IsAutomaticLootDisabled)
+            {
+                failure = "automatic loot was disabled";
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Starts the dedicated return only for the exact interaction this operation exists for.
+        /// The mandatory loot obligation is verified from the authoritative LootSystem snapshot
+        /// and the physical handoff is then taken through the existing combat-recovery
+        /// authorization, so the barrier contract itself is never bypassed.
+        /// </summary>
+        private bool TryStartCombatGateWaypointReturn(
+            float currX,
+            float currY,
+            bool confirmedMonsterTarget,
+            int targetId,
+            out string denialReason)
+        {
+            denialReason = string.Empty;
+
+            if (IsAutomaticLootDisabled)
+            {
+                denialReason = "automatic loot disabled by profile/path policy";
+                return false;
+            }
+
+            if (_finalStandbyActive)
+            {
+                denialReason = "final-waypoint standby owns movement";
+                return false;
+            }
+
+            if (_waypoints.Count == 0)
+            {
+                denialReason = "no current waypoint";
+                return false;
+            }
+
+            Waypoint waypoint = _waypoints.Peek();
+            if (waypoint.IsOperationStep)
+            {
+                denialReason = "current waypoint is an operation step";
+                return false;
+            }
+
+            if (!RequiresMandatoryLootBarrier(waypoint.Mode))
+            {
+                denialReason = $"waypoint mode={waypoint.Mode} is not MoveAndAttackAndLoot";
+                return false;
+            }
+
+            if (!_attackSuppressedForCurrentWaypoint)
+            {
+                denialReason = "CombatGate attack suppression is not active";
+                return false;
+            }
+
+            if (IsMobGroupingSequenceActive)
+            {
+                denialReason = "mob grouping owns movement";
+                return false;
+            }
+
+            float attackDisengage = GetEffectiveAttackDisengageDistance(waypoint);
+            float manhattan = GeometryUtils.ManhattanDistance(currX, currY, waypoint.X, waypoint.Y);
+            if (manhattan <= attackDisengage)
+            {
+                denialReason = $"waypoint is already inside the attack-disengage boundary (manhattan={manhattan:F1})";
+                return false;
+            }
+
+            if (!_lootBarrier.IsActive ||
+                _lootBarrier.Phase != LootBarrierPhase.Deferred ||
+                _lootBarrier.Reason != LootBarrierReason.PostKill ||
+                !_lootBarrier.TryGetRequestId(out long requestId))
+            {
+                denialReason = $"loot obligation is not a Deferred PostKill request (state={_lootBarrier.Phase} reason={_lootBarrier.Reason})";
+                return false;
+            }
+
+            LootSystem? loot = LootSystemRef;
+            if (loot == null)
+            {
+                denialReason = "no loot system attached";
+                return false;
+            }
+
+            if (!loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus status) ||
+                status.State != LootRequestState.Deferred ||
+                status.Reason != LootBarrierReason.PostKill)
+            {
+                denialReason = $"request {requestId} is not Deferred PostKill";
+                return false;
+            }
+
+            if (targetId <= 0 || !confirmedMonsterTarget)
+            {
+                denialReason = $"selected target is not a confirmed monster (TargetId={targetId})";
+                return false;
+            }
+
+            if (Volatile.Read(ref _stopRequested) != 0)
+            {
+                denialReason = "movement system is stopping";
+                return false;
+            }
+
+            if (_gameUnresponsiveDetected)
+            {
+                denialReason = "game connection watchdog is active";
+                return false;
+            }
+
+            if (_isCityStuckFatal || _navigationFailureEscalationRequested)
+            {
+                denialReason = "route failure escalation is active";
+                return false;
+            }
+
+            if (_repotHelper.IsReportAndGoBackActive)
+            {
+                denialReason = "ReportAndGoBack teleport is active";
+                return false;
+            }
+
+            if (_mapTransitionGuardActive || _mapTransitionConfirmed)
+            {
+                denialReason = "map transition hold is active";
+                return false;
+            }
+
+            if (IsZoneBlocked)
+            {
+                denialReason = "zone restriction holds movement";
+                return false;
+            }
+
+            if (_isUnstuckRoutineActive ||
+                _reverseDiagonalRecovery.IsActive ||
+                _isWaypointSpecialRecoveryActive ||
+                _waypointMobRecovery?.IsActive == true ||
+                _recoveryOwnershipHeld)
+            {
+                denialReason = "another recovery owns movement/input";
+                return false;
+            }
+
+            if (LootCollectionStillOwnsInput() || loot.IsCollecting)
+            {
+                denialReason = "an in-flight loot collection owns movement/cursor";
+                return false;
+            }
+
+            if (loot.IsScanActive || loot.IsPinkRescanActive)
+            {
+                denialReason = "an active loot scan owns the camera";
+                return false;
+            }
+
+            if (!IsGameClientForegroundForRecovery())
+            {
+                denialReason = "game client is not in the foreground";
+                return false;
+            }
+
+            if (!TryBeginCombatRecoveryMovement("CombatGate waypoint return"))
+            {
+                denialReason = "combat-recovery handoff refused (request/target/camera ownership)";
+                return false;
+            }
+
+            DateTime now = DateTime.UtcNow;
+            _combatGateReturnActive = true;
+            _combatGateReturnRequestId = requestId;
+            _combatGateReturnTargetId = targetId;
+            _combatGateReturnWaypointX = waypoint.X;
+            _combatGateReturnWaypointY = waypoint.Y;
+            _combatGateReturnStartX = currX;
+            _combatGateReturnStartY = currY;
+            _combatGateReturnLastX = currX;
+            _combatGateReturnLastY = currY;
+            _combatGateReturnStartedAt = now;
+            _combatGateReturnLastProgressAt = now;
+            _combatGateReturnLastProgressLogAt = DateTime.MinValue;
+            _combatGateReturnBestDistance = GeometryUtils.Distance(currX, currY, waypoint.X, waypoint.Y);
+            _combatGateReturnInputDenials = 0;
+            _combatGateReturnWAcceptedLogged = false;
+            _combatGateReturnInputDeniedLogged = false;
+            _combatGateReturnDeadlockSince = DateTime.MinValue;
+            _combatGateReturnDeadlockDetail = string.Empty;
+            _combatGateReturnDeadlockEscalated = false;
+
+            // A fresh segment bypasses the camera filter so the very first return tick applies
+            // the waypoint bearing immediately instead of waiting for hysteresis.
+            ResetBearingState();
+
+            _log($"[CombatGateReturn] START reason=CombatGateOvershootUnderDeferredPostKill {DescribeCombatGateReturnContext(currX, currY)}.");
+            _log($"[CombatGateReturn] Authorization granted request={requestId} state={status.State} reason={status.Reason} " +
+                 $"target={targetId} waypoint=({waypoint.X:F1},{waypoint.Y:F1}) " +
+                 $"startPos=({currX:F1},{currY:F1}) startDistance={_combatGateReturnBestDistance:F2} " +
+                 $"reachThreshold={GetEffectiveWaypointReachThreshold(waypoint):F2} attackDisengage={attackDisengage:F1}.");
+            return true;
+        }
+
+        /// <summary>
+        /// Tick-driven CombatGate return. Returns true when this operation owns the tick and
+        /// ordinary navigation/combat must not run. It never advances the waypoint queue, never
+        /// runs arrival operations, never resynchronizes the route, never attacks and never
+        /// touches the mandatory loot obligation.
+        /// </summary>
+        private async Task<bool> TickCombatGateWaypointReturnUnderLootBarrierAsync(
+            float currX,
+            float currY,
+            bool confirmedMonsterTarget,
+            int targetId,
+            CancellationToken token)
+        {
+            if (!_combatGateReturnActive)
+            {
+                if (!TryStartCombatGateWaypointReturn(currX, currY, confirmedMonsterTarget, targetId, out string denialReason))
+                {
+                    ObserveCombatGateReturnDeadlock(currX, currY, confirmedMonsterTarget, targetId, denialReason, token);
+                    return false;
+                }
+            }
+
+            if (token.IsCancellationRequested)
+            {
+                // A cancelled tick must not leave this operation holding the handoff (or, later in
+                // the tick, W). Release exactly its own ownership before propagating.
+                CancelCombatGateWaypointReturn("operation cancelled");
+                token.ThrowIfCancellationRequested();
+            }
+
+            DateTime now = DateTime.UtcNow;
+            var (sampleX, sampleY, sampleRead) = _memoryService.GetPlayerPosition();
+            if (!sampleRead)
+            {
+                // An unreadable position is never proof of movement: keep the last known one so
+                // the stall window keeps running.
+                sampleX = _combatGateReturnLastX;
+                sampleY = _combatGateReturnLastY;
+            }
+            else
+            {
+                _combatGateReturnLastX = sampleX;
+                _combatGateReturnLastY = sampleY;
+            }
+
+            // ── Safety first: movement never outranks target validity ──
+            CombatTargetValidation validation = _targetSafety.Validate();
+            if (validation.TargetId <= 0 || validation.Kind == TargetEntityKind.None)
+            {
+                string context = DescribeCombatGateReturnContext(sampleX, sampleY);
+                CancelCombatGateWaypointReturn("selected target disappeared");
+                _log($"[CombatGateReturn] ABORT reason=TargetLost observedTarget={validation.TargetId}/{validation.Kind} {context}; " +
+                     "W released, handoff released, loot obligation preserved for the stationary scan.");
+                return true;
+            }
+
+            if (!validation.IsConfirmedMonster)
+            {
+                string context = DescribeCombatGateReturnContext(sampleX, sampleY);
+                // Release movement input BEFORE the player-safety response runs, so no W is ever
+                // held across a rejected/other-player handling path.
+                CancelCombatGateWaypointReturn($"target rejected ({validation.Kind})");
+                HandleRejectedCombatTarget(validation);
+                _log($"[CombatGateReturn] ABORT reason=TargetRejected {validation.Describe()} {context}; " +
+                     "no attack and no unsafe continuation.");
+                if (ShouldCycleTargetAwayFromRejectedTarget(validation.TargetId) && TryPressTargetCycleKey())
+                    await Task.Delay(BotConstants.Delays.PreTabWaitMs, CancellationToken.None);
+                return true;
+            }
+
+            if (!IsCombatGateReturnAuthorizationValid(out string authorizationFailure))
+            {
+                string context = DescribeCombatGateReturnContext(sampleX, sampleY);
+                CancelCombatGateWaypointReturn($"authorization lost: {authorizationFailure}");
+                _log($"[CombatGateReturn] ABORT reason=AuthorizationLost detail={authorizationFailure} {context}.");
+                return true;
+            }
+
+            Waypoint waypoint = _waypoints.Peek();
+            float distance = GeometryUtils.Distance(sampleX, sampleY, waypoint.X, waypoint.Y);
+            float manhattan = GeometryUtils.ManhattanDistance(sampleX, sampleY, waypoint.X, waypoint.Y);
+            float reachThreshold = GetEffectiveWaypointReachThreshold(waypoint);
+            float attackDisengage = GetEffectiveAttackDisengageDistance(waypoint);
+            double elapsedMs = (now - _combatGateReturnStartedAt).TotalMilliseconds;
+
+            // ── Completion (real geometry only, never elapsed time or an animation byte) ──
+            if (IsCombatGateReturnComplete(distance, manhattan, reachThreshold, attackDisengage))
+            {
+                CompleteCombatGateWaypointReturn(sampleX, sampleY, distance, manhattan, reachThreshold, attackDisengage, elapsedMs);
+                return true;
+            }
+
+            // ── Meaningful progress: only real waypoint-directed improvement counts ──
+            if (_combatGateReturnBestDistance - distance >= BotConstants.CombatGateReturn.MeaningfulProgressUnits)
+            {
+                float improvement = _combatGateReturnBestDistance - distance;
+                _combatGateReturnBestDistance = distance;
+                _combatGateReturnLastProgressAt = now;
+                _combatGateReturnInputDenials = 0;
+
+                if ((now - _combatGateReturnLastProgressLogAt).TotalMilliseconds >=
+                    BotConstants.CombatGateReturn.ProgressLogIntervalMs)
+                {
+                    _combatGateReturnLastProgressLogAt = now;
+                    _log($"[CombatGateReturn] PROGRESS improvement={improvement:F2} bestDistance={distance:F2} " +
+                         $"elapsed={(now - _combatGateReturnStartedAt).TotalMilliseconds:F0}ms " +
+                         $"request={_combatGateReturnRequestId} target={_combatGateReturnTargetId} " +
+                         $"pos=({sampleX:F1},{sampleY:F1}) waypoint=({waypoint.X:F1},{waypoint.Y:F1}) " +
+                         $"attackDisengage={attackDisengage:F1}.");
+                }
+            }
+
+            double sinceProgressMs = (now - _combatGateReturnLastProgressAt).TotalMilliseconds;
+            if (sinceProgressMs >= BotConstants.CombatGateReturn.StallTimeoutMs)
+            {
+                await FailCombatGateWaypointReturnAsync(
+                    "STALLED",
+                    $"no waypoint-directed progress for {sinceProgressMs:F0}ms (limit {BotConstants.CombatGateReturn.StallTimeoutMs}ms)",
+                    sampleX, sampleY, distance, manhattan, reachThreshold, attackDisengage, elapsedMs, token);
+                return true;
+            }
+
+            if (elapsedMs >= BotConstants.CombatGateReturn.AttemptBudgetMs)
+            {
+                await FailCombatGateWaypointReturnAsync(
+                    "STALLED",
+                    $"attempt budget exhausted after {elapsedMs:F0}ms (limit {BotConstants.CombatGateReturn.AttemptBudgetMs}ms)",
+                    sampleX, sampleY, distance, manhattan, reachThreshold, attackDisengage, elapsedMs, token);
+                return true;
+            }
+
+            // ── Authorized camera + forward input ──
+            // ApplyCameraBearing is the existing authorized-recovery camera path: it refuses to
+            // write while the loot barrier holds input and no valid combat-recovery authorization
+            // exists. W is requested through TryStartMoving, which is the only place that can
+            // press it and reports refusal instead of pretending the character moved.
+            float bearing = GeometryUtils.GetBearingToTargetDeg(sampleX, sampleY, waypoint.X, waypoint.Y);
+            ApplyCameraBearing(bearing);
+
+            if (!_isMovingForward)
+            {
+                bool inputAccepted = TryStartMoving();
+                if (!inputAccepted)
+                {
+                    _combatGateReturnInputDenials++;
+                    if (!_combatGateReturnInputDeniedLogged)
+                    {
+                        _combatGateReturnInputDeniedLogged = true;
+                        _log($"[CombatGateReturn] INPUT_DENIED {DescribeCombatGateReturnContext(sampleX, sampleY)} " +
+                             $"elapsed={elapsedMs:F0}ms denials={_combatGateReturnInputDenials}/{BotConstants.CombatGateReturn.MaximumInputDenials} " +
+                             $"waypoint=({waypoint.X:F1},{waypoint.Y:F1}) attackDisengage={attackDisengage:F1} request={_combatGateReturnRequestId} " +
+                             $"target={_combatGateReturnTargetId}.");
+                    }
+
+                    if (_combatGateReturnInputDenials >= BotConstants.CombatGateReturn.MaximumInputDenials)
+                    {
+                        await FailCombatGateWaypointReturnAsync(
+                            "INPUT_DENIED",
+                            $"forward input was refused {_combatGateReturnInputDenials} times (camera/ownership/vertical-lock)",
+                            sampleX, sampleY, distance, manhattan, reachThreshold, attackDisengage, elapsedMs, token);
+                        return true;
+                    }
+                }
+                else if (!_combatGateReturnWAcceptedLogged)
+                {
+                    _combatGateReturnWAcceptedLogged = true;
+                    _log($"[CombatGateReturn] W accepted bearing={bearing:F1}deg pos=({sampleX:F1},{sampleY:F1}) " +
+                         $"waypoint=({waypoint.X:F1},{waypoint.Y:F1}) distance={distance:F2} " +
+                         $"attackDisengage={attackDisengage:F1} request={_combatGateReturnRequestId} target={_combatGateReturnTargetId}.");
+                }
+            }
+            else
+            {
+                _combatGateReturnInputDenials = 0;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Successful return: stop input, release the handoff, clear the CombatGate latch and let
+        /// the ordinary tick pipeline resume. The waypoint stays current and the mandatory loot
+        /// request keeps its id and Deferred state (only a camera-verified scan may finish it).
+        /// </summary>
+        private void CompleteCombatGateWaypointReturn(
+            float x,
+            float y,
+            float distance,
+            float manhattan,
+            float reachThreshold,
+            float attackDisengage,
+            double elapsedMs)
+        {
+            long requestId = _combatGateReturnRequestId;
+            float waypointX = _combatGateReturnWaypointX;
+            float waypointY = _combatGateReturnWaypointY;
+            int targetId = _combatGateReturnTargetId;
+
+            // 1. Stop forward movement.
+            StopMoving();
+            // 2. Release any turn input owned by this recovery.
+            ReleaseTurnKey("CombatGate waypoint return reached");
+            // 3./4. Release the handoff and clear the dedicated return state. The success path
+            // has already stopped W/turn input above and must not emit an ABORT event.
+            CancelCombatGateWaypointReturn("reached waypoint", releaseInput: false, logAbort: false);
+
+            _combatGateReturnFailedAttempts = 0;
+            _combatGateReturnDeadlockSince = DateTime.MinValue;
+            _combatGateReturnDeadlockDetail = string.Empty;
+            _combatGateReturnDeadlockEscalated = false;
+
+            // 5./6. Clear the gate latch and reset the combat handler for reacquisition.
+            _attackSuppressedForCurrentWaypoint = false;
+            _combatHandler.ResetState();
+            ClearCombatRetargetSearch();
+            _resumeCombatSkillAfterGrouping = false;
+
+            _log($"[CombatGateReturn] REACHED pos=({x:F1},{y:F1}) waypoint=({waypointX:F1},{waypointY:F1}) " +
+                 $"distance={distance:F2} reachThreshold={reachThreshold:F2} manhattan={manhattan:F1} " +
+                 $"attackDisengage={attackDisengage:F1} elapsed={elapsedMs:F0}ms request={requestId} target={targetId}.");
+            _log($"[CombatGateReturn] COMPLETE request={requestId} state=Deferred waypoint=({waypointX:F1},{waypointY:F1}) " +
+                 $"elapsed={elapsedMs:F0}ms — W released, handoff released, CombatGate cleared; " +
+                 "waypoint unchanged and loot obligation preserved (camera-verified completion still required).");
+        }
+
+        /// <summary>
+        /// Bounded failure path of the return: stop W, release everything this operation owns,
+        /// keep the loot obligation, capture diagnostics and hand the situation to the project's
+        /// existing recovery/escalation chain. No fake completion is ever produced.
+        /// </summary>
+        private async Task FailCombatGateWaypointReturnAsync(
+            string kind,
+            string detail,
+            float x,
+            float y,
+            float distance,
+            float manhattan,
+            float reachThreshold,
+            float attackDisengage,
+            double elapsedMs,
+            CancellationToken token)
+        {
+            long requestId = _combatGateReturnRequestId;
+            float waypointX = _combatGateReturnWaypointX;
+            float waypointY = _combatGateReturnWaypointY;
+            int targetId = _combatGateReturnTargetId;
+            float bestDistance = _combatGateReturnBestDistance;
+            long lootStateCode = (long)_lootBarrier.Phase;
+            string lootState = $"{_lootBarrier.Phase}/{_lootBarrier.Reason}";
+
+            // Stop W and the turn keys on the spot, BEFORE handing the situation to the
+            // recovery chain: the unstuck cannot always start (suspended by the loot hold,
+            // collection still owns input, cancelled token), and a failed attempt must never
+            // leave forward input held. Release only what this operation owns.
+            CancelCombatGateWaypointReturn(kind == "INPUT_DENIED"
+                ? "forward input denied"
+                : "no waypoint-directed progress", releaseInput: true);
+
+            _combatGateReturnFailedAttempts++;
+            int attempts = _combatGateReturnFailedAttempts;
+
+            _log($"[CombatGateReturn] {kind} pos=({x:F1},{y:F1}) waypoint=({waypointX:F1},{waypointY:F1}) " +
+                 $"distance={distance:F2} reachThreshold={reachThreshold:F2} manhattan={manhattan:F1} " +
+                 $"attackDisengage={attackDisengage:F1} request={requestId} loot={lootState} target={targetId} " +
+                 $"startPos=({_combatGateReturnStartX:F1},{_combatGateReturnStartY:F1}) elapsed={elapsedMs:F0}ms " +
+                 $"bestDistance={bestDistance:F2} attempt={attempts}/{BotConstants.CombatGateReturn.MaximumFailedAttempts} detail={detail}.");
+
+            CaptureCombatGateReturnFailureScreenshot();
+
+            if (attempts >= BotConstants.CombatGateReturn.MaximumFailedAttempts)
+            {
+                _combatGateReturnFailedAttempts = 0;
+                _log($"[CombatGateReturn] ABORT reason=RepeatedFailures attempts={attempts} request={requestId} " +
+                     $"lootStateCode={lootStateCode} — escalating through the existing navigation-failure path " +
+                     "instead of retrying the return indefinitely.");
+                EscalateNavigationFailure(
+                    $"CombatGate waypoint return failed {attempts} times for waypoint ({waypointX:F1},{waypointY:F1}) under request={requestId}",
+                    token);
+                return;
+            }
+
+            _log($"[CombatGateReturn] UNSTUCK attempt={attempts} — starting the standard combat unstuck (reverse-diagonal recovery).");
+            StartCombatUnstuck(x, y);
+            await Task.Delay(BotConstants.CombatGateReturn.FailureSettleMs, CancellationToken.None);
+        }
+
+        /// <summary>
+        /// Idempotent cleanup of the return operation. It releases only the input and handoff
+        /// this operation actually holds: the mandatory loot request keeps its id and its
+        /// Deferred state, the waypoint queue is untouched and no other subsystem's recovery is
+        /// cancelled.
+        /// </summary>
+        private void CancelCombatGateWaypointReturn(string reason, bool releaseInput = true, bool logAbort = true)
+        {
+            if (!_combatGateReturnActive)
+                return;
+
+            long requestId = _combatGateReturnRequestId;
+            float waypointX = _combatGateReturnWaypointX;
+            float waypointY = _combatGateReturnWaypointY;
+            int targetId = _combatGateReturnTargetId;
+            double elapsedMs = _combatGateReturnStartedAt == DateTime.MinValue
+                ? 0
+                : (DateTime.UtcNow - _combatGateReturnStartedAt).TotalMilliseconds;
+            bool wWasHeld = _isMovingForward;
+
+            _combatGateReturnActive = false;
+            _combatGateReturnRequestId = 0;
+            _combatGateReturnTargetId = 0;
+            _combatGateReturnWaypointX = 0f;
+            _combatGateReturnWaypointY = 0f;
+            _combatGateReturnStartedAt = DateTime.MinValue;
+            _combatGateReturnLastProgressAt = DateTime.MinValue;
+            _combatGateReturnLastProgressLogAt = DateTime.MinValue;
+            _combatGateReturnBestDistance = float.MaxValue;
+            _combatGateReturnInputDenials = 0;
+            _combatGateReturnWAcceptedLogged = false;
+            _combatGateReturnInputDeniedLogged = false;
+
+            if (releaseInput)
+            {
+                StopMoving();
+                ReleaseTurnKey($"CombatGate waypoint return released: {reason}");
+            }
+
+            EndCombatRecoveryMovement($"CombatGate waypoint return released: {reason}");
+
+            if (logAbort)
+            {
+                _log($"[CombatGateReturn] ABORT reason={reason} request={requestId} waypoint=({waypointX:F1},{waypointY:F1}) " +
+                     $"target={targetId} elapsed={elapsedMs:F0}ms wHeld={wWasHeld} pos=({_combatGateReturnLastX:F1},{_combatGateReturnLastY:F1}) — " +
+                     "input and handoff released, loot obligation preserved.");
+            }
+        }
+
+        /// <summary>
+        /// Narrow deadlock monitor for exactly this interaction: CombatGate active, Deferred
+        /// PostKill obligation, monster still selected, no combat action, no waypoint-directed
+        /// movement and no other valid recovery. When the handoff cannot be obtained the precise
+        /// reason is logged once (never per tick); if the same state persists beyond the bounded
+        /// window, diagnostics are captured and the established route-failure escalation runs.
+        /// The loot obligation is never released by a timeout.
+        /// </summary>
+        private void ObserveCombatGateReturnDeadlock(
+            float currX,
+            float currY,
+            bool confirmedMonsterTarget,
+            int targetId,
+            string denialReason,
+            CancellationToken token)
+        {
+            bool otherRecoveryActive = _isUnstuckRoutineActive ||
+                                       _reverseDiagonalRecovery.IsActive ||
+                                       _isWaypointSpecialRecoveryActive ||
+                                       _waypointMobRecovery?.IsActive == true ||
+                                       _recoveryOwnershipHeld;
+
+            bool exactDeadlock =
+                !IsAutomaticLootDisabled &&
+                !_finalStandbyActive &&
+                _attackSuppressedForCurrentWaypoint &&
+                _waypoints.Count > 0 &&
+                !_waypoints.Peek().IsOperationStep &&
+                RequiresMandatoryLootBarrier(_waypoints.Peek().Mode) &&
+                _lootBarrier.IsActive &&
+                _lootBarrier.Phase == LootBarrierPhase.Deferred &&
+                _lootBarrier.Reason == LootBarrierReason.PostKill &&
+                confirmedMonsterTarget &&
+                targetId > 0 &&
+                !otherRecoveryActive;
+
+            if (!exactDeadlock)
+            {
+                _combatGateReturnDeadlockSince = DateTime.MinValue;
+                _combatGateReturnDeadlockDetail = string.Empty;
+                _combatGateReturnDeadlockEscalated = false;
+                return;
+            }
+
+            DateTime now = DateTime.UtcNow;
+            string detail = denialReason ?? string.Empty;
+
+            if (_combatGateReturnDeadlockSince == DateTime.MinValue)
+            {
+                _combatGateReturnDeadlockSince = now;
+                _combatGateReturnDeadlockDetail = detail;
+                _log($"[CombatGateReturn] ABORT reason=HandoffUnavailable detail={detail} " +
+                     $"wAccepted={_isMovingForward} {DescribeCombatGateReturnContext(currX, currY)} — " +
+                     "the deadlock is monitored and will escalate if it persists.");
+                return;
+            }
+
+            if (!string.Equals(_combatGateReturnDeadlockDetail, detail, StringComparison.Ordinal))
+            {
+                _combatGateReturnDeadlockDetail = detail;
+                _log($"[CombatGateReturn] ABORT reason=HandoffUnavailable detail={detail} " +
+                     $"wAccepted={_isMovingForward} {DescribeCombatGateReturnContext(currX, currY)}.");
+            }
+
+            double persistedMs = (now - _combatGateReturnDeadlockSince).TotalMilliseconds;
+            if (!_combatGateReturnDeadlockEscalated &&
+                persistedMs >= BotConstants.CombatGateReturn.DeadlockDiagnosticWindowMs)
+            {
+                _combatGateReturnDeadlockEscalated = true;
+                _log($"[CombatGateReturn] ABORT reason=DeadlockWindowExpired persisted={persistedMs:F0}ms " +
+                     $"detail={detail} {DescribeCombatGateReturnContext(currX, currY)} — capturing diagnostics and escalating.");
+                CaptureCombatGateReturnFailureScreenshot();
+                EscalateNavigationFailure(
+                    $"CombatGate return recovery could not obtain the movement handoff for {persistedMs:F0}ms (request={_lootBarrier.RequestId})",
+                    token);
+            }
+        }
+
         private string DescribeCurrentWaypoint()
         {
             if (_finalStandbyActive)
@@ -1975,7 +2805,14 @@ namespace DriverScanTester.Services
 
         public async Task Update(CancellationToken token)
         {
-            token.ThrowIfCancellationRequested();
+            if (token.IsCancellationRequested)
+            {
+                // A cancelled tick must never leave the CombatGate return holding W, the turn
+                // keys or the loot handoff; release exactly its own ownership before cancelling.
+                CancelCombatGateWaypointReturn("operation cancelled");
+                token.ThrowIfCancellationRequested();
+            }
+
             if (Volatile.Read(ref _stopRequested) != 0)
             {
                 StopMoving();
@@ -1990,6 +2827,7 @@ namespace DriverScanTester.Services
             // immediately after this Update and aborts the route.
             if (_isCityStuckFatal)
             {
+                CancelCombatGateWaypointReturn("city stuck fatal");
                 EndCombatRecoveryMovement("city stuck fatal");
                 StopMoving();
                 ReleaseCombatKeys();
@@ -2089,6 +2927,7 @@ namespace DriverScanTester.Services
             // After the in-city stuck limit (2 attempts), the bot presses 6 and waits 10 minutes.
             if (DateTime.Now < _inCityStuckCooldownUntil)
             {
+                CancelCombatGateWaypointReturn("in-city teleport cooldown");
                 CancelMobGrouping("in-city teleport cooldown");
                 if (_isMovingForward || _isSkillThreeHeld)
                 {
@@ -2117,6 +2956,7 @@ namespace DriverScanTester.Services
 
                 if (zoneBlocked)
                 {
+                    CancelCombatGateWaypointReturn("zone restriction hold");
                     CancelMobGrouping("zone restriction hold");
                     // Log only on the transition into the blocked state, not every tick.
                     if (_zoneBlockedSince == DateTime.MinValue)
@@ -2201,6 +3041,7 @@ namespace DriverScanTester.Services
             // resume as soon as the collection finishes.
             if (LootSystemRef != null && LootSystemRef.IsCollecting)
             {
+                CancelCombatGateWaypointReturn("loot collection owns input");
                 CancelMobGrouping("loot collection hold");
                 if (!_lootPriorityHoldActive)
                 {
@@ -2232,6 +3073,7 @@ namespace DriverScanTester.Services
                 // Never resume combat on a timer while pink loot is still pending.
                 if (LootSystemRef.IsPinkScanPendingOrActive)
                 {
+                    CancelCombatGateWaypointReturn("SOD/SOP pink scan owns the camera");
                     CancelMobGrouping("SOD/SOP pink-scan hold");
                     if (!_pinkScanHoldActive)
                     {
@@ -2265,6 +3107,7 @@ namespace DriverScanTester.Services
             // is found.
             if (LootPriorityMode && LootSystemRef != null && LootSystemRef.IsLootingActive)
             {
+                CancelCombatGateWaypointReturn("loot-priority hold");
                 CancelMobGrouping("loot-priority hold");
                 if (_lootPriorityHoldSince == DateTime.MinValue)
                 {
@@ -2644,6 +3487,9 @@ namespace DriverScanTester.Services
             // at loot distance; resume watchdog timing after the sweep is done.
             if (!IsAutomaticLootDisabled && LootSystemRef?.IsPinkRescanActive == true)
             {
+                // The loot rescan owns the camera/cursor — an active return must release its
+                // input instead of holding W across a tick this branch never reaches.
+                CancelCombatGateWaypointReturn("loot pink rescan owns the camera");
                 lock (_inputLock)
                     CancelAttackKeyRetry("loot rescan owns input");
                 _combatHandler.SuspendForExternalMovement();
@@ -2913,6 +3759,17 @@ namespace DriverScanTester.Services
             // behavior; it is never used as proof that a MoveAndAttackAndLoot loot pass
             // completed. Only a camera-verified Completed request releases movement.
             RefreshLootBarrier();
+
+            // ── CombatGate waypoint return ──
+            // The exact interaction this operation exists for: CombatGate suppressed the attack
+            // (player outside the waypoint's AttackDisengageDistance), a Deferred PostKill loot
+            // obligation blocks ordinary navigation and a confirmed monster is still selected.
+            // The return runs BEFORE the mandatory hold because that hold stops all movement; it
+            // is tick-driven, keeps the waypoint and the obligation untouched, and owns the tick
+            // exclusively so no navigation/resync/grouping runs concurrently.
+            if (await TickCombatGateWaypointReturnUnderLootBarrierAsync(currX, currY, confirmedMonsterTarget, targetId, token))
+                return;
+
             if (await HoldNavigationForMandatoryLootAsync(token))
             {
                 // Only an authorized combat-owned recovery may still act while the hold is
@@ -5175,6 +6032,7 @@ namespace DriverScanTester.Services
         {
             AcquireRecoveryOwnership($"map transition hold (expected={ExpectedMap} observed={observed.Map})");
             CancelWaypointSpecialRecovery();
+            CancelCombatGateWaypointReturn("map transition hold");
             CancelMobGrouping("map transition hold");
             StopMoving();
             ReleaseCombatKeys();
@@ -5190,6 +6048,7 @@ namespace DriverScanTester.Services
         /// </summary>
         private void ResetStuckAndUnstuckState(string reason)
         {
+            CancelCombatGateWaypointReturn($"route reset: {reason}");
             CancelMobGrouping($"unstuck state reset: {reason}");
             _reverseDiagonalRecovery.Stop();
             EndCombatRecoveryMovement($"unstuck reset: {reason}");
@@ -5205,6 +6064,10 @@ namespace DriverScanTester.Services
             _lastRepositionPos = null;
             _combatUnstuckDeniedCount = 0;
             _combatRecoverySuspendedByLootHold = false;
+            _combatGateReturnFailedAttempts = 0;
+            _combatGateReturnDeadlockSince = DateTime.MinValue;
+            _combatGateReturnDeadlockDetail = string.Empty;
+            _combatGateReturnDeadlockEscalated = false;
             _routeResyncPendingAfterCombat = false;
             _attackSuppressedForCurrentWaypoint = false;
             _combatHandler.ResetState();
@@ -5220,6 +6083,8 @@ namespace DriverScanTester.Services
 
         private void ResetCombatStateForWaypointChange()
         {
+            CancelCombatGateWaypointReturn("waypoint replaced");
+            _combatGateReturnFailedAttempts = 0;
             _attackSuppressedForCurrentWaypoint = false;
             _combatHandler.ResetState();
             _resumeCombatSkillAfterGrouping = false;
@@ -5437,6 +6302,7 @@ namespace DriverScanTester.Services
             {
                 _navigationFailureEscalationRequested = true;
                 LootSystemRef?.SuspendForRecovery("navigation failure escalation");
+                CancelCombatGateWaypointReturn("navigation failure escalation");
                 CancelMobGrouping("navigation failure escalation");
                 _reverseDiagonalRecovery.Stop();
                 EndCombatRecoveryMovement("navigation failure escalation");
@@ -5446,6 +6312,7 @@ namespace DriverScanTester.Services
                 return true;
             }
 
+            CancelCombatGateWaypointReturn("navigation failure escalation");
             CancelMobGrouping("navigation failure escalation");
             _reverseDiagonalRecovery.Stop();
             EndCombatRecoveryMovement("navigation failure escalation");
@@ -6226,6 +7093,15 @@ namespace DriverScanTester.Services
             }
         }
 
+        /// <summary>
+        /// Diagnostic screenshot for a failed/cancelled CombatGate waypoint return. Reuses the
+        /// project's existing stuck-screenshot infrastructure (same folder, same file naming, same
+        /// failure handling) instead of introducing a second screenshot framework; tests override
+        /// this hook so no desktop capture is performed.
+        /// </summary>
+        protected virtual void CaptureCombatGateReturnFailureScreenshot()
+            => CaptureStuckScreenshot();
+
         // ========================================================================
         //  INPUT — W key management
         // ========================================================================
@@ -6426,6 +7302,7 @@ namespace DriverScanTester.Services
             {
                 TryCleanup(() => LootSystemRef?.SuspendForRecovery("movement system stopped"), "loot suspension");
                 TryCleanup(() => CancelMobGrouping("movement system stopped"), "mob grouping cancellation");
+                TryCleanup(() => CancelCombatGateWaypointReturn("movement system stopped"), "CombatGate return cancellation");
                 TryCleanup(() => EndCombatRecoveryMovement("movement system stopped"), "combat recovery cancellation");
                 TryCleanup(() =>
                 {
