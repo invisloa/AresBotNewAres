@@ -90,7 +90,10 @@ namespace DriverScanTester.Services
 
             token.ThrowIfCancellationRequested();
             bool completed = await _auxiliaryPathRunner.RunPathAsync(
-                waypoints, loop: false, token, disableAllLoot: _profile.DisableAllLoot);
+                waypoints, loop: false, token,
+                disableAllLoot: _profile.DisableAllLoot,
+                ignoreAlliancePlayers: _profile.IgnoreAlliancePlayers,
+                ignoreEmpirePlayers: _profile.IgnoreEmpirePlayers);
             token.ThrowIfCancellationRequested();
             return completed;
         }

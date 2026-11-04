@@ -101,22 +101,26 @@ namespace DriverScanTester.Services
         private readonly Func<Bitmap?> _captureFrame;
         private readonly PlayerMarkerPixelDetector _detector = new();
         private readonly int _scanIntervalMs;
+        private readonly Func<PlayerMarkerCandidate, bool> _shouldIgnoreOtherPlayer;
         private readonly object _gate = new();
 
         private CombatPlayerPresence _last = new(
             CombatPlayerPresenceStatus.NotScanned, null, DateTime.MinValue, "not scanned yet");
         private CombatPlayerPresenceStatus _loggedStatus = CombatPlayerPresenceStatus.NotScanned;
+        private string _loggedIgnoredFaction = string.Empty;
 
         public ScreenCombatPlayerPresenceScanner(
             Action<string> log,
             Func<DateTime>? now = null,
             Func<Bitmap?>? captureFrame = null,
-            int scanIntervalMs = BotConstants.CombatSafety.PlayerScanIntervalMs)
+            int scanIntervalMs = BotConstants.CombatSafety.PlayerScanIntervalMs,
+            Func<PlayerMarkerCandidate, bool>? shouldIgnoreOtherPlayer = null)
         {
             _log = log ?? (_ => { });
             _now = now ?? (() => DateTime.UtcNow);
             _captureFrame = captureFrame ?? (() => ScreenshotService.CaptureGameClientFrame());
             _scanIntervalMs = Math.Max(0, scanIntervalMs);
+            _shouldIgnoreOtherPlayer = shouldIgnoreOtherPlayer ?? OtherPlayerIgnoreSettings.ShouldIgnore;
         }
 
         public CombatPlayerPresence Observe(bool forceCapture)
@@ -164,11 +168,34 @@ namespace DriverScanTester.Services
 
                 if (!found)
                 {
+                    _loggedIgnoredFaction = string.Empty;
                     return new CombatPlayerPresence(
                         CombatPlayerPresenceStatus.NoOtherPlayer, null, now,
                         "no other-player faction marker on screen");
                 }
 
+                if (_shouldIgnoreOtherPlayer(candidate))
+                {
+                    // The ignore option for this faction is enabled: report the marker as
+                    // absent so the target validation keeps authorizing attacks and no
+                    // diagnostic screenshot is written for a player the bot must ignore.
+                    // The transition is logged here (once per faction) because LogTransition
+                    // only knows the status, not the ignored faction.
+                    if (!string.Equals(_loggedIgnoredFaction, candidate.Faction, StringComparison.Ordinal))
+                    {
+                        _loggedIgnoredFaction = candidate.Faction;
+                        _log($"[PlayerDetection] IgnoredOtherPlayerDetected Faction={candidate.Faction} " +
+                             $"Bounds={candidate.Bounds} — the other-player ignore option for this " +
+                             "faction is enabled, so the bot keeps working.");
+                    }
+
+                    _loggedStatus = CombatPlayerPresenceStatus.NoOtherPlayer;
+                    return new CombatPlayerPresence(
+                        CombatPlayerPresenceStatus.NoOtherPlayer, null, now,
+                        $"{candidate.Faction} faction marker ignored by the other-player ignore option");
+                }
+
+                _loggedIgnoredFaction = string.Empty;
                 float dx = candidate.Center.X - anchor.X;
                 float dy = candidate.Center.Y - anchor.Y;
                 float distance = MathF.Sqrt((dx * dx) + (dy * dy));
@@ -250,6 +277,7 @@ namespace DriverScanTester.Services
     ///   • target id in the player-id domain               → OtherPlayer → attack NO
     ///   • player is inside the city                       → Npc         → attack NO
     ///   • other-player faction marker on screen           → OtherPlayer → attack NO
+    ///   • faction marker of an IGNORED faction            → ignored     → attack YES (as if absent)
     ///   • scan unavailable/failed or stale evidence        → Unknown     → attack NO
     ///   • mob-domain id + completed scan, no player mark  → Monster     → attack YES
     ///
@@ -265,6 +293,7 @@ namespace DriverScanTester.Services
         private readonly Action<string> _log;
         private readonly Func<DateTime> _now;
         private readonly int _maxPresenceAgeMs;
+        private readonly Func<PlayerMarkerCandidate, bool> _shouldIgnoreOtherPlayer;
 
         private int _lastTargetId = int.MinValue;
         private string _lastLoggedSignature = string.Empty;
@@ -276,7 +305,8 @@ namespace DriverScanTester.Services
             Func<bool> isInCity,
             Action<string> log,
             Func<DateTime>? now = null,
-            int maxPresenceAgeMs = BotConstants.CombatSafety.PlayerScanMaxAgeMs)
+            int maxPresenceAgeMs = BotConstants.CombatSafety.PlayerScanMaxAgeMs,
+            Func<PlayerMarkerCandidate, bool>? shouldIgnoreOtherPlayer = null)
         {
             _readTargetId = readTargetId ?? throw new ArgumentNullException(nameof(readTargetId));
             _presence = presence ?? throw new ArgumentNullException(nameof(presence));
@@ -284,6 +314,7 @@ namespace DriverScanTester.Services
             _log = log ?? (_ => { });
             _now = now ?? (() => DateTime.UtcNow);
             _maxPresenceAgeMs = Math.Max(0, maxPresenceAgeMs);
+            _shouldIgnoreOtherPlayer = shouldIgnoreOtherPlayer ?? OtherPlayerIgnoreSettings.ShouldIgnore;
         }
 
         /// <summary>
@@ -335,12 +366,24 @@ namespace DriverScanTester.Services
                     "player is in the city (NPC/non-combat area)", null);
             }
 
+            // An ignored faction behaves exactly like an empty screen: the bot keeps moving
+            // and attacking instead of stopping or holding the attack. A target id in the
+            // player-id domain above is rejected before this point, so ignoring a faction can
+            // never turn into attacking players.
+            string ignoredFaction = string.Empty;
             CombatPlayerPresence presence = _presence.Observe(forcePlayerScan);
             if (presence.Status == CombatPlayerPresenceStatus.OtherPlayer)
             {
-                return new CombatTargetValidation(
-                    targetId, TargetEntityKind.OtherPlayer, "other-player-marker", false,
-                    presence.Detail, presence.Candidate);
+                if (presence.Candidate is { } candidate && _shouldIgnoreOtherPlayer(candidate))
+                {
+                    ignoredFaction = candidate.Faction;
+                }
+                else
+                {
+                    return new CombatTargetValidation(
+                        targetId, TargetEntityKind.OtherPlayer, "other-player-marker", false,
+                        presence.Detail, presence.Candidate);
+                }
             }
 
             if (!presence.HasAnswer)
@@ -358,9 +401,13 @@ namespace DriverScanTester.Services
                     $"other-player evidence is stale ({ageMs:F0} ms > {_maxPresenceAgeMs} ms)", null);
             }
 
-            return new CombatTargetValidation(
-                targetId, TargetEntityKind.Monster, "mob-target-id+no-player-marker", true,
-                null, null);
+            return string.IsNullOrEmpty(ignoredFaction)
+                ? new CombatTargetValidation(
+                    targetId, TargetEntityKind.Monster, "mob-target-id+no-player-marker", true,
+                    null, null)
+                : new CombatTargetValidation(
+                    targetId, TargetEntityKind.Monster, "mob-target-id+ignored-player-marker", true,
+                    $"ignored {ignoredFaction} faction marker (other-player ignore option)", null);
         }
 
         private void LogValidation(CombatTargetValidation validation)

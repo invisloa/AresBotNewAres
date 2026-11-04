@@ -101,6 +101,22 @@ namespace DriverScanTester.Models
         /// </summary>
         public bool DisableAllLoot { get; set; } = false;
 
+        /// <summary>
+        /// When true, an Alliance (green) faction marker seen while this profile runs no
+        /// longer stops the bot, returns it to the city or blocks an attack. Applies to every
+        /// route of the flow; the path-level option works independently (either source
+        /// enables the ignore). Direct player targets stay blocked.
+        /// </summary>
+        public bool IgnoreAlliancePlayers { get; set; } = false;
+
+        /// <summary>
+        /// When true, an Empire (yellow) faction marker seen while this profile runs no longer
+        /// stops the bot, returns it to the city or blocks an attack. Applies to every route
+        /// of the flow; the path-level option works independently (either source enables the
+        /// ignore). Direct player targets stay blocked.
+        /// </summary>
+        public bool IgnoreEmpirePlayers { get; set; } = false;
+
         /// <summary>Virtual-key code for town teleport (default 0x36 = '6').</summary>
         public int TeleportKey { get; set; } = BotConstants.Workflow.DefaultTeleportKey;
         /// <summary>Scan code for teleport key (default 0x07 for '6').</summary>

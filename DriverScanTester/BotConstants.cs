@@ -46,12 +46,21 @@ namespace DriverScanTester
             /// </summary>
             public const int LootScanCameraSettleMs = 250;
 
+            /// <summary>
+            /// Render settle time (ms) after a waypoint start camera yaw was written
+            /// and verified, while W is released, before the leg's first W-down. The
+            /// game needs one client tick to adopt the new yaw, and pressing W before
+            /// that tick is exactly the stale-position bug this feature prevents.
+            /// </summary>
+            public const int StartAngleSettleMs = 100;
+
             /// <summary>Camera distance used only during SOD/SOP pink-pixel loot scans.</summary>
             public const short SodSopLootScanDistance = 17050;
 
             /// <summary>
-            /// Legacy name retained for the existing seller calibration (16160). New code
-            /// should use the explicitly named seller/movement constants below.
+            /// Legacy name kept for compatibility. It carries the tilted movement value
+            /// (16160); the NPC scan and every non-W view must use the top-down
+            /// <see cref="StationaryVerticalLock"/> (16310) instead.
             /// </summary>
             public const short DefaultVerticalLock = 16160;
 
@@ -68,10 +77,14 @@ namespace DriverScanTester
             public const short MovementVerticalLock = 16160;
 
             /// <summary>
-            /// Seller/NPC vertical camera lock (16160). Numerically equal to the movement
-            /// lock but a separate calibration concept for the existing sell view.
+            /// Vertical camera lock used while the bot scans the game window for an NPC
+            /// (seller, COT entry NPC, ...) and while it works in the NPC's dialog.
+            /// The scan MUST run in the top-down view: this is the stationary baseline
+            /// (16310), not the tilted 16160 movement/walk view. Scanning top-down keeps
+            /// the view identical to the one restored when the NPC is clicked, so the
+            /// camera no longer changes only after the NPC has already been found.
             /// </summary>
-            public const short SellerVerticalLock = 16160;
+            public const short NpcScanVerticalLock = StationaryVerticalLock;
 
             /// <summary>Existing seller/NPC camera distance (16720).</summary>
             public const short SellerDistanceLock = 16720;
@@ -160,7 +173,7 @@ namespace DriverScanTester
         public static class SpeedPotion
         {
             /// <summary>Attack speed value at which bot drinks speed potions (key 7 + key 8).</summary>
-            public const short AttackSpeedThreshold = 16384; //16341 +2 speed //16384 +3 speed (archer bos+giko)
+            public const short AttackSpeedThreshold = 16341; //16341 +2 speed //16384 +3 speed (archer bos+giko)
 
             /// <summary>Interval in seconds between attack-speed checks.</summary>
             public const double CheckIntervalSeconds = 5.0;
@@ -753,7 +766,8 @@ namespace DriverScanTester
             public const ulong IsSellerPointedPtr = 0x4883E8;
             public const ulong IsSellerPointed = 0xC;
 
-            // Camera vertical "lock" used by the sell view (16-bit value, e.g. 16160).
+            // Camera vertical "lock" (16-bit), e.g. 16310 for the top-down stationary/NPC
+            // scan view and 16160 for the tilted movement (W-held) view.
             // Distinct from the float vertical angle at +0x1B0 (CameraVerticalAngle).
             public const ulong CameraVerticalLockOffset = 0x1BE;
         }
@@ -1010,6 +1024,14 @@ namespace DriverScanTester
 
             /// <summary>Main loop delay between ticks in PathRunnerService.</summary>
             public const int PathRunnerTickMs = 100;
+
+            /// <summary>
+            /// PathRunner tick used while the effective mode is OnlyMove. OnlyMove is pure
+            /// navigation (no combat, no loot), so the player position is re-read every
+            /// 50 ms (20 Hz) instead of every 100 ms. Combat-capable modes keep
+            /// <see cref="PathRunnerTickMs"/>.
+            /// </summary>
+            public const int PathRunnerOnlyMoveTickMs = 50;
 
             /// <summary>Delay when bot is in Failed state before re-checking.</summary>
             public const int FailedStateMs = 1000;

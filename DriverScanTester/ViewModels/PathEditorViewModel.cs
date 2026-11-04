@@ -132,6 +132,32 @@ namespace DriverScanTester.ViewModels
             set => SetProperty(ref _disableAllLoot, value);
         }
 
+        private bool _ignoreAlliancePlayers = false;
+        /// <summary>
+        /// Path-level policy: when true, an Alliance (green) faction marker no longer stops
+        /// the bot, returns it to the city or blocks an attack while this path runs.
+        /// Persisted in <see cref="PathSegment.IgnoreAlliancePlayers"/> and applied to every
+        /// waypoint generated from the editor's points.
+        /// </summary>
+        public bool IgnoreAlliancePlayers
+        {
+            get => _ignoreAlliancePlayers;
+            set => SetProperty(ref _ignoreAlliancePlayers, value);
+        }
+
+        private bool _ignoreEmpirePlayers = false;
+        /// <summary>
+        /// Path-level policy: when true, an Empire (yellow) faction marker no longer stops
+        /// the bot, returns it to the city or blocks an attack while this path runs.
+        /// Persisted in <see cref="PathSegment.IgnoreEmpirePlayers"/> and applied to every
+        /// waypoint generated from the editor's points.
+        /// </summary>
+        public bool IgnoreEmpirePlayers
+        {
+            get => _ignoreEmpirePlayers;
+            set => SetProperty(ref _ignoreEmpirePlayers, value);
+        }
+
         /// <summary>Global runtime-only mob grouping toggle, shared with the main window.</summary>
         public bool MobGroupingEnabled
         {
@@ -169,6 +195,7 @@ namespace DriverScanTester.ViewModels
         public ICommand MovePointUpCommand { get; }
         public ICommand MovePointDownCommand { get; }
         public ICommand CapturePositionCommand { get; }
+        public ICommand CaptureCameraAngleCommand { get; }
         public ICommand ClearPathCommand { get; }
         public ICommand ClearArrivalOperationCommand { get; }
         public ICommand SaveSegmentCommand { get; }
@@ -185,6 +212,8 @@ namespace DriverScanTester.ViewModels
 
         // Offsets
         private const ulong PlayerPtrOffset = BotConstants.MemoryOffsets.PlayerPtr;
+        private const ulong CameraPtrOffset = BotConstants.MemoryOffsets.CameraPtr;
+        private const ulong CameraAngleOffset = BotConstants.MemoryOffsets.CameraAngle;
         private const ulong XOffset = 0x144;
         private const ulong YOffset = 0xEE8;
 
@@ -203,6 +232,7 @@ namespace DriverScanTester.ViewModels
             MovePointUpCommand = new RelayCommand(_ => MovePoint(-1), _ => SelectedPoint != null);
             MovePointDownCommand = new RelayCommand(_ => MovePoint(1), _ => SelectedPoint != null);
             CapturePositionCommand = new RelayCommand(_ => CapturePosition());
+            CaptureCameraAngleCommand = new RelayCommand(_ => CaptureCameraAngle(), _ => SelectedPoint != null);
             ClearPathCommand = new RelayCommand(_ => Points.Clear());
             ClearArrivalOperationCommand = new RelayCommand(_ => ClearArrivalOperation(), _ => SelectedPoint != null);
             SaveSegmentCommand = new RelayCommand(_ => SaveSegment());
@@ -323,9 +353,71 @@ namespace DriverScanTester.ViewModels
             }
         }
 
-        private void CapturePosition()
+        /// <summary>
+        /// Reads the CURRENT horizontal camera yaw from the game (the same 32-bit float
+        /// at +0x1A8 that GetCameraAngle exposes) and writes its exact bit pattern into
+        /// the selected path point. The field then shows the concrete radian value.
+        /// </summary>
+        private void CaptureCameraAngle()
         {
+            if (SelectedPoint == null)
+            {
+                StatusText = "Select a path point first.";
+                return;
+            }
+
             if (!_gameAccess.IsAttached())
+            {
+                StatusText = "Not attached — attach to the game to capture the current camera angle.";
+                return;
+            }
+
+            ulong moduleBase = _gameAccess.GetModuleBase();
+            int ptrSize = _gameAccess.GetPointerSize();
+            uint pid = _gameAccess.GetPid();
+            if (moduleBase == 0 || ptrSize == 0 || pid == 0)
+            {
+                StatusText = "Error: Invalid module base, pointer size or PID.";
+                return;
+            }
+
+            byte[] ptrBuf = new byte[ptrSize];
+            if (!_gameAccess.ReadMemory(pid, moduleBase + CameraPtrOffset, ptrBuf, 0))
+            {
+                StatusText = "Error: Failed to read the camera pointer.";
+                return;
+            }
+
+            ulong cameraBase = (ptrSize == 4)
+                ? BitConverter.ToUInt32(ptrBuf, 0)
+                : BitConverter.ToUInt64(ptrBuf, 0);
+            if (cameraBase == 0)
+            {
+                StatusText = "Error: Camera base is 0.";
+                return;
+            }
+
+            byte[] angleBuf = new byte[4];
+            if (!_gameAccess.ReadMemory(pid, cameraBase + CameraAngleOffset, angleBuf, 0))
+            {
+                StatusText = "Error: Failed to read the current camera angle.";
+                return;
+            }
+
+            int angleBits = BitConverter.ToInt32(angleBuf, 0);
+            float radians = BitConverter.Int32BitsToSingle(angleBits);
+            if (!float.IsFinite(radians))
+            {
+                StatusText = $"Error: Current camera angle is not a finite value (0x{angleBits:X8}).";
+                return;
+            }
+
+            SelectedPoint.StartCameraAngleBits = angleBits;
+            StatusText = $"Captured current camera angle {CameraAngleValue.Format(angleBits)} rad (0x{angleBits:X8}) into point ({SelectedPoint.X}, {SelectedPoint.Y}).";
+        }
+
+        private void CapturePosition()
+        {            if (!_gameAccess.IsAttached())
             {
                 StatusText = "Not attached — attach to the game to capture the player position.";
                 return;
@@ -407,6 +499,8 @@ namespace DriverScanTester.ViewModels
                     Mode = SegmentBotMode,
                     LoopRoute = LoopRoute,
                     DisableAllLoot = DisableAllLoot,
+                    IgnoreAlliancePlayers = IgnoreAlliancePlayers,
+                    IgnoreEmpirePlayers = IgnoreEmpirePlayers,
                     ZoneRestriction = SegmentZoneRestriction,
                     Points = Points.ToList()
                 };
@@ -486,6 +580,8 @@ namespace DriverScanTester.ViewModels
                     SegmentBotMode = loaded.Mode;
                     LoopRoute = loaded.LoopRoute;
                     DisableAllLoot = loaded.DisableAllLoot;
+                    IgnoreAlliancePlayers = loaded.IgnoreAlliancePlayers;
+                    IgnoreEmpirePlayers = loaded.IgnoreEmpirePlayers;
                     SegmentZoneRestriction = loaded.ZoneRestriction;
                     if (loadedPoints.Count > 0)
                     {
@@ -530,7 +626,10 @@ namespace DriverScanTester.ViewModels
                 p.OnArrivalOperation ?? "",
                 p.IsOperationStep,
                 p.SteeringMode,
-                DisableAllLoot)).ToList();
+                DisableAllLoot,
+                IgnoreAlliancePlayers,
+                IgnoreEmpirePlayers,
+                startCameraAngleBits: p.StartCameraAngleBits)).ToList();
             OnRunPath?.Invoke(list, LoopRoute);
             StatusText = "Running current editor path...";
         }

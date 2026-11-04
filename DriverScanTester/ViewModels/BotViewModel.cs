@@ -241,6 +241,65 @@ namespace DriverScanTester.ViewModels
             ? $"Mob Grouping: {_main.MobGroupingStatus}"
             : "Mob Grouping: Off";
 
+        /// <summary>
+        /// Global runtime-only option: a detected Alliance (green) faction marker no longer
+        /// stops the bot, returns it to the city or blocks an attack. Player-id targets stay
+        /// blocked. Profiles and paths never own this value.
+        /// </summary>
+        public bool IgnoreAlliancePlayers
+        {
+            get => OtherPlayerIgnoreSettings.IgnoreAlliancePlayers;
+            set
+            {
+                if (OtherPlayerIgnoreSettings.IgnoreAlliancePlayers == value)
+                    return;
+                OtherPlayerIgnoreSettings.IgnoreAlliancePlayers = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(IgnoredPlayerFactionsText));
+                AppendBotLog(value
+                    ? "[PlayerDetection] Alliance (green) players are now ignored — their marker no longer stops the bot or blocks attacks."
+                    : "[PlayerDetection] Alliance (green) players are no longer ignored — detection stops the bot again.");
+            }
+        }
+
+        /// <summary>
+        /// Global runtime-only option: a detected Empire (yellow) faction marker no longer
+        /// stops the bot, returns it to the city or blocks an attack. Player-id targets stay
+        /// blocked. Profiles and paths never own this value.
+        /// </summary>
+        public bool IgnoreEmpirePlayers
+        {
+            get => OtherPlayerIgnoreSettings.IgnoreEmpirePlayers;
+            set
+            {
+                if (OtherPlayerIgnoreSettings.IgnoreEmpirePlayers == value)
+                    return;
+                OtherPlayerIgnoreSettings.IgnoreEmpirePlayers = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(IgnoredPlayerFactionsText));
+                AppendBotLog(value
+                    ? "[PlayerDetection] Empire (yellow) players are now ignored — their marker no longer stops the bot or blocks attacks."
+                    : "[PlayerDetection] Empire (yellow) players are no longer ignored — detection stops the bot again.");
+            }
+        }
+
+        /// <summary>Compact summary of the active other-player ignore options.</summary>
+        public string IgnoredPlayerFactionsText
+        {
+            get
+            {
+                bool alliance = OtherPlayerIgnoreSettings.IgnoreAlliancePlayers;
+                bool empire = OtherPlayerIgnoreSettings.IgnoreEmpirePlayers;
+                if (alliance && empire)
+                    return "Ignoring: Alliance + Empire";
+                if (alliance)
+                    return "Ignoring: Alliance";
+                if (empire)
+                    return "Ignoring: Empire";
+                return "Ignoring: none";
+            }
+        }
+
         public bool IsMovementBotRunning
         {
             get => _isMovementBotRunning;

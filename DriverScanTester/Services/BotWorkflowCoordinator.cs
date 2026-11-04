@@ -253,6 +253,24 @@ namespace DriverScanTester.Services
         /// <summary>Reads the live UI setting for stopping on a confirmed other-player marker.</summary>
         public Func<bool>? ShouldStopOnOtherPlayerDetected { get; set; }
 
+        /// <summary>
+        /// Live other-player ignore policy used by the EXP-loop loot system. The running route
+        /// wins (path-level flag + profile-level override + global option); between routes the
+        /// profile and the global options still apply, so a profile-level ignore never depends
+        /// on whether a route is currently moving.
+        /// </summary>
+        internal bool ShouldIgnoreDetectedPlayerMarker(PlayerMarkerCandidate candidate)
+        {
+            MovementSystem? movement = _pathRunner.CurrentMovement;
+            if (movement != null)
+                return movement.ShouldIgnoreOtherPlayerMarker(candidate);
+
+            return OtherPlayerIgnoreSettings.ShouldIgnore(
+                candidate.Faction,
+                OtherPlayerIgnoreSettings.IgnoreAlliancePlayers || _profile.IgnoreAlliancePlayers,
+                OtherPlayerIgnoreSettings.IgnoreEmpirePlayers || _profile.IgnoreEmpirePlayers);
+        }
+
         /// <summary>Whether the coordinator is running.</summary>
         public bool IsRunning => _isRunning;
 
@@ -1389,7 +1407,9 @@ namespace DriverScanTester.Services
                 token: expToken,
                 expectedMap: route.ProtectionMapNumber,
                 routeLabel: route.PathFile,
-                disableAllLoot: _profile.DisableAllLoot);
+                disableAllLoot: _profile.DisableAllLoot,
+                ignoreAlliancePlayers: _profile.IgnoreAlliancePlayers,
+                ignoreEmpirePlayers: _profile.IgnoreEmpirePlayers);
 
             // The EXP route is a hunting route: run the loot system in parallel so drops
             // are collected while walking and after kills. MoveAndAttackAndLoot routes use
@@ -1412,6 +1432,7 @@ namespace DriverScanTester.Services
                     PinkLootOnlyMode = !hasAttackLootRoute && hasAttackOnlyRoute,
                     AutomaticLootDisabled = disableAllLoot,
                     ShouldStopOnOtherPlayerMarker = () => ShouldStopOnOtherPlayerDetected?.Invoke() ?? true,
+                    ShouldIgnoreOtherPlayerMarker = ShouldIgnoreDetectedPlayerMarker,
                     OtherPlayerMarkerDetected = () =>
                     {
                         if (Interlocked.Exchange(ref otherPlayerMarkerDetected, 1) == 0)
@@ -2271,7 +2292,10 @@ namespace DriverScanTester.Services
             }
 
             bool completed = await _pathRunner.RunPathAsync(
-                waypoints, loop: false, token, disableAllLoot: _profile.DisableAllLoot);
+                waypoints, loop: false, token,
+                disableAllLoot: _profile.DisableAllLoot,
+                ignoreAlliancePlayers: _profile.IgnoreAlliancePlayers,
+                ignoreEmpirePlayers: _profile.IgnoreEmpirePlayers);
             if (completed)
                 _log($"[Coordinator] {stageName}: path completed.");
             else
@@ -2346,7 +2370,10 @@ namespace DriverScanTester.Services
             {
                 // FinalWaypoint: normal non-loop execution.
                 bool completed = await _pathRunner.RunPathAsync(
-                    waypoints, loop: false, token, disableAllLoot: _profile.DisableAllLoot);
+                    waypoints, loop: false, token,
+                    disableAllLoot: _profile.DisableAllLoot,
+                    ignoreAlliancePlayers: _profile.IgnoreAlliancePlayers,
+                    ignoreEmpirePlayers: _profile.IgnoreEmpirePlayers);
                 if (token.IsCancellationRequested) return TravelRouteRunResult.Cancelled;
 
                 if (completed)
@@ -2414,7 +2441,10 @@ namespace DriverScanTester.Services
             PlayerStateSnapshot? lastSourceState = _positionSync.CaptureCurrentState();
 
             var pathTask = _pathRunner.RunPathAsync(
-                waypoints, loop: false, routeToken, disableAllLoot: _profile.DisableAllLoot);
+                waypoints, loop: false, routeToken,
+                disableAllLoot: _profile.DisableAllLoot,
+                ignoreAlliancePlayers: _profile.IgnoreAlliancePlayers,
+                ignoreEmpirePlayers: _profile.IgnoreEmpirePlayers);
 
             int consecutiveDestReads = 0;
             bool destinationConfirmed = false;

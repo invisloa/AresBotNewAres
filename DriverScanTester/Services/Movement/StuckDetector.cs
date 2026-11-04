@@ -11,11 +11,16 @@ namespace DriverScanTester.Services
     /// - action 25 or 1 → idle/stuck
     ///
     /// A single idle/stuck sample does NOT trigger — the detector requires
-    /// either 2 consecutive idle/stuck samples or 200 ms of continuous
-    /// idle/stuck before declaring stuck.
+    /// the debounce window (<see cref="DebounceWindowMs"/>) to be covered by
+    /// consecutive idle/stuck samples, or 200 ms of continuous idle/stuck.
+    /// The required sample count follows <see cref="SampleIntervalMs"/> so a
+    /// faster movement tick never shortens the window.
     /// </summary>
     internal class StuckDetector
     {
+        /// <summary>Minimum time window an idle/stuck action must persist before it counts as stuck.</summary>
+        private const double DebounceWindowMs = 200.0;
+
         private readonly GameMemoryService _memory;
         private readonly Action<string> _log;
         private readonly Func<Waypoint, float> _getReachThreshold;
@@ -25,6 +30,17 @@ namespace DriverScanTester.Services
 
         private DateTime _actionStuckFirstSeenAt = DateTime.MinValue;
         private int _consecutiveActionStuckSamples = 0;
+
+        /// <summary>
+        /// Movement tick interval (ms) the caller runs its samples at. Owned by the
+        /// caller (MovementSystem.TickIntervalMs) so the sample-count debounce always
+        /// covers <see cref="DebounceWindowMs"/> of wall-clock time.
+        /// </summary>
+        public int SampleIntervalMs { get; set; } = BotConstants.Delays.PathRunnerTickMs;
+
+        /// <summary>Consecutive idle/stuck samples that cover the debounce window.</summary>
+        private int RequiredConsecutiveSamples =>
+            Math.Max(2, (int)Math.Ceiling(DebounceWindowMs / Math.Max(1, SampleIntervalMs)));
 
         public StuckDetector(
             GameMemoryService memory,
@@ -101,9 +117,11 @@ namespace DriverScanTester.Services
 
                 _consecutiveActionStuckSamples++;
 
-                // Debounce: require either 2+ consecutive samples or >= 200ms elapsed
-                if (_consecutiveActionStuckSamples >= 2 ||
-                    (DateTime.Now - _actionStuckFirstSeenAt).TotalMilliseconds >= 200.0)
+                // Debounce: require the debounce window to be covered by consecutive
+                // samples (200 ms at 100 ms ticks = 2 samples, at 50 ms = 4 samples) or
+                // the same 200 ms of elapsed time.
+                if (_consecutiveActionStuckSamples >= RequiredConsecutiveSamples ||
+                    (DateTime.Now - _actionStuckFirstSeenAt).TotalMilliseconds >= DebounceWindowMs)
                 {
                     return true;
                 }

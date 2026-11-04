@@ -18,6 +18,20 @@ namespace DriverScanTester.Models
         /// </summary>
         public bool DisableAllLoot { get; set; } = false;
 
+        /// <summary>
+        /// When true, an Alliance (green) faction marker seen while this path runs no longer
+        /// stops the bot, returns it to the city or blocks an attack. Saved in the path file
+        /// together with the other path-level options. Player-id targets stay blocked.
+        /// </summary>
+        public bool IgnoreAlliancePlayers { get; set; } = false;
+
+        /// <summary>
+        /// When true, an Empire (yellow) faction marker seen while this path runs no longer
+        /// stops the bot, returns it to the city or blocks an attack. Saved in the path file
+        /// together with the other path-level options. Player-id targets stay blocked.
+        /// </summary>
+        public bool IgnoreEmpirePlayers { get; set; } = false;
+
         public ZoneRestriction ZoneRestriction { get; set; } = ZoneRestriction.OutsideOnly;
         public List<PathPoint> Points { get; set; } = new List<PathPoint>();
 

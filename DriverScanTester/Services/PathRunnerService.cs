@@ -83,6 +83,12 @@ namespace DriverScanTester.Services
         /// <param name="disableAllLoot">Profile-level override: when true this run performs
         /// no automatic loot work. The per-waypoint path-level flags are carried on the
         /// waypoints themselves and are never written back into saved path data.</param>
+        /// <param name="ignoreAlliancePlayers">Profile-level override: when true, Alliance
+        /// (green) player markers are ignored for the whole run in addition to the
+        /// per-waypoint path-level flag.</param>
+        /// <param name="ignoreEmpirePlayers">Profile-level override: when true, Empire
+        /// (yellow) player markers are ignored for the whole run in addition to the
+        /// per-waypoint path-level flag.</param>
         /// <returns>True if the path completed normally (non-loop); false if cancelled.</returns>
         public async Task<bool> RunPathAsync(
             List<Waypoint> waypoints,
@@ -90,7 +96,9 @@ namespace DriverScanTester.Services
             CancellationToken token,
             int expectedMap = 0,
             string routeLabel = "",
-            bool disableAllLoot = false)
+            bool disableAllLoot = false,
+            bool ignoreAlliancePlayers = false,
+            bool ignoreEmpirePlayers = false)
         {
             LastStopReason = PathRunStopReason.None;
             if (waypoints == null || waypoints.Count == 0)
@@ -132,7 +140,9 @@ namespace DriverScanTester.Services
                     // navigating old-map waypoints after the player leaves that map.
                     ExpectedMap = expectedMap,
                     RouteLabel = routeLabel,
-                    DisableAllLootOverride = disableAllLoot
+                    DisableAllLootOverride = disableAllLoot,
+                    IgnoreAlliancePlayersOverride = ignoreAlliancePlayers,
+                    IgnoreEmpirePlayersOverride = ignoreEmpirePlayers
                 };
             }
             catch
@@ -255,9 +265,10 @@ namespace DriverScanTester.Services
                         return false;
                     }
 
+                    int tickIntervalMs = movementSystem.TickIntervalMs;
                     await (PauseController != null
-                        ? PauseController.PausableDelayAsync(BotConstants.Delays.PathRunnerTickMs, runToken)
-                        : Task.Delay(BotConstants.Delays.PathRunnerTickMs, runToken));
+                        ? PauseController.PausableDelayAsync(tickIntervalMs, runToken)
+                        : Task.Delay(tickIntervalMs, runToken));
                 }
                 _log("[PathRunner] Loop exited due to cancellation request.");
                 LastStopReason = PathRunStopReason.Cancelled;

@@ -17,7 +17,11 @@ namespace DriverScanTester.Tests
         {
             Assert.Equal((short)16160, BotConstants.Camera.MovementVerticalLock);
             Assert.Equal((short)16310, BotConstants.Camera.StationaryVerticalLock);
-            Assert.Equal((short)16160, BotConstants.Camera.SellerVerticalLock);
+            // The NPC mouseover scan must run in the top-down view, not the tilted
+            // 16160 movement view; otherwise the camera only becomes top-down after
+            // the NPC has already been found and clicked.
+            Assert.Equal(BotConstants.Camera.StationaryVerticalLock, BotConstants.Camera.NpcScanVerticalLock);
+            Assert.Equal((short)16310, BotConstants.Camera.NpcScanVerticalLock);
             Assert.Equal((short)16720, BotConstants.Camera.SellerDistanceLock);
             Assert.Equal((ulong)0x1BE, BotConstants.MemoryOffsets.CameraVerticalLockOffset);
         }

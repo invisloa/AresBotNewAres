@@ -86,6 +86,16 @@ namespace DriverScanTester.Services
         /// DirectCamera for auxiliary recovery routes).
         /// </summary>
         public MovementSteeringMode? SteeringMode { get; set; }
+
+        /// <summary>
+        /// Optional horizontal camera yaw (left/right camera) written once at the start
+        /// of this waypoint's leg, while W is released and before the first W-down. The
+        /// value is the exact 32-bit float bit pattern at +0x1A8, so a camera angle
+        /// captured from the game round-trips without precision loss. Null = leave the
+        /// camera untouched.
+        /// </summary>
+        public int? StartCameraAngleBits { get; set; }
+
         public WaypointStuckRecoveryType StuckRecoveryType { get; set; }
         public string StuckRecoveryOperation { get; set; }
         public string StuckRecoveryPath { get; set; }
@@ -111,6 +121,20 @@ namespace DriverScanTester.Services
         /// </summary>
         public bool DisableAllLoot { get; set; }
 
+        /// <summary>
+        /// Path-level policy: Alliance (green) faction markers are ignored while this path
+        /// runs. Carried on every generated waypoint like <see cref="DisableAllLoot"/>, so the
+        /// effective policy is available for the active waypoint (including final-waypoint
+        /// standby) and survives path advancement/loops.
+        /// </summary>
+        public bool IgnoreAlliancePlayers { get; set; }
+
+        /// <summary>
+        /// Path-level policy: Empire (yellow) faction markers are ignored while this path
+        /// runs. Carried on every generated waypoint like <see cref="DisableAllLoot"/>.
+        /// </summary>
+        public bool IgnoreEmpirePlayers { get; set; }
+
         public Waypoint(
             float x,
             float y,
@@ -126,7 +150,10 @@ namespace DriverScanTester.Services
             string onArrivalOperation = "",
             bool isOperationStep = false,
             MovementSteeringMode? steeringMode = null,
-            bool disableAllLoot = false)
+            bool disableAllLoot = false,
+            bool ignoreAlliancePlayers = false,
+            bool ignoreEmpirePlayers = false,
+            int? startCameraAngleBits = null)
         {
             X = x;
             Y = y;
@@ -143,6 +170,9 @@ namespace DriverScanTester.Services
             IsOperationStep = isOperationStep;
             SteeringMode = steeringMode;
             DisableAllLoot = disableAllLoot;
+            IgnoreAlliancePlayers = ignoreAlliancePlayers;
+            IgnoreEmpirePlayers = ignoreEmpirePlayers;
+            StartCameraAngleBits = startCameraAngleBits;
         }
     }
 
@@ -417,6 +447,19 @@ namespace DriverScanTester.Services
         public bool DisableAllLootOverride { get; set; }
 
         /// <summary>
+        /// Profile-level override for the current run: when true, Alliance (green) player
+        /// markers are ignored regardless of the per-waypoint path flag. Set by the host from
+        /// the active profile; never written back into saved path data.
+        /// </summary>
+        public bool IgnoreAlliancePlayersOverride { get; set; }
+
+        /// <summary>
+        /// Profile-level override for the current run: when true, Empire (yellow) player
+        /// markers are ignored regardless of the per-waypoint path flag.
+        /// </summary>
+        public bool IgnoreEmpirePlayersOverride { get; set; }
+
+        /// <summary>
         /// Effective automatic-loot policy for the active waypoint/profile. True when the
         /// profile override is set or the current waypoint (including final-waypoint
         /// standby) carries the path-level disable flag. Movement, combat, targeting and
@@ -447,6 +490,48 @@ namespace DriverScanTester.Services
                 }
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Effective other-player ignore policy for the active waypoint combined with the
+        /// global runtime options. Any enabled source ignores that faction, so a path saved
+        /// with "Ignore Alliance players" keeps working regardless of the bot-window toggle.
+        /// Only the STOP/attack-block behavior is affected; player-id targets stay blocked.
+        /// </summary>
+        internal bool ShouldIgnoreOtherPlayerMarker(PlayerMarkerCandidate candidate)
+            => OtherPlayerIgnoreSettings.ShouldIgnore(
+                candidate.Faction,
+                OtherPlayerIgnoreSettings.IgnoreAlliancePlayers ||
+                    IgnoreAlliancePlayersOverride ||
+                    CurrentWaypointIgnoresAlliancePlayers,
+                OtherPlayerIgnoreSettings.IgnoreEmpirePlayers ||
+                    IgnoreEmpirePlayersOverride ||
+                    CurrentWaypointIgnoresEmpirePlayers);
+
+        private bool CurrentWaypointIgnoresAlliancePlayers
+            => CurrentWaypointPlayerIgnorePolicy(static waypoint => waypoint.IgnoreAlliancePlayers);
+
+        private bool CurrentWaypointIgnoresEmpirePlayers
+            => CurrentWaypointPlayerIgnorePolicy(static waypoint => waypoint.IgnoreEmpirePlayers);
+
+        /// <summary>
+        /// Path-level flag of the effective waypoint (same standby-aware lookup as the loot
+        /// policy), so a per-path option can never become stale after the queue empties.
+        /// </summary>
+        private bool CurrentWaypointPlayerIgnorePolicy(Func<Waypoint, bool> selector)
+        {
+            try
+            {
+                if (_finalStandbyActive)
+                    return selector(_finalStandbyWaypoint);
+                if (_waypoints.Count > 0)
+                    return selector(_waypoints.Peek());
+            }
+            catch (InvalidOperationException)
+            {
+                // Queue raced from a parallel reader — safest default is "not ignored".
+            }
+            return false;
         }
 
         /// <summary>
@@ -538,6 +623,17 @@ namespace DriverScanTester.Services
         /// runs in its own HealManaSystem task).
         /// </summary>
         public bool IsMoveOnlyActive => CurrentMode == BotMode.OnlyMove;
+
+        /// <summary>
+        /// Loop cadence (ms) the host must use between <see cref="Update"/> calls.
+        /// OnlyMove is the position-critical mode — it is pure navigation and the only
+        /// mode that samples the player position on the faster tick
+        /// (<see cref="BotConstants.Delays.PathRunnerOnlyMoveTickMs"/>). Every
+        /// combat-capable mode keeps <see cref="BotConstants.Delays.PathRunnerTickMs"/>.
+        /// </summary>
+        public int TickIntervalMs => IsMoveOnlyActive
+            ? BotConstants.Delays.PathRunnerOnlyMoveTickMs
+            : BotConstants.Delays.PathRunnerTickMs;
 
         /// <summary>
         /// Cancels only the grouping-owned sequence and releases inputs through the existing
@@ -961,6 +1057,21 @@ namespace DriverScanTester.Services
         private int _initialHeadingAlignmentLastTick;
         private DateTime _initialHeadingAlignmentDeadlineUtc = DateTime.MinValue;
 
+        // ── Per-waypoint start camera angle ──
+        // Applied once per waypoint leg, while W is released, before that leg's first
+        // W-down. Tracking the last applied position + value makes repeated Update
+        // ticks, route resync and combat re-entry idempotent within the same leg.
+        private bool _startCameraAngleApplied;
+        private float _startCameraAngleAppliedX;
+        private float _startCameraAngleAppliedY;
+        private int _startCameraAngleAppliedBits;
+
+        // DirectCamera steering writes the target bearing before pressing W by design.
+        // When an explicit start angle was just applied, the leg's first W must happen
+        // at that configured bearing instead, so the direct write is deferred by one
+        // W transition.
+        private bool _startCameraAngleAwaitingFirstW;
+
         private enum TurnKeyState
         {
             None,
@@ -1262,9 +1373,12 @@ namespace DriverScanTester.Services
             _combatHandler = new CombatHandler(log);
             _targetSafety = targetSafety ?? new CombatTargetSafety(
                 () => memoryService.GetSelectedTargetId(),
-                new ScreenCombatPlayerPresenceScanner(log),
+                new ScreenCombatPlayerPresenceScanner(
+                    log,
+                    shouldIgnoreOtherPlayer: ShouldIgnoreOtherPlayerMarker),
                 () => memoryService.GetIsInCity(),
-                log);
+                log,
+                shouldIgnoreOtherPlayer: ShouldIgnoreOtherPlayerMarker);
             _mobMarkerDetector = new MobMarkerDetector(log);
             _mobGroupingController = new MobGroupingController(log);
             _repotHelper = new RepotHelper(memoryService, log, StopMoving, () => _goalReached = true);
@@ -1304,7 +1418,10 @@ namespace DriverScanTester.Services
                 {
                     string methodTag = p.IsOperationStep ? $" METHOD:{p.OnArrivalOperation} (no position check)" : "";
                     string steeringTag = p.SteeringMode?.ToString() ?? "Default";
-                    _log($"[Path] #{index}: ({p.X:F1}, {p.Y:F1}) Precision:{p.Precision} Mode:{p.Mode} CamLock:{p.CameraDistanceLock} AtkDis:{p.AttackDisengageDistance} Steer:{steeringTag}{methodTag}");
+                    string startCamTag = p.StartCameraAngleBits.HasValue
+                        ? $" StartCam:{CameraAngleValue.Describe(p.StartCameraAngleBits)}"
+                        : "";
+                    _log($"[Path] #{index}: ({p.X:F1}, {p.Y:F1}) Precision:{p.Precision} Mode:{p.Mode} CamLock:{p.CameraDistanceLock} AtkDis:{p.AttackDisengageDistance} Steer:{steeringTag}{startCamTag}{methodTag}");
                     index++;
                 }
 
@@ -2300,6 +2417,14 @@ namespace DriverScanTester.Services
                 _initialResyncDone = true;
             }
 
+            // Apply the optional per-waypoint start camera before any combat/movement
+            // path in this tick can press W. Route resync above may have selected a
+            // different first waypoint, so this runs after it.
+            if (_waypoints.Count > 0)
+            {
+                await EnsureWaypointStartCameraAngleAsync(_waypoints.Peek(), token);
+            }
+
             byte currentAction = _memoryService.GetCurrentAction();
             int targetId = _memoryService.GetSelectedTargetId();
 
@@ -2969,6 +3094,9 @@ namespace DriverScanTester.Services
                 }
 
                 var target = _waypoints.Peek();
+                // A waypoint reached in this tick may have just exposed the next leg;
+                // apply its start camera before this same tick's W-down.
+                await EnsureWaypointStartCameraAngleAsync(target, token);
                 TryApplyMovementCameraDistance(target.CameraDistanceLock);
                 if (await UpdateNavigationProgress(target, currX, currY, token))
                     return;
@@ -3063,7 +3191,10 @@ namespace DriverScanTester.Services
                 }
 
                 // Action-stuck detection is ignored during the start grace period so a
-                // freshly pressed W key never triggers a false stuck recovery.
+                // freshly pressed W key never triggers a false stuck recovery. The debounce
+                // is expressed against the effective tick interval, so the faster OnlyMove
+                // tick keeps the same 200 ms (not 100 ms) idle window before firing.
+                _stuckDetector.SampleIntervalMs = TickIntervalMs;
                 if (DateTime.Now >= _ignoreStuckUntil &&
                     _stuckDetector.IsActionStuck(currX, currY, target, _isMovingForward))
                 {
@@ -3254,6 +3385,9 @@ namespace DriverScanTester.Services
                 }
 
                 _waypoints.Dequeue();
+                // A consumed waypoint ends its leg; the next target must be able to apply
+                // its own start camera even when it repeats the same coordinates.
+                ClearStartCameraAngleApplication();
                 if (target.IsOperationStep)
                     _log($"[AdvWp] #{wpIndex} method-step '{target.OnArrivalOperation}'{ghostTag} → run (no position check) | Queue: {_waypoints.Count}");
                 else
@@ -3557,6 +3691,27 @@ namespace DriverScanTester.Services
             {
                 StopMoving();
                 return;
+            }
+
+            // A configured start angle must be the camera orientation at the leg's first
+            // W-down. DirectCamera normally writes the target bearing before W; press W
+            // first for this one transition so the explicit angle is not overwritten
+            // before the game sees the forward input.
+            if (_startCameraAngleAwaitingFirstW)
+            {
+                _startCameraAngleAwaitingFirstW = false;
+                if (moveForward)
+                {
+                    if (!TryStartMoving())
+                    {
+                        // W was not accepted; keep the deferral so a later attempt still
+                        // presses W at the configured start bearing.
+                        _startCameraAngleAwaitingFirstW = true;
+                        return;
+                    }
+                }
+                else if (_isMovingForward)
+                    StopMoving();
             }
 
             ReleaseTurnKey("direct camera steering");
@@ -4699,6 +4854,87 @@ namespace DriverScanTester.Services
         internal static bool IsInitialHeadingAligned(float currentBearingDeg, float desiredBearingDeg)
             => Math.Abs(GeometryUtils.GetShortestBearingDiffDeg(currentBearingDeg, desiredBearingDeg)) <=
                BotConstants.Movement.InitialHeadingAlignmentToleranceDegrees;
+
+        /// <summary>
+        /// Applies a waypoint's optional horizontal camera yaw exactly once per leg.
+        /// The value is the same 32-bit float written at +0x1A8 (left/right camera).
+        /// W is released before the verified yaw write, and the method only returns
+        /// after the configured settle delay, so the caller's next W-down is always the
+        /// first forward input at the new bearing. The explicit bearing replaces the
+        /// first-step in-place A/D alignment: turning away from it before W would defeat
+        /// the whole purpose of the setting.
+        /// </summary>
+        private async Task EnsureWaypointStartCameraAngleAsync(
+            Waypoint target,
+            CancellationToken token)
+        {
+            // Operation steps have no position/movement leg of their own; their named
+            // operation owns the camera while it runs.
+            if (target.IsOperationStep)
+                return;
+
+            if (!target.StartCameraAngleBits.HasValue)
+            {
+                // Leaving a leg that had a configured angle without ever consuming the
+                // DirectCamera deferral must not leak it into this leg.
+                _startCameraAngleAwaitingFirstW = false;
+                return;
+            }
+
+            int angleBits = target.StartCameraAngleBits.Value;
+
+            if (_startCameraAngleApplied &&
+                Math.Abs(_startCameraAngleAppliedX - target.X) < 0.01f &&
+                Math.Abs(_startCameraAngleAppliedY - target.Y) < 0.01f &&
+                _startCameraAngleAppliedBits == angleBits)
+                return;
+
+            // A new leg supersedes any unconsumed DirectCamera deferral from the old one.
+            _startCameraAngleAwaitingFirstW = false;
+
+            // The camera must be final before W goes down. StopMoving is unconditional
+            // and idempotent; it also clears any turn key left from the previous leg.
+            StopMoving();
+
+            bool applied = _wKeyCameraController != null
+                ? _wKeyCameraController.TrySetCameraAngleBits(angleBits)
+                : _memoryService.TrySetCameraAngleBits(angleBits);
+
+            string description = CameraAngleValue.Describe(angleBits);
+            if (!applied)
+            {
+                _log($"[StartCam] Waypoint ({target.X:F1},{target.Y:F1}) — could not write start camera {description}; the route continues and the write will be retried on the next tick.");
+                return;
+            }
+
+            _log($"[StartCam] Waypoint ({target.X:F1},{target.Y:F1}) — camera set to {description} with W released; settling {BotConstants.Camera.StartAngleSettleMs} ms before W.");
+            await Task.Delay(BotConstants.Camera.StartAngleSettleMs, token);
+
+            // The configured bearing is the intended W-down orientation. Do not run the
+            // first-step A/D alignment, which would rotate the camera away from it.
+            _initialHeadingAlignmentPending = false;
+            _initialHeadingAlignmentInProgress = false;
+            _initialHeadingAlignmentDeadlineUtc = DateTime.MinValue;
+
+            _startCameraAngleApplied = true;
+            _startCameraAngleAppliedX = target.X;
+            _startCameraAngleAppliedY = target.Y;
+            _startCameraAngleAppliedBits = angleBits;
+            _startCameraAngleAwaitingFirstW = true;
+        }
+
+        /// <summary>
+        /// Forgets the last applied start-angle target without touching the camera. Called
+        /// when the route consumes a waypoint or rebuilds its queue so the next leg is
+        /// evaluated from scratch.
+        /// </summary>
+        private void ClearStartCameraAngleApplication()
+        {
+            _startCameraAngleApplied = false;
+            _startCameraAngleAppliedX = 0f;
+            _startCameraAngleAppliedY = 0f;
+            _startCameraAngleAppliedBits = 0;
+        }
 
         /// <summary>
         /// Handles the first route step's heading alignment. Returns true while the bot is
@@ -6067,6 +6303,7 @@ namespace DriverScanTester.Services
 
                 _isMovingForward = true;
                 _startMoveCount++;
+                _startCameraAngleAwaitingFirstW = false;
                 _lootMoveSuppressedLogged = false;
                 _ignoreStuckUntil = DateTime.Now.AddSeconds(STUCK_GRACE_AFTER_START_SECONDS);
                 return true;
@@ -6745,6 +6982,9 @@ namespace DriverScanTester.Services
 
             int oldCount = _waypoints.Count;
             _waypoints.Clear();
+            // Route resync starts a new leg selection. A later return to a previously
+            // used waypoint must be allowed to apply its start camera again.
+            ClearStartCameraAngleApplication();
 
             if (goBackward)
             {
@@ -7007,11 +7247,71 @@ namespace DriverScanTester.Services
                 }
             }
 
+            // ── Initial-resync start-camera guard ──
+            // The nearest-segment rule targets the END of the segment it starts on, which
+            // drops the point the player is standing on (e.g. the first path point right
+            // after a town teleport). When a dropped point carries an explicit start
+            // camera angle, its leg never runs, so the configured yaw is never written:
+            // the bot presses W with the old camera (or turns with A/D) instead of setting
+            // the angle first. Keep such a point as the target, but only for a route that
+            // starts where it was recorded to start (segment 0, t≈0) and only while the
+            // point is truly closer than the resync's own choice, so a route resumed
+            // further along never walks backwards.
+            bool atRouteStart = bestSegmentStart == 0 &&
+                                bestT <= 1f - BotConstants.Movement.RouteResyncVeryCloseToSegmentEndT;
+            if (isInitialResync && atRouteStart)
+            {
+                int startCameraIndex = FindSkippedStartCameraWaypointIndex(currX, currY, nextWpIndex);
+                if (startCameraIndex >= 0)
+                {
+                    var kept = _initialPath[startCameraIndex];
+                    _log($"[RouteResync] start-camera guard: waypoint {startCameraIndex + 1} ({kept.X:F1},{kept.Y:F1}) has StartCam:{CameraAngleValue.Describe(kept.StartCameraAngleBits)} and would be skipped — targeting it first so the camera is written before W.");
+                    nextWpIndex = startCameraIndex;
+                    reason += "+startcam-guard";
+                }
+            }
+
             // ── Log and apply ──
             _log($"[RouteResync] bestSegment={bestSegmentStart}->{bestSegmentEnd} t={bestT:F2} dist={bestDist:F2} nextIndex={nextWpIndex} reason={reason}");
             _log($"[RouteResync] oldTarget=({oldTarget.X:F1},{oldTarget.Y:F1}) newTarget=({_initialPath[nextWpIndex].X:F1},{_initialPath[nextWpIndex].Y:F1})");
 
             return RebuildWaypointQueueFromIndex(nextWpIndex, oldTarget, preserveLeadingMethodSteps: isInitialResync);
+        }
+
+        /// <summary>
+        /// Returns the index of the nearest waypoint the resync would skip although it
+        /// carries a start camera angle, or -1 when nothing has to be kept. Only points
+        /// before <paramref name="nextWpIndex"/> are considered, and only when they are
+        /// closer to the player than the resync's own target; points already inside their
+        /// reach threshold are excluded because they would be consumed in the same tick
+        /// without ever writing their start camera.
+        /// </summary>
+        private int FindSkippedStartCameraWaypointIndex(float currX, float currY, int nextWpIndex)
+        {
+            if (nextWpIndex <= 0 || nextWpIndex >= _initialPath.Count)
+                return -1;
+
+            var target = _initialPath[nextWpIndex];
+            float bestDistance = GeometryUtils.Distance(currX, currY, target.X, target.Y);
+            int bestIndex = -1;
+
+            for (int i = 0; i < nextWpIndex; i++)
+            {
+                var candidate = _initialPath[i];
+                if (candidate.IsOperationStep || !candidate.StartCameraAngleBits.HasValue)
+                    continue;
+
+                float distance = GeometryUtils.Distance(currX, currY, candidate.X, candidate.Y);
+                if (distance <= GetEffectiveWaypointReachThreshold(candidate))
+                    continue; // Already reached — there is no leg left to configure.
+                if (distance >= bestDistance)
+                    continue;
+
+                bestDistance = distance;
+                bestIndex = i;
+            }
+
+            return bestIndex;
         }
 
         // ========================================================================

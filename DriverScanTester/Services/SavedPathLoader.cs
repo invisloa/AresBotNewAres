@@ -68,7 +68,10 @@ namespace DriverScanTester.Services
                         pt.OnArrivalOperation ?? "",
                         pt.IsOperationStep,
                         pt.SteeringMode,
-                        segment.DisableAllLoot));
+                        segment.DisableAllLoot,
+                        segment.IgnoreAlliancePlayers,
+                        segment.IgnoreEmpirePlayers,
+                        startCameraAngleBits: pt.StartCameraAngleBits));
                 }
 
                 _log($"[SavedPathLoader] Loaded '{segmentFileName}': {waypoints.Count} points.");

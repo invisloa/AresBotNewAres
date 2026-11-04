@@ -101,8 +101,8 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Opens the seller/shop dialog the same way the old bot did:
-        /// 1. Zoom the camera to the known sell view (distance 16720, vertical 16160)
-        ///    so the shop NPC is in its expected on-screen position.
+        /// 1. Zoom the camera to the known NPC scan view (distance 16720, top-down
+        ///    vertical lock 16310) so the shop NPC is in its expected on-screen position.
         /// 2. Scan the game window from the center outward, moving the mouse until
         ///    S_IsSellerPointed == SellerPointedValue (the mouse is over the NPC),
         ///    then right-click the NPC, click the "Shop" option and verify the shop
@@ -204,8 +204,8 @@ namespace DriverScanTester.Services
             }
 
             // ── NEW PRE-STEP: ensure the seller dialog is open ──
-            // 1. Force the known sell-view camera (distance 16720, vertical 16160)
-            //    so the shop NPC is in its expected on-screen position.
+            // 1. Force the known NPC scan camera (distance 16720, top-down vertical
+            //    lock 16310) so the shop NPC is in its expected on-screen position.
             // 2. If the dialog is already open, skip scanning and continue.
             // 3. Otherwise, scan the game window from center outward looking for
             //    S_IsSellerPointed == 143850200 and right-click when found.
@@ -1211,7 +1211,15 @@ namespace DriverScanTester.Services
 
         private const int SellerCameraSetupAttempts = 3;
         private const int SellerCameraSetupRetryDelayMs = 50;
-        private const int SellerCameraSettleDelayMs = 250;
+
+        /// <summary>
+        /// Render settle time (ms) after the top-down scan camera values were written and
+        /// verified. The lock readback is immediate, but the game animates the visible
+        /// pitch — the sweep must not start before the view has actually reached top-down,
+        /// otherwise the first part of the NPC scan would still run in the tilted
+        /// movement view.
+        /// </summary>
+        private const int SellerCameraSettleDelayMs = 500;
         private const int SellerScanYawCheckIntervalPoints = 32;
 
         private bool TryAcquireSellerCamera(out object? owner)
@@ -1238,17 +1246,18 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Applies the calibrated seller view (distance 16720, vertical lock 16160),
+        /// Applies the NPC scan view (distance 16720, top-down vertical lock 16310),
         /// verifies both values after the game has had time to settle, and fails closed
-        /// instead of starting a scan with an unknown camera. The caller holds the shared
-        /// external camera lease so bot movement cannot overwrite this view; releasing the
-        /// lease restores the stationary vertical lock.
+        /// instead of starting a scan with an unknown camera. The vertical lock is the
+        /// same top-down baseline the rest of the bot uses, so the view does not change
+        /// when the NPC is clicked and the camera lease is released. The caller holds the
+        /// shared external camera lease so bot movement cannot overwrite this view.
         /// </summary>
         private bool SetSellCameraView()
         {
             short sellCameraDistance = BotConstants.Camera.SellerDistanceLock;
-            short sellVerticalLock = BotConstants.Camera.SellerVerticalLock;
-            _log($"ItemSeller: Setting seller top-down view (distance={sellCameraDistance}, vertical lock={sellVerticalLock}).");
+            short sellVerticalLock = BotConstants.Camera.NpcScanVerticalLock;
+            _log($"ItemSeller: Setting NPC scan top-down view (distance={sellCameraDistance}, vertical lock={sellVerticalLock}).");
 
             for (int attempt = 1; attempt <= SellerCameraSetupAttempts; attempt++)
             {

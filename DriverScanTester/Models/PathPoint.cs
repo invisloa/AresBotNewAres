@@ -1,7 +1,9 @@
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Text.Json.Serialization;
 using DriverScanTester.Services;
+using DriverScanTester.Utils;
 
 namespace DriverScanTester.Models
 {
@@ -42,6 +44,53 @@ namespace DriverScanTester.Models
         /// (KeyboardTurn / WAD for normal routes). New points default to WAD in the editor.
         /// </summary>
         public MovementSteeringMode? SteeringMode { get => _steeringMode; set => SetField(ref _steeringMode, value); }
+
+        private int? _startCameraAngleBits;
+        /// <summary>
+        /// Optional horizontal camera yaw (left/right camera) applied once when the bot
+        /// starts moving toward this point, while W is released and before the leg's
+        /// first W-down. The value is the exact 32-bit float bit pattern written at
+        /// [Ares.exe + 0x4883F0] + 0x1A8, so a captured camera angle round-trips
+        /// without precision loss. Null = leave the camera untouched. The first point
+        /// therefore controls the camera at the start of the whole path.
+        /// </summary>
+        public int? StartCameraAngleBits
+        {
+            get => _startCameraAngleBits;
+            set
+            {
+                if (SetField(ref _startCameraAngleBits, value))
+                {
+                    OnPropertyChanged(nameof(StartCameraAngleText));
+                    OnPropertyChanged(nameof(StartCameraAngleDescription));
+                }
+            }
+        }
+
+        /// <summary>
+        /// Editor text for <see cref="StartCameraAngleBits"/>. Accepts blank (none),
+        /// radians (1.5736735 / 1.5736735rad), degrees (90deg / 90°) or a raw bit
+        /// pattern (0x3FC96E22 / 1070165538). Not persisted separately.
+        /// </summary>
+        [JsonIgnore]
+        public string StartCameraAngleText
+        {
+            get => StartCameraAngleBits.HasValue
+                ? CameraAngleValue.Format(StartCameraAngleBits.Value)
+                : "";
+            set
+            {
+                if (CameraAngleValue.TryParse(value, out int? bits))
+                    StartCameraAngleBits = bits;
+                else
+                    OnPropertyChanged(); // reject invalid text, keep the last valid angle
+            }
+        }
+
+        /// <summary>Read-only decode of the configured angle (raw bits / radians / degrees).</summary>
+        [JsonIgnore]
+        public string StartCameraAngleDescription =>
+            CameraAngleValue.Describe(StartCameraAngleBits);
 
         private short _cameraDistanceLock = DefaultCameraDistanceLock;
         public short CameraDistanceLock { get => _cameraDistanceLock; set => SetField(ref _cameraDistanceLock, value); }
@@ -105,7 +154,8 @@ namespace DriverScanTester.Models
             short stuckRecoveryMobCameraDistance = DefaultCameraDistanceLock,
             string onArrivalOperation = "",
             bool isOperationStep = false,
-            MovementSteeringMode? steeringMode = null)
+            MovementSteeringMode? steeringMode = null,
+            int? startCameraAngleBits = null)
         {
             _x = x;
             _y = y;
@@ -121,6 +171,7 @@ namespace DriverScanTester.Models
             _onArrivalOperation = onArrivalOperation;
             _isOperationStep = isOperationStep;
             _steeringMode = steeringMode;
+            _startCameraAngleBits = startCameraAngleBits;
         }
     }
 }

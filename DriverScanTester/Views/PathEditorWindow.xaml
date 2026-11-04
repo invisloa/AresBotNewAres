@@ -47,6 +47,16 @@
                                 <DataGridComboBoxColumn Header="Zone" 
                                     ItemsSource="{Binding Source={x:Static vm:EnumSources.ZoneRestrictions}}"
                                     SelectedItemBinding="{Binding ZoneRestriction}" Width="100" MinWidth="100"/>
+                                <DataGridTextColumn Header="Start Cam"
+                                    Binding="{Binding StartCameraAngleText, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                    Width="105" MinWidth="90">
+                                    <DataGridTextColumn.HeaderStyle>
+                                        <Style TargetType="DataGridColumnHeader">
+                                            <Setter Property="ToolTip"
+                                                    Value="Horizontal camera yaw (left/right camera) at +0x1A8, applied once before W at the start of this waypoint's leg. Blank = leave the camera untouched. Use the Capture current camera angle button in Selected Point to insert the live value."/>
+                                        </Style>
+                                    </DataGridTextColumn.HeaderStyle>
+                                </DataGridTextColumn>
                                 <DataGridTemplateColumn Header="Steering" Width="115" MinWidth="115">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
@@ -145,6 +155,38 @@
 
                             <GroupBox Header="Selected Point" Margin="0,0,0,8" Padding="5">
                                 <StackPanel>
+                                    <Label Content="Start camera angle (left/right yaw):" Padding="2,2,2,0"/>
+                                    <TextBox Text="{Binding SelectedPoint.StartCameraAngleText, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                             Margin="2,2,2,3" Padding="3"
+                                             ToolTip="Horizontal camera yaw at +0x1A8. Applied once when the bot starts moving toward the selected point, while W is released and before the first W-down. Blank = leave the camera untouched.">
+                                        <TextBox.Style>
+                                            <Style TargetType="TextBox">
+                                                <Setter Property="IsEnabled" Value="True"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding SelectedPoint}" Value="{x:Null}">
+                                                        <Setter Property="IsEnabled" Value="False"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBox.Style>
+                                    </TextBox>
+                                    <Button Content="Capture current camera angle"
+                                            Command="{Binding CaptureCameraAngleCommand}"
+                                            HorizontalAlignment="Left" Margin="2,0,2,4">
+                                        <Button.Style>
+                                            <Style TargetType="Button" BasedOn="{StaticResource SecondaryActionButtonStyle}">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding SelectedPoint}" Value="{x:Null}">
+                                                        <Setter Property="IsEnabled" Value="False"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Button.Style>
+                                    </Button>
+                                    <TextBlock Text="{Binding SelectedPoint.StartCameraAngleDescription}"
+                                               TextWrapping="Wrap" Foreground="Gray" FontSize="10" Margin="3,0,3,3"/>
+                                    <TextBlock Text="Blank = none. Type radians (1.5736735), degrees (90deg / 90°) or raw bits (0x3FC96E22 / 1070165538). The button reads the current camera yaw from the game and inserts its exact value; the bot sets it before W."
+                                               TextWrapping="Wrap" Foreground="Gray" FontSize="10" Margin="3,0,3,6"/>
                                     <CheckBox Content="Standalone method step (ignore position)"
                                               IsChecked="{Binding SelectedPoint.IsOperationStep, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                               Margin="2,2,2,5"
@@ -167,6 +209,12 @@
                                     <CheckBox Content="Disable All Loot (including SOD/SOP)" IsChecked="{Binding DisableAllLoot}"
                                               Margin="2,2,2,6"
                                               ToolTip="When this path runs, ignore all ground loot. Do not perform normal loot scans, SOD/SOP scans, loot camera changes, loot screenshots or item collection."/>
+                                    <CheckBox Content="Ignore Alliance players (green)" IsChecked="{Binding IgnoreAlliancePlayers}"
+                                              Margin="2,2,2,6"
+                                              ToolTip="When this path runs, an Alliance (green) player marker no longer stops the bot, returns it to the city or blocks an attack — the bot keeps moving and fighting. Saved in the path file. Direct player targets (player-id domain) stay blocked."/>
+                                    <CheckBox Content="Ignore Empire players (yellow)" IsChecked="{Binding IgnoreEmpirePlayers}"
+                                              Margin="2,2,2,6"
+                                              ToolTip="When this path runs, an Empire (yellow) player marker no longer stops the bot, returns it to the city or blocks an attack — the bot keeps moving and fighting. Saved in the path file. Direct player targets (player-id domain) stay blocked."/>
                                     <Label Content="Path Name (Save As):" Padding="2"/>
                                     <TextBox Text="{Binding SegmentName, UpdateSourceTrigger=PropertyChanged}" Margin="2,2,2,5" Padding="3"/>
                                     <Button Content="Save Path" Command="{Binding SaveSegmentCommand}"
@@ -631,9 +679,17 @@
                                               IsChecked="{Binding LootPriority}" IsEnabled="{Binding LootPriorityEditable}" Margin="2" VerticalAlignment="Center"
                                               ToolTip="During the ExpLoop step, looting outranks combat and waypoint movement. When a loot item is found the bot loots it first."/>
 
-                                    <CheckBox Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2" Content="Disable All Loot (including SOD/SOP)"
-                                              IsChecked="{Binding DisableAllLoot}" Margin="2" VerticalAlignment="Center"
-                                              ToolTip="Completely disables automatic loot scans, item collection and loot-related camera/screenshot operations for this profile. Movement and combat continue normally."/>
+                                    <StackPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2">
+                                        <CheckBox Content="Disable All Loot (including SOD/SOP)"
+                                                  IsChecked="{Binding DisableAllLoot}" Margin="2" VerticalAlignment="Center"
+                                                  ToolTip="Completely disables automatic loot scans, item collection and loot-related camera/screenshot operations for this profile. Movement and combat continue normally."/>
+                                        <CheckBox Content="Ignore Alliance players (green)"
+                                                  IsChecked="{Binding IgnoreAlliancePlayers}" Margin="2" VerticalAlignment="Center"
+                                                  ToolTip="Profile-level: an Alliance (green) player marker no longer stops the bot, returns it to the city or blocks an attack on every route of this profile. The path-level option works independently. Direct player targets stay blocked."/>
+                                        <CheckBox Content="Ignore Empire players (yellow)"
+                                                  IsChecked="{Binding IgnoreEmpirePlayers}" Margin="2" VerticalAlignment="Center"
+                                                  ToolTip="Profile-level: an Empire (yellow) player marker no longer stops the bot, returns it to the city or blocks an attack on every route of this profile. The path-level option works independently. Direct player targets stay blocked."/>
+                                    </StackPanel>
 
                                     <Label Grid.Row="3" Grid.Column="0" Content="Teleport Key:"/>
                                     <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding TeleportKey, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="2" HorizontalAlignment="Left"/>

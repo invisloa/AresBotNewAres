@@ -362,7 +362,10 @@ namespace DriverScanTester.Tests
         [Fact]
         public async Task ActionStuckAndNoProgressDetectionUseTheSameFailureAccounting()
         {
-            // ── Action-based detector: 2 idle samples while W is held ──
+            // ── Action-based detector: idle samples covering the 200 ms debounce window ──
+            // The waypoint is OnlyMove, so the movement host runs the fast 50 ms tick and
+            // the detector needs 4 consecutive idle samples (4 × 50 ms = 200 ms) — the same
+            // wall-clock window as the legacy 2 × 100 ms.
             var actionLines = new List<string>();
             var actionSimulation = new SimulatedGameMemory { Action = 25 };
             var actionTarget = new Waypoint(
@@ -375,8 +378,11 @@ namespace DriverScanTester.Tests
             IgnoreStuckUntilField.SetValue(actionMovement, DateTime.Now.AddSeconds(-1));
             InitialHeadingAlignmentField.SetValue(actionMovement, false);
 
-            await actionMovement.Update(CancellationToken.None); // first idle sample
-            await actionMovement.Update(CancellationToken.None); // confirmed ActionStuck
+            await actionMovement.Update(CancellationToken.None); // idle sample 1/4
+            await actionMovement.Update(CancellationToken.None); // idle sample 2/4
+            await actionMovement.Update(CancellationToken.None); // idle sample 3/4
+            Assert.Equal(0, GetStuckCount(actionMovement));
+            await actionMovement.Update(CancellationToken.None); // idle sample 4/4 — confirmed ActionStuck
 
             Assert.Equal(1, GetStuckCount(actionMovement));
             Assert.True(IsRecoveryActive(actionMovement));

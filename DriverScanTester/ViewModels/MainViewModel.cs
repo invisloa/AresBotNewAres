@@ -747,7 +747,8 @@ namespace DriverScanTester.ViewModels
             {
                 _lootSystem = new LootSystem(memoryService, AppendBotLog, GetSharedCameraControllerForLoot())
                 {
-                    AutomaticLootDisabled = disableAllLootByPath
+                    AutomaticLootDisabled = disableAllLootByPath,
+                    ShouldIgnoreOtherPlayerMarker = ShouldIgnoreDetectedPlayerMarker
                 };
                 _lootSystem.ShouldStopOnOtherPlayerMarker = () => StopOnOtherPlayerDetected;
                 Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 0);
@@ -776,6 +777,16 @@ namespace DriverScanTester.ViewModels
 
             StartGameConnectionMonitor();
         }
+
+        /// <summary>
+        /// Live other-player ignore policy for the standalone loot systems: the active
+        /// waypoint's path-level flags (Ignore Alliance / Ignore Empire saved in the path
+        /// file) combined with the global runtime options of the bot window. Falls back to
+        /// the global policy when no movement system is running.
+        /// </summary>
+        private bool ShouldIgnoreDetectedPlayerMarker(PlayerMarkerCandidate candidate)
+            => _movementSystem?.ShouldIgnoreOtherPlayerMarker(candidate)
+               ?? OtherPlayerIgnoreSettings.ShouldIgnore(candidate);
 
         private void HandleStandalonePlayerMarkerDetected(GameMemoryService memoryService, BotProfile profile)
         {
@@ -4603,6 +4614,7 @@ namespace DriverScanTester.ViewModels
                                 Interlocked.Exchange(ref _gameFailureStopHandled, 0);
                             _lootSystem = new LootSystem(memoryService, AppendBotLog, sharedCameraController);
                             _lootSystem.ShouldStopOnOtherPlayerMarker = () => StopOnOtherPlayerDetected;
+                            _lootSystem.ShouldIgnoreOtherPlayerMarker = ShouldIgnoreDetectedPlayerMarker;
                             Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 0);
                             _lootSystem.OtherPlayerMarkerDetected =
                                 () => HandleStandalonePlayerMarkerDetected(memoryService, profile);
@@ -4671,7 +4683,7 @@ namespace DriverScanTester.ViewModels
                                 break;
                             }
 
-                            await PauseController.PausableDelayAsync(100, token); // Update rate
+                            await PauseController.PausableDelayAsync(movementForTask.TickIntervalMs, token); // Update rate (50 ms in OnlyMove)
                         }
                     }
                     catch (TaskCanceledException) { }

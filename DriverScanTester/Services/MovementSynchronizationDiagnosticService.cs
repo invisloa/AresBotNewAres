@@ -2042,7 +2042,7 @@ namespace DriverScanTester.Services
                         break;
                     }
 
-                    await Task.Delay(BotConstants.Delays.PathRunnerTickMs, token).ConfigureAwait(false);
+                    await Task.Delay(movement.TickIntervalMs, token).ConfigureAwait(false);
                 }
             }
             finally

@@ -154,6 +154,8 @@ namespace DriverScanTester.ViewModels
                     OnPropertyChanged(nameof(DryRunRepot));
                     OnPropertyChanged(nameof(LootPriority));
                     OnPropertyChanged(nameof(DisableAllLoot));
+                    OnPropertyChanged(nameof(IgnoreAlliancePlayers));
+                    OnPropertyChanged(nameof(IgnoreEmpirePlayers));
                     OnPropertyChanged(nameof(LootPriorityEditable));
                     OnPropertyChanged(nameof(TeleportKey));
                     OnPropertyChanged(nameof(TeleportScanCode));
@@ -283,6 +285,40 @@ namespace DriverScanTester.ViewModels
         /// the control is disabled visually, but the saved value is not modified.
         /// </summary>
         public bool LootPriorityEditable => !DisableAllLoot;
+
+        /// <summary>
+        /// Profile-level policy: when true, Alliance (green) player markers no longer stop the
+        /// bot, return it to the city or block attacks on every route of this profile.
+        /// </summary>
+        public bool IgnoreAlliancePlayers
+        {
+            get => CurrentProfile?.IgnoreAlliancePlayers ?? false;
+            set
+            {
+                if (CurrentProfile == null || CurrentProfile.IgnoreAlliancePlayers == value)
+                    return;
+
+                CurrentProfile.IgnoreAlliancePlayers = value;
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>
+        /// Profile-level policy: when true, Empire (yellow) player markers no longer stop the
+        /// bot, return it to the city or block attacks on every route of this profile.
+        /// </summary>
+        public bool IgnoreEmpirePlayers
+        {
+            get => CurrentProfile?.IgnoreEmpirePlayers ?? false;
+            set
+            {
+                if (CurrentProfile == null || CurrentProfile.IgnoreEmpirePlayers == value)
+                    return;
+
+                CurrentProfile.IgnoreEmpirePlayers = value;
+                OnPropertyChanged();
+            }
+        }
 
         public int TeleportKey
         {
@@ -496,6 +532,8 @@ namespace DriverScanTester.ViewModels
                 DryRunRepot = false,
                 LootPriority = false,
                 DisableAllLoot = false,
+                IgnoreAlliancePlayers = false,
+                IgnoreEmpirePlayers = false,
                 TeleportKey = BotConstants.Workflow.DefaultTeleportKey,
                 TeleportScanCode = BotConstants.Workflow.DefaultTeleportScanCode,
                 MaxTeleportRetries = BotConstants.Repot.MaxTeleportRetries,

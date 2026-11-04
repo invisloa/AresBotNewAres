@@ -270,6 +270,7 @@ namespace DriverScanTester.Services
         private const int OtherPlayerMarkerRequiredChecks = 3;
         private readonly PlayerMarkerPixelDetector _playerMarkerPixelDetector = new();
         private bool _otherPlayerMarkerWasVisible;
+        private string _ignoredPlayerMarkerFaction = string.Empty;
         private bool _playerMarkerConfirmationPending;
         private int _playerMarkerChecksConfirmed;
         private DateTime _playerMarkerCandidateDetectedAt = DateTime.MinValue;
@@ -770,6 +771,17 @@ namespace DriverScanTester.Services
         public Func<bool>? ShouldStopOnOtherPlayerMarker { get; set; }
 
         /// <summary>
+        /// Optional live faction-ignore policy. When it returns true for a detected marker,
+        /// that marker does not trigger the stop/return-to-city behavior (and no repeated
+        /// diagnostic screenshots are written for it). Null uses the process-wide
+        /// <see cref="OtherPlayerIgnoreSettings"/> policy set from the bot window.
+        /// </summary>
+        public Func<PlayerMarkerCandidate, bool>? ShouldIgnoreOtherPlayerMarker { get; set; }
+
+        private bool IsIgnoredOtherPlayerMarker(PlayerMarkerCandidate candidate)
+            => (ShouldIgnoreOtherPlayerMarker ?? OtherPlayerIgnoreSettings.ShouldIgnore)(candidate);
+
+        /// <summary>
         /// Runs the confirmed-marker safety behavior for a marker detected outside the
         /// periodic loot scan — the MovementSystem attack-start player-pixel check. The
         /// caller has already saved the annotated diagnostic screenshot.
@@ -779,6 +791,13 @@ namespace DriverScanTester.Services
             _log($"[PlayerPixels] {source}: other-player marker detected — " +
                  $"{candidate.Faction} bounds={FormatRectangle(candidate.Bounds)} " +
                  $"pixels={candidate.PixelCount} fill={candidate.FillRatio:P0} aspect={candidate.AspectRatio:F2}.");
+            if (IsIgnoredOtherPlayerMarker(candidate))
+            {
+                _log($"[PlayerPixels] {candidate.Faction} faction is ignored by the other-player ignore option; " +
+                     "continuing normally.");
+                return;
+            }
+
             if (ShouldStopOnOtherPlayerMarker?.Invoke() ?? true)
             {
                 try
@@ -3938,8 +3957,27 @@ namespace DriverScanTester.Services
                 if (!candidateVisible)
                 {
                     _otherPlayerMarkerWasVisible = false;
+                    _ignoredPlayerMarkerFaction = string.Empty;
                     return;
                 }
+
+                if (IsIgnoredOtherPlayerMarker(candidate))
+                {
+                    // A faction the host asked to ignore never enters the confirmation
+                    // pipeline: no stop, no repeated diagnostic screenshots. The ignore is
+                    // logged once per faction while the marker stays on screen.
+                    ResetPlayerMarkerConfirmation();
+                    if (!string.Equals(_ignoredPlayerMarkerFaction, candidate.Faction, StringComparison.Ordinal))
+                    {
+                        _ignoredPlayerMarkerFaction = candidate.Faction;
+                        _log($"[PlayerPixels] {DescribePlayerMarkerCandidate(candidate)} belongs to an ignored " +
+                             "faction; no stop/return-to-city response.");
+                    }
+
+                    return;
+                }
+
+                _ignoredPlayerMarkerFaction = string.Empty;
                 if (_otherPlayerMarkerWasVisible)
                     return;
 
@@ -3994,6 +4032,14 @@ namespace DriverScanTester.Services
                 {
                     _log($"[PlayerPixels] Candidate disappeared during check " +
                          $"{_playerMarkerChecksConfirmed + 1}/{OtherPlayerMarkerRequiredChecks}; continuing normally.");
+                    ResetPlayerMarkerConfirmation();
+                    return false;
+                }
+
+                if (IsIgnoredOtherPlayerMarker(confirmedCandidate))
+                {
+                    _log($"[PlayerPixels] {DescribePlayerMarkerCandidate(confirmedCandidate)} belongs to an " +
+                         "ignored faction; confirmation cancelled without a stop/return-to-city response.");
                     ResetPlayerMarkerConfirmation();
                     return false;
                 }
