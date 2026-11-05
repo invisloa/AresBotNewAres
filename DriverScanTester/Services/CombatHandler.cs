@@ -418,7 +418,7 @@ namespace DriverScanTester.Services
                 if (killedSinceLastEvaluation ||
                     (DateTime.Now - _lastMoveModeTabTime).TotalSeconds >= MOVE_MODE_TAB_INTERVAL_SECONDS)
                 {
-                    _log("[Key] TAB (target cycle — move mode)");
+                    _log("[Combat] TAB target-cycle requested (move mode).");
                     _lastMoveModeTabTime = DateTime.Now;
                     return killedSinceLastEvaluation ? CombatAction.TabAfterKill : CombatAction.TabTarget;
                 }

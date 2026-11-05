@@ -924,7 +924,11 @@ namespace DriverScanTester.Services
                                          (_pinkScanRequested || _pinkScanOwnsCameraCursor ||
                                           _pinkRescanActive || _isCollecting ||
                                           _lootState == LootMachineState.PinkScan);
-                if (pinkOwnsTargeting)
+                bool mandatoryLootOwnsTargeting = !_automaticLootDisabled &&
+                    _activeMandatoryLootRequest != null &&
+                    (_activeMandatoryLootRequest.State == LootRequestState.Pending ||
+                     _activeMandatoryLootRequest.State == LootRequestState.Running);
+                if (pinkOwnsTargeting || _lootScanCameraOwned || mandatoryLootOwnsTargeting)
                     return false;
                 action();
                 return true;

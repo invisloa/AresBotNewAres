@@ -463,6 +463,8 @@ namespace DriverScanTester.Services
         // combat until the route has advanced beyond that waypoint and 15 seconds have elapsed.
         private const int CombatGateTargetReleaseMaximumClicks = 2;
         private const int CombatGateTargetReleaseRetryDelayMs = 200;
+        private const int PostKillTargetReleaseMaximumClicks = 2;
+        private const int PostKillTargetReleaseRetryDelayMs = 200;
         private const int CombatGateTargetSuppressionSeconds = 15;
         private int _combatGateSuppressedTargetId;
         private Waypoint _combatGateSuppressedWaypoint;
@@ -1436,8 +1438,16 @@ namespace DriverScanTester.Services
         private const short CombatRetargetVeryLowCameraDistance = BotConstants.Camera.CombatRetargetVeryLowDistance;
         private const short CombatRetargetLowCameraDistance = BotConstants.Camera.CombatRetargetLowDistance;
         private const short CombatRetargetMidCameraDistance = BotConstants.Camera.CombatRetargetMidDistance;
+        private const int CombatRetargetCameraMaximumAttempts = 3;
         private CombatRetargetCameraStage _combatRetargetCameraStage = CombatRetargetCameraStage.None;
         private bool _combatRetargetAwaitingSelection = false;
+        private int _combatRetargetCameraFailureAttempts;
+        private bool _combatRetargetFailed;
+        private long _postKillRetargetRequestId;
+        private int _postKillTargetReleaseId;
+        private int _postKillTargetReleaseAttempts;
+        private bool _postKillTargetReleaseRefusalLogged;
+        private DateTime _postKillTargetReleaseRetryAtUtc = DateTime.MinValue;
         private bool _postKillCloseTargetCheckPending;
         private int _postKillTargetIdBeforeTab;
         private bool _postPinkScanTargetCheckPending;
@@ -1563,6 +1573,7 @@ namespace DriverScanTester.Services
             if (!IsAutomaticLootDisabled)
                 return;
 
+            bool resumePostKillSearchWithoutLoot = _postKillRetargetRequestId > 0;
             CancelCombatGateWaypointReturn("automatic loot disabled by profile/path policy");
 
             if (_combatRecoveryMovementAuthorized)
@@ -1579,7 +1590,23 @@ namespace DriverScanTester.Services
             _pinkScanHoldSince = DateTime.MinValue;
             _pinkScanHoldTimedOut = false;
             _postPinkScanTargetCheckPending = false;
-            _postKillCloseTargetCheckPending = false;
+            if (resumePostKillSearchWithoutLoot)
+            {
+                _postKillRetargetRequestId = 0;
+                _postKillTargetReleaseId = 0;
+                _postKillTargetReleaseAttempts = 0;
+                _postKillTargetReleaseRetryAtUtc = DateTime.MinValue;
+                if (MobGroupingController.IsSupportedCombatMode(CurrentMode))
+                {
+                    _log("[CombatRetarget] Automatic loot disabled while waiting for PostKill — continuing without a loot wait.");
+                    StartCombatRetargetSearch();
+                }
+                else
+                {
+                    _postKillCloseTargetCheckPending = false;
+                    _postKillTargetIdBeforeTab = 0;
+                }
+            }
         }
 
         /// <summary>
@@ -1713,7 +1740,19 @@ namespace DriverScanTester.Services
         {
             if (IsAutomaticLootDisabled)
             {
+                bool resumePostKillSearchWithoutLoot = _postKillRetargetRequestId > 0;
                 ReleaseLootBarrierForDisabledPolicy("automatic loot disabled by profile/path policy");
+                if (resumePostKillSearchWithoutLoot)
+                {
+                    _postKillRetargetRequestId = 0;
+                    _postKillTargetReleaseId = 0;
+                    _postKillTargetReleaseAttempts = 0;
+                    _postKillTargetReleaseRetryAtUtc = DateTime.MinValue;
+                    if (MobGroupingController.IsSupportedCombatMode(CurrentMode))
+                        StartCombatRetargetSearch();
+                    else
+                        ResetPostKillRetargetState();
+                }
                 return;
             }
 
@@ -1726,6 +1765,26 @@ namespace DriverScanTester.Services
                     _lootBarrier.Abandon($"mode changed to {CurrentMode}");
                     SetLootNavigationBarrierHoldsInput(false);
                     _log($"[LootBarrier] Released — mode changed to {CurrentMode}; no mandatory loot applies.");
+                }
+                bool combatModeStillAllowed = MobGroupingController.IsSupportedCombatMode(CurrentMode);
+                if (!combatModeStillAllowed &&
+                    (_postKillRetargetRequestId > 0 || _postKillTargetReleaseId > 0 ||
+                     _combatRetargetCameraStage != CombatRetargetCameraStage.None ||
+                     _postKillCloseTargetCheckPending))
+                {
+                    ResetPostKillRetargetState();
+                }
+                else if (combatModeStillAllowed &&
+                         (_postKillRetargetRequestId > 0 || _postKillTargetReleaseId > 0))
+                {
+                    // MA has no mandatory normal scan, but combat remains allowed. Drop
+                    // the obsolete request context and continue the close-first search.
+                    _postKillRetargetRequestId = 0;
+                    _postKillTargetReleaseId = 0;
+                    _postKillTargetReleaseAttempts = 0;
+                    _postKillTargetReleaseRetryAtUtc = DateTime.MinValue;
+                    if (_combatRetargetCameraStage == CombatRetargetCameraStage.None)
+                        StartCombatRetargetSearch();
                 }
                 return;
             }
@@ -1756,6 +1815,8 @@ namespace DriverScanTester.Services
             {
                 SetLootNavigationBarrierHoldsInput(true);
                 _lootBarrier.Fail("loot system disappeared while the obligation was pending");
+                if (_postKillRetargetRequestId == requestId)
+                    ResetPostKillRetargetState();
                 return;
             }
 
@@ -1763,6 +1824,8 @@ namespace DriverScanTester.Services
             {
                 SetLootNavigationBarrierHoldsInput(true);
                 _lootBarrier.Fail($"request {requestId} status unavailable");
+                if (_postKillRetargetRequestId == requestId)
+                    ResetPostKillRetargetState();
                 return;
             }
 
@@ -1772,6 +1835,8 @@ namespace DriverScanTester.Services
             {
                 SetLootNavigationBarrierHoldsInput(false);
                 _lootBarrierBlockedLogged = false;
+                if (status.Reason == LootBarrierReason.PostKill)
+                    _log($"[LootBarrier] PostKill completed request={requestId} cameraVerified={status.CameraVerified}");
                 _log($"[LootBarrier] Completed request={requestId} items={status.ItemsCollected}; " +
                      $"Navigation released — resuming waypoint {DescribeCurrentWaypoint()}.");
             }
@@ -1787,6 +1852,8 @@ namespace DriverScanTester.Services
                 SetLootNavigationBarrierHoldsInput(true);
                 StopMoving();
                 ReleaseSkillThree();
+                if (_postKillRetargetRequestId == requestId)
+                    ResetPostKillRetargetState();
                 if (!_lootBarrierFailureLogged)
                 {
                     _lootBarrierFailureLogged = true;
@@ -2315,6 +2382,187 @@ namespace DriverScanTester.Services
             clickAttempted = localClickAttempted;
             failure = localFailure;
             return clickSent;
+        }
+
+        /// <summary>
+        /// Releases the killed target without invoking CombatGate's return handoff. The
+        /// cursor ownership gate, client-area centre and physical cursor verification are
+        /// shared with CombatGate, but this click has no route-recovery side effects.
+        /// </summary>
+        private bool TryClickPostKillClientCenter(
+            CancellationToken token,
+            out bool clickWasSent,
+            out string failure)
+        {
+            clickWasSent = false;
+            failure = string.Empty;
+            bool clickCompleted = false;
+            bool localClickWasSent = false;
+            string localFailure = string.Empty;
+
+            lock (_inputLock)
+            {
+                if (token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
+                {
+                    failure = "bot stopped or operation cancelled";
+                    return false;
+                }
+
+                bool cursorActionRan = TryRunMovementCursorAction(() =>
+                {
+                    if (token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
+                    {
+                        localFailure = "bot stopped or operation cancelled";
+                        return;
+                    }
+
+                    if (!TryResolveCombatGateClientArea(
+                            out nint hwnd, out int clientLeft, out int clientTop,
+                            out int clientWidth, out int clientHeight))
+                    {
+                        localFailure = "game client is unavailable or not foreground";
+                        return;
+                    }
+
+                    int centerX = clientLeft + clientWidth / 2;
+                    int centerY = clientTop + clientHeight / 2;
+                    bool leftDownAttempted = false;
+                    bool leftDownCompleted = false;
+                    bool leftUpCompleted = false;
+                    try
+                    {
+                        MoveCombatGateMouseCursor(centerX, centerY);
+                        if (!TryGetCombatGateCursorPosition(out int cursorX, out int cursorY) ||
+                            cursorX != centerX || cursorY != centerY)
+                        {
+                            localFailure = "cursor did not reach game client center";
+                            return;
+                        }
+
+                        if (token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
+                        {
+                            localFailure = "bot stopped or operation cancelled";
+                            return;
+                        }
+                        if (!IsCombatGateClientForeground(hwnd))
+                        {
+                            localFailure = "game client lost foreground before click";
+                            return;
+                        }
+
+                        leftDownAttempted = true;
+                        SendCombatGateMouseEvent(MouseOperations.MouseEventFlags.LeftDown);
+                        leftDownCompleted = true;
+                        Thread.Sleep(50);
+                    }
+                    catch (Exception ex)
+                    {
+                        localFailure = $"left-click input failed: {ex.Message}";
+                    }
+                    finally
+                    {
+                        if (leftDownAttempted)
+                        {
+                            try
+                            {
+                                SendCombatGateMouseEvent(MouseOperations.MouseEventFlags.LeftUp);
+                                leftUpCompleted = true;
+                            }
+                            catch (Exception ex)
+                            {
+                                localFailure = string.IsNullOrEmpty(localFailure)
+                                    ? $"left-button release failed: {ex.Message}"
+                                    : $"{localFailure}; left-button release failed: {ex.Message}";
+                                try
+                                {
+                                    SendCombatGateMouseEvent(MouseOperations.MouseEventFlags.LeftUp);
+                                    leftUpCompleted = true;
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+
+                    localClickWasSent = leftDownCompleted;
+                    clickCompleted = leftDownCompleted && leftUpCompleted;
+                });
+
+                if (!cursorActionRan)
+                    localFailure = "mouse cursor is owned by the loot workflow";
+            }
+
+            clickWasSent = localClickWasSent;
+            failure = localFailure;
+            return clickCompleted;
+        }
+
+        private void ProcessPostKillTargetRelease(CancellationToken token)
+        {
+            int targetId = _postKillTargetReleaseId;
+            if (targetId <= 0)
+                return;
+
+            if (token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
+                return;
+
+            int selectedTargetId = _memoryService.GetSelectedTargetId();
+            if (selectedTargetId != targetId)
+            {
+                _postKillTargetReleaseId = 0;
+                _postKillTargetReleaseAttempts = 0;
+                _postKillTargetReleaseRetryAtUtc = DateTime.MinValue;
+                return;
+            }
+
+            if (_postKillTargetReleaseRetryAtUtc != DateTime.MinValue &&
+                DateTime.UtcNow < _postKillTargetReleaseRetryAtUtc)
+                return;
+
+            if (_postKillTargetReleaseAttempts >= PostKillTargetReleaseMaximumClicks)
+            {
+                _log($"[PostKillTarget] LeftClick release failed target={targetId} after {PostKillTargetReleaseMaximumClicks} attempts; loot obligation preserved.");
+                _postKillTargetReleaseId = 0;
+                _postKillTargetReleaseAttempts = 0;
+                _postKillTargetReleaseRetryAtUtc = DateTime.MinValue;
+                return;
+            }
+
+            TryClickPostKillClientCenter(token, out bool clickWasSent, out string clickFailure);
+            if (!clickWasSent)
+            {
+                // Focus loss / loot cursor ownership / unverified cursor are NOT clicks:
+                // defer to the next tick and report the reason only once per episode.
+                if (!_postKillTargetReleaseRefusalLogged)
+                {
+                    _postKillTargetReleaseRefusalLogged = true;
+                    string detail = string.IsNullOrEmpty(clickFailure) ? "click not sent" : clickFailure;
+                    _log($"[PostKillTarget] LeftClick deferred target={targetId} — {detail}; retrying next tick.");
+                }
+                return;
+            }
+
+            _postKillTargetReleaseRefusalLogged = false;
+            _postKillTargetReleaseAttempts++;
+            int targetAfterClick = _memoryService.GetSelectedTargetId();
+            if (targetAfterClick != targetId)
+            {
+                _log("[PostKillTarget] LeftClick center — release verified");
+                _postKillTargetReleaseId = 0;
+                _postKillTargetReleaseAttempts = 0;
+                _postKillTargetReleaseRetryAtUtc = DateTime.MinValue;
+                return;
+            }
+
+            if (_postKillTargetReleaseAttempts >= PostKillTargetReleaseMaximumClicks)
+            {
+                _log($"[PostKillTarget] LeftClick release failed target={targetId} after {PostKillTargetReleaseMaximumClicks} attempts; loot obligation preserved.");
+                _postKillTargetReleaseId = 0;
+                _postKillTargetReleaseAttempts = 0;
+                _postKillTargetReleaseRetryAtUtc = DateTime.MinValue;
+                return;
+            }
+
+            _postKillTargetReleaseRetryAtUtc = DateTime.UtcNow.AddMilliseconds(PostKillTargetReleaseRetryDelayMs);
         }
 
         private void UpdateCombatGateTargetSuppression(float playerX, float playerY)
@@ -3290,7 +3538,9 @@ namespace DriverScanTester.Services
             {
                 CancelMobGrouping("ReportAndGoBack/teleport transition");
                 if (_isMovingForward || _isSkillThreeHeld || _isUnstuckRoutineActive ||
-                    _reverseDiagonalRecovery.IsActive || _consecutiveStuckAttempts != 0)
+                    _reverseDiagonalRecovery.IsActive || _consecutiveStuckAttempts != 0 ||
+                    _postKillRetargetRequestId > 0 || _postKillTargetReleaseId > 0 ||
+                    _combatRetargetCameraStage != CombatRetargetCameraStage.None)
                 {
                     ResetStuckAndUnstuckState("report-and-go-back-active");
                     _log($"[Tick {_tickCount}] ReportAndGoBack active — old route/unstuck discarded, movement held for coordinator Repot.");
@@ -3675,6 +3925,23 @@ namespace DriverScanTester.Services
             BotMode currentMode = BotMode.OnlyMove;
             float manhattanDistanceToTarget = 0f;
 
+            // Refresh and release a killed target before standby bounds or ordinary
+            // combat evaluation can issue input. This path deliberately does not use the
+            // CombatGate release helper, whose click reserves a route-return handoff.
+            RefreshLootBarrier();
+            if (_postKillTargetReleaseId > 0)
+            {
+                ProcessPostKillTargetRelease(token);
+                return;
+            }
+
+            if (_finalStandbyActive && _lootBarrier.IsBlockingNavigation &&
+                !confirmedMonsterTarget && !_combatGateReturnActive)
+            {
+                if (await HoldNavigationForMandatoryLootAsync(token))
+                    return;
+            }
+
             // ── Final-waypoint standby ──
             // When the path is complete, the bot stays at the final waypoint.
             // Attack modes keep fighting/looting within the AtkDis boundary.
@@ -3794,118 +4061,16 @@ namespace DriverScanTester.Services
 
                 bool canUseCombatRetargetSearch = currentMode == BotMode.MoveAndAttack || currentMode == BotMode.MoveAndAttackAndLoot;
                 if (!canUseCombatRetargetSearch)
-                {
                     ClearCombatRetargetSearch();
-                }
 
-                short cameraDistanceToApply = currentWaypoint.CameraDistanceLock;
-                if (canUseCombatRetargetSearch && _combatRetargetCameraStage != CombatRetargetCameraStage.None)
-                {
-                    cameraDistanceToApply = GetCombatRetargetCameraDistance();
-                }
-
-                // While the loot system is mid-cycle (MoveAndAttackAndLoot, the MoveAndAttack
-                // SOD/SOP pink scan, or the delayed SOD/SOP rescan), do NOT override the camera:
-                // the pixel scan needs its zoomed view to detect drops. Camera distance is
-                // restored before target cycling resumes.
+                // While the loot system owns the camera, preserve its scan view. An active
+                // retarget stage applies its own verified distance at the shared combat point.
                 bool lootScanning = !IsAutomaticLootDisabled &&
-                                    (currentMode == BotMode.MoveAndAttackAndLoot ||
-                                     currentMode == BotMode.MoveAndAttack) &&
+                                    canUseCombatRetargetSearch &&
                                     LootSystemRef != null &&
                                     (LootSystemRef.IsLootCycleActive || LootSystemRef.IsPinkRescanActive);
-                if (!lootScanning)
-                    TryApplyMovementCameraDistance(cameraDistanceToApply);
-
-                if (canUseCombatRetargetSearch && _combatRetargetCameraStage != CombatRetargetCameraStage.None &&
-                    (IsAutomaticLootDisabled || LootSystemRef?.IsPinkRescanActive != true))
-                {
-                    if (confirmedMonsterTarget &&
-                        (!_postKillCloseTargetCheckPending || targetId != _postKillTargetIdBeforeTab))
-                    {
-                        // A confirmed monster is selected at the retarget camera: let the
-                        // ordinary combat pipeline acquire/attack it on the next tick.
-                        _log($"[CombatRetarget] Confirmed monster selected at camera {cameraDistanceToApply}. Resuming normal combat.");
-                        ClearCombatRetargetSearch();
-                    }
-                    else if (!_combatRetargetAwaitingSelection)
-                    {
-                        ReleaseSkillThree();
-                        _log($"[CombatRetarget] Camera -> {cameraDistanceToApply}, TAB");
-                        if (!await PressTargetTabAfterCameraSettle(token))
-                            return;
-                        _combatRetargetAwaitingSelection = true;
-                        await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
-                        return;
-                    }
-                    else if (_postKillCloseTargetCheckPending)
-                    {
-                        if (IsAutomaticLootDisabled)
-                        {
-                            // The close-camera TAB is combat retargeting, not loot. With
-                            // automatic loot disabled there is no SOD/SOP scan to run:
-                            // continue the ordinary retarget ladder instead of pausing.
-                            _postKillCloseTargetCheckPending = false;
-                            _combatRetargetCameraStage = CombatRetargetCameraStage.LowSearch;
-                            _combatRetargetAwaitingSelection = false;
-                            _log("[CombatRetarget] No close mob selected — automatic loot disabled, continuing retarget search.");
-                            if (!TryApplyMovementCameraDistance(CombatRetargetLowCameraDistance))
-                                return;
-                            ReleaseSkillThree();
-                            if (!await PressTargetTabAfterCameraSettle(token))
-                                return;
-                            _combatRetargetAwaitingSelection = true;
-                            await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
-                            return;
-                        }
-
-                        _log($"[CombatRetarget] No close mob selected at {CombatRetargetVeryLowCameraDistance} — starting SOD/SOP loot scan.");
-                        ReleaseSkillThree();
-                        ClearCombatRetargetSearch();
-                        LootSystemRef?.RequestPinkScan();
-                        await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
-                        return;
-                    }
-                    else if (_combatRetargetCameraStage == CombatRetargetCameraStage.VeryLowSearch)
-                    {
-                        _log($"[CombatRetarget] No mob selected at {CombatRetargetVeryLowCameraDistance}. Retrying at {CombatRetargetLowCameraDistance}.");
-                        _combatRetargetCameraStage = CombatRetargetCameraStage.LowSearch;
-                        _combatRetargetAwaitingSelection = false;
-
-                        if (!TryApplyMovementCameraDistance(CombatRetargetLowCameraDistance))
-                            return;
-                        ReleaseSkillThree();
-                        _log($"[CombatRetarget] Camera -> {CombatRetargetLowCameraDistance}, TAB");
-                        if (!await PressTargetTabAfterCameraSettle(token))
-                            return;
-                        _combatRetargetAwaitingSelection = true;
-                        await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
-                        return;
-                    }
-                    else if (_combatRetargetCameraStage == CombatRetargetCameraStage.LowSearch)
-                    {
-                        _log($"[CombatRetarget] No mob selected at {CombatRetargetLowCameraDistance}. Retrying at {CombatRetargetMidCameraDistance}.");
-                        _combatRetargetCameraStage = CombatRetargetCameraStage.MidSearch;
-                        _combatRetargetAwaitingSelection = false;
-
-                        if (!TryApplyMovementCameraDistance(CombatRetargetMidCameraDistance))
-                            return;
-                        ReleaseSkillThree();
-                        _log($"[CombatRetarget] Camera -> {CombatRetargetMidCameraDistance}, TAB");
-                        if (!await PressTargetTabAfterCameraSettle(token))
-                            return;
-                        _combatRetargetAwaitingSelection = true;
-                        await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
-                        return;
-                    }
-                    else
-                    {
-                        _log($"[CombatRetarget] No mob selected at {CombatRetargetMidCameraDistance}. Restoring camera to {currentWaypoint.CameraDistanceLock}.");
-                        TryApplyMovementCameraDistance(currentWaypoint.CameraDistanceLock);
-                        ClearCombatRetargetSearch();
-                        await Task.Delay(BotConstants.Delays.CombatAttackWaitMs, token);
-                        return;
-                    }
-                }
+                if (!lootScanning && _combatRetargetCameraStage == CombatRetargetCameraStage.None)
+                    TryApplyMovementCameraDistance(currentWaypoint.CameraDistanceLock);
 
             }
 
@@ -3935,6 +4100,10 @@ namespace DriverScanTester.Services
                 _combatGateSuppressionSelectionHandled = false;
             }
 
+            // Refresh here (before combat evaluation and target cycling) so a newly
+            // created or completed request is visible to retargeting on this same tick.
+            RefreshLootBarrier();
+
             // The delayed SOD/SOP sweep owns the zoomed camera and cursor. Let any
             // current attack finish, but do not run target cycling while the camera is
             // at loot distance; resume watchdog timing after the sweep is done.
@@ -3950,6 +4119,27 @@ namespace DriverScanTester.Services
                 return;
             }
             _combatHandler.ResumeAfterExternalMovement();
+
+            if (await HandlePostKillRetargetRequestAsync(token))
+                return;
+
+            if (_combatRetargetCameraStage != CombatRetargetCameraStage.None)
+            {
+                bool retargetMonsterSelected = IsCurrentCombatRetargetMonsterSelected();
+                if (_lootBarrier.IsBlockingNavigation && !retargetMonsterSelected)
+                {
+                    if (_combatGateReturnActive &&
+                        await TickCombatGateWaypointReturnUnderLootBarrierAsync(
+                            currX, currY, confirmedMonsterTarget, targetId, token))
+                        return;
+                    if (await HoldNavigationForMandatoryLootAsync(token))
+                        return;
+                }
+
+                short restoreCameraDistance = GetRetargetRestoreCameraDistance();
+                if (await HandleCombatRetargetCameraStageAsync(currentMode, restoreCameraDistance, token))
+                    return;
+            }
 
             // After the post-kill pink check, restore the waypoint's normal camera
             // distance before looking for another target. A delayed rescan can postpone
@@ -4044,7 +4234,15 @@ namespace DriverScanTester.Services
 
             RefreshLootBarrier();
 
+            if (combatAction == CombatAction.TabTarget &&
+                _lootBarrier.HasTerminalFailure &&
+                _lootBarrier.Reason == LootBarrierReason.PostKill)
+                combatAction = CombatAction.None;
+
             if (ShouldSuppressPeriodicTargetCycle(combatAction))
+                combatAction = CombatAction.None;
+
+            if (combatAction == CombatAction.TabTarget && _combatRetargetFailed)
                 combatAction = CombatAction.None;
 
             if (combatAction == CombatAction.TabTarget && IsCombatGateTargetSuppressionActive)
@@ -4092,24 +4290,66 @@ namespace DriverScanTester.Services
                     // Explicit kill signal — arm/refresh the mandatory obligation before
                     // any retarget TAB. Consecutive kills coalesce into the same request.
                     ArmMandatoryLootBarrier(LootBarrierReason.PostKill);
+                    if (CurrentMode == BotMode.MoveAndAttackAndLoot)
+                    {
+                        _postKillCloseTargetCheckPending = true;
+                        _postKillTargetIdBeforeTab = targetId;
+                        ReleaseSkillThree();
+                        StopMoving();
+
+                        if (!IsAutomaticLootDisabled)
+                        {
+                            long requestId = _lootBarrier.RequestId;
+                            LootSystem? loot = LootSystemRef;
+                            bool activePostKillRequest = requestId > 0 &&
+                                _lootBarrier.Reason == LootBarrierReason.PostKill &&
+                                (_lootBarrier.Phase == LootBarrierPhase.Pending ||
+                                 _lootBarrier.Phase == LootBarrierPhase.Running ||
+                                 _lootBarrier.Phase == LootBarrierPhase.Deferred) &&
+                                loot != null &&
+                                loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus requestStatus) &&
+                                requestStatus.Reason == LootBarrierReason.PostKill &&
+                                (requestStatus.State == LootRequestState.Pending ||
+                                 requestStatus.State == LootRequestState.Running ||
+                                 requestStatus.State == LootRequestState.Deferred);
+                            if (!activePostKillRequest)
+                            {
+                                // The failed barrier is intentionally left blocking. Never
+                                // bypass a missing/rejected loot obligation with a TAB.
+                                ResetPostKillRetargetState();
+                                _log($"[PostKillTarget] Mandatory request unavailable request={requestId}; retarget remains blocked.");
+                                return;
+                            }
+
+                            _postKillRetargetRequestId = requestId;
+                            _postKillTargetReleaseId = targetId > 0 ? targetId : 0;
+                            _postKillTargetReleaseAttempts = 0;
+                            _postKillTargetReleaseRefusalLogged = false;
+                            _postKillTargetReleaseRetryAtUtc = DateTime.MinValue;
+                            _log($"[PostKillTarget] Request={requestId} PreviousTarget={targetId}");
+                        }
+                        else
+                        {
+                            _postKillRetargetRequestId = 0;
+                            _postKillTargetReleaseId = 0;
+                            StartCombatRetargetSearch();
+                            _log("[CombatRetarget] PostKill with automatic loot disabled — starting close-first search.");
+                        }
+                        return;
+                    }
+
                     if (!IsAutomaticLootDisabled &&
                         currentMode == BotMode.MoveAndAttack && LootSystemRef?.PinkLootOnlyMode == true)
                     {
                         // First cycle TAB at the closest retarget camera. Keep fighting if
                         // that finds a nearby mob; only request the SOD/SOP scan when the
-                        // close-range check finds nothing.
+                        // close-range TAB finds none.
                         LootSystemRef.SchedulePinkRescanAfterKill();
                         _postKillCloseTargetCheckPending = true;
                         _postKillTargetIdBeforeTab = targetId;
                         StartCombatRetargetSearch();
-                        if (!TryApplyMovementCameraDistance(CombatRetargetVeryLowCameraDistance))
-                            return;
                         ReleaseSkillThree();
                         _log($"[CombatRetarget] Mob killed — checking for nearby mobs at {CombatRetargetVeryLowCameraDistance} before SOD/SOP loot scan.");
-                        if (!await PressTargetTabAfterCameraSettle(token))
-                            return;
-                        _combatRetargetAwaitingSelection = true;
-                        await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
                         return;
                     }
 
@@ -4125,18 +4365,10 @@ namespace DriverScanTester.Services
                     {
                         _log($"[CombatRetarget] Target lost after attack. Lowering camera to {CombatRetargetVeryLowCameraDistance}.");
                         StartCombatRetargetSearch();
-                        if (!TryApplyMovementCameraDistance(CombatRetargetVeryLowCameraDistance))
-                            return;
                         ReleaseSkillThree();
-                        _log($"[CombatRetarget] Camera -> {CombatRetargetVeryLowCameraDistance}, TAB");
-                        if (!await PressTargetTabAfterCameraSettle(token))
-                            return;
-                        _combatRetargetAwaitingSelection = true;
-                        await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
                         return;
                     }
 
-                    _log("[Key] TAB (target cycle)");
                     ReleaseSkillThree();
                     if (!TryPressTargetCycleKey())
                     {
@@ -5447,6 +5679,35 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// Combat-retarget variant of <see cref="TryApplyMovementCameraDistance"/>: the same
+        /// barrier/ownership gate plus a read-back verification of the physical write. The
+        /// result bounds the retarget camera retries so a failing write can never degrade
+        /// into a blind TAB at the wrong zoom.
+        /// </summary>
+        private bool TryApplyVerifiedMovementCameraDistance(short distance, out bool writeFailed)
+        {
+            writeFailed = false;
+            if (!IsAutomaticLootDisabled && _lootNavigationBarrierHoldsInput)
+                return false;
+
+            bool writeSucceeded = false;
+            void Apply() => writeSucceeded = _memoryService.TrySetCameraDistance(distance);
+
+            LootSystem? loot = LootSystemRef;
+            if (loot == null)
+            {
+                Apply();
+            }
+            else if (!loot.TryRunMovementCameraAction(Apply))
+            {
+                return false;
+            }
+
+            writeFailed = !writeSucceeded;
+            return writeSucceeded;
+        }
+
+        /// <summary>
         /// Extra player-pixel safety check performed once per newly selected attack target
         /// (right after TAB picked a target and the bot is about to start attacking):
         /// briefly zooms the camera out to the marker-scan distance, captures a fresh game
@@ -6586,7 +6847,7 @@ namespace DriverScanTester.Services
             ClearCombatGateTargetSuppression();
             _combatHandler.ResetState();
             _resumeCombatSkillAfterGrouping = false;
-            ClearCombatRetargetSearch();
+            ResetPostKillRetargetState();
             ReleaseSkillThree();
             StopMoving();
             // The teleport/map change invalidates the old camera context: the next route
@@ -6602,7 +6863,7 @@ namespace DriverScanTester.Services
             _attackSuppressedForCurrentWaypoint = false;
             _combatHandler.ResetState();
             _resumeCombatSkillAfterGrouping = false;
-            ClearCombatRetargetSearch();
+            ResetPostKillRetargetState();
             ReleaseSkillThree();
         }
 
@@ -7805,6 +8066,7 @@ namespace DriverScanTester.Services
         public void Stop()
         {
             Interlocked.Exchange(ref _stopRequested, 1);
+            ResetPostKillRetargetState();
             ClearCombatGateTargetSuppression();
             ReleaseStoppedInputs();
             void TryCleanup(Action cleanup, string action)
@@ -8159,26 +8421,284 @@ namespace DriverScanTester.Services
         {
             _combatRetargetCameraStage = CombatRetargetCameraStage.VeryLowSearch;
             _combatRetargetAwaitingSelection = false;
+            _combatRetargetCameraFailureAttempts = 0;
+            _combatRetargetFailed = false;
         }
 
-        private async Task<bool> PressTargetTabAfterCameraSettle(CancellationToken token)
+        private async Task<bool> HandlePostKillRetargetRequestAsync(CancellationToken token)
         {
-            await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
-            if (TryPressTargetCycleKey())
+            long requestId = _postKillRetargetRequestId;
+            if (requestId <= 0)
+                return false;
+
+            if (_combatGateReturnActive)
+                return false;
+
+            if (CurrentMode != BotMode.MoveAndAttackAndLoot)
+            {
+                ResetPostKillRetargetState();
+                return false;
+            }
+
+            if (IsAutomaticLootDisabled)
+            {
+                _postKillRetargetRequestId = 0;
+                _postKillTargetReleaseId = 0;
+                _postKillTargetReleaseAttempts = 0;
+                _postKillTargetReleaseRetryAtUtc = DateTime.MinValue;
+                StartCombatRetargetSearch();
+                _log("[CombatRetarget] Automatic loot disabled while waiting for PostKill — starting close-first search.");
+                return true;
+            }
+
+            LootSystem? loot = LootSystemRef;
+            LootRequestStatus status = default;
+            bool hasStatus = loot != null && loot.TryGetMandatoryLootRequestStatus(requestId, out status);
+            bool requestCompleted = hasStatus &&
+                status.RequestId == requestId &&
+                status.Reason == LootBarrierReason.PostKill &&
+                status.State == LootRequestState.Completed &&
+                status.CameraVerified &&
+                _lootBarrier.RequestId == requestId &&
+                _lootBarrier.Reason == LootBarrierReason.PostKill &&
+                _lootBarrier.Phase == LootBarrierPhase.Completed &&
+                _lootBarrier.CameraVerified;
+
+            if (!requestCompleted)
+            {
+                int currentTargetId = _memoryService.GetSelectedTargetId();
+                CombatTargetValidation currentTarget = currentTargetId > 0
+                    ? _targetSafety.Validate()
+                    : default;
+                if (currentTargetId > 0 && !currentTarget.IsConfirmedMonster)
+                    return false;
+
+                bool liveMonsterSelected = currentTarget.IsConfirmedMonster;
+                if (!liveMonsterSelected && _lootBarrier.IsBlockingNavigation && !_combatGateReturnActive)
+                    return await HoldNavigationForMandatoryLootAsync(token);
+
+                // Pending/Running/Deferred and every terminal non-success state are not
+                // proof of loot completion. Keep the post-kill request armed and prevent
+                // its ordinary fallback TAB from using the loot/previous camera.
+                if (!liveMonsterSelected)
+                {
+                    await Task.Delay(BotConstants.Delays.CombatAttackWaitMs, token);
+                    return true;
+                }
+                return false;
+            }
+
+            int selectedTargetId = _memoryService.GetSelectedTargetId();
+            CombatTargetValidation validation = selectedTargetId > 0
+                ? _targetSafety.Validate()
+                : default;
+            if (validation.IsConfirmedMonster)
+            {
+                _log($"[CombatRetarget] PostKill request={requestId} already has monster targetId={selectedTargetId}; resuming combat.");
+                _postKillRetargetRequestId = 0;
+                _postKillCloseTargetCheckPending = false;
+                _postKillTargetIdBeforeTab = 0;
+                return false;
+            }
+
+            _postKillRetargetRequestId = 0;
+            StartCombatRetargetSearch();
+            _log($"[CombatRetarget] PostKill request={requestId} — starting close-first search");
+            return true;
+        }
+
+        private async Task<bool> HandleCombatRetargetCameraStageAsync(
+            BotMode currentMode,
+            short restoreCameraDistance,
+            CancellationToken token)
+        {
+            CombatRetargetCameraStage stage = _combatRetargetCameraStage;
+            if (stage == CombatRetargetCameraStage.None)
+                return false;
+
+            if ((currentMode != BotMode.MoveAndAttack && currentMode != BotMode.MoveAndAttackAndLoot) ||
+                !MobGroupingController.IsSupportedCombatMode(CurrentMode))
+            {
+                ClearCombatRetargetSearch();
+                return false;
+            }
+
+            if (!IsAutomaticLootDisabled && LootSystemRef?.IsPinkRescanActive == true)
                 return true;
 
-            _combatHandler.SuspendForExternalMovement();
-            return false;
+            int selectedTargetId = _memoryService.GetSelectedTargetId();
+            CombatTargetValidation validation = selectedTargetId > 0
+                ? _targetSafety.Validate()
+                : default;
+            bool sameKilledTarget = _postKillCloseTargetCheckPending &&
+                                    selectedTargetId == _postKillTargetIdBeforeTab;
+            if (validation.IsConfirmedMonster && !sameKilledTarget)
+            {
+                _log($"[CombatRetarget] Monster selected targetId={selectedTargetId} stage={GetCombatRetargetStageName(stage)}");
+                ClearCombatRetargetSearch();
+                return false;
+            }
+
+            // A player/NPC/unknown target remains under the central CombatHandler safety
+            // path. Retargeting never treats its presence as proof of a nearby monster.
+            if (selectedTargetId > 0 && !validation.IsConfirmedMonster)
+                return false;
+
+            if (_combatRetargetAwaitingSelection)
+            {
+                bool shouldRunPinkCheck = _postKillCloseTargetCheckPending &&
+                    stage == CombatRetargetCameraStage.VeryLowSearch &&
+                    CurrentMode == BotMode.MoveAndAttack &&
+                    currentMode == BotMode.MoveAndAttack &&
+                    !IsAutomaticLootDisabled &&
+                    LootSystemRef?.PinkLootOnlyMode == true;
+                if (shouldRunPinkCheck)
+                {
+                    _log($"[CombatRetarget] No close mob selected at {CombatRetargetVeryLowCameraDistance} — starting SOD/SOP loot scan.");
+                    ReleaseSkillThree();
+                    ClearCombatRetargetSearch();
+                    LootSystemRef?.RequestPinkScan();
+                    await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                    return true;
+                }
+
+                if (stage == CombatRetargetCameraStage.VeryLowSearch)
+                {
+                    _combatRetargetCameraStage = CombatRetargetCameraStage.LowSearch;
+                    _combatRetargetCameraFailureAttempts = 0;
+                }
+                else if (stage == CombatRetargetCameraStage.LowSearch)
+                {
+                    _combatRetargetCameraStage = CombatRetargetCameraStage.MidSearch;
+                    _combatRetargetCameraFailureAttempts = 0;
+                }
+                else
+                {
+                    _log($"[CombatRetarget] No mob selected at {CombatRetargetMidCameraDistance}. Restoring camera to {restoreCameraDistance}.");
+                    if (!TryApplyMovementCameraDistance(restoreCameraDistance))
+                        return true;
+                    ClearCombatRetargetSearch();
+                    await Task.Delay(BotConstants.Delays.CombatAttackWaitMs, token);
+                    return true;
+                }
+
+                _combatRetargetAwaitingSelection = false;
+                stage = _combatRetargetCameraStage;
+            }
+
+            short expectedDistance = GetCombatRetargetCameraDistance();
+            if (!TryApplyVerifiedMovementCameraDistance(expectedDistance, out bool writeFailed))
+            {
+                if (writeFailed)
+                    RecordCombatRetargetCameraFailure(stage, expectedDistance, null, restoreCameraDistance);
+                return true;
+            }
+
+            ReleaseSkillThree();
+            await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
+
+            bool cameraCheckAttempted;
+            bool cameraReadSucceeded;
+            short actualDistance;
+            if (!TryPressTargetCycleKey(
+                    expectedDistance, out cameraCheckAttempted, out cameraReadSucceeded, out actualDistance))
+            {
+                if (cameraCheckAttempted)
+                {
+                    RecordCombatRetargetCameraFailure(
+                        stage,
+                        expectedDistance,
+                        cameraReadSucceeded ? actualDistance : null,
+                        restoreCameraDistance);
+                }
+                else
+                {
+                    // Loot acquired the target-action gate after the camera write. Keep
+                    // this exact stage and retry once ownership has been returned.
+                    _combatHandler.SuspendForExternalMovement();
+                }
+                return true;
+            }
+
+            _combatRetargetCameraFailureAttempts = 0;
+            string stageName = GetCombatRetargetStageName(stage);
+            _log($"[CombatRetarget] Stage={stageName} cameraRequested={expectedDistance} cameraActual={actualDistance}");
+            _log($"[CombatRetarget] TAB sent stage={stageName}");
+            _combatRetargetAwaitingSelection = true;
+            await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
+            return true;
         }
+
+        private void RecordCombatRetargetCameraFailure(
+            CombatRetargetCameraStage stage,
+            short requestedDistance,
+            short? actualDistance,
+            short restoreCameraDistance)
+        {
+            int attempt = ++_combatRetargetCameraFailureAttempts;
+            string actual = actualDistance.HasValue ? actualDistance.Value.ToString() : "unavailable";
+            string stageName = GetCombatRetargetStageName(stage);
+            _log($"[CombatRetarget] Stage={stageName} cameraRequested={requestedDistance} cameraActual={actual} verification failed ({attempt}/{CombatRetargetCameraMaximumAttempts}).");
+            if (attempt < CombatRetargetCameraMaximumAttempts)
+                return;
+
+            _log($"[CombatRetarget] Retarget failed at stage={stageName} after {CombatRetargetCameraMaximumAttempts} camera attempts; no blind TAB sent.");
+            TryApplyMovementCameraDistance(restoreCameraDistance);
+            ClearCombatRetargetSearch();
+            _combatRetargetFailed = true;
+        }
+
+        private bool IsCurrentCombatRetargetMonsterSelected()
+        {
+            int targetId = _memoryService.GetSelectedTargetId();
+            if (targetId <= 0)
+                return false;
+            CombatTargetValidation validation = _targetSafety.Validate();
+            return validation.IsConfirmedMonster &&
+                   (!_postKillCloseTargetCheckPending || targetId != _postKillTargetIdBeforeTab);
+        }
+
+        private short GetRetargetRestoreCameraDistance()
+            => _finalStandbyActive
+                ? _finalStandbyWaypoint.CameraDistanceLock
+                : _waypoints.Count > 0
+                    ? _waypoints.Peek().CameraDistanceLock
+                    : Waypoint.DefaultCameraDistanceLock;
 
         private bool TryPressTargetCycleKey()
         {
+            bool pressed = TryPressTargetCycleKey(
+                expectedCameraDistance: null,
+                out _, out _, out _);
+            if (pressed)
+                _log("[Key] TAB (target cycle)");
+            return pressed;
+        }
+
+        private bool TryPressTargetCycleKey(
+            short? expectedCameraDistance,
+            out bool cameraCheckAttempted,
+            out bool cameraReadSucceeded,
+            out short actualCameraDistance)
+        {
             bool pressed = false;
+            bool localCameraCheckAttempted = false;
+            bool localCameraReadSucceeded = false;
+            short localActualCameraDistance = 0;
+
             void Press()
             {
+                if (expectedCameraDistance.HasValue)
+                {
+                    localCameraCheckAttempted = true;
+                    localCameraReadSucceeded = _memoryService.TryGetCameraDistance(out localActualCameraDistance);
+                    if (!localCameraReadSucceeded || localActualCameraDistance != expectedCameraDistance.Value)
+                        return;
+                }
+
                 SendTargetCycleKey();
-                _combatHandler.NotifyTargetCyclePressed();
                 pressed = true;
+                _combatHandler.NotifyTargetCyclePressed();
             }
 
             LootSystem? loot = LootSystemRef;
@@ -8186,6 +8706,10 @@ namespace DriverScanTester.Services
                 Press();
             else
                 loot.TryRunMovementTargetAction(Press);
+
+            cameraCheckAttempted = localCameraCheckAttempted;
+            cameraReadSucceeded = localCameraReadSucceeded;
+            actualCameraDistance = localActualCameraDistance;
             return pressed;
         }
 
@@ -8193,9 +8717,32 @@ namespace DriverScanTester.Services
         {
             _combatRetargetCameraStage = CombatRetargetCameraStage.None;
             _combatRetargetAwaitingSelection = false;
+            _combatRetargetCameraFailureAttempts = 0;
+            _combatRetargetFailed = false;
             _postKillCloseTargetCheckPending = false;
             _postKillTargetIdBeforeTab = 0;
         }
+
+        private void ResetPostKillRetargetState()
+        {
+            _postKillRetargetRequestId = 0;
+            _postKillTargetReleaseId = 0;
+            _postKillTargetReleaseAttempts = 0;
+            _postKillTargetReleaseRefusalLogged = false;
+            _postKillTargetReleaseRetryAtUtc = DateTime.MinValue;
+            _postKillCloseTargetCheckPending = false;
+            _postKillTargetIdBeforeTab = 0;
+            ClearCombatRetargetSearch();
+        }
+
+        private static string GetCombatRetargetStageName(CombatRetargetCameraStage stage)
+            => stage switch
+            {
+                CombatRetargetCameraStage.VeryLowSearch => "VeryLow",
+                CombatRetargetCameraStage.LowSearch => "Low",
+                CombatRetargetCameraStage.MidSearch => "Mid",
+                _ => "None"
+            };
 
         private short GetCombatRetargetCameraDistance()
         {
