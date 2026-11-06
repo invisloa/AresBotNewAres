@@ -799,7 +799,7 @@ namespace DriverScanTester.Tests
 
             short distance = LootSystem.NormalLootScanDistance;
             short lockValue = BotConstants.Camera.StationaryVerticalLock;
-            Assert.Equal((short)16310, lockValue);
+            Assert.Equal((short)16330, lockValue);
             Assert.Equal((short)16160, BotConstants.Camera.MovementVerticalLock);
 
             Assert.True(LootSystem.IsLootCaptureAuthorized(

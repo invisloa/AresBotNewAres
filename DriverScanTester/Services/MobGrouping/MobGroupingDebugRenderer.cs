@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Linq;
+using System.Text;
 
 namespace DriverScanTester.Services
 {
@@ -15,7 +18,8 @@ namespace DriverScanTester.Services
             string state,
             Action<string> log,
             string? decisionReason = null,
-            MobFormationTrendResult? trend = null)
+            MobFormationTrendResult? trend = null,
+            string? decisionSummary = null)
         {
             try
             {
@@ -77,12 +81,34 @@ namespace DriverScanTester.Services
                                     $"wholeClustered={analysis.IsSufficientlyClustered} | " +
                                     $"attackReadyCluster={analysis.HasAttackReadyCluster} | " +
                                     $"reason={decisionReason ?? "-"}";
-                    SizeF size = graphics.MeasureString(caption, font);
-                    SizeF size2 = graphics.MeasureString(second, font);
-                    float width = Math.Max(size.Width, size2.Width) + 10;
-                    graphics.FillRectangle(textBack, 5, 5, width, size.Height + size2.Height + 6);
-                    graphics.DrawString(caption, font, textBrush, 10, 8);
-                    graphics.DrawString(second, font, textBrush, 10, 8 + size.Height);
+
+                    // The decision summary can be longer than the ROI frame, so every caption line
+                    // is word-wrapped to the image width instead of being clipped at the edge.
+                    float available = Math.Max(40f, annotated.Width - 20f);
+                    var lines = new List<(string Text, SizeF Size)>();
+                    foreach (string? line in new[] { caption, second, decisionSummary })
+                    {
+                        if (string.IsNullOrEmpty(line))
+                            continue;
+                        foreach (string wrapped in WrapToWidth(graphics, font, line, available))
+                            lines.Add((wrapped, graphics.MeasureString(wrapped, font)));
+                    }
+
+                    float width = 0f;
+                    float height = 6f;
+                    foreach ((string _, SizeF size) in lines)
+                    {
+                        width = Math.Max(width, size.Width);
+                        height += size.Height;
+                    }
+
+                    graphics.FillRectangle(textBack, 5, 5, width + 10, height);
+                    float lineY = 8f;
+                    foreach ((string text, SizeF size) in lines)
+                    {
+                        graphics.DrawString(text, font, textBrush, 10, lineY);
+                        lineY += size.Height;
+                    }
                 }
 
                 string directory = ResolveDebugDirectory();
@@ -90,6 +116,10 @@ namespace DriverScanTester.Services
                 string path = Path.Combine(directory, $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss-fff}_mob-grouping.png");
                 annotated.Save(path, ImageFormat.Png);
                 log($"[MobGrouping] one-shot debug frame saved: {path}");
+
+                // A fight produces several snapshots per second; keep the folder bounded
+                // (only files written by this renderer are ever removed).
+                PruneOldSnapshots(directory);
                 return true;
             }
             catch (Exception ex)
@@ -99,8 +129,58 @@ namespace DriverScanTester.Services
             }
         }
 
-        private static string ResolveDebugDirectory()
+        /// <summary>Maximum number of diagnostic frames kept on disk.</summary>
+        private const int MaxRetainedSnapshots = 60;
+
+        /// <summary>Deletes the oldest snapshots above <see cref="MaxRetainedSnapshots"/>.</summary>
+        private static void PruneOldSnapshots(string directory)
         {
+            try
+            {
+                var files = new DirectoryInfo(directory)
+                    .GetFiles("*_mob-grouping.png", SearchOption.TopDirectoryOnly);
+                if (files.Length <= MaxRetainedSnapshots)
+                    return;
+
+                foreach (var file in files
+                    .OrderByDescending(file => file.Name, StringComparer.Ordinal)
+                    .Skip(MaxRetainedSnapshots))
+                {
+                    try { file.Delete(); }
+                    catch { /* retention must never break a diagnostic write */ }
+                }
+            }
+            catch
+            {
+                // Diagnostics only: never surface retention failures.
+            }
+        }
+
+        /// <summary>Greedy word wrap to the available caption width (never clips a decision).</summary>
+        private static IEnumerable<string> WrapToWidth(
+            Graphics graphics, Font font, string text, float maxWidth)
+        {
+            string[] words = text.Split(' ');
+            var current = new StringBuilder();
+            foreach (string word in words)
+            {
+                string candidate = current.Length == 0 ? word : current + " " + word;
+                if (current.Length > 0 && graphics.MeasureString(candidate, font).Width > maxWidth)
+                {
+                    yield return current.ToString();
+                    current.Clear().Append(word);
+                }
+                else
+                {
+                    current.Clear().Append(candidate);
+                }
+            }
+
+            if (current.Length > 0)
+                yield return current.ToString();
+        }
+
+        private static string ResolveDebugDirectory()        {
             string baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
             string relative = "";
             for (int depth = 1; depth <= 6; depth++)

@@ -102,7 +102,7 @@ namespace DriverScanTester.Services
         /// <summary>
         /// Opens the seller/shop dialog the same way the old bot did:
         /// 1. Zoom the camera to the known NPC scan view (distance 16720, top-down
-        ///    vertical lock 16310) so the shop NPC is in its expected on-screen position.
+        ///    vertical lock 16330) so the shop NPC is in its expected on-screen position.
         /// 2. Scan the game window from the center outward, moving the mouse until
         ///    S_IsSellerPointed == SellerPointedValue (the mouse is over the NPC),
         ///    then right-click the NPC, click the "Shop" option and verify the shop
@@ -205,7 +205,7 @@ namespace DriverScanTester.Services
 
             // ── NEW PRE-STEP: ensure the seller dialog is open ──
             // 1. Force the known NPC scan camera (distance 16720, top-down vertical
-            //    lock 16310) so the shop NPC is in its expected on-screen position.
+            //    lock 16330) so the shop NPC is in its expected on-screen position.
             // 2. If the dialog is already open, skip scanning and continue.
             // 3. Otherwise, scan the game window from center outward looking for
             //    S_IsSellerPointed == 143850200 and right-click when found.
@@ -256,6 +256,11 @@ namespace DriverScanTester.Services
 
                     if (target.Tab != currentOpenedTab)
                     {
+                        // GATE: the tab click is an absolute click too. With the shop
+                        // window gone it would land in the game world (= walk), so verify
+                        // the window is still there right before clicking.
+                        EnsureShopOpenForClick($"inventory tab {target.Tab} click");
+
                         if (target.Tab == 1)
                             OpenInventoryTab1();
                         else
@@ -397,8 +402,9 @@ namespace DriverScanTester.Services
 
         private void SellInventorySlotByMouse(int realSlot, InventorySlotTarget target)
         {
-            if (!_memory.IsShopOpen())
-                return;
+            // GATE: never click a predefined shop position on a closed shop — the click
+            // would land in the game world and move the character instead of selling.
+            EnsureShopOpenForClick($"sell of inventory slot {realSlot}");
 
             if (target.MousePositionIndex < 0 || target.MousePositionIndex >= RepotMousePositions.itemSellPositions.Length)
             {
@@ -415,8 +421,33 @@ namespace DriverScanTester.Services
             _log($"ItemSeller: Selling REAL slot {realSlot} -> memorySlot {target.MemorySlot}, Tab={target.Tab}, MouseIdx={target.MousePositionIndex}, Row={target.Row}, Col={target.Column}");
             _log($"[ItemSeller] Sell realSlot {realSlot} -> screen ({screenX},{screenY}) [relative ({pos.X},{pos.Y}) + window ({winX},{winY})]");
 
+            // Re-check immediately before the click: the gate above already logged and
+            // validated, this closes the remaining race window.
+            EnsureShopOpenForClick($"sell click for inventory slot {realSlot}");
+
             MouseOperations.MoveAndRightClickAbsolute(screenX, screenY);
             MouseConfirmSelling();
+        }
+
+        /// <summary>
+        /// GATE for every repot click: the shop window must still be open at the moment
+        /// the click is sent. A missed click (e.g. on the inventory tab) closes the shop
+        /// window; without this gate the following absolute clicks land in the game
+        /// world, where a left-click means "walk there" — that is how the bot used to
+        /// end up in strange, extreme places instead of buying/selling.
+        ///
+        /// Throws <see cref="ShopWindowClosedException"/> so the repot aborts BEFORE any
+        /// further click is sent; the workflow then waits about a minute and restarts the
+        /// whole repot from the top.
+        /// </summary>
+        private void EnsureShopOpenForClick(string operation)
+        {
+            if (_memory.IsShopOpen())
+                return;
+
+            _log($"ItemSeller: Shop window is CLOSED before '{operation}' — aborting the repot sequence without sending the click.");
+            throw new ShopWindowClosedException(
+                $"Shop window closed before '{operation}' (a missed click closed it).");
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -1092,6 +1123,17 @@ namespace DriverScanTester.Services
 
         private void LeftClickOnConfirmSell(string debugMessage)
         {
+            // GATE: the sell-confirm click is an absolute click as well. The caller only
+            // reaches it while the confirm window is open, so that window (part of the
+            // shop UI) is the authority; if neither it nor the shop is open the click
+            // would hit the game world and move the character — abort instead.
+            if (!_memory.IsSellConfirmWindowOpen() && !_memory.IsShopOpen())
+            {
+                _log($"ItemSeller: Sell-confirm window and shop window are both CLOSED before '{debugMessage}' — aborting without sending the click.");
+                throw new ShopWindowClosedException(
+                    $"Shop window closed before the sell-confirm click ('{debugMessage}').");
+            }
+
             var (winX, winY) = GetWindowOrigin();
             int screenX = 104 + winX;
             int screenY = 464 + winY;
@@ -1246,7 +1288,7 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Applies the NPC scan view (distance 16720, top-down vertical lock 16310),
+        /// Applies the NPC scan view (distance 16720, top-down vertical lock 16330),
         /// verifies both values after the game has had time to settle, and fails closed
         /// instead of starting a scan with an unknown camera. The vertical lock is the
         /// same top-down baseline the rest of the bot uses, so the view does not change

@@ -247,28 +247,67 @@ namespace DriverScanTester.Tests
             Assert.Equal(0, encounter.Controller.MovesStarted);
         }
 
-        // ── Two-mob behaviour (mandatory) ──────────────────────────────────────
+        // ── Two-mob behaviour ──────────────────────────────────────────────────
 
         [Fact]
-        public void ExactlyTwoDistantMarkersNeverStartGathering()
+        public void ExactlyTwoDistantMarkersWithStaticFormationDoNotStartGathering()
         {
-            // Scenario A: two ranged enemies that keep their attack distance. They may never
-            // converge, so any gather walk is pure time loss. No W press, no turning.
+            // Scenario A: two ranged enemies that keep their attack distance and show no
+            // convergence trend. A pair is now eligible for gathering, but the temporal gate
+            // (two consecutive formation improvements) still refuses the walk: pure time loss.
             var lines = new List<string>();
             var controller = new MobGroupingController(lines.Add);
             var encounter = new Encounter(controller, TwoDistant) { Convergence = 1f };
 
             AssertNeverStartsGathering(encounter, 30);
             Assert.NotEqual(MobGroupingState.GroupingMove, controller.State);
-            Assert.Contains(lines, line =>
+            Assert.DoesNotContain(lines, line =>
                 line.Contains(MobGroupingReason.TwoMobNoGather, StringComparison.Ordinal));
+            Assert.Contains(lines, line =>
+                line.Contains(MobGroupingReason.NoConvergenceEvidence, StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void ModeratelySpreadThreeMobsAreEligibleForGathering()
+        {
+            // ~60 px triangle. The old 40/68 px trigger never called this "scattered" and it was
+            // far too wide to be "compact", so grouping silently did nothing at all.
+            MobPoint[] markers = { new(70, 60), new(130, 60), new(100, 12) };
+            MobGroupAnalysis analysis = Analyze(markers);
+            Assert.True(analysis.IsScattered);
+            Assert.False(analysis.HasCompactLocalGroup);
+
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            var encounter = new Encounter(controller, markers) { Convergence = 0.94f };
+
+            MobGroupingDecision decision = encounter.RunUntilStartMove();
+
+            Assert.Equal(MobGroupingDirective.StartMove, decision.Directive);
+            Assert.Contains(lines, line =>
+                line.Contains("scattered-formation candidate started", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public void ExactlyTwoScatteredConvergingMarkersCanStartGathering()
+        {
+            // MinimumGatherMarkers == 2: a scattered pair that converges route-compatibly is
+            // allowed to borrow one short gather walk instead of attacking them one by one.
+            var controller = new MobGroupingController();
+            var encounter = new Encounter(controller, TwoDistant);
+
+            MobGroupingDecision decision = encounter.RunUntilStartMove();
+
+            Assert.Equal(MobGroupingDirective.StartMove, decision.Directive);
+            Assert.Equal(MobGroupingState.GroupingMove, controller.State);
+            Assert.Equal(1, controller.GroupingsThisEncounter);
         }
 
         [Fact]
         public void ExactlyTwoCompactMarkersNeverStartGathering()
         {
             // Scenario B: one melee and one ranged marker at different apparent distances.
-            // Even a compact pair never justifies a separate movement.
+            // An already compact pair is a usable local group, so no movement is justified.
             var lines = new List<string>();
             var controller = new MobGroupingController(lines.Add);
             var encounter = new Encounter(controller, new[] { new MobPoint(95, 60), new MobPoint(105, 60) })
@@ -278,7 +317,7 @@ namespace DriverScanTester.Tests
 
             AssertNeverStartsGathering(encounter, 20);
             Assert.Contains(lines, line =>
-                line.Contains(MobGroupingReason.TwoMobNoGather, StringComparison.Ordinal));
+                line.Contains(MobGroupingReason.CompactLocalGroup, StringComparison.Ordinal));
         }
 
         [Fact]
@@ -427,7 +466,7 @@ namespace DriverScanTester.Tests
             // Three improving observations, then a 25 degree camera turn: screen-space geometry
             // is no longer comparable, so the earlier evidence is invalidated. Only two
             // post-jump observations exist, which is not enough for a positive trend.
-            encounter.Tick(3);
+            encounter.Tick(2);
             MobGroupingController controllerUnderTest = encounter.Controller;
             encounter.CameraYawDegrees += 25f;
             encounter.Tick(2);
@@ -1086,7 +1125,9 @@ namespace DriverScanTester.Tests
         public void AnalyzerFindsTheMostCompactLocalPairAndItsNeighborhood()
         {
             MobGroupAnalysis analysis = Analyze(ScatteredPoints);
-            Assert.Equal(2, analysis.BestLocalClusterSize);
+            // The compact neighborhood is deliberately tight (2r), so a pair 100 px apart has
+            // no compact cluster around its midpoint - the formation is genuinely scattered.
+            Assert.Equal(0, analysis.BestLocalClusterSize);
             Assert.Equal(100f, analysis.BestPairDistancePx, 1);
             Assert.Equal(100f / analysis.EffectiveMarkerRadius,
                 analysis.BestPairDistanceNormalized, 3);
@@ -1100,8 +1141,9 @@ namespace DriverScanTester.Tests
         [Fact]
         public void AnalyzerNormalizesCompactPairDistanceByMarkerRadius()
         {
-            // 60 px separation: compact at a 36 px marker radius (1.67r), not at 18 px (3.33r).
-            MobPoint[] markers = { new(70, 60), new(130, 60), new(100, 0) };
+            // 32 px separation: a stacked pair at a 36 px marker radius (0.89r), clearly NOT
+            // stacked at 18 px (1.78r) once the compact threshold is 1.25r.
+            MobPoint[] markers = { new(84, 60), new(116, 60), new(100, 20) };
 
             Assert.True(AnalyzeWithRadius(36f, markers).HasCompactLocalGroup);
             Assert.False(AnalyzeWithRadius(18f, markers).HasCompactLocalGroup);
@@ -1133,8 +1175,19 @@ namespace DriverScanTester.Tests
             MobGroupAnalysis analysis = AnalyzeMarkers(markers.ToArray());
             Assert.Equal(2, analysis.DetectedMobCount);
             Assert.True(analysis.HasCompactLocalGroup);
-            // Two reliable markers are not enough for a movement decision.
-            Assert.False(analysis.IsMovementSampleReliable);
+            // Both remaining markers are reliable, and a pair is enough for a movement decision
+            // now that MinimumGatherMarkers == 2.
+            Assert.True(analysis.IsMovementSampleReliable);
+        }
+
+        [Fact]
+        public void CompactLocalGroupRequiresVisiblyStackedMobsNotJustNearbyOnes()
+        {
+            // 45 px apart: exactly what the snapshots showed for two mobs in melee. That is NOT
+            // "already grouped" (the old 2.75r threshold said it was and blocked every gather).
+            Assert.False(Analyze(new MobPoint(78, 60), new MobPoint(123, 60)).HasCompactLocalGroup);
+            // 1.0r apart: visibly stacked, nothing left to gather.
+            Assert.True(Analyze(new MobPoint(91, 60), new MobPoint(109, 60)).HasCompactLocalGroup);
         }
 
         [Fact]
@@ -1154,7 +1207,10 @@ namespace DriverScanTester.Tests
             Assert.True(MobGroupingController.IsGatherCandidate(Analyze(ScatteredPoints)));
             Assert.False(MobGroupingController.IsGatherCandidate(Analyze(ClusteredPoints)));
             Assert.False(MobGroupingController.IsGatherCandidate(Analyze(ThreeCompactPlusOutlier)));
-            Assert.False(MobGroupingController.IsGatherCandidate(Analyze(TwoDistant)));
+            // Two scattered markers are a valid candidate; only two COMPACT ones are not.
+            Assert.True(MobGroupingController.IsGatherCandidate(Analyze(TwoDistant)));
+            Assert.False(MobGroupingController.IsGatherCandidate(
+                Analyze(new MobPoint(95, 60), new MobPoint(105, 60))));
         }
 
         // ── Temporal trend (pure, bounded) ─────────────────────────────────────
@@ -1462,7 +1518,7 @@ namespace DriverScanTester.Tests
             encounter.Tick(30);
 
             Assert.Single(lines, line =>
-                line.Contains(MobGroupingReason.TwoMobNoGather, StringComparison.Ordinal));
+                line.Contains("gather not started", StringComparison.Ordinal));
         }
 
         [Fact]
@@ -1683,11 +1739,11 @@ namespace DriverScanTester.Tests
         [Fact]
         public void AttackReadyClusterAverageSpreadEqualityAtThresholdPasses()
         {
-            // Four-subset spread is exactly the 24 px average success threshold
-            // (and 24 px maximum, inside the 44 px maximum threshold).
+            // Four-subset spread is exactly the 18 px average success threshold
+            // (and 18 px maximum, inside the 30 px maximum threshold).
             MobPoint[] formation =
             {
-                new(76, 60), new(124, 60), new(100, 36), new(100, 84), new(0, 60)
+                new(82, 60), new(118, 60), new(100, 42), new(100, 78), new(0, 60)
             };
             MobGroupAnalysis analysis = Analyze(formation);
 
@@ -1697,11 +1753,11 @@ namespace DriverScanTester.Tests
         [Fact]
         public void AttackReadyClusterAverageSpreadJustBeyondThresholdFails()
         {
-            // Same geometry with 24.5 px spread: the average threshold rejects the subset
+            // Same geometry with 18.5 px spread: the average threshold rejects the subset
             // while the maximum threshold would still accept it.
             MobPoint[] formation =
             {
-                new(75.5f, 60), new(124.5f, 60), new(100, 35.5f), new(100, 84.5f), new(0, 60)
+                new(81.5f, 60), new(118.5f, 60), new(100, 41.5f), new(100, 78.5f), new(0, 60)
             };
             MobGroupAnalysis analysis = Analyze(formation);
 
@@ -1712,12 +1768,12 @@ namespace DriverScanTester.Tests
         [Fact]
         public void AttackReadyClusterMaximumSpreadEqualityAtThresholdPasses()
         {
-            // Two mobs sit exactly 44 px from the subset centroid (the maximum success
+            // Two mobs sit exactly 30 px from the subset centroid (the maximum success
             // threshold) while the other two sit 1 px away, so the average stays inside
-            // its 24 px limit and only the maximum boundary is exercised.
+            // its 18 px limit and only the maximum boundary is exercised.
             MobPoint[] formation =
             {
-                new(144, 60), new(56, 60), new(99, 60), new(101, 60), new(0, 60)
+                new(130, 60), new(70, 60), new(99, 60), new(101, 60), new(0, 60)
             };
             MobGroupAnalysis analysis = Analyze(formation);
 
@@ -1729,11 +1785,11 @@ namespace DriverScanTester.Tests
         [Fact]
         public void AttackReadyClusterMaximumSpreadJustBeyondThresholdFails()
         {
-            // Same geometry with 44.5 px maximum spread: just beyond the maximum
+            // Same geometry with 30.5 px maximum spread: just beyond the maximum
             // threshold while the average is still inside its own limit.
             MobPoint[] formation =
             {
-                new(144.5f, 60), new(55.5f, 60), new(99, 60), new(101, 60), new(0, 60)
+                new(130.5f, 60), new(69.5f, 60), new(99, 60), new(101, 60), new(0, 60)
             };
             MobGroupAnalysis analysis = Analyze(formation);
 
@@ -1743,9 +1799,9 @@ namespace DriverScanTester.Tests
         [Fact]
         public void AttackReadyClusterScalesSuccessThresholdsBySubsetAverageMarkerRadius()
         {
-            // Four mobs sit 36 px from their local centroid: beyond the unscaled 24 px
+            // Four mobs sit 36 px from their local centroid: beyond the unscaled 18 px
             // average-success threshold, but inside the thresholds scaled by a 36 px
-            // marker radius (36 / 18 = 2 -> 48 px average, 88 px maximum).
+            // marker radius (36 / 18 = 2 -> 36 px average, 60 px maximum).
             MobPoint[] geometry =
             {
                 new(64, 60), new(136, 60), new(100, 24), new(100, 96), new(0, 60)
@@ -1755,15 +1811,15 @@ namespace DriverScanTester.Tests
             Assert.False(AnalyzeWithRadius(18f, geometry).HasAttackReadyCluster);
 
             // The scale uses the SUBSET AVERAGE radius, not the minimum: three 36 px
-            // markers and one 18 px marker average to 31.5 px (scale 1.75 -> 42 px
-            // average threshold), which still accepts the 36 px spread even though the
-            // minimum-radius scale (1.0) would not.
+            // markers and one 18 px marker average to 31.5 px (scale 1.75 -> 31.5 px
+            // average threshold), which still accepts a 25 px spread even though the
+            // minimum-radius scale (1.0 -> 18 px) would not.
             var mixed = new[]
             {
-                new MobMarker(new MobPoint(64, 60), 36f, 1f, MobMarkerSource.CyanCenter),
-                new MobMarker(new MobPoint(136, 60), 36f, 1f, MobMarkerSource.CyanCenter),
-                new MobMarker(new MobPoint(100, 24), 36f, 1f, MobMarkerSource.CyanCenter),
-                new MobMarker(new MobPoint(100, 96), 18f, 1f, MobMarkerSource.CyanCenter),
+                new MobMarker(new MobPoint(75, 60), 36f, 1f, MobMarkerSource.CyanCenter),
+                new MobMarker(new MobPoint(125, 60), 36f, 1f, MobMarkerSource.CyanCenter),
+                new MobMarker(new MobPoint(100, 35), 36f, 1f, MobMarkerSource.CyanCenter),
+                new MobMarker(new MobPoint(100, 85), 18f, 1f, MobMarkerSource.CyanCenter),
                 new MobMarker(new MobPoint(0, 60), 18f, 1f, MobMarkerSource.CyanCenter)
             };
             Assert.True(AnalyzeMarkers(mixed).HasAttackReadyCluster);
@@ -2023,6 +2079,47 @@ namespace DriverScanTester.Tests
             Assert.Equal(2, unique.Count);
             Assert.Equal(MobMarkerSource.CyanCenter, unique[0].Source);
             Assert.Equal(52, unique[0].Center.X);
+        }
+
+        [Fact]
+        public void CandidateDedupeMergesTheSameMarkerDetectedTwiceButKeepsRealMobs()
+        {
+            // Regression for the analysed snapshots: one marker produced a cyan-center and a
+            // Hough-ring candidate 6-15 px apart, which the analyzer then reported as a
+            // "compact pair" and every gather was refused with CompactLocalGroup.
+            float radius = BotConstants.MobGrouping.ExpectedMarkerRadiusPx;
+            var candidates = new[]
+            {
+                new MobMarker(new MobPoint(50, 50), radius, 1f, MobMarkerSource.CyanCenter),
+                new MobMarker(new MobPoint(56, 53), radius, 0.80f, MobMarkerSource.MagentaRing),
+                // A genuinely different mob: 37 px away (observed melee spacing in a live fight).
+                new MobMarker(new MobPoint(87, 50), radius, 0.80f, MobMarkerSource.MagentaRing)
+            };
+
+            IReadOnlyList<MobMarker> unique = MobMarkerDetector.DeduplicateCandidates(candidates, radius);
+
+            Assert.Equal(2, unique.Count);
+            Assert.Equal(MobMarkerSource.CyanCenter, unique[0].Source);
+            Assert.Equal(87, unique[1].Center.X);
+        }
+
+        [Fact]
+        public void DetectorRejectsSparseMagicArcWithoutCyanCenter()
+        {
+            // 170 degrees of ring (≈47% coverage) used to pass the ring-only path. Spell bursts
+            // and decorative glyphs look exactly like that; a real mob ring is a full circle.
+            using var detector = new MobMarkerDetector();
+            using var frame = NewFrame(180, 100);
+            float radius = BotConstants.MobGrouping.ExpectedMarkerRadiusPx;
+            using (Graphics graphics = Graphics.FromImage(frame))
+            using (var pen = new Pen(Color.Magenta, 2f))
+                graphics.DrawArc(pen, 90 - radius, 50 - radius, radius * 2, radius * 2, 0, 170);
+
+            MobMarker[] markers = detector.DetectBitmapForTesting(frame);
+
+            Assert.DoesNotContain(markers, marker =>
+                marker.Source == MobMarkerSource.MagentaRing &&
+                Math.Abs(marker.Center.X - 90) <= 3 && Math.Abs(marker.Center.Y - 50) <= 3);
         }
 
         [Fact]

@@ -946,8 +946,77 @@ namespace DriverScanTester.Tests
             "_moveToRepotRetryCount",
             PrivateInstance) ?? throw new InvalidOperationException("_moveToRepotRetryCount not found.");
 
+        private static readonly FieldInfo ShopClosedRestartCountField = typeof(BotWorkflowCoordinator).GetField(
+            "_shopClosedRepotRestartCount",
+            PrivateInstance) ?? throw new InvalidOperationException("_shopClosedRepotRestartCount not found.");
+
+        private static readonly FieldInfo FlowIndexField = typeof(BotWorkflowCoordinator).GetField(
+            "_flowIndex",
+            PrivateInstance) ?? throw new InvalidOperationException("_flowIndex not found.");
+
+        private static int GetFlowIndex(BotWorkflowCoordinator coordinator)
+            => (int)(FlowIndexField.GetValue(coordinator) ?? -1);
+
+        private static int GetShopClosedRestartCount(BotWorkflowCoordinator coordinator)
+            => (int)(ShopClosedRestartCountField.GetValue(coordinator) ?? 0);
+
+        private static async Task<bool> RunRepotStepAsync(
+            BotWorkflowCoordinator coordinator,
+            BotFlowStep step)
+        {
+            var task = (Task<bool>?)ExecuteRepotStepMethod.Invoke(
+                coordinator,
+                new object[] { step, CancellationToken.None });
+            Assert.NotNull(task);
+            return await task!;
+        }
+
+        /// <summary>
+        /// Test-only RepotSystem: reproduces the production failure where the shop window
+        /// disappears in the middle of the repot sequence (a missed click closed it). The
+        /// real <see cref="RepotSystem.Repot"/> would move the real mouse, so the test
+        /// throws the very same <see cref="ShopWindowClosedException"/> the per-click gate
+        /// throws before it sends a click.
+        /// </summary>
+        private sealed class ShopClosingRepotSystem : RepotSystem
+        {
+            public ShopClosingRepotSystem(GameMemoryService memory, Action<string> log)
+                : base(memory, log)
+            {
+            }
+
+            public override void Repot()
+                => throw new ShopWindowClosedException(
+                    "Shop window closed before 'potion buy click for slot 1' (a missed click closed it).");
+        }
+
         private static int GetMoveToRepotRetryCount(BotWorkflowCoordinator coordinator)
             => (int)(MoveToRepotRetryField.GetValue(coordinator) ?? 0);
+
+        /// <summary>
+        /// Test-only RepotSystem: the shop window disappears during the FIRST sell/buy
+        /// sequence (a missed click closed it) and every later call completes normally.
+        /// </summary>
+        private sealed class ShopClosingOnceRepotSystem : RepotSystem
+        {
+            private int _calls;
+
+            public ShopClosingOnceRepotSystem(GameMemoryService memory, Action<string> log)
+                : base(memory, log)
+            {
+            }
+
+            public int Calls => Volatile.Read(ref _calls);
+
+            public override void Repot()
+            {
+                if (Interlocked.Increment(ref _calls) == 1)
+                {
+                    throw new ShopWindowClosedException(
+                        "Shop window closed before 'potion buy click for slot 1' (a missed click closed it).");
+                }
+            }
+        }
 
         [Fact]
         public async Task NavigationFailureInsideTheCityWaitsResetsAndRestartsFromRepot()
@@ -1019,6 +1088,265 @@ namespace DriverScanTester.Tests
                 int cooldownIndex = lines.FindIndex(line => line.Contains("[Recovery] Starting") && line.Contains("cooldown in town"));
                 Assert.True(teleportIndex >= 0 && teleportIndex < cooldownIndex,
                     "The town teleport must be verified BEFORE the cooldown starts.");
+            }
+            finally
+            {
+                try { File.Delete(fullPath); } catch { }
+            }
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  SHOP WINDOW CLOSED MID-REPOT
+        //  A missed click during sell/buy closes the shop window. Every remaining
+        //  predefined absolute click would then land in the game world (= walk there)
+        //  and send the character to strange, extreme places. The repot must abort
+        //  before the next click, wait ~1 min, then restart from the top.
+        // ════════════════════════════════════════════════════════════════
+
+        [Fact]
+        public void BuyPotionsAbortsBeforeAnyClickWhenTheShopWindowIsClosed()
+        {
+            var lines = new List<string>();
+            var simulation = new SimulatedGameMemory { InCity = true, X = 100, Y = 100, Map = ItemSellerService.MapEtana };
+            var memory = simulation.CreateMemory(lines.Add);
+            var repotSystem = new RepotSystem(memory, lines.Add);
+
+            var ex = Assert.Throws<ShopWindowClosedException>(() => repotSystem.BuyPotions());
+
+            Assert.Contains("Shop window closed before", ex.Message);
+            Assert.Contains(lines, line => line.Contains("Shop window is CLOSED before"));
+            // No buy/quantity click was started: the abort happens before the first click.
+            Assert.DoesNotContain(lines, line => line.Contains("Buying") && line.Contains("potions (profile target"));
+        }
+
+        [Fact]
+        public void ItemSellerClickGateAbortsWhenTheShopWindowIsClosed()
+        {
+            var lines = new List<string>();
+            var simulation = new SimulatedGameMemory { InCity = true, X = 100, Y = 100 };
+            var memory = simulation.CreateMemory(lines.Add);
+            var itemSeller = new ItemSellerService(memory, lines.Add);
+
+            MethodInfo? gate = typeof(ItemSellerService).GetMethod(
+                "EnsureShopOpenForClick", PrivateInstance);
+            Assert.NotNull(gate);
+
+            var ex = Assert.Throws<TargetInvocationException>(() =>
+                gate!.Invoke(itemSeller, new object[] { "sell click for inventory slot 10" }));
+            Assert.IsType<ShopWindowClosedException>(ex.InnerException);
+            Assert.Contains("Shop window is CLOSED before", string.Join("=>", lines));
+        }
+
+        [Fact]
+        public async Task ShopWindowClosedMidRepotWaitsAndRestartsTheRepotFromTheTop()
+        {
+            string saveDirectory = Path.GetFullPath(
+                Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "SavedPaths"));
+            Directory.CreateDirectory(saveDirectory);
+            string pathFile = $"ShopClosedRepot_{Guid.NewGuid():N}.json";
+            string fullPath = Path.Combine(saveDirectory, pathFile);
+            // The route ends where the player already stands, so the existing route runner
+            // completes it immediately and the repot sequence runs.
+            File.WriteAllText(fullPath,
+                "{\"Name\":\"shop-closed-repot\",\"Points\":[{\"X\":100,\"Y\":100,\"Precision\":2,\"Mode\":0,\"ZoneRestriction\":2}]}");
+
+            try
+            {
+                var lines = new List<string>();
+                var simulation = new SimulatedGameMemory { InCity = true, X = 100, Y = 100 };
+                var memory = simulation.CreateMemory(lines.Add);
+                var pathLoader = new SavedPathLoader(lines.Add);
+                var pathRunner = new PathRunnerService(
+                    memory,
+                    lines.Add,
+                    enableWaypointSpecialRecoveries: false,
+                    steeringMode: MovementSteeringMode.DirectCamera);
+                var repotSystem = new ShopClosingRepotSystem(memory, lines.Add);
+                var repotDetector = new RepotDetectorService(lines.Add);
+                var itemSeller = new ItemSellerService(memory, lines.Add);
+                var profile = new BotProfile { Name = "shop-closed-repot" };
+                var operationContext = new OperationContext(memory, pathRunner, itemSeller, profile, lines.Add, () => { });
+                var operationRunner = new OperationRunnerService(operationContext, lines.Add);
+                var positionSync = CreateFastPositionSync(memory, lines);
+                var coordinator = new BotWorkflowCoordinator(
+                    memory, repotSystem, repotDetector, pathLoader, pathRunner, operationRunner,
+                    profile, lines.Add, () => { }, positionSync)
+                {
+                    // Keep the regression suite fast: the production default is 1 minute.
+                    ShopClosedRestartDelayMs = 5
+                };
+
+                var repotStep = new BotFlowStep
+                {
+                    Type = BotFlowStepType.Repot,
+                    RepotPaths = new List<BotRouteStep> { new() { PathFile = pathFile } }
+                };
+                profile.FlowSteps = new List<BotFlowStep> { repotStep };
+
+                Assert.False(await RunRepotStepAsync(coordinator, repotStep));
+
+                // The step is repeated (not advanced, not failed) and the workflow waits
+                // before the restart instead of clicking further.
+                Assert.NotEqual(BotPhase.Failed, coordinator.CurrentPhase);
+                Assert.True(GetShopClosedRestartCount(coordinator) == 1,
+                    "Expected exactly one shop-closed repot restart." + Environment.NewLine +
+                    string.Join(Environment.NewLine, lines.TakeLast(40)));
+                Assert.Equal(0, GetMoveToRepotRetryCount(coordinator));
+                Assert.Contains(lines, line => line.Contains("Shop window closed mid-repot"));
+                Assert.Contains(lines, line => line.Contains("restarting the whole profile cycle from the Repot step"));
+                Assert.Contains(lines, line => line.Contains("No shop window left open"));
+                Assert.Contains(lines, line => line.Contains("restarting the profile cycle from the Repot step."));
+                Assert.DoesNotContain(lines, line => line.Contains("[Repot] Repot completed"));
+
+                // The restart is a FULL profile-cycle restart: the flow is redirected to the
+                // Repot step, exactly like an exp-triggered repot (low potions / full
+                // inventory) — never "continue inside the current step".
+                Assert.Equal(0, GetFlowIndex(coordinator));
+
+                int waitIndex = lines.FindIndex(line => line.Contains("restarting the whole profile cycle from the Repot step"));
+                int restartIndex = lines.FindIndex(line => line.Contains("restarting the profile cycle from the Repot step."));
+                Assert.True(waitIndex >= 0 && waitIndex < restartIndex,
+                    "The restart delay must run before the cycle is restarted.");
+            }
+            finally
+            {
+                try { File.Delete(fullPath); } catch { }
+            }
+        }
+
+        [Fact]
+        public async Task RepotRestartedWhileStandingAtTheShopSkipsTheRouteWalk()
+        {
+            string saveDirectory = Path.GetFullPath(
+                Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "SavedPaths"));
+            Directory.CreateDirectory(saveDirectory);
+            string pathFile = $"ShopClosedRepotNoWalk_{Guid.NewGuid():N}.json";
+            string fullPath = Path.Combine(saveDirectory, pathFile);
+            // The route ends where the player already stands, so the first run completes it
+            // immediately and the repot sequence runs.
+            File.WriteAllText(fullPath,
+                "{\"Name\":\"shop-closed-no-walk\",\"Points\":[{\"X\":100,\"Y\":100,\"Precision\":2,\"Mode\":0,\"ZoneRestriction\":2}]}");
+
+            try
+            {
+                var lines = new List<string>();
+                var simulation = new SimulatedGameMemory { InCity = true, X = 100, Y = 100 };
+                var memory = simulation.CreateMemory(lines.Add);
+                var pathLoader = new SavedPathLoader(lines.Add);
+                var pathRunner = new PathRunnerService(
+                    memory,
+                    lines.Add,
+                    enableWaypointSpecialRecoveries: false,
+                    steeringMode: MovementSteeringMode.DirectCamera);
+                var repotSystem = new ShopClosingOnceRepotSystem(memory, lines.Add);
+                var repotDetector = new RepotDetectorService(lines.Add);
+                var itemSeller = new ItemSellerService(memory, lines.Add);
+                var profile = new BotProfile
+                {
+                    Name = "shop-closed-no-walk",
+                    // The simulator has no potion counts: verify against zero targets so the
+                    // post-repot check never waits for the production 5-minute retry delay.
+                    HpBuyTarget = 0,
+                    ManaBuyTarget = 0,
+                    RedBuyTarget = 0,
+                    WhiteBuyTarget = 0
+                };
+                var operationContext = new OperationContext(memory, pathRunner, itemSeller, profile, lines.Add, () => { });
+                var operationRunner = new OperationRunnerService(operationContext, lines.Add);
+                var positionSync = CreateFastPositionSync(memory, lines);
+                var coordinator = new BotWorkflowCoordinator(
+                    memory, repotSystem, repotDetector, pathLoader, pathRunner, operationRunner,
+                    profile, lines.Add, () => { }, positionSync)
+                {
+                    ShopClosedRestartDelayMs = 5
+                };
+
+                var repotStep = new BotFlowStep
+                {
+                    Type = BotFlowStepType.Repot,
+                    RepotPaths = new List<BotRouteStep> { new() { PathFile = pathFile } }
+                };
+                profile.FlowSteps = new List<BotFlowStep> { repotStep };
+
+                // 1st run: the walk completes, then the shop window closes mid sequence.
+                Assert.False(await RunRepotStepAsync(coordinator, repotStep));
+                Assert.Equal(1, repotSystem.Calls);
+                int routeRuns = lines.Count(line => line.Contains("[Coordinator] Repot path — loading path"));
+                Assert.Equal(1, routeRuns);
+                Assert.DoesNotContain(lines, line => line.Contains("still at the repot point"));
+
+                // 2nd run (the shop-closed restart, exactly like a fresh profile cycle): the
+                // character still stands at the repot point, so the repot route must NOT be
+                // walked again from its first waypoint — the sell/buy sequence runs right away.
+                Assert.True(await RunRepotStepAsync(coordinator, repotStep));
+                Assert.Equal(2, repotSystem.Calls);
+                Assert.Contains(lines, line => line.Contains("still at the repot point") && line.Contains("skipping repot path"));
+                Assert.Equal(routeRuns, lines.Count(line => line.Contains("[Coordinator] Repot path — loading path")));
+                Assert.Contains(lines, line => line.Contains("[Repot] Repot completed."));
+            }
+            finally
+            {
+                try { File.Delete(fullPath); } catch { }
+            }
+        }
+
+        [Fact]
+        public async Task RepeatedShopWindowClosedRepotsFailAfterTheBoundedRestartBudget()
+        {
+            string saveDirectory = Path.GetFullPath(
+                Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "SavedPaths"));
+            Directory.CreateDirectory(saveDirectory);
+            string pathFile = $"ShopClosedRepotBudget_{Guid.NewGuid():N}.json";
+            string fullPath = Path.Combine(saveDirectory, pathFile);
+            File.WriteAllText(fullPath,
+                "{\"Name\":\"shop-closed-budget\",\"Points\":[{\"X\":100,\"Y\":100,\"Precision\":2,\"Mode\":0,\"ZoneRestriction\":2}]}");
+
+            try
+            {
+                var lines = new List<string>();
+                var simulation = new SimulatedGameMemory { InCity = true, X = 100, Y = 100 };
+                var memory = simulation.CreateMemory(lines.Add);
+                var pathLoader = new SavedPathLoader(lines.Add);
+                var pathRunner = new PathRunnerService(
+                    memory,
+                    lines.Add,
+                    enableWaypointSpecialRecoveries: false,
+                    steeringMode: MovementSteeringMode.DirectCamera);
+                var repotSystem = new ShopClosingRepotSystem(memory, lines.Add);
+                var repotDetector = new RepotDetectorService(lines.Add);
+                var itemSeller = new ItemSellerService(memory, lines.Add);
+                var profile = new BotProfile { Name = "shop-closed-budget" };
+                var operationContext = new OperationContext(memory, pathRunner, itemSeller, profile, lines.Add, () => { });
+                var operationRunner = new OperationRunnerService(operationContext, lines.Add);
+                var positionSync = CreateFastPositionSync(memory, lines);
+                var coordinator = new BotWorkflowCoordinator(
+                    memory, repotSystem, repotDetector, pathLoader, pathRunner, operationRunner,
+                    profile, lines.Add, () => { }, positionSync)
+                {
+                    ShopClosedRestartDelayMs = 5
+                };
+
+                var repotStep = new BotFlowStep
+                {
+                    Type = BotFlowStepType.Repot,
+                    RepotPaths = new List<BotRouteStep> { new() { PathFile = pathFile } }
+                };
+                profile.FlowSteps = new List<BotFlowStep> { repotStep };
+
+                for (int attempt = 1; attempt <= BotConstants.Repot.MaxShopClosedRestarts; attempt++)
+                {
+                    Assert.False(await RunRepotStepAsync(coordinator, repotStep));
+                    Assert.NotEqual(BotPhase.Failed, coordinator.CurrentPhase);
+                    Assert.True(GetShopClosedRestartCount(coordinator) == attempt,
+                        $"Expected {attempt} shop-closed repot restart(s)." + Environment.NewLine +
+                        string.Join(Environment.NewLine, lines.TakeLast(40)));
+                }
+
+                // One restart too many: fail visibly instead of restarting forever.
+                Assert.False(await RunRepotStepAsync(coordinator, repotStep));
+                Assert.Equal(BotPhase.Failed, coordinator.CurrentPhase);
+                Assert.Equal(0, GetShopClosedRestartCount(coordinator));
+                Assert.Contains(lines, line => line.Contains($"Shop window closed mid-repot {BotConstants.Repot.MaxShopClosedRestarts + 1} times in a row"));
             }
             finally
             {

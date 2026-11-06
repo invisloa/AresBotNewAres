@@ -5,6 +5,7 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using DriverScanTester.Models;
@@ -257,6 +258,11 @@ namespace DriverScanTester.Services
         /// <summary>Client size of the last mob-grouping detection sample (trend validity).</summary>
         private int _lastMobGroupingClientWidth;
         private int _lastMobGroupingClientHeight;
+        /// <summary>Marker count of the previous detection sample; a change is logged once.</summary>
+        private int _lastMobGroupingLoggedMarkerCount = -1;
+        /// <summary>Last suppression/decision key that produced an automatic debug snapshot.</summary>
+        private string _lastMobGroupingDecisionKey = "";
+        private DateTime _nextMobGroupingSnapshotAt = DateTime.MinValue;
         private bool _mobGroupingOwnsMovement;
         private bool _resumeCombatSkillAfterGrouping;
         private bool _mobGroupingDisposed;
@@ -725,23 +731,99 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>Manually captures and saves one annotated combat-ROI diagnostic image.</summary>
-        public bool CaptureMobGroupingDebugSnapshot()
+        public bool CaptureMobGroupingDebugSnapshot() => SaveMobGroupingDebugSnapshot(updateAnalysis: true);
+
+        private bool SaveMobGroupingDebugSnapshot(bool updateAnalysis, string? decisionSummary = null)
         {
             lock (_mobGroupingLock)
             {
                 if (_mobGroupingDisposed)
                     return false;
 
+                // Prefer the exact frame and marker set the last decision was made on. A fresh
+                // capture would render a LATER frame, so the picture would disagree with the
+                // logged/decided mob count (previous versions showed mobs=2 next to decisionMobs=5).
+                Bitmap? decidedFrame = _mobMarkerDetector.TryCloneLastFrame(out MobMarkerDetectionResult? decidedResult);
+                if (decidedFrame != null && decidedResult != null &&
+                    _lastMobGroupingAnalysis is { IsValid: true } decidedAnalysis)
+                {
+                    using (decidedFrame)
+                    {
+                        return MobGroupingDebugRenderer.Save(
+                            decidedFrame, decidedResult, decidedAnalysis, CurrentMobGroupingState.ToString(),
+                            _log, _mobGroupingController.LastDecisionReason, _mobGroupingController.LastTrend,
+                            decisionSummary);
+                    }
+                }
+                decidedFrame?.Dispose();
+
                 using Bitmap? frame = _mobMarkerDetector.CaptureDebugFrame(out MobMarkerDetectionResult? result);
                 if (frame == null || result == null)
                     return false;
 
-                _lastMobGroupingAnalysis = MobGroupAnalyzer.Analyze(result.Markers, result.PlayerAnchor);
+                MobGroupAnalysis analysis = MobGroupAnalyzer.Analyze(result.Markers, result.PlayerAnchor);
+                if (updateAnalysis)
+                    _lastMobGroupingAnalysis = analysis;
+
                 return MobGroupingDebugRenderer.Save(
-                    frame, result, _lastMobGroupingAnalysis, CurrentMobGroupingState.ToString(), _log,
-                    _mobGroupingController.LastDecisionReason, _mobGroupingController.LastTrend);
+                    frame, result, analysis, CurrentMobGroupingState.ToString(), _log,
+                    _mobGroupingController.LastDecisionReason, _mobGroupingController.LastTrend,
+                    decisionSummary);
             }
         }
+
+        /// <summary>
+        /// Diagnostic: saves one annotated ROI snapshot for EVERY distinct mob-grouping decision,
+        /// but only when at least <see cref="BotConstants.MobGrouping.MinimumMobs"/> markers were
+        /// detected (a grouping decision about fewer mobs does not exist). Distinct means: new
+        /// directive, new decision/suppression code, new state or new marker count. Two snapshots
+        /// are never closer than <see cref="MobGroupingSnapshotMinIntervalMs"/> apart, except for a
+        /// real directive (start/finish/cancel), which is always captured. It never influences the
+        /// decision itself - only logging/diagnostics.
+        /// </summary>
+        private void MaybeSaveMobGroupingDecisionSnapshot(MobGroupingDecision decision)
+        {
+            if (_mobGroupingDisposed)
+                return;
+
+            MobGroupAnalysis? analysis = _lastMobGroupingAnalysis;
+            if (analysis is not { IsValid: true } ||
+                analysis.DetectedMobCount < BotConstants.MobGrouping.MinimumMobs)
+                return;
+
+            string suppressionCode = _mobGroupingController.LastSuppressionCode;
+            string code = !string.IsNullOrEmpty(decision.Code) ? decision.Code : suppressionCode;
+            string key = $"{decision.Directive}|{code}|{_mobGroupingController.State}|{analysis.DetectedMobCount}";
+            if (string.Equals(key, _lastMobGroupingDecisionKey, StringComparison.Ordinal))
+                return;
+
+            bool realDirective = decision.Directive != MobGroupingDirective.None;
+            DateTime now = DateTime.UtcNow;
+            if (!realDirective && now < _nextMobGroupingSnapshotAt)
+                return;
+
+            _lastMobGroupingDecisionKey = key;
+            _nextMobGroupingSnapshotAt = now.AddMilliseconds(MobGroupingSnapshotMinIntervalMs);
+
+            string summary = $"DECISION={decision.Directive} | code={(string.IsNullOrEmpty(code) ? "-" : code)} | " +
+                             $"suppression={(string.IsNullOrEmpty(suppressionCode) ? "-" : suppressionCode)} | " +
+                             $"state={_mobGroupingController.State} | decisionMobs={analysis.DetectedMobCount} | " +
+                             $"maxPerEncounter={BotConstants.MobGrouping.MaxGroupingsPerEncounter} | " +
+                             $"groupings={_mobGroupingController.GroupingsThisEncounter} | " +
+                             $"detail={(string.IsNullOrEmpty(decision.Reason) ? "-" : decision.Reason)}";
+            try
+            {
+                if (SaveMobGroupingDebugSnapshot(updateAnalysis: false, decisionSummary: summary))
+                    _log($"[MobGrouping] decision snapshot saved: {summary}.");
+            }
+            catch (Exception ex)
+            {
+                _log($"[MobGrouping] automatic decision snapshot failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>Minimum spacing between two non-directive decision snapshots.</summary>
+        private const int MobGroupingSnapshotMinIntervalMs = 400;
 
         private void StartMobGroupingMove(MobGroupingDecision decision)
         {
@@ -905,6 +987,8 @@ namespace DriverScanTester.Services
                 decision = _mobGroupingController.Tick(input);
                 ApplyMobGroupingDecision(decision, now);
 
+                MaybeSaveMobGroupingDecisionSnapshot(decision);
+
                 // StartMove only releases combat control here; the first waypoint-steered
                 // gather step runs immediately on this same tick through the ordinary
                 // MoveTowards path.
@@ -952,6 +1036,8 @@ namespace DriverScanTester.Services
                 decision = _mobGroupingController.Tick(input);
 
                 ApplyMobGroupingDecision(decision, now);
+
+                MaybeSaveMobGroupingDecisionSnapshot(decision);
 
                 // Continue the LIVE waypoint-steered gather walk for the whole movement.
                 // Every tick recomputes the desired bearing from the player's current
@@ -1024,6 +1110,43 @@ namespace DriverScanTester.Services
                 _lastMobGroupingClientWidth = result.ClientWidth;
                 _lastMobGroupingClientHeight = result.ClientHeight;
             }
+
+            LogMobGroupingDetection(result, analysis);
+        }
+
+        /// <summary>
+        /// Diagnostic: logs the detected marker layout whenever the marker count changes, so a
+        /// silently missed mob (outside the combat ROI or rejected by the marker/ring gates) is
+        /// visible in the log instead of looking like a grouping-logic refusal.
+        /// </summary>
+        private void LogMobGroupingDetection(MobMarkerDetectionResult result, MobGroupAnalysis? analysis)
+        {
+            if (!result.Success || analysis == null || !analysis.IsValid)
+                return;
+
+            if (analysis.DetectedMobCount == _lastMobGroupingLoggedMarkerCount)
+                return;
+
+            _lastMobGroupingLoggedMarkerCount = analysis.DetectedMobCount;
+
+            var markers = new StringBuilder();
+            foreach (MobMarker marker in result.Markers)
+            {
+                if (markers.Length > 0)
+                    markers.Append(' ');
+                markers.Append('(')
+                    .Append((int)Math.Round(marker.Center.X - result.RoiClient.Left)).Append(',')
+                    .Append((int)Math.Round(marker.Center.Y - result.RoiClient.Top)).Append(" r")
+                    .Append((int)Math.Round(marker.Radius)).Append(' ')
+                    .Append(marker.Source == MobMarkerSource.CyanCenter ? "cyan" : "ring")
+                    .Append(')');
+            }
+
+            _log($"[MobGrouping] detection changed: mobs={analysis.DetectedMobCount} " +
+                 $"reliable={analysis.IsMovementSampleReliable} radius={analysis.EffectiveMarkerRadius:F1} " +
+                 $"client={result.ClientWidth}x{result.ClientHeight} " +
+                 $"roi=({result.RoiClient.Left},{result.RoiClient.Top},{result.RoiClient.Width}x{result.RoiClient.Height}) " +
+                 $"inRoi={result.Markers.Count} markers=[{(markers.Length == 0 ? "none" : markers.ToString())}].");
         }
 
         /// <summary>Reads the camera yaw for a grouping observation; never throws.</summary>
@@ -9506,6 +9629,25 @@ namespace DriverScanTester.Services
                 if (distToLast <= BotConstants.Movement.RouteResyncNearWaypointDistance)
                 {
                     _log($"[RouteResync] skipped terminal: already-near-last-waypoint d={distToLast:F2}");
+
+                    // "Natural completion" only exists when the queue already targets the
+                    // terminal waypoint. The FIRST resync of a route leaves the untouched
+                    // queue pointing at waypoint #1, so keeping it would walk the character
+                    // all the way back to the route's beginning (e.g. a repot restart while
+                    // it already stands next to the shop). Target the terminal waypoint in
+                    // that case: the ordinary reach check then finishes the route where the
+                    // character stands instead of walking away from the destination.
+                    if (isInitialResync &&
+                        (_waypoints.Count == 0 ||
+                         GeometryUtils.Distance(
+                             _waypoints.Peek().X, _waypoints.Peek().Y,
+                             _initialPath[^1].X, _initialPath[^1].Y) > 0.5f))
+                    {
+                        var terminal = _initialPath[^1];
+                        _log($"[RouteResync] initial resync at the route end — targeting terminal waypoint #{_initialPath.Count} ({terminal.X:F1},{terminal.Y:F1}) so the route completes here instead of walking back to waypoint #1.");
+                        return RebuildWaypointQueueFromIndex(_initialPath.Count - 1, oldTarget);
+                    }
+
                     return RouteResyncResult.TerminalSkip;
                 }
             }

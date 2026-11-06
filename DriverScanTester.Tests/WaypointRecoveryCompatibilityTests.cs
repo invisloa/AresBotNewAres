@@ -225,6 +225,58 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void InitialResyncAtTheRouteEndTargetsTheTerminalWaypointInsteadOfWalkingBack()
+        {
+            // Exact scenario from the shop-closed repot log: the character already stands at
+            // the repot point (= the route's last waypoint) and the route is re-run from the
+            // top. The initial resync used to keep the untouched queue pointing at waypoint #1,
+            // so the character walked all the way back to the route's beginning (across the
+            // town) before walking to the shop again. It must instead target the terminal
+            // waypoint so the ordinary reach check completes the route where it stands.
+            var lines = new List<string>();
+            var memory = CreateStubMemory(lines.Add);
+            var path = new List<Waypoint>
+            {
+                new Waypoint(222, 213, MovementPrecision.Accurate, BotMode.OnlyMove),
+                new Waypoint(230, 212, MovementPrecision.Accurate, BotMode.OnlyMove),
+                new Waypoint(240, 212, MovementPrecision.Accurate, BotMode.OnlyMove),
+                new Waypoint(250, 200, MovementPrecision.Accurate, BotMode.OnlyMove),
+                new Waypoint(264, 195, MovementPrecision.Accurate, BotMode.OnlyMove)
+            };
+            var movement = new MovementSystem(
+                memory,
+                lines.Add,
+                264,
+                195,
+                customPath: path,
+                loopPath: false,
+                enableWaypointSpecialRecoveries: true)
+            {
+                InternalRepotEnabled = false
+            };
+
+            var resync = typeof(MovementSystem).GetMethod(
+                "RouteResyncFromCurrentPosition",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(resync);
+            resync!.Invoke(movement, new object[] { 263f, 195f, true });
+
+            Assert.Contains(lines, line => line.Contains("already-near-last-waypoint"));
+            Assert.Contains(lines, line => line.Contains("targeting terminal waypoint #5 (264"));
+
+            // The rebuilt queue must point at the terminal waypoint, never back at #1.
+            var queueField = typeof(MovementSystem).GetField(
+                "_waypoints", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(queueField);
+            var queue = Assert.IsAssignableFrom<System.Collections.Generic.IEnumerable<Waypoint>>(
+                queueField!.GetValue(movement));
+            var targets = new List<Waypoint>(queue);
+            Assert.Single(targets);
+            Assert.Equal(264, targets[0].X, 1);
+            Assert.Equal(195, targets[0].Y, 1);
+        }
+
+        [Fact]
         public void LegacyWaypointConstructorDefaultsToStandardRecovery()
         {
             var waypoint = new Waypoint(1, 2, MovementPrecision.Medium, BotMode.OnlyMove);

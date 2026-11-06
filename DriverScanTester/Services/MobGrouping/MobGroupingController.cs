@@ -93,6 +93,11 @@ namespace DriverScanTester.Services
         private bool _lootBarrierBlockLogged;
         /// <summary>Code of the last logged "gather not started" decision (event-driven logging).</summary>
         private string _lastSuppressionCode = "";
+        /// <summary>
+        /// Code of the last logged suppression, exposed read-only so the host can attach a
+        /// diagnostic snapshot to exactly the moment a gather was refused.
+        /// </summary>
+        public string LastSuppressionCode => _lastSuppressionCode;
         private string _lastDecisionReason = "";
         private MobFormationTrendResult _lastTrend = MobFormationTrendResult.Unknown("no observation");
         private int _movesStarted;
@@ -327,12 +332,15 @@ namespace DriverScanTester.Services
                 return;
             }
 
-            // MANDATORY: two visible markers never start a separate grouping movement. Both may
-            // be ranged, their preferred attack distances may never converge, and the route may
-            // even increase their separation. Natural combat approach is unaffected.
+            // Below the gather-eligibility count no separate grouping movement may start. With the
+            // current configuration (MinimumGatherMarkers == MinimumMobs == 2) every analyzed
+            // formation passes this check, so a scattered pair may gather; a compact pair is still
+            // rejected by the compact-local-group check below. Raising the constant restores the
+            // "never gather on a pair" policy without any further code change.
             if (analysis.DetectedMobCount < BotConstants.MobGrouping.MinimumGatherMarkers)
             {
-                ClearCandidate("two visible mobs never justify a gather walk",
+                ClearCandidate($"{analysis.DetectedMobCount} visible mob(s), at least " +
+                    $"{BotConstants.MobGrouping.MinimumGatherMarkers} are required for a gather walk",
                     MobGroupingReason.TwoMobNoGather);
                 return;
             }

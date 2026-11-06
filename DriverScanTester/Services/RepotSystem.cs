@@ -148,6 +148,12 @@ namespace DriverScanTester.Services
                 if (i >= positions.Length)
                     continue;
 
+                // GATE: the whole buy step is a chain of predefined absolute clicks. If
+                // the shop window closed (a missed click on a tab/option) every following
+                // click lands in the game world and walks the character to strange spots.
+                // Check BEFORE each click and abort the repot instead.
+                EnsureShopOpenForClick($"potion buy click for slot {i}");
+
                 Thread.Sleep(1000);
 
                 // HP Potions (Index 3)
@@ -200,14 +206,21 @@ namespace DriverScanTester.Services
 
             _log($"Buying {amountToBuy} potions (profile target minus current count).");
 
+            // GATE: moving + clicking the quantity field only makes sense while the shop
+            // window is open.
+            EnsureShopOpenForClick("quantity field move/click");
+
             // Move to the quantity input field (calibrated absolute 1295,530 at
             // reference window 445,105), wait for the dialog, then click once.
             MoveCalibrated(1295, 530);
             Thread.Sleep(1000);
+            EnsureShopOpenForClick("quantity field click");
             MouseOperations.LeftClick(); // Down/Up with delay
             Thread.Sleep(500);
 
             // Type the amount as digits (max 3 digits, same as the old bot).
+            // GATE: typing with the shop closed would send the digits to the game/chat.
+            EnsureShopOpenForClick("quantity typing");
             int digits = Math.Min(amountToBuy, 999);
             string amountStr = digits.ToString();
             foreach (char c in amountStr)
@@ -221,9 +234,50 @@ namespace DriverScanTester.Services
         private void ClickOkWhenBuying()
         {
             Thread.Sleep(300);
+            // GATE: the OK button click is an absolute click — never send it blind.
+            EnsureShopOpenForClick("buy OK button click");
             MoveCalibrated(560, 570);
+            EnsureShopOpenForClick("buy OK button click");
             MouseOperations.LeftClick();
             Thread.Sleep(500);
+        }
+
+        /// <summary>
+        /// GATE for every repot click: the shop window must still be open at the moment
+        /// the click is sent. A missed click (e.g. on a potion tab) closes the shop; the
+        /// remaining predefined absolute clicks would then hit the game world, where a
+        /// left-click means "walk there" — that is how the bot ended up in strange,
+        /// extreme places instead of buying potions.
+        ///
+        /// Throws <see cref="ShopWindowClosedException"/> so the repot aborts BEFORE the
+        /// click is sent. The workflow coordinator then waits about a minute and restarts
+        /// the whole repot step from the top (teleport to city → walk → shop → buy).
+        /// </summary>
+        private void EnsureShopOpenForClick(string operation)
+        {
+            if (IsShopOpen())
+                return;
+
+            _log($"Repot: Shop window is CLOSED before '{operation}' — aborting the repot sequence without sending the click.");
+            throw new ShopWindowClosedException(
+                $"Shop window closed before '{operation}' during the repot sequence.");
+        }
+
+        /// <summary>
+        /// Closes any shop / sell-confirm window the aborted repot sequence left open by
+        /// pressing Escape (keyboard only — never a mouse click, which could move the
+        /// character). Safe to call when nothing is open.
+        /// </summary>
+        public void CloseShopWindowIfOpen()
+        {
+            if (!IsShopOpen() && !IsSellConfirmWindowOpen())
+            {
+                _log("Repot: No shop window left open — nothing to close.");
+                return;
+            }
+
+            _log("Repot: Closing the shop window left open by the aborted repot sequence (Escape).");
+            GameInput.PressKey(GameInput.VK_ESCAPE, GameInput.SCAN_ESCAPE);
         }
 
         /// <summary>
@@ -252,6 +306,10 @@ namespace DriverScanTester.Services
         /// </summary>
         private void ClickCalibrated(int calibratedX, int calibratedY, int delay = 200)
         {
+            // GATE: every calibrated click is an absolute click; verify the shop window
+            // is still open directly before sending it.
+            EnsureShopOpenForClick($"calibrated click ({calibratedX},{calibratedY})");
+
             var (screenX, screenY) = CalibratedToScreen(calibratedX, calibratedY);
             MouseOperations.MoveAndLeftClickAbsolute(screenX, screenY, delay);
         }
@@ -337,7 +395,7 @@ namespace DriverScanTester.Services
             return hwnd;
         }
 
-        public void Repot()
+        public virtual void Repot()
         {
             _log("Starting Repot Sequence...");
 
@@ -361,7 +419,10 @@ namespace DriverScanTester.Services
             // 2. Sell Items (using new ItemSellerService)
             SellItems();
 
-            // 3. Buy Potions
+            // 3. Buy Potions — only while the shop window is still open. The sell step
+            //    may have closed it (missed tab/slot click); buying then would click
+            //    predefined positions on the game world and walk the character away.
+            EnsureShopOpenForClick("start of the potion buy step");
             BuyPotions();
 
             // Close Shop (Escape key)

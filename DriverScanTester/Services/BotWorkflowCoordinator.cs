@@ -129,6 +129,35 @@ namespace DriverScanTester.Services
         /// </summary>
         public int InCityStuckResetDelayMs { get; set; } = BotConstants.Repot.InCityStuckResetDelayMs;
 
+        /// <summary>
+        /// How long the workflow waits after the shop window closed in the middle of the
+        /// repot (sell/buy) sequence before it restarts the whole profile cycle from the
+        /// Repot step (exactly like an exp-triggered repot: teleport to city → repot point →
+        /// open shop → sell → buy → back to the route).
+        /// Default 1 minute; tests override it to keep the regression suite fast.
+        /// </summary>
+        public int ShopClosedRestartDelayMs { get; set; } = BotConstants.Repot.ShopClosedRestartDelayMs;
+
+        /// <summary>
+        /// Consecutive restarts caused by the shop window closing mid-repot. After the
+        /// max the workflow fails visibly instead of restarting forever (e.g. the seller
+        /// NPC scan keeps opening the wrong window).
+        /// </summary>
+        private int _shopClosedRepotRestartCount;
+
+        /// <summary>
+        /// Map + position where the last completed walk to the repot point left the
+        /// character. The repot point is where the shop is, so a repot that has to be
+        /// repeated while the character still stands there (shop window closed mid
+        /// sequence, failed buy verification, ...) skips the repot-route walk instead of
+        /// walking the route again from its first waypoint (i.e. all the way back across
+        /// the town and then to the shop once more).
+        /// </summary>
+        private bool _hasRepotPoint;
+        private int _repotPointMap;
+        private float _repotPointX;
+        private float _repotPointY;
+
         private int _teleportRetryCount;
 
         /// <summary>
@@ -1117,49 +1146,70 @@ namespace DriverScanTester.Services
                 _repotPathIndex = 0;
 
             var repotPath = repotPaths[_repotPathIndex];
-            _log($"[Repot] Walking to repot point using repot path {_repotPathIndex + 1}/{repotPaths.Count} — '{repotPath.PathFile}'.");
 
-            if (!await RunRouteStartProtectionAsync(repotPath, token))
+            if (IsStandingAtRecordedRepotPoint())
             {
-                HandleRouteStartProtectionFailure("Repot path");
-                return false;
+                // The character already stands at the repot point (right next to the shop),
+                // so the walk is done. Walk the repot route anyway and it would take the
+                // character back to the route's first waypoint — the recorded town start —
+                // and only then return to the shop, wasting a whole trip after e.g. the
+                // shop window was closed mid sequence. Skip the walk, keep the retry budget
+                // clean and continue with the normal sell + buy sequence, exactly like a
+                // fresh repot whose walk just finished here.
+                _log($"[Repot] Character is still at the repot point (map {_repotPointMap}, {_repotPointX:F0},{_repotPointY:F0}) — the walk to the shop is already done; skipping repot path {_repotPathIndex + 1}/{repotPaths.Count} ('{repotPath.PathFile}') and starting the sell/buy sequence again.");
+                _moveToRepotRetryCount = 0;
             }
-
-            var result = await RunRouteOnceAsync(repotPath, "Repot path", token);
-            if (token.IsCancellationRequested) return false;
-            if (IsDeathRecoveryRequested) return false;
-
-            if (result == RouteRunResult.WaypointRepotRequested)
+            else
             {
-                _log("[WaypointRecovery] Repot was requested inside the Repot step path; treating it as a failed repot-path attempt.");
-            }
+                _log($"[Repot] Walking to repot point using repot path {_repotPathIndex + 1}/{repotPaths.Count} — '{repotPath.PathFile}'.");
 
-            if (result != RouteRunResult.Completed)
-            {
-                // In-city stuck escalation (or any route aborted by the in-city unstuck limit):
-                // never burn more back-to-back repot retries. Stop, wait 10 min, reset, repot again.
-                if ((result == RouteRunResult.CityStuck || result == RouteRunResult.NavigationFailure) &&
-                    _memoryService.GetIsInCity())
+                if (!await RunRouteStartProtectionAsync(repotPath, token))
                 {
-                    await WaitOutInCityStuckAndResetAsync("Repot path", token);
+                    HandleRouteStartProtectionFailure("Repot path");
                     return false;
                 }
 
-                _moveToRepotRetryCount++;
-                if (_moveToRepotRetryCount >= BotConstants.Repot.MaxMoveToRepotRetries)
-                {
-                    _log($"[Repot] Could not reach the repot point after {_moveToRepotRetryCount} tries (player likely stuck in the city). Giving up.");
-                    _moveToRepotRetryCount = 0;
-                    CurrentPhase = BotPhase.Failed;
-                    return false;
-                }
-                _log($"[Repot] Could not reach the repot point (attempt {_moveToRepotRetryCount}/{BotConstants.Repot.MaxMoveToRepotRetries}). Retrying.");
-                return false; // stay on this step and retry
-            }
-            _moveToRepotRetryCount = 0;
+                var result = await RunRouteOnceAsync(repotPath, "Repot path", token);
+                if (token.IsCancellationRequested) return false;
+                if (IsDeathRecoveryRequested) return false;
 
-            // The next repot trip will use the next path in the pool.
-            _repotPathIndex = (_repotPathIndex + 1) % repotPaths.Count;
+                if (result == RouteRunResult.WaypointRepotRequested)
+                {
+                    _log("[WaypointRecovery] Repot was requested inside the Repot step path; treating it as a failed repot-path attempt.");
+                }
+
+                if (result != RouteRunResult.Completed)
+                {
+                    // In-city stuck escalation (or any route aborted by the in-city unstuck limit):
+                    // never burn more back-to-back repot retries. Stop, wait 10 min, reset, repot again.
+                    if ((result == RouteRunResult.CityStuck || result == RouteRunResult.NavigationFailure) &&
+                        _memoryService.GetIsInCity())
+                    {
+                        await WaitOutInCityStuckAndResetAsync("Repot path", token);
+                        return false;
+                    }
+
+                    _moveToRepotRetryCount++;
+                    if (_moveToRepotRetryCount >= BotConstants.Repot.MaxMoveToRepotRetries)
+                    {
+                        _log($"[Repot] Could not reach the repot point after {_moveToRepotRetryCount} tries (player likely stuck in the city). Giving up.");
+                        _moveToRepotRetryCount = 0;
+                        CurrentPhase = BotPhase.Failed;
+                        return false;
+                    }
+                    _log($"[Repot] Could not reach the repot point (attempt {_moveToRepotRetryCount}/{BotConstants.Repot.MaxMoveToRepotRetries}). Retrying.");
+                    return false; // stay on this step and retry
+                }
+                _moveToRepotRetryCount = 0;
+
+                // The next repot trip will use the next path in the pool.
+                _repotPathIndex = (_repotPathIndex + 1) % repotPaths.Count;
+
+                // Remember where the walk ended: the shop is right here, so a repot that has
+                // to be repeated (e.g. the shop window closed mid sequence) continues with the
+                // sell/buy sequence instead of walking this route from its first waypoint again.
+                RecordRepotPoint();
+            }
 
             // 3. Perform the repot sequence.
             if (_profile.DryRunRepot)
@@ -1172,6 +1222,7 @@ namespace DriverScanTester.Services
             try
             {
                 _repotSystem.Repot();
+                _shopClosedRepotRestartCount = 0;
                 _log("[Repot] Repot completed.");
             }
             catch (BotStopRequestedException)
@@ -1179,6 +1230,69 @@ namespace DriverScanTester.Services
                 // The game window lost focus during the seller scan — the whole bot
                 // must stop cleanly. Rethrow so StartAsync handles it as a stop.
                 throw;
+            }
+            catch (ShopWindowClosedException ex)
+            {
+                // The shop window vanished in the middle of the sell/buy sequence (a
+                // missed click closed it). Continuing would keep clicking predefined
+                // shop positions on the game world and walk the character away — the
+                // sequence already aborted before the next click. Wait ~1 min, then
+                // restart the full repot step from the top: teleport to city (no-op
+                // when already there) → walk to the repot point → open shop → buy.
+                _shopClosedRepotRestartCount++;
+                _log($"[Repot] Shop window closed mid-repot: {ex.Message}");
+
+                if (_shopClosedRepotRestartCount > BotConstants.Repot.MaxShopClosedRestarts)
+                {
+                    _log($"[Repot] Shop window closed mid-repot {_shopClosedRepotRestartCount} times in a row " +
+                         $"(max {BotConstants.Repot.MaxShopClosedRestarts}). Giving up instead of restarting again.");
+                    _shopClosedRepotRestartCount = 0;
+                    CurrentPhase = BotPhase.Failed;
+                    return false;
+                }
+
+                _log($"[Repot] Waiting {ShopClosedRestartDelayMs / 60000} min, then restarting the whole profile cycle from the Repot step " +
+                     $"(teleport to city → repot point → open shop → sell → buy → back to the route), exactly like an exp-triggered repot " +
+                     $"[restart {_shopClosedRepotRestartCount}/{BotConstants.Repot.MaxShopClosedRestarts}].");
+
+                // The coordinate readback may still show the shop open (or a leftover
+                // dialog). Close it with Escape only — never with a click, which could
+                // move the character.
+                try
+                {
+                    _repotSystem.CloseShopWindowIfOpen();
+                }
+                catch (Exception closeEx)
+                {
+                    _log($"[Repot] Could not close the leftover shop window: {closeEx.Message}");
+                }
+
+                // The repot attempt itself was fine — only the shop UI went away. Give
+                // the restart a clean retry budget.
+                _moveToRepotRetryCount = 0;
+                _teleportRetryCount = 0;
+                _postRepotVerifyRetryCount = 0;
+
+                try
+                {
+                    await PausableDelayAsync(ShopClosedRestartDelayMs, token);
+                }
+                catch (OperationCanceledException)
+                {
+                    return false;
+                }
+                if (token.IsCancellationRequested)
+                    return false;
+
+                _log("[Repot] Shop-closed restart delay over — restarting the profile cycle from the Repot step.");
+
+                // Full profile-cycle restart, exactly like an exp-triggered repot (low potions /
+                // full inventory): the flow goes back to the Repot step and redoes the complete
+                // sequence, instead of merely repeating this step with the repot route that was
+                // already walked. The character still stands at the repot point, so the step
+                // skips its walk and re-opens the shop right away.
+                RedirectToRepotStep("shop window closed mid-repot");
+                return false; // the flow position was set by the redirect; never advance past it
             }
             catch (Exception ex)
             {
@@ -1237,6 +1351,46 @@ namespace DriverScanTester.Services
             _postRepotVerifyRetryCount = 0;
 
             return true;
+        }
+
+        /// <summary>
+        /// Remembers where the finished walk to the repot point left the character. The shop
+        /// is right there, so a repot that has to be repeated immediately (shop window closed
+        /// mid sequence, failed buy verification, ...) continues with the sell/buy sequence
+        /// instead of walking the repot route from its recorded first waypoint again.
+        /// </summary>
+        private void RecordRepotPoint()
+        {
+            var (x, y, success) = _memoryService.GetPlayerPosition();
+            int map = _memoryService.GetCurrentMap();
+            if (!success || map <= 0)
+            {
+                _hasRepotPoint = false;
+                return;
+            }
+
+            _hasRepotPoint = true;
+            _repotPointMap = map;
+            _repotPointX = x;
+            _repotPointY = y;
+        }
+
+        /// <summary>
+        /// True when the character still stands at the repot point recorded by the last
+        /// completed repot walk (same map, within the route resync's near-waypoint distance),
+        /// i.e. the shop is in reach and only the sell/buy sequence is left to do.
+        /// </summary>
+        private bool IsStandingAtRecordedRepotPoint()
+        {
+            if (!_hasRepotPoint)
+                return false;
+
+            var (x, y, success) = _memoryService.GetPlayerPosition();
+            if (!success || _memoryService.GetCurrentMap() != _repotPointMap)
+                return false;
+
+            return GeometryUtils.Distance(x, y, _repotPointX, _repotPointY) <=
+                   BotConstants.Movement.RouteResyncNearWaypointDistance;
         }
 
         /// <summary>
@@ -3555,6 +3709,22 @@ namespace DriverScanTester.Services
                 // must stop. Rethrow so StartAsync handles it as a stop; the retry
                 // chain must not continue.
                 throw;
+            }
+            catch (ShopWindowClosedException ex)
+            {
+                // The shop window disappeared mid-repot: the sequence aborted before the
+                // next predefined click (those clicks would hit the game world and walk
+                // the character away). Close any leftover shop UI with Escape only — no
+                // clicks — and let the retry chain continue.
+                _log($"[StartProtection] Shop window closed mid-repot: {ex.Message} — no further clicks sent; continuing with the retry.");
+                try
+                {
+                    _repotSystem.CloseShopWindowIfOpen();
+                }
+                catch (Exception closeEx)
+                {
+                    _log($"[StartProtection] Could not close the leftover shop window: {closeEx.Message}");
+                }
             }
             catch (Exception ex)
             {

@@ -100,15 +100,15 @@ namespace DriverScanTester
             /// <summary>
             /// Legacy name kept for compatibility. It carries the tilted movement value
             /// (16160); the NPC scan and every non-W view must use the top-down
-            /// <see cref="StationaryVerticalLock"/> (16310) instead.
+            /// <see cref="StationaryVerticalLock"/> (16330) instead.
             /// </summary>
             public const short DefaultVerticalLock = 16160;
 
             /// <summary>
             /// Stationary vertical camera lock: the original normal-camera baseline
-            /// (16310), used for targeting, normal loot scans and every non-W view.
+            /// (16330), used for targeting, normal loot scans and every non-W view.
             /// </summary>
-            public const short StationaryVerticalLock = 16310;
+            public const short StationaryVerticalLock = 16330;
 
             /// <summary>
             /// Vertical camera lock used only while a bot-owned W input is held (16160).
@@ -120,7 +120,7 @@ namespace DriverScanTester
             /// Vertical camera lock used while the bot scans the game window for an NPC
             /// (seller, COT entry NPC, ...) and while it works in the NPC's dialog.
             /// The scan MUST run in the top-down view: this is the stationary baseline
-            /// (16310), not the tilted 16160 movement/walk view. Scanning top-down keeps
+            /// (16330), not the tilted 16160 movement/walk view. Scanning top-down keeps
             /// the view identical to the one restored when the NPC is clicked, so the
             /// camera no longer changes only after the NPC has already been found.
             /// </summary>
@@ -501,11 +501,13 @@ namespace DriverScanTester
             public const int MinimumMobs = 2;
             /// <summary>
             /// Minimum RELIABLY detected visible markers before an active gather walk may start.
-            /// Two visible mobs never justify a separate grouping movement: both may be ranged,
-            /// their preferred attack distances may never converge, and following the route may
-            /// even increase their separation. Natural combat/route approach is unaffected.
+            /// A pair is allowed to justify a gather walk (2), but keep in mind that two mobs may be
+            /// ranged, their preferred attack distances may never converge, and following the route
+            /// may even increase their separation - the temporal (trend), persistence and
+            /// route-compatible-progress gates still have to pass, and an already compact pair is
+            /// rejected by the compact-local-group check. Natural combat/route approach is unaffected.
             /// </summary>
-            public const int MinimumGatherMarkers = 3;
+            public const int MinimumGatherMarkers = 2;
             /// <summary>
             /// When many mobs are visible this is how many properly clustered mobs are enough
             /// to stop gathering and attack the local cluster instead of chasing every outlier.
@@ -514,10 +516,21 @@ namespace DriverScanTester
             /// </summary>
             public const int AttackReadyClusterMobCount = 4;
             public const int DetectionIntervalMs = 225;
-            public const int BadFormationPersistenceMs = 750;
+            /// <summary>
+            /// A scattered formation must persist this long before a gather walk may start.
+            /// Measured on real fights: melee mobs close 30 px in ~300 ms, so the old 750 ms
+            /// (plus a 1200 ms combat gate) meant the formation was already compact before the
+            /// gates opened - every evaluation ended as "compact local group already available".
+            /// 300 ms ≈ two consecutive detection samples is enough anti-flap protection.
+            /// </summary>
+            public const int BadFormationPersistenceMs = 300;
             /// <summary>One missed/weak frame can bridge this short interval without resetting a candidate.</summary>
             public const int BadFormationGraceMs = 450;
-            public const int MinimumCombatTimeMs = 1200;
+            /// <summary>
+            /// Minimum combat time before grouping may act. Was 1200 ms, which together with the
+            /// persistence/trend gates arrived after the mobs had already stacked up.
+            /// </summary>
+            public const int MinimumCombatTimeMs = 300;
             /// <summary>
             /// Hard upper bound of ONE gather movement. There is no randomness any more: the
             /// attempt is a short, predictable, route-compatible walk that is never extended.
@@ -543,10 +556,16 @@ namespace DriverScanTester
             public const int EncounterQuietResetMs = 2500;
 
             // ── Local cluster assessment ────────────────────────────────────────────
-            /// <summary>Two markers this close (normalized by marker radius) form a compact pair.</summary>
-            public const float CompactPairDistanceFactor = 2.75f;
+            /// <summary>
+            /// Two markers this close (normalized by marker radius) form a compact pair.
+            /// 2.75r (≈45 px at the reference client) was far too generous: real melee mobs
+            /// standing 37-75 px apart were already declared "grouped", so a gather walk could
+            /// never be justified. 1.25r (≈20 px) means "visibly stacked", which is what an
+            /// area attack needs; anything looser is still a scattered formation.
+            /// </summary>
+            public const float CompactPairDistanceFactor = 1.25f;
             /// <summary>Neighborhood radius (normalized by marker radius) around the best pair.</summary>
-            public const float CompactClusterNeighborhoodFactor = 3.0f;
+            public const float CompactClusterNeighborhoodFactor = 2.0f;
             /// <summary>A compact local group this large already suppresses any gather movement.</summary>
             public const int MinimumCompactClusterSize = 2;
             /// <summary>
@@ -563,8 +582,12 @@ namespace DriverScanTester
             public const int FormationHistoryWindowMs = 1000;
             /// <summary>Hard cap of retained formation observations.</summary>
             public const int FormationHistoryMaxObservations = 12;
-            /// <summary>Relative local-formation-quality improvement that counts as meaningful.</summary>
-            public const float FormationImprovementNoise = 0.10f;
+            /// <summary>
+            /// Relative local-formation-quality improvement that counts as meaningful. Melee mobs
+            /// approach in small per-sample steps (≈5-10%), so the old 10% floor reported
+            /// "Stagnant/Unknown" during a normal pull and the trend gate blocked every gather.
+            /// </summary>
+            public const float FormationImprovementNoise = 0.05f;
             /// <summary>
             /// Screen-space geometry changes with camera rotation, so formation trends are not
             /// compared across camera moves larger than this angular difference.
@@ -584,8 +607,13 @@ namespace DriverScanTester
             public const int PlayerProgressWindowMs = 750;
             /// <summary>Hard cap of retained player-position samples.</summary>
             public const int PlayerProgressMaxSamples = 16;
-            /// <summary>Minimum world-coordinate span of the progress window that is usable.</summary>
-            public const int MinimumPlayerProgressSpanMs = 500;
+            /// <summary>
+            /// Minimum time span of the progress window that is usable. The detection cadence is
+            /// 225 ms, so 500 ms required FOUR samples: with a formation that closes in ~600 ms the
+            /// eligibility was reached only after the mobs had already stacked up. 400 ms accepts
+            /// three consecutive samples while still measuring real world-space movement.
+            /// </summary>
+            public const int MinimumPlayerProgressSpanMs = 400;
             /// <summary>Minimum world-coordinate progress inside the window before gathering.</summary>
             public const float MinimumMovementProgressForGather = 0.5f;
             /// <summary>
@@ -603,14 +631,18 @@ namespace DriverScanTester
             public const float GatherProgressTolerance = 0.5f;
 
             /// <summary>
-            /// Initial conservative spread thresholds at the reference marker size (pixels).
-            /// Trigger is deliberately wider than success; tune using real Hyena screenshots.
-            /// Analyzer scales them with detected marker radius when client resolution changes.
+            /// Scatter ("worth a gather walk") thresholds at the reference marker size, in pixels.
+            /// Trigger must stay wider than success, but the old 40/68 px pair left a dead zone:
+            /// two or three melee mobs standing 40-80 px apart were neither "already grouped"
+            /// (compact pair is now 20 px) nor "scattered", so grouping literally never engaged.
+            /// 24/40 px opens a real band (≈48 px apart for a pair) that melee mobs actually cross
+            /// during a pull - and they cross it in well under a second, hence the short gates.
+            /// Analyzer scales them with the detected marker radius when the client resolution changes.
             /// </summary>
-            public const float TriggerAverageSpreadPx = 40f;
-            public const float TriggerMaximumSpreadPx = 68f;
-            public const float SuccessAverageSpreadPx = 24f;
-            public const float SuccessMaximumSpreadPx = 44f;
+            public const float TriggerAverageSpreadPx = 24f;
+            public const float TriggerMaximumSpreadPx = 40f;
+            public const float SuccessAverageSpreadPx = 18f;
+            public const float SuccessMaximumSpreadPx = 30f;
 
             /// <summary>Approximate outer ring radius at a reference 840px-high client.</summary>
             public const float ExpectedMarkerRadiusPx = 18f;
@@ -620,13 +652,19 @@ namespace DriverScanTester
             public const int RingValidationTolerancePx = 1;
             public const int MarkerColorTolerance = 32;
             public const int MinimumRingHoughVotes = 10;
-            public const float MinimumRingCoverage = 0.40f;
+            /// <summary>
+            /// Ring-only acceptance coverage. Raised from 0.40 to 0.55: spell bursts, ground
+            /// item labels and decorative glyphs all produce sparse magenta arcs that used to
+            /// pass as mob markers (a single effect could fake 5-10 "mobs" within a few pixels).
+            /// A real ground ring covers the full circle, so 0.55 still tolerates heavy occlusion.
+            /// </summary>
+            public const float MinimumRingCoverage = 0.55f;
             /// <summary>
             /// Minimum artificial-magenta ring support required to confirm a cyan-center
             /// hypothesis as a real mob marker. A cyan blob alone gives the exact center but
             /// can also come from arbitrary effects, so magenta evidence near the expected
             /// ring radius must corroborate it. The threshold is deliberately below the
-            /// ring-only <see cref="MinimumRingCoverage"/> (0.40): the cyan center is already
+            /// ring-only <see cref="MinimumRingCoverage"/> (0.55): the cyan center is already
             /// known, so a partial/occluded ring is enough. 0.20 tolerates a fully occluded
             /// quadrant plus scattered gaps while still rejecting cyan-only artifacts.
             /// </summary>
@@ -637,7 +675,14 @@ namespace DriverScanTester
             public const int RingAngularSamples = 32;
             public const int CyanMinimumComponentPixels = 1;
             public const int CyanMaximumComponentPixels = 80;
-            public const float CandidateDeduplicationRadiusFactor = 0.35f;
+            /// <summary>
+            /// Marker merge distance, normalized by marker radius. The cyan-center path and the
+            /// Hough-ring path locate the SAME marker a few pixels apart, so 0.35r (≈6 px) kept
+            /// both copies alive: a single mob became a "compact pair" 0.3-0.9r wide and every
+            /// gather was refused with CompactLocalGroup. 1.0r merges those duplicates while real
+            /// mobs (≥37 px apart in a live fight) stay separate.
+            /// </summary>
+            public const float CandidateDeduplicationRadiusFactor = 1.0f;
 
             /// <summary>Stable anchor inferred from the centered local-player marker exclusion zone.</summary>
             public const float PlayerAnchorRatioX = 0.372f;
@@ -936,7 +981,7 @@ namespace DriverScanTester
             public const ulong IsSellerPointedPtr = 0x4883E8;
             public const ulong IsSellerPointed = 0xC;
 
-            // Camera vertical "lock" (16-bit), e.g. 16310 for the top-down stationary/NPC
+            // Camera vertical "lock" (16-bit), e.g. 16330 for the top-down stationary/NPC
             // scan view and 16160 for the tilted movement (W-held) view.
             // Distinct from the float vertical angle at +0x1B0 (CameraVerticalAngle).
             public const ulong CameraVerticalLockOffset = 0x1BE;
@@ -1043,7 +1088,7 @@ namespace DriverScanTester
 
             /// <summary>Camera vertical angle (short at [Ares.exe + 0x4883F0] + 0x1BE)
             /// observed while hovering the NPC. This is an NPC-hover observation only;
-            /// it is NOT the general stationary camera baseline (16310).</summary>
+            /// it is NOT the general stationary camera baseline (16330).</summary>
             public const short CameraVerticalAngle = 16320; // 0x3FB6
         }
 
@@ -1681,6 +1726,26 @@ namespace DriverScanTester
             /// the buy — no gold, wrong layout — and every retry would fail the same way).
             /// </summary>
             public const int MaxPostRepotVerifyRetries = 3;
+
+            /// <summary>
+            /// Delay before restarting the repot after the shop window closed in the
+            /// middle of the repot (sell/buy) sequence. A missed click can close the
+            /// shop; every following predefined click would land in the game world and
+            /// walk the character away. The repot is aborted instead, the bot waits this
+            /// long (1 minute) and then restarts the whole profile cycle from the Repot
+            /// step — exactly like an exp-triggered repot: teleport to city (no-op when
+            /// already there) → repot point → open shop → sell → buy → back to the route.
+            /// When the character still stands at the repot point the walk is skipped, so
+            /// the shop is re-opened right away instead of walking the repot route again.
+            /// </summary>
+            public const int ShopClosedRestartDelayMs = 60_000;
+
+            /// <summary>
+            /// Maximum shop-closed repot restarts before the workflow fails visibly
+            /// instead of retrying forever (e.g. the shop window keeps closing because
+            /// the NPC scan hits the wrong object and the Shop option never opens).
+            /// </summary>
+            public const int MaxShopClosedRestarts = 3;
         }
 
         // ════════════════════════════════════════════════════════════════

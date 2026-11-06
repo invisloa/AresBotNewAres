@@ -610,7 +610,7 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Writes the camera vertical "lock" (16-bit) value, e.g. 16310 for the top-down
+        /// Writes the camera vertical "lock" (16-bit) value, e.g. 16330 for the top-down
         /// stationary/NPC scan view or 16160 for the tilted movement view. The address is
         /// +0x1BE relative to the camera base, which is distinct from the float vertical
         /// angle at +0x1B0 (CameraVerticalAngle).

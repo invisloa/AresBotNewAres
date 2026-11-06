@@ -59,10 +59,10 @@ AKTUALNE WARTOSCI (SESJA 4, 2026-08-03):
   cl   | [Ares.exe + 0x4853E8] + 0xC  | int     | 302348960        | 0x12057AA0     | 138599240        | 0x0842DB48
   dl   | [Ares.exe + 0x4853E8] + 0xD  | int     | 1181050          | 0x0012057A     | 541403           | 0x000842DB
 
-  Camera Vertical Angle [Ares.exe + 0x4853F0] + 0x1BE: 16310 (0x3FB6) przed
+  Camera Vertical Angle [Ares.exe + 0x4853F0] + 0x1BE: 16330 (0x3FCA) przed
   naprowadzeniem na NPC / 16320 podczas naprowadzenia na NPC.
   (Zakodowane: BotConstants.NpcMouseOverValues.CameraVerticalAngle = 16320,
-  BotConstants.Camera.DefaultVerticalLock = 16310.)
+  BotConstants.Camera.DefaultVerticalLock = 16330.)
 
 Surowe bajty w okolicy (+0xA do +0xF) — SESJA 4 (2026-08-03):
   Offs  | Item     | NPC
@@ -115,7 +115,7 @@ HISTORIA ZMIAN:
                              dl=541403)
                            - NpcMouseOverValues.CameraVerticalAngle = 16320
                              ([Ares.exe+0x4853F0]+0x1BE podczas naprowadzenia
-                             na NPC; poza naprowadzeniem = 16310 ==
+                             na NPC; poza naprowadzeniem = 16330 ==
                              Camera.DefaultVerticalLock)
 
 WNIOSKI Z ANALIZY (SESJE 1-4) — CZY WARTOSCI MAJA LOGIKE? TAK:

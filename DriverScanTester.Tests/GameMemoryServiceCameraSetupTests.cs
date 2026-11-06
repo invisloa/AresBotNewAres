@@ -16,12 +16,12 @@ namespace DriverScanTester.Tests
         public void WKeyCameraSettingsKeepMovementAndStationaryValuesDistinct()
         {
             Assert.Equal((short)16160, BotConstants.Camera.MovementVerticalLock);
-            Assert.Equal((short)16310, BotConstants.Camera.StationaryVerticalLock);
+            Assert.Equal((short)16330, BotConstants.Camera.StationaryVerticalLock);
             // The NPC mouseover scan must run in the top-down view, not the tilted
             // 16160 movement view; otherwise the camera only becomes top-down after
             // the NPC has already been found and clicked.
             Assert.Equal(BotConstants.Camera.StationaryVerticalLock, BotConstants.Camera.NpcScanVerticalLock);
-            Assert.Equal((short)16310, BotConstants.Camera.NpcScanVerticalLock);
+            Assert.Equal((short)16330, BotConstants.Camera.NpcScanVerticalLock);
             Assert.Equal((short)16720, BotConstants.Camera.SellerDistanceLock);
             Assert.Equal((ulong)0x1BE, BotConstants.MemoryOffsets.CameraVerticalLockOffset);
         }
@@ -63,11 +63,11 @@ namespace DriverScanTester.Tests
             var memory = new MemoryFixture();
             memory.Set(ModuleBase + BotConstants.MemoryOffsets.CameraPtr, BitConverter.GetBytes(CameraBase));
             memory.Set(CameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset,
-                BitConverter.GetBytes((short)16310));
+                BitConverter.GetBytes((short)16330));
             GameMemoryService service = memory.CreateService();
 
             Assert.True(service.TryGetCameraVerticalLock(out short verticalLock));
-            Assert.Equal((short)16310, verticalLock);
+            Assert.Equal((short)16330, verticalLock);
 
             GameMemoryService noCamera = new MemoryFixture().CreateService();
             Assert.False(noCamera.TryGetCameraVerticalLock(out _));

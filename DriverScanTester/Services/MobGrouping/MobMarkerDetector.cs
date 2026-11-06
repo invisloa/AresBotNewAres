@@ -41,6 +41,8 @@ namespace DriverScanTester.Services
         private readonly List<int> _magentaPixels = new();
         private readonly List<(int X, int Y, int Votes)> _peaks = new();
         private readonly List<(int X, int Y, int Votes, float Coverage)> _ringCandidates = new();
+        private MobMarkerDetectionResult? _lastResult;
+        private bool _hasLastResult;
         private bool _captureErrorLogged;
         private bool _disposed;
 
@@ -77,7 +79,7 @@ namespace DriverScanTester.Services
                     float markerRadius = GetExpectedRadius(clientSize.Height);
                     MobMarker[] markers = DetectBitmapLocked(_frame!, roi.Left, roi.Top, markerRadius);
                     _captureErrorLogged = false;
-                    return new MobMarkerDetectionResult
+                    var detection = new MobMarkerDetectionResult
                     {
                         Success = true,
                         ClientWidth = clientSize.Width,
@@ -86,6 +88,12 @@ namespace DriverScanTester.Services
                         PlayerAnchor = GetPlayerAnchor(clientSize.Width, clientSize.Height),
                         Markers = markers
                     };
+
+                    // Keep the exact frame/result pair so a diagnostics snapshot can show what
+                    // the grouping decision was actually made on (no second capture, no drift).
+                    _lastResult = detection;
+                    _hasLastResult = true;
+                    return detection;
                 }
                 catch (Exception ex)
                 {
@@ -99,9 +107,35 @@ namespace DriverScanTester.Services
             }
         }
 
-        /// <summary>Returns a detached one-shot ROI frame for the optional diagnostics renderer.</summary>
-        internal Bitmap? CaptureDebugFrame(out MobMarkerDetectionResult? result)
+        /// <summary>
+        /// Returns a clone of the frame that produced the LAST successful detection together with
+        /// its exact result. Diagnostics use this so the rendered snapshot shows the same markers
+        /// the grouping controller decided on (a fresh capture can be a different frame).
+        /// </summary>
+        internal Bitmap? TryCloneLastFrame(out MobMarkerDetectionResult? result)
         {
+            lock (_gate)
+            {
+                result = null;
+                if (_disposed || !_hasLastResult || _lastResult == null || _frame == null)
+                    return null;
+
+                result = _lastResult;
+                try
+                {
+                    return (Bitmap)_frame.Clone();
+                }
+                catch
+                {
+                    // Diagnostics must never break the capture/detection pipeline.
+                    result = null;
+                    return null;
+                }
+            }
+        }
+
+        /// <summary>Returns a detached one-shot ROI frame for the optional diagnostics renderer.</summary>
+        internal Bitmap? CaptureDebugFrame(out MobMarkerDetectionResult? result)        {
             lock (_gate)
             {
                 result = null;
