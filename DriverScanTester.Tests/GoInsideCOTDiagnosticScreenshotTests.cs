@@ -21,6 +21,7 @@ namespace DriverScanTester.Tests
         private const ulong PlayerBase = 0x200000;
         private const ulong UiWindowBase = 0x300000;
         private const ulong DialogBase = 0x400000;
+        private const ulong CameraBase = 0x500000;
 
         [Fact]
         public async Task TestA_DialogDidNotOpenCapturesScreenshotBeforeTheAttemptReturns()
@@ -139,6 +140,60 @@ namespace DriverScanTester.Tests
             Assert.Equal(1, capture.Attempt);
             Assert.Equal("NpcDialogNotOpened", capture.Reason);
             Assert.Contains(log, line => line.Contains("GoInsideCOT: map changed — success."));
+        }
+
+        [Fact]
+        public async Task SuccessfulEntryAppliesTheCotExpPathStartCameraBeforeThePositionSyncW()
+        {
+            const int startCameraBits = BotConstants.CameraAngleBits.North_0Deg;
+            const string routeFile = "goinsidecot-exp-camera-regression.json";
+            string saveDir = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", "SavedPaths"));
+            Directory.CreateDirectory(saveDir);
+            string routePath = Path.Combine(saveDir, routeFile);
+            File.WriteAllText(routePath,
+                "{\"Name\":\"CotExpStartCam\",\"Points\":[{\"X\":139,\"Y\":156,\"StartCameraAngleBits\":" +
+                startCameraBits + "}]}");
+
+            try
+            {
+                var memory = new CotMemory { DialogOpen = true };
+                var log = new List<string>();
+                var screenshots = new ScreenshotRecorder();
+                var profile = new BotProfile
+                {
+                    FlowSteps = new List<BotFlowStep>
+                    {
+                        new()
+                        {
+                            Type = BotFlowStepType.ExpLoop,
+                            StartMapNumber = 36,
+                            Routes = new List<BotRouteStep>
+                            {
+                                new() { PathFile = routeFile, StartMapNumber = 36 }
+                            }
+                        }
+                    }
+                };
+
+                OperationContext context = CreateContext(memory, log, screenshots.Capture, profile);
+
+                bool succeeded = await RunAttemptAsync(
+                    context,
+                    scanNpc: () => true,
+                    clickAtCalibrated: (_, _, _) => memory.Map = 36);
+
+                Assert.True(succeeded);
+                Assert.Equal(startCameraBits, memory.LastWrittenCameraAngleBits);
+                Assert.Contains(log, line =>
+                    line.Contains("[StartCam] GoInsideCOT:") &&
+                    line.Contains(routeFile) &&
+                    line.Contains("BEFORE the position-refresh W"));
+            }
+            finally
+            {
+                File.Delete(routePath);
+            }
         }
 
         [Fact]
@@ -291,7 +346,8 @@ namespace DriverScanTester.Tests
         private static OperationContext CreateContext(
             CotMemory memory,
             List<string> log,
-            Func<string, string, int, string?> capture)
+            Func<string, string, int, string?> capture,
+            BotProfile? profile = null)
         {
             GameMemoryService memoryService = memory.CreateService(log.Add);
             var pathRunner = new PathRunnerService(memoryService, log.Add);
@@ -300,7 +356,7 @@ namespace DriverScanTester.Tests
                 memoryService,
                 pathRunner,
                 itemSeller,
-                new BotProfile(),
+                profile ?? new BotProfile(),
                 log.Add,
                 () => { },
                 diagnosticScreenshotCapture: capture);
@@ -343,12 +399,16 @@ namespace DriverScanTester.Tests
             public short X { get; set; } = 334;
             public short Y { get; set; } = 143;
             public bool DialogOpen { get; set; }
+            public int? LastWrittenCameraAngleBits { get; private set; }
 
             public GameMemoryService CreateService(Action<string> log)
             {
                 SetPointer(ModuleBase + BotConstants.MemoryOffsets.PlayerPtr, PlayerBase);
                 SetPointer(ModuleBase + BotConstants.MemoryOffsets.UiWindowM, UiWindowBase);
                 SetPointer(UiWindowBase + (ulong)BotConstants.MemoryOffsets.DialogOpenPtr, DialogBase);
+                SetPointer(ModuleBase + BotConstants.MemoryOffsets.CameraPtr, CameraBase);
+                SetInt(CameraBase + (ulong)BotConstants.MemoryOffsets.CameraAngle,
+                    BotConstants.CameraAngleBits.North_0Deg);
 
                 GameMemoryService.ReadMemoryDelegate read =
                     (uint pid, ulong address, byte[] buffer, out uint bytesRead) =>
@@ -371,6 +431,15 @@ namespace DriverScanTester.Tests
                     (uint pid, ulong address, byte[] buffer, out uint bytesWritten) =>
                     {
                         bytesWritten = 0;
+                        if (address == CameraBase + (ulong)BotConstants.MemoryOffsets.CameraAngle &&
+                            buffer.Length == 4)
+                        {
+                            _memory[address] = buffer.ToArray();
+                            LastWrittenCameraAngleBits = BitConverter.ToInt32(buffer, 0);
+                            bytesWritten = 4;
+                            return true;
+                        }
+
                         return false;
                     };
 

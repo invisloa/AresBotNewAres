@@ -31,6 +31,10 @@ namespace DriverScanTester.Tests
             "_waypoints",
             PrivateInstance) ?? throw new InvalidOperationException("_waypoints not found.");
 
+        private static readonly FieldInfo StartCameraLockActiveField = typeof(MovementSystem).GetField(
+            "_startCameraLockActive",
+            PrivateInstance) ?? throw new InvalidOperationException("_startCameraLockActive not found.");
+
         [Theory]
         [InlineData("", null)]
         [InlineData("   ", null)]
@@ -63,6 +67,26 @@ namespace DriverScanTester.Tests
         public void InvalidCameraAngleTextIsRejected(string text)
         {
             Assert.False(CameraAngleValue.TryParse(text, out _));
+        }
+
+        [Fact]
+        public void CameraAngleTextShowsTheRawAddressValueLikeTheAddressListAndRoundTrips()
+        {
+            // C_CameraHorizontal sample from the address list: 1070780928 (0x3FD2D200).
+            const int bits = 1070780928;
+
+            Assert.Equal("0x3FD2D200", $"0x{bits:X8}");
+            Assert.Equal("1070780928", CameraAngleValue.Format(bits));
+            Assert.True(CameraAngleValue.TryParse(CameraAngleValue.Format(bits), out int? reparsed));
+            Assert.Equal(bits, reparsed);
+
+            string description = CameraAngleValue.Describe(bits);
+            Assert.StartsWith("1070780928 (0x3FD2D200)", description);
+            Assert.Contains("\u00B0", description);
+            Assert.Contains(" rad", description);
+
+            // The editor must never present the value in radians.
+            Assert.DoesNotContain("rad", CameraAngleValue.Format(bits));
         }
 
         [Fact]
@@ -187,6 +211,72 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public async Task StartCameraLockKeepsTheAngleAndSuppressesSteeringUntilThePlayerMoves()
+        {
+            // Post-town-teleport case: the client still ignores W (action=1) while the map
+            // loads. Holding the configured angle for 500 ms of *time* let the stuck
+            // recovery rotate the camera to 211° and walk away from the repot point. The
+            // lock must stay armed until real displacement happens.
+            var events = new List<string>();
+            var simulation = new StartCameraSimulatedGameMemory(events)
+            {
+                CameraAngle = BitConverter.Int32BitsToSingle(BotConstants.CameraAngleBits.North_0Deg),
+                X = 262f,
+                Y = 188f
+            };
+
+            var path = new List<Waypoint>
+            {
+                new Waypoint(
+                    4000,
+                    4000,
+                    MovementPrecision.Medium,
+                    BotMode.OnlyMove,
+                    zoneRestriction: ZoneRestriction.Both,
+                    startCameraAngleBits: BotConstants.CameraAngleBits.East_90Deg)
+            };
+
+            var movement = new RecordingStartCameraMovementSystem(
+                simulation.CreateMemory(_ => { }),
+                _ => { },
+                path,
+                events);
+
+            await movement.Update(CancellationToken.None);
+            int wDownIndex = events.FindIndex(e => e == "W:DOWN");
+            Assert.True(wDownIndex >= 0, $"W down missing. Events: {string.Join(", ", events)}");
+
+            // Loading: no displacement at all, W is physically held but the game ignores it.
+            DateTime deadline = DateTime.UtcNow.AddMilliseconds(
+                BotConstants.Camera.StartAngleLockMs + 400);
+            while (DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(25);
+                await movement.Update(CancellationToken.None);
+            }
+
+            Assert.True((bool)StartCameraLockActiveField.GetValue(movement)!,
+                "The start-angle lock released without any player movement.");
+            Assert.DoesNotContain(
+                events.GetRange(wDownIndex, events.Count - wDownIndex),
+                e => e.StartsWith("A:", StringComparison.Ordinal) || e.StartsWith("D:", StringComparison.Ordinal));
+
+            // The game starts processing the held W: real movement releases the lock.
+            simulation.Action = 3;
+            simulation.X += 4f;
+            deadline = DateTime.UtcNow.AddMilliseconds(BotConstants.Camera.StartAngleLockMs + 1500);
+            while (DateTime.UtcNow < deadline &&
+                   (bool)StartCameraLockActiveField.GetValue(movement)!)
+            {
+                await Task.Delay(25);
+                await movement.Update(CancellationToken.None);
+            }
+
+            Assert.False((bool)StartCameraLockActiveField.GetValue(movement)!,
+                "The start-angle lock did not release after real movement.");
+        }
+
+        [Fact]
         public async Task DirectCameraPressesWAtTheConfiguredStartAngleBeforeWritingItsBearing()
         {
             var events = new List<string>();
@@ -214,6 +304,19 @@ namespace DriverScanTester.Tests
                 events);
 
             await movement.Update(CancellationToken.None);
+
+            // The start-angle lock holds the configured yaw until W actually moves the
+            // player, then for at least StartAngleLockMs. Simulate real forward movement
+            // through the lock window instead of assuming a single tick is enough.
+            simulation.X += 2f;
+            DateTime deadline = DateTime.UtcNow.AddMilliseconds(
+                BotConstants.Camera.StartAngleLockMs + 1500);
+            while (DateTime.UtcNow < deadline &&
+                   events.Count(e => e.StartsWith("CAM:", StringComparison.Ordinal)) < 2)
+            {
+                await Task.Delay(25);
+                await movement.Update(CancellationToken.None);
+            }
 
             int startAngleIndex = events.IndexOf(
                 $"CAM:0x{BotConstants.CameraAngleBits.East_90Deg:X8}");
@@ -292,6 +395,53 @@ namespace DriverScanTester.Tests
             Assert.NotEmpty(queue);
             Assert.Equal(269f, queue.Peek().X);
             Assert.Equal(189f, queue.Peek().Y);
+        }
+
+        [Fact]
+        public async Task InitialResyncKeepsTheFirstWaypointEvenWhenThePlayerStandsOnIt()
+        {
+            // A path usually starts where it was recorded — on the player's position. The
+            // initial resync used to treat that first point as "already reached" and skip
+            // it, so its StartCam was never written and W went down on the old camera.
+            var events = new List<string>();
+            var simulation = new StartCameraSimulatedGameMemory(events)
+            {
+                CameraAngle = BitConverter.Int32BitsToSingle(BotConstants.CameraAngleBits.North_0Deg),
+                X = 222f,
+                Y = 213f
+            };
+
+            var path = new List<Waypoint>
+            {
+                new Waypoint(
+                    222,
+                    213,
+                    MovementPrecision.Medium,
+                    BotMode.OnlyMove,
+                    zoneRestriction: ZoneRestriction.Both,
+                    startCameraAngleBits: BotConstants.CameraAngleBits.East_90Deg),
+                new Waypoint(229, 213, MovementPrecision.Medium, BotMode.OnlyMove, zoneRestriction: ZoneRestriction.Both),
+                new Waypoint(242, 203, MovementPrecision.Medium, BotMode.OnlyMove, zoneRestriction: ZoneRestriction.Both)
+            };
+
+            var movement = new RecordingStartCameraMovementSystem(
+                simulation.CreateMemory(_ => { }),
+                _ => { },
+                path,
+                events);
+
+            await movement.Update(CancellationToken.None);
+
+            int startAngleIndex = events.IndexOf(
+                $"CAM:0x{BotConstants.CameraAngleBits.East_90Deg:X8}");
+            int wDownIndex = events.FindIndex(e => e == "W:DOWN");
+
+            Assert.True(startAngleIndex >= 0,
+                $"The first waypoint's start camera was never written. Events: {string.Join(", ", events)}");
+            Assert.True(wDownIndex >= 0, $"W down missing. Events: {string.Join(", ", events)}");
+            Assert.True(startAngleIndex < wDownIndex,
+                $"W must be pressed after the start angle. Events: {string.Join(", ", events)}");
+            Assert.Equal(BotConstants.CameraAngleBits.East_90Deg, simulation.LastWrittenCameraAngleBits);
         }
 
         [Fact]

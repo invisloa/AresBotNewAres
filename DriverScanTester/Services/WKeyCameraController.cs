@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using DriverScanTester.Utils;
 
 namespace DriverScanTester.Services
 {
@@ -153,6 +154,15 @@ namespace DriverScanTester.Services
                         TryApplyLock(StationaryVerticalLock, "failed movement setup cleanup");
                         return false;
                     }
+
+                    // Diagnostic: every physical W-down records the yaw the game actually
+                    // exposes at that moment. This covers W from movement, the PositionSync
+                    // mini-W refresh and any other owner, so a W sent before a waypoint's
+                    // start camera is applied is visible with its exact value.
+                    string cameraBeforeW = _memory.TryGetCameraAngleBits(out int cameraBitsBeforeW)
+                        ? CameraAngleValue.Describe(cameraBitsBeforeW)
+                        : "unreadable";
+                    _log($"[WCamera] Physical W-down ({owner.Source}) — live camera yaw {cameraBeforeW}; movement vertical lock {MovementVerticalLock}.");
 
                     if (!TrySendPhysicalW(owner, keyUp: false, "first W-down"))
                     {

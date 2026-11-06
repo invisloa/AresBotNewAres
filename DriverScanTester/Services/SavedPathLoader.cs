@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using DriverScanTester.Models;
 
@@ -21,6 +22,35 @@ namespace DriverScanTester.Services
         public SavedPathLoader(Action<string> log)
         {
             _log = log;
+        }
+
+        /// <summary>
+        /// Reads only the first positional waypoint's configured start camera angle from a
+        /// segment file. Used by the startup flow to set the camera before the bounded
+        /// position-refresh W, without loading (and logging) the whole route twice.
+        /// Returns null when the file/point has no start angle or cannot be read.
+        /// </summary>
+        public int? LoadFirstPositionalStartCameraAngleBits(string segmentFileName)
+        {
+            if (!segmentFileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                segmentFileName += ".json";
+
+            string path = Path.Combine(SAVE_DIR, segmentFileName);
+            if (!File.Exists(path))
+                return null;
+
+            try
+            {
+                var segment = JsonSerializer.Deserialize<PathSegment>(File.ReadAllText(path));
+                PathPoint? firstPositional = segment?.Points?.FirstOrDefault(p => !p.IsOperationStep);
+                return firstPositional?.StartCameraAngleBits;
+            }
+            catch
+            {
+                // Diagnostics are owned by the caller; a broken route file is reported
+                // when the route is actually loaded.
+                return null;
+            }
         }
 
         /// <summary>

@@ -58,10 +58,11 @@ namespace DriverScanTester.Services
         public const string OperationsFolder = "Operations";
 
         /// <summary>
-        /// Master switch for loot-scan diagnostics. Enabled by default so every loot
-        /// frame is saved with its validated candidate pixels annotated.
+        /// Master switch for loot-scan diagnostics. Disabled by default so automatic
+        /// loot attempts do not save a screenshot for every scan; manual diagnostic
+        /// scans enable it explicitly for the duration of the test.
         /// </summary>
-        public static bool LootScanCaptureEnabled { get; set; } = true;
+        public static bool LootScanCaptureEnabled { get; set; } = false;
 
         /// <summary>
         /// Loot screenshots go to the project's visible Screenshots/LootTest folder

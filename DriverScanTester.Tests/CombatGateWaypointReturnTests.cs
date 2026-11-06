@@ -619,6 +619,55 @@ namespace DriverScanTester.Tests
             Assert.DoesNotContain(scenario.Log, l => l.Contains("Target 20001 skipped", StringComparison.Ordinal));
         }
 
+        [Fact]
+        public async Task SuppressionClearsAtTheNextWaypointInThePath()
+        {
+            using var scenario = new ReturnScenario(
+                playerX: 124f, playerY: 175f, mode: BotMode.MoveAndAttackAndLoot,
+                waypointX: 139f, waypointY: 156f, targetId: 16401);
+
+            await scenario.TickAsync();
+            Assert.Equal(0, scenario.Stub.TargetId);
+            Assert.Equal(1, scenario.Movement.MouseActions.Count(action => action == "LeftDown"));
+            Assert.Equal(16401, (int)GetField(scenario.Movement, "_combatGateSuppressedTargetId")!);
+
+            // The route reaches its waypoint and advances to the NEXT one in the path (the same
+            // transition AdvWp/RouteResync performs). No time may be needed for TAB to come back.
+            var queue = (Queue<Waypoint>)GetField(scenario.Movement, "_waypoints")!;
+            queue.Dequeue();
+            queue.Enqueue(new Waypoint(150f, 170f, MovementPrecision.Medium, BotMode.MoveAndAttackAndLoot,
+                attackDisengageDistance: ProductionAttackDisengageDistance));
+            Invoke(scenario.Movement, "ResetCombatStateForWaypointChange");
+
+            await scenario.TickAsync();
+
+            Assert.Equal(0, (int)GetField(scenario.Movement, "_combatGateSuppressedTargetId")!);
+            Assert.Contains(scenario.Log, l => l.Contains("Target suppression released at the next waypoint", StringComparison.Ordinal));
+
+            await TickUntilAsync(scenario, () => scenario.Movement.TargetCyclePresses > 0, timeoutMs: 5000);
+        }
+
+        [Fact]
+        public async Task SuppressionIsNotReleasedByTimeWhileTheRouteStillTargetsTheSameWaypoint()
+        {
+            using var scenario = new ReturnScenario(
+                playerX: 124f, playerY: 175f, mode: BotMode.MoveAndAttack,
+                waypointX: 139f, waypointY: 156f, targetId: 16401);
+
+            await scenario.TickAsync();
+            Assert.Equal(0, scenario.Stub.TargetId);
+            Assert.Equal(16401, (int)GetField(scenario.Movement, "_combatGateSuppressedTargetId")!);
+
+            // A stale clock must never end the suppression: only the next waypoint does.
+            SetField(scenario.Movement, "_combatGateTargetDisengagedAtUtc", DateTime.UtcNow.AddSeconds(-120));
+            await scenario.TickAsync();
+            await scenario.TickAsync();
+
+            Assert.Equal(16401, (int)GetField(scenario.Movement, "_combatGateSuppressedTargetId")!);
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("Target suppression released", StringComparison.Ordinal));
+            Assert.DoesNotContain(scenario.Log, l => l.Contains("TAB suppressed", StringComparison.Ordinal));
+        }
+
         // ── C. No movement: bounded stall, diagnostics, existing recovery ───────
 
         [Fact]

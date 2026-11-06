@@ -461,16 +461,16 @@ namespace DriverScanTester.Services
 
         // A target selected when CombatGate disengages is released once and kept out of
         // combat until the route has advanced beyond that waypoint and 15 seconds have elapsed.
+        // A target selected when CombatGate disengages is released once and kept out of
+        // combat only for the route leg it was released on: the next waypoint in the path
+        // ends the suppression. There is deliberately no time-based release.
         private const int CombatGateTargetReleaseMaximumClicks = 2;
         private const int CombatGateTargetReleaseRetryDelayMs = 200;
         private const int PostKillTargetReleaseMaximumClicks = 2;
         private const int PostKillTargetReleaseRetryDelayMs = 200;
-        private const int CombatGateTargetSuppressionSeconds = 15;
         private int _combatGateSuppressedTargetId;
         private Waypoint _combatGateSuppressedWaypoint;
         private DateTime _combatGateTargetDisengagedAtUtc = DateTime.MinValue;
-        private bool _combatGateSuppressionWaypointReached;
-        private bool _combatGateSuppressionRouteProgressed;
         private bool _combatGateSuppressedTargetTabAttempted;
         private bool _combatGateSuppressedTabSuppressionLogged;
         private bool _combatGateSuppressionSelectionHandled;
@@ -1164,6 +1164,28 @@ namespace DriverScanTester.Services
         // at that configured bearing instead, so the direct write is deferred by one
         // W transition.
         private bool _startCameraAngleAwaitingFirstW;
+
+        // ── Start camera lock ──
+        // While armed, the configured start angle owns BOTH the camera and W: the bot
+        // holds W at exactly that yaw until it has moved forward for at least
+        // StartAngleLockMs. No bearing write and no A/D turn may run in that window, and
+        // the yaw is re-asserted if anything else moves it. Only after the window closes
+        // does normal steering (bearing writes / keyboard turns) take over.
+        private bool _startCameraLockActive;
+        private int _startCameraLockBits;
+        private double _startCameraLockWHeldMs;
+        private DateTime _startCameraLockLastSampleUtc = DateTime.MinValue;
+        private DateTime _startCameraLockLastWriteUtc = DateTime.MinValue;
+        private int _startCameraLockRewriteCount;
+        // The lock may only release once W actually produced movement: right after a town
+        // teleport the client can ignore W while the map is still loading (action=1), and
+        // releasing on time alone let stuck recovery turn the camera away from the
+        // configured angle.
+        private bool _startCameraLockMovementSampled;
+        private bool _startCameraLockMovementSeen;
+        private bool _startCameraLockNoMovementLogged;
+        private float _startCameraLockStartX;
+        private float _startCameraLockStartY;
 
         private enum TurnKeyState
         {
@@ -2139,8 +2161,6 @@ namespace DriverScanTester.Services
             _combatGateSuppressedTargetId = targetId;
             _combatGateSuppressedWaypoint = waypoint;
             _combatGateTargetDisengagedAtUtc = DateTime.UtcNow;
-            _combatGateSuppressionWaypointReached = false;
-            _combatGateSuppressionRouteProgressed = false;
             _combatGateSuppressedTargetTabAttempted = false;
             _combatGateSuppressedTabSuppressionLogged = false;
             _combatGateSuppressionSelectionHandled = false;
@@ -2565,44 +2585,50 @@ namespace DriverScanTester.Services
             _postKillTargetReleaseRetryAtUtc = DateTime.UtcNow.AddMilliseconds(PostKillTargetReleaseRetryDelayMs);
         }
 
-        private void UpdateCombatGateTargetSuppression(float playerX, float playerY)
+        private void UpdateCombatGateTargetSuppression()
         {
             if (!IsCombatGateTargetSuppressionActive)
                 return;
 
-            Waypoint recoveryWaypoint = _combatGateSuppressedWaypoint;
-            float reachThreshold = GetEffectiveWaypointReachThreshold(recoveryWaypoint);
-            if (GeometryUtils.Distance(playerX, playerY, recoveryWaypoint.X, recoveryWaypoint.Y) <= reachThreshold)
-                _combatGateSuppressionWaypointReached = true;
+            // The suppression is bound to exactly ONE route leg: the leg leading to the waypoint
+            // the bot was walking to when the target was released. As soon as the route advances
+            // to the NEXT waypoint in the path the suppression ends and TAB works normally again.
+            // This is a waypoint-based contract on purpose — never a timer.
+            Waypoint disengagedWaypoint = _combatGateSuppressedWaypoint;
+            if (!HasRouteMovedBeyondCombatGateWaypoint(disengagedWaypoint))
+                return;
 
-            if (_combatGateSuppressionWaypointReached)
+            int releasedTarget = _combatGateSuppressedTargetId;
+            double elapsedMs = (DateTime.UtcNow - _combatGateTargetDisengagedAtUtc).TotalMilliseconds;
+            string nextTarget = DescribeCurrentWaypoint();
+            ClearCombatGateTargetSuppression();
+            _log($"[CombatGate] Target suppression released at the next waypoint: target={releasedTarget} " +
+                 $"disengagedAt=({disengagedWaypoint.X:F1},{disengagedWaypoint.Y:F1}) next={nextTarget} " +
+                 $"after={elapsedMs:F0}ms — TAB available again.");
+        }
+
+        /// <summary>
+        /// True when the active navigation target is no longer the waypoint captured at the
+        /// disengagement, i.e. the route has advanced to the next waypoint in the path (or a
+        /// RouteResync rebuilt it). This alone ends the target suppression.
+        /// </summary>
+        private bool HasRouteMovedBeyondCombatGateWaypoint(Waypoint recoveryWaypoint)
+        {
+            if (_waypoints.Count > 0)
             {
-                bool routeMovedBeyondWaypoint = false;
-                if (_waypoints.Count > 0)
-                {
-                    Waypoint current = _waypoints.Peek();
-                    routeMovedBeyondWaypoint = current.IsOperationStep ||
-                        Math.Abs(current.X - recoveryWaypoint.X) > 0.01f ||
-                        Math.Abs(current.Y - recoveryWaypoint.Y) > 0.01f;
-                }
-                else if (_finalStandbyActive)
-                {
-                    routeMovedBeyondWaypoint =
-                        Math.Abs(_finalStandbyX - recoveryWaypoint.X) > 0.01f ||
-                        Math.Abs(_finalStandbyY - recoveryWaypoint.Y) > 0.01f;
-                }
-
-                if (routeMovedBeyondWaypoint)
-                    _combatGateSuppressionRouteProgressed = true;
+                Waypoint current = _waypoints.Peek();
+                return current.IsOperationStep ||
+                    Math.Abs(current.X - recoveryWaypoint.X) > 0.01f ||
+                    Math.Abs(current.Y - recoveryWaypoint.Y) > 0.01f;
             }
 
-            if (_combatGateSuppressionRouteProgressed &&
-                (DateTime.UtcNow - _combatGateTargetDisengagedAtUtc).TotalSeconds >= CombatGateTargetSuppressionSeconds)
+            if (_finalStandbyActive)
             {
-                int releasedTarget = _combatGateSuppressedTargetId;
-                ClearCombatGateTargetSuppression();
-                _log($"[CombatGate] Target suppression expired after route progression and {CombatGateTargetSuppressionSeconds}s: target={releasedTarget}.");
+                return Math.Abs(_finalStandbyX - recoveryWaypoint.X) > 0.01f ||
+                    Math.Abs(_finalStandbyY - recoveryWaypoint.Y) > 0.01f;
             }
+
+            return false;
         }
 
         private void ClearCombatGateTargetSuppression()
@@ -2610,8 +2636,6 @@ namespace DriverScanTester.Services
             _combatGateSuppressedTargetId = 0;
             _combatGateSuppressedWaypoint = default;
             _combatGateTargetDisengagedAtUtc = DateTime.MinValue;
-            _combatGateSuppressionWaypointReached = false;
-            _combatGateSuppressionRouteProgressed = false;
             _combatGateSuppressedTargetTabAttempted = false;
             _combatGateSuppressedTabSuppressionLogged = false;
             _combatGateSuppressionSelectionHandled = false;
@@ -3185,7 +3209,6 @@ namespace DriverScanTester.Services
 
             // 5./6. Clear the gate latch and reset the combat handler for reacquisition.
             _attackSuppressedForCurrentWaypoint = false;
-            _combatGateSuppressionWaypointReached = true;
             _combatHandler.ResetState();
             ClearCombatRetargetSearch();
             _resumeCombatSkillAfterGrouping = false;
@@ -3912,7 +3935,7 @@ namespace DriverScanTester.Services
                 ? _targetSafety.Validate()
                 : default;
             bool confirmedMonsterTarget = targetValidation.IsConfirmedMonster;
-            UpdateCombatGateTargetSuppression(currX, currY);
+            UpdateCombatGateTargetSuppression();
 
             // Log position every 5 ticks (action bytes included — key for stuck diagnosis:
             // 25=idle, 27/3=running, 28=being hit, 39=attacking).
@@ -4757,6 +4780,7 @@ namespace DriverScanTester.Services
                 // tick keeps the same 200 ms (not 100 ms) idle window before firing.
                 _stuckDetector.SampleIntervalMs = TickIntervalMs;
                 if (DateTime.Now >= _ignoreStuckUntil &&
+                    !_startCameraLockActive &&
                     _stuckDetector.IsActionStuck(currX, currY, target, _isMovingForward))
                 {
                     _log($"[ActionStuck] Action={currentAction} while moving. Starting ReverseDiagonalRecovery.");
@@ -4771,6 +4795,7 @@ namespace DriverScanTester.Services
                 // Track real displacement while W is held; zero progress for the timeout
                 // is treated as stuck, regardless of what the animation claims.
                 if (_isMovingForward && !_reverseDiagonalRecovery.IsActive &&
+                    !_startCameraLockActive &&
                     DateTime.Now >= _ignoreStuckUntil &&
                     distNow > thresholdNow + BotConstants.Movement.NoProgressNearTargetExtra)
                 {
@@ -5213,6 +5238,11 @@ namespace DriverScanTester.Services
                 return;
             }
 
+            // A waypoint's configured start angle owns W and the camera at the beginning
+            // of its leg: the camera stays locked at the recorded value while W is held.
+            if (MaintainStartCameraLock(moveForward))
+                return;
+
             if (steeringMode == MovementSteeringMode.DirectCamera)
             {
                 ApplyDirectSteeringBearing(bearingDeg, moveForward);
@@ -5220,6 +5250,220 @@ namespace DriverScanTester.Services
             }
 
             ApplyKeyboardSteeringBearing(bearingDeg, moveForward);
+        }
+
+        /// <summary>
+        /// Holds a waypoint's configured start camera angle while its leg starts moving.
+        /// The lock owns the input: W is held, no turn key and no bearing-derived camera
+        /// write may run, and the configured yaw is re-asserted if anything else moves it.
+        /// It releases only after W was held at that yaw for
+        /// <see cref="BotConstants.Camera.StartAngleLockMs"/>; normal steering takes over
+        /// on the next update. Returns true while the lock owns this update.
+        /// </summary>
+        private bool MaintainStartCameraLock(bool allowForward)
+        {
+            if (!_startCameraLockActive)
+                return false;
+
+            // Turning away from the configured angle would defeat the lock.
+            if (_heldTurnKey != TurnKeyState.None || _keyboardFastTurnMouseActive)
+                ReleaseTurnKey("start camera lock");
+
+            // A recovery owns W and the camera while it runs: the lock waits, it never
+            // presses W behind the recovery's back.
+            if (_isUnstuckRoutineActive || _reverseDiagonalRecovery.IsActive)
+            {
+                _startCameraLockLastSampleUtc = DateTime.MinValue;
+                return true;
+            }
+
+            DateTime now = DateTime.UtcNow;
+
+            if (!allowForward)
+            {
+                // In-place turn update: never press W here, but the lock stays armed and
+                // the camera keeps the configured angle.
+                _startCameraLockLastSampleUtc = DateTime.MinValue;
+                EnforceStartCameraLockCamera(now);
+                return true;
+            }
+
+            bool wPressedThisUpdate = false;
+            if (!_isMovingForward)
+            {
+                _startCameraLockLastSampleUtc = DateTime.MinValue;
+                if (!TryStartMoving())
+                {
+                    // W rejected (navigation barrier / camera lease held elsewhere). Keep
+                    // the lock armed and retry instead of silently unlocking the angle.
+                    EnforceStartCameraLockCamera(now);
+                    return true;
+                }
+
+                // W is held from this moment on.
+                _startCameraLockLastSampleUtc = now;
+                wPressedThisUpdate = true;
+            }
+            else if (_startCameraLockLastSampleUtc == DateTime.MinValue)
+            {
+                _startCameraLockLastSampleUtc = now;
+            }
+            else
+            {
+                _startCameraLockWHeldMs += (now - _startCameraLockLastSampleUtc).TotalMilliseconds;
+                _startCameraLockLastSampleUtc = now;
+            }
+
+            bool playerMoved = UpdateStartCameraLockMovement(wPressedThisUpdate);
+
+            EnforceStartCameraLockCamera(now);
+
+            // Hard bound: an angle that produces no movement at all (blocked spawn) must
+            // not disable steering and stuck recovery forever.
+            if (_startCameraLockWHeldMs >= BotConstants.Camera.StartAngleLockMaxMs)
+            {
+                _startCameraLockActive = false;
+                _startCameraLockLastSampleUtc = DateTime.MinValue;
+                _startCameraLockNoMovementLogged = false;
+                ResetActionStuckTracking();
+                _log($"[StartCam] Lock released after the {BotConstants.Camera.StartAngleLockMaxMs} ms maximum without movement — camera stays where the game has it; normal steering and stuck recovery resume.");
+                return false;
+            }
+
+            if (_startCameraLockWHeldMs < BotConstants.Camera.StartAngleLockMs || !playerMoved)
+            {
+                if (!_startCameraLockNoMovementLogged &&
+                    _startCameraLockWHeldMs >= BotConstants.Camera.StartAngleLockMs)
+                {
+                    _startCameraLockNoMovementLogged = true;
+                    var (nowX, nowY, readOk) = _memoryService.GetPlayerPosition();
+                    _log($"[StartCam] Lock still holding after {_startCameraLockWHeldMs:F0} ms of W — no movement yet (action={_memoryService.GetCurrentAction()}, position={(readOk ? $"({nowX:F1},{nowY:F1})" : "unreadable")}, start=({_startCameraLockStartX:F1},{_startCameraLockStartY:F1})). Keeping the configured angle and suppressing stuck recovery.");
+                }
+                return true;
+            }
+
+            _startCameraLockActive = false;
+            _startCameraLockLastSampleUtc = DateTime.MinValue;
+            _startCameraLockNoMovementLogged = false;
+            var (movedX, movedY, movedReadOk) = _memoryService.GetPlayerPosition();
+            float movedDistance = movedReadOk
+                ? GeometryUtils.Distance(movedX, movedY, _startCameraLockStartX, _startCameraLockStartY)
+                : 0f;
+            _log($"[StartCam] Lock released — W was held {_startCameraLockWHeldMs:F0} ms at {CameraAngleValue.Describe(_startCameraLockBits)} and the player moved {movedDistance:F2} units from ({_startCameraLockStartX:F1},{_startCameraLockStartY:F1}) to {(movedReadOk ? $"({movedX:F1},{movedY:F1})" : "unreadable")} (rewrites={_startCameraLockRewriteCount}); normal steering resumes.");
+            return false;
+        }
+
+        /// <summary>
+        /// Samples the player's position while the start-angle lock owns W. The lock may
+        /// only satisfy its minimum window once the player has actually travelled
+        /// <see cref="BotConstants.Camera.StartAngleLockMinMovementTiles"/>: after a town
+        /// teleport W is ignored until the map finishes loading, and releasing on elapsed
+        /// time alone let the stuck recovery rotate the camera away from the angle.
+        /// </summary>
+        private bool UpdateStartCameraLockMovement(bool justPressedW)
+        {
+            var (x, y, readOk) = _memoryService.GetPlayerPosition();
+            if (!readOk)
+                return _startCameraLockMovementSeen;
+
+            if (justPressedW || !_startCameraLockMovementSampled)
+            {
+                _startCameraLockStartX = x;
+                _startCameraLockStartY = y;
+                _startCameraLockMovementSampled = true;
+                return false;
+            }
+
+            if (!_startCameraLockMovementSeen &&
+                GeometryUtils.Distance(x, y, _startCameraLockStartX, _startCameraLockStartY) >=
+                BotConstants.Camera.StartAngleLockMinMovementTiles)
+            {
+                _startCameraLockMovementSeen = true;
+            }
+
+            return _startCameraLockMovementSeen;
+        }
+
+        /// <summary>
+        /// Re-asserts a locked start angle when the live camera yaw drifted away from it.
+        /// Throttled by <see cref="BotConstants.Camera.StartAngleLockRewriteMs"/> and
+        /// reported so a game-side yaw fight is visible instead of silent.
+        /// </summary>
+        private void EnforceStartCameraLockCamera(DateTime now)
+        {
+            int bits = _startCameraLockBits;
+            float targetRadians = BitConverter.Int32BitsToSingle(bits);
+            float targetBearingDeg = GeometryUtils.ConvertRadiansToBearingDeg(targetRadians);
+
+            bool driftDetected = true;
+            float currentBearingDeg = targetBearingDeg;
+            if (_memoryService.TryGetCameraAngleBits(out int currentBits))
+            {
+                currentBearingDeg = GeometryUtils.ConvertRadiansToBearingDeg(
+                    BitConverter.Int32BitsToSingle(currentBits));
+                driftDetected = Math.Abs(GeometryUtils.GetShortestBearingDiffDeg(currentBearingDeg, targetBearingDeg)) >
+                                BotConstants.Camera.StartAngleLockToleranceDeg;
+            }
+
+            if (!driftDetected)
+                return;
+
+            if ((now - _startCameraLockLastWriteUtc).TotalMilliseconds < BotConstants.Camera.StartAngleLockRewriteMs)
+                return;
+
+            _startCameraLockLastWriteUtc = now;
+            bool applied = _wKeyCameraController != null
+                ? _wKeyCameraController.TrySetCameraAngleBits(bits)
+                : _memoryService.TrySetCameraAngleBits(bits);
+
+            _startCameraLockRewriteCount++;
+            if (_startCameraLockRewriteCount == 1 || _startCameraLockRewriteCount % 5 == 0)
+            {
+                _log($"[StartCam] Lock re-assert #{_startCameraLockRewriteCount} — camera was at {currentBearingDeg:F1}° instead of {targetBearingDeg:F1}°; write {(applied ? "verified" : "FAILED")}.");
+            }
+
+            if (!applied)
+                return;
+
+            _cameraLastAppliedAngle = targetRadians;
+            _lastSetGameAngle = targetRadians;
+            _lastSetBearingDeg = targetBearingDeg;
+            _lastCameraUpdateTime = DateTime.Now;
+            _hasLastGameAngle = true;
+            _hasCameraHysteresisCandidate = false;
+        }
+
+        /// <summary>Arms the start-angle lock for the leg that is about to receive its first W.</summary>
+        private void ArmStartCameraLock(int angleBits)
+        {
+            _startCameraLockActive = true;
+            _startCameraLockBits = angleBits;
+            _startCameraLockWHeldMs = 0;
+            _startCameraLockLastSampleUtc = DateTime.MinValue;
+            _startCameraLockLastWriteUtc = DateTime.UtcNow;
+            _startCameraLockRewriteCount = 0;
+            _startCameraLockMovementSampled = false;
+            _startCameraLockMovementSeen = false;
+            _startCameraLockNoMovementLogged = false;
+            _startCameraLockStartX = 0f;
+            _startCameraLockStartY = 0f;
+        }
+
+        /// <summary>Forgets the start-angle lock without touching the camera.</summary>
+        private void ClearStartCameraLock()
+        {
+            if (_startCameraLockActive &&
+                _startCameraLockWHeldMs < BotConstants.Camera.StartAngleLockMs)
+            {
+                _log($"[StartCam] Lock cancelled after {_startCameraLockWHeldMs:F0} ms of W — the {BotConstants.Camera.StartAngleLockMs} ms minimum was not reached (leg ended or another subsystem took the camera).");
+            }
+
+            _startCameraLockActive = false;
+            _startCameraLockWHeldMs = 0;
+            _startCameraLockLastSampleUtc = DateTime.MinValue;
+            _startCameraLockMovementSampled = false;
+            _startCameraLockMovementSeen = false;
+            _startCameraLockNoMovementLogged = false;
         }
 
         /// <summary>
@@ -5258,9 +5502,11 @@ namespace DriverScanTester.Services
             // W-down. DirectCamera normally writes the target bearing before W; press W
             // first for this one transition so the explicit angle is not overwritten
             // before the game sees the forward input.
+            bool usedStartCameraAngle = false;
             if (_startCameraAngleAwaitingFirstW)
             {
                 _startCameraAngleAwaitingFirstW = false;
+                usedStartCameraAngle = true;
                 if (moveForward)
                 {
                     if (!TryStartMoving())
@@ -5288,7 +5534,16 @@ namespace DriverScanTester.Services
             _hasLastGameAngle = true;
 
             // ── Camera update filter ──
-            if (ShouldUpdateCamera(cameraRadians, isFreshSegment, out _))
+            // The leg started with an explicit start angle: writing the bearing-derived
+            // camera here (previously 1 ms after W went down) silently replaced the
+            // configured angle, so the leg never actually began at the recorded heading.
+            // Suppress exactly this one transition; the normal bearing steering resumes
+            // on the next update.
+            if (usedStartCameraAngle)
+            {
+                _log($"[StartCam] DirectCamera bearing write {bearingDeg:F1}° skipped — the configured start angle is the orientation for this leg's first W (camera stays at {GeometryUtils.ConvertRadiansToBearingDeg(_cameraLastAppliedAngle):F1}°).");
+            }
+            else if (ShouldUpdateCamera(cameraRadians, isFreshSegment, out _))
             {
                 _log($"[Camera] Apply brg={bearingDeg:F1}deg target={cameraRadians:F4}rad last={_cameraLastAppliedAngle:F4}rad diff={CircularGameAngleDiff(cameraRadians, _cameraLastAppliedAngle):F4}");
                 if (TrySetCameraAngle(cameraRadians))
@@ -6303,6 +6558,10 @@ namespace DriverScanTester.Services
                 return;
             }
 
+            // An explicit recovery camera write supersedes a leg's start-angle lock;
+            // otherwise the lock would keep fighting the recovery back to the old yaw.
+            ClearStartCameraLock();
+
             ReleaseTurnKey("direct camera recovery");
 
             float cameraRadians = GeometryUtils.ConvertBearingToRadians(bearingDeg);
@@ -6471,6 +6730,11 @@ namespace DriverScanTester.Services
             // original freeze distance.
             if (_hasLastGameAngle && nearWaypointHeadingFrozen)
             {
+                // A locked start angle still owns this update even inside the freeze
+                // radius, otherwise a short leg would skip the lock entirely.
+                if (MaintainStartCameraLock(allowForward: true))
+                    return;
+
                 StartMoving();
                 return;
             }
@@ -6523,6 +6787,10 @@ namespace DriverScanTester.Services
             // A new leg supersedes any unconsumed DirectCamera deferral from the old one.
             _startCameraAngleAwaitingFirstW = false;
 
+            string previousCamera = _memoryService.TryGetCameraAngleBits(out int previousBits)
+                ? CameraAngleValue.Describe(previousBits)
+                : "unreadable";
+
             // The camera must be final before W goes down. StopMoving is unconditional
             // and idempotent; it also clears any turn key left from the previous leg.
             StopMoving();
@@ -6534,12 +6802,34 @@ namespace DriverScanTester.Services
             string description = CameraAngleValue.Describe(angleBits);
             if (!applied)
             {
-                _log($"[StartCam] Waypoint ({target.X:F1},{target.Y:F1}) — could not write start camera {description}; the route continues and the write will be retried on the next tick.");
+                _log($"[StartCam] Waypoint ({target.X:F1},{target.Y:F1}) — could NOT write start camera {description}; camera before write: {previousCamera}, W released={!_isMovingForward}, tick={_tickCount}. The write will be retried on the next tick — W must not be pressed before it succeeds.");
                 return;
             }
 
-            _log($"[StartCam] Waypoint ({target.X:F1},{target.Y:F1}) — camera set to {description} with W released; settling {BotConstants.Camera.StartAngleSettleMs} ms before W.");
+            bool writeVerified = _memoryService.TryGetCameraAngleBits(out int writtenBits) && writtenBits == angleBits;
+            _log($"[StartCam] Waypoint ({target.X:F1},{target.Y:F1}) — camera set to {description} (was {previousCamera}, read-back exact={writeVerified}) with W released; settling {BotConstants.Camera.StartAngleSettleMs} ms before W.");
             await Task.Delay(BotConstants.Camera.StartAngleSettleMs, token);
+
+            // The write itself is verified in process memory, but the game may normalise or
+            // revert the yaw during the settle window. Report the real value instead of
+            // pressing W at an angle nobody checked.
+            if (_memoryService.TryGetCameraAngleBits(out int settledBits) && settledBits != angleBits)
+            {
+                _log($"[StartCam] Waypoint ({target.X:F1},{target.Y:F1}) — camera did NOT hold the configured angle: " +
+                     $"asked {description}, game reports {CameraAngleValue.Describe(settledBits)} after {BotConstants.Camera.StartAngleSettleMs} ms.");
+            }
+
+            // Keep the camera-write filter in sync with the angle that was just written.
+            // Without this the filter still thought the camera sat at 0 rad, so the first
+            // DirectCamera update right after W tried to "correct" it away from the
+            // configured angle.
+            float appliedRadians = BitConverter.Int32BitsToSingle(angleBits);
+            _cameraLastAppliedAngle = appliedRadians;
+            _lastSetGameAngle = appliedRadians;
+            _lastSetBearingDeg = GeometryUtils.ConvertRadiansToBearingDeg(appliedRadians);
+            _lastCameraUpdateTime = DateTime.Now;
+            _hasLastGameAngle = true;
+            _hasCameraHysteresisCandidate = false;
 
             // The configured bearing is the intended W-down orientation. Do not run the
             // first-step A/D alignment, which would rotate the camera away from it.
@@ -6552,6 +6842,12 @@ namespace DriverScanTester.Services
             _startCameraAngleAppliedY = target.Y;
             _startCameraAngleAppliedBits = angleBits;
             _startCameraAngleAwaitingFirstW = true;
+
+            // The configured yaw is now LOCKED: W goes down at this angle and the bot keeps
+            // holding W with it for at least StartAngleLockMs before any bearing write or
+            // A/D turn is allowed to touch the camera again.
+            ArmStartCameraLock(angleBits);
+            _log($"[StartCam] Lock armed — camera pinned to {description}; W must be held at this angle for at least {BotConstants.Camera.StartAngleLockMs} ms.");
         }
 
         /// <summary>
@@ -6565,6 +6861,7 @@ namespace DriverScanTester.Services
             _startCameraAngleAppliedX = 0f;
             _startCameraAngleAppliedY = 0f;
             _startCameraAngleAppliedBits = 0;
+            ClearStartCameraLock();
         }
 
         /// <summary>
@@ -7881,6 +8178,31 @@ namespace DriverScanTester.Services
         //  INPUT — W key management
         // ========================================================================
 
+        /// <summary>
+        /// Diagnostic log emitted immediately before a physical W-down is requested. It
+        /// records the waypoint's configured start angle, the live yaw and the internal
+        /// applied/lock bookkeeping, so a W press that happens before (or with a stale)
+        /// start-camera write is visible in the bot log with exact values.
+        /// </summary>
+        private void LogStartCameraBeforeWDown(string source)
+        {
+            bool targetHasStartCamera = _waypoints.Count > 0 && _waypoints.Peek().StartCameraAngleBits.HasValue;
+            if (!targetHasStartCamera && !_startCameraAngleApplied && !_startCameraLockActive)
+                return;
+
+            Waypoint target = _waypoints.Count > 0 ? _waypoints.Peek() : default;
+            int? expectedBits = target.StartCameraAngleBits
+                ?? (_startCameraLockActive ? _startCameraLockBits : (int?)null);
+
+            bool cameraReadable = _memoryService.TryGetCameraAngleBits(out int liveBits);
+            string liveCamera = cameraReadable ? CameraAngleValue.Describe(liveBits) : "unreadable";
+            bool? exactMatch = expectedBits.HasValue
+                ? cameraReadable && liveBits == expectedBits.Value
+                : null;
+
+            _log($"[StartCam] W-down request ({source}, tick={_tickCount}) — waypoint ({target.X:F1},{target.Y:F1}) expected {(expectedBits.HasValue ? CameraAngleValue.Describe(expectedBits) : "none")}; live camera {liveCamera}; exactMatch={exactMatch}; applied={_startCameraAngleApplied} awaitingFirstW={_startCameraAngleAwaitingFirstW} lock={_startCameraLockActive}.");
+        }
+
         private void StartMoving()
         {
             TryStartMoving();
@@ -7916,6 +8238,8 @@ namespace DriverScanTester.Services
                 {
                     return true;
                 }
+
+                LogStartCameraBeforeWDown("movement StartMoving");
 
                 if (_wKeyCameraController != null && _wKeyCameraOwner != null)
                 {
@@ -9195,7 +9519,9 @@ namespace DriverScanTester.Services
             // the angle first. Keep such a point as the target, but only for a route that
             // starts where it was recorded to start (segment 0, t≈0) and only while the
             // point is truly closer than the resync's own choice, so a route resumed
-            // further along never walks backwards.
+            // further along never walks backwards. A point the player already stands on
+            // is kept too: its start camera still defines the heading of the leg that
+            // leaves it, even when the position check consumes the point in this tick.
             bool atRouteStart = bestSegmentStart == 0 &&
                                 bestT <= 1f - BotConstants.Movement.RouteResyncVeryCloseToSegmentEndT;
             if (isInitialResync && atRouteStart)
@@ -9204,11 +9530,14 @@ namespace DriverScanTester.Services
                 if (startCameraIndex >= 0)
                 {
                     var kept = _initialPath[startCameraIndex];
-                    _log($"[RouteResync] start-camera guard: waypoint {startCameraIndex + 1} ({kept.X:F1},{kept.Y:F1}) has StartCam:{CameraAngleValue.Describe(kept.StartCameraAngleBits)} and would be skipped — targeting it first so the camera is written before W.");
+                    float keptDistance = GeometryUtils.Distance(currX, currY, kept.X, kept.Y);
+                    _log($"[RouteResync] start-camera guard: waypoint {startCameraIndex + 1} ({kept.X:F1},{kept.Y:F1}) has StartCam:{CameraAngleValue.Describe(kept.StartCameraAngleBits)} and would be skipped (d={keptDistance:F2}, reach={GetEffectiveWaypointReachThreshold(kept):F2}) — targeting it first so the camera is written before W.");
                     nextWpIndex = startCameraIndex;
                     reason += "+startcam-guard";
                 }
             }
+
+            LogSkippedStartCameraWaypoints(nextWpIndex);
 
             // ── Log and apply ──
             _log($"[RouteResync] bestSegment={bestSegmentStart}->{bestSegmentEnd} t={bestT:F2} dist={bestDist:F2} nextIndex={nextWpIndex} reason={reason}");
@@ -9218,12 +9547,30 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// Diagnostic: reports every waypoint before the new target that carries a start
+        /// camera angle and is therefore not going to run its leg. This makes a missing
+        /// "camera before W" write attributable to the resync decision in the bot log.
+        /// </summary>
+        private void LogSkippedStartCameraWaypoints(int nextWpIndex)
+        {
+            int limit = Math.Min(nextWpIndex, _initialPath.Count);
+            for (int i = 0; i < limit; i++)
+            {
+                var skipped = _initialPath[i];
+                if (skipped.IsOperationStep || !skipped.StartCameraAngleBits.HasValue)
+                    continue;
+
+                _log($"[RouteResync] StartCam point {i + 1} ({skipped.X:F1},{skipped.Y:F1}) is being skipped — new target is index {nextWpIndex + 1} ({_initialPath[nextWpIndex].X:F1},{_initialPath[nextWpIndex].Y:F1}); its camera {CameraAngleValue.Describe(skipped.StartCameraAngleBits)} will NOT be written on this leg.");
+            }
+        }
+
+        /// <summary>
         /// Returns the index of the nearest waypoint the resync would skip although it
         /// carries a start camera angle, or -1 when nothing has to be kept. Only points
         /// before <paramref name="nextWpIndex"/> are considered, and only when they are
-        /// closer to the player than the resync's own target; points already inside their
-        /// reach threshold are excluded because they would be consumed in the same tick
-        /// without ever writing their start camera.
+        /// closer to the player than the resync's own target. A point the player already
+        /// stands on is deliberately eligible: the initial resync must still select it so
+        /// its start camera is written before the first W of the route.
         /// </summary>
         private int FindSkippedStartCameraWaypointIndex(float currX, float currY, int nextWpIndex)
         {
@@ -9241,8 +9588,6 @@ namespace DriverScanTester.Services
                     continue;
 
                 float distance = GeometryUtils.Distance(currX, currY, candidate.X, candidate.Y);
-                if (distance <= GetEffectiveWaypointReachThreshold(candidate))
-                    continue; // Already reached — there is no leg left to configure.
                 if (distance >= bestDistance)
                     continue;
 

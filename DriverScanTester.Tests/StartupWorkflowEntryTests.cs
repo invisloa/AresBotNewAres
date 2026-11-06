@@ -45,6 +45,10 @@ namespace DriverScanTester.Tests
             .GetMethod("RedirectToRepotStep", PrivateInstance)
             ?? throw new InvalidOperationException("RedirectToRepotStep not found.");
 
+        private static readonly MethodInfo TeleportToCityMethod = typeof(BotWorkflowCoordinator)
+            .GetMethod("TeleportToCity", PrivateInstance)
+            ?? throw new InvalidOperationException("TeleportToCity not found.");
+
         private static readonly MethodInfo WaitIfPausedMethod = typeof(BotWorkflowCoordinator)
             .GetMethod("WaitIfPausedAsync", PrivateInstance)
             ?? throw new InvalidOperationException("WaitIfPausedAsync not found.");
@@ -284,6 +288,146 @@ namespace DriverScanTester.Tests
             Assert.Equal(145, resolved.Value.Y);
             Assert.Equal(1, rig.Nudges);
             Assert.Equal(0, rig.TownTeleports);
+        }
+
+        [Fact]
+        public async Task StartupRouteStartCameraIsWrittenBeforeTheRefreshW()
+        {
+            const int startCameraBits = BotConstants.CameraAngleBits.East_90Deg;
+            const string routeFile = "startup-startcam-regression.json";
+            string saveDir = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", "SavedPaths"));
+            Directory.CreateDirectory(saveDir);
+            string routePath = Path.Combine(saveDir, routeFile);
+            File.WriteAllText(routePath,
+                "{\"Name\":\"StartupStartCam\",\"Points\":[{\"X\":100,\"Y\":100,\"StartCameraAngleBits\":" +
+                startCameraBits + "}]}");
+
+            try
+            {
+                var profile = new BotProfile
+                {
+                    Name = "StartupStartCam",
+                    EnableStartPositionCheck = true,
+                    StartPositionX = 214,
+                    StartPositionY = 213,
+                    ProtectionMapNumber = 35,
+                    StartPositionTolerance = 5,
+                    FlowSteps = new List<BotFlowStep>
+                    {
+                        new()
+                        {
+                            Type = BotFlowStepType.Repot,
+                            StartMapNumber = 35,
+                            RepotPaths = new List<BotRouteStep>
+                            {
+                                new() { PathFile = routeFile, StartMapNumber = 35 }
+                            }
+                        }
+                    }
+                };
+
+                // The stale position is not at the profile baseline, so the startup requires
+                // the bounded mini-W refresh to prove it live.
+                var memory = new FakeMemory { Map = 35, X = 300, Y = 213 };
+                int? cameraWhenRefreshWWasSent = null;
+                var rig = CreateRig(profile, memory, (m, _) =>
+                {
+                    cameraWhenRefreshWWasSent = m.LastWrittenCameraAngleBits;
+                    m.X = 214;
+                    m.Y = 212;
+                });
+
+                PlayerStateSnapshot? resolved = await ResolveStartupLocationAsync(rig.Coordinator);
+
+                Assert.NotNull(resolved);
+                Assert.Equal(1, rig.Nudges);
+                Assert.Equal(startCameraBits, cameraWhenRefreshWWasSent);
+                Assert.Contains(rig.Log, line => line.Contains("[StartCam] Startup") &&
+                                                 line.Contains("BEFORE the position-refresh W"));
+            }
+            finally
+            {
+                File.Delete(routePath);
+            }
+        }
+
+        [Fact]
+        public async Task TownTeleportAppliesTheRepotStartCameraBeforeTheMandatoryWRefresh()
+        {
+            // Reported incident: the mandatory post-teleport W refresh was pressed at the
+            // exp route's 172° yaw, then the repot path set 89° only afterwards. The repot
+            // start camera must be in memory before that refresh W.
+            const int startCameraBits = BotConstants.CameraAngleBits.North_0Deg;
+            const string routeFile = "town-teleport-startcam-regression.json";
+            Directory.CreateDirectory(SaveDirectory);
+            string routePath = Path.Combine(SaveDirectory, routeFile);
+            File.WriteAllText(routePath,
+                "{\"Name\":\"TownTeleportStartCam\",\"Points\":[{\"X\":222,\"Y\":213,\"StartCameraAngleBits\":" +
+                startCameraBits + "}]}");
+
+            try
+            {
+                var profile = new BotProfile
+                {
+                    Name = "TownTeleportStartCam",
+                    EnableStartPositionCheck = true,
+                    StartPositionX = 214,
+                    StartPositionY = 213,
+                    ProtectionMapNumber = 35,
+                    StartPositionTolerance = 5,
+                    FlowSteps = new List<BotFlowStep>
+                    {
+                        new()
+                        {
+                            Type = BotFlowStepType.Repot,
+                            StartMapNumber = 35,
+                            RepotPaths = new List<BotRouteStep>
+                            {
+                                new() { PathFile = routeFile, StartMapNumber = 35 }
+                            }
+                        }
+                    }
+                };
+
+                var memory = new FakeMemory
+                {
+                    Map = 36,
+                    X = 38,
+                    Y = 43,
+                    CameraAngleBits = BotConstants.CameraAngleBits.East_90Deg
+                };
+                int? cameraWhenRefreshWWasSent = null;
+                var rig = CreateRig(profile, memory, (m, _) =>
+                {
+                    cameraWhenRefreshWWasSent = m.LastWrittenCameraAngleBits;
+                    m.Map = 35;
+                    m.X = 214;
+                    m.Y = 211;
+                });
+
+                rig.Coordinator.TownTeleportOverride = _ =>
+                {
+                    memory.Map = 35;
+                    memory.X = 38;
+                    memory.Y = 213;
+                    return Task.FromResult(true);
+                };
+
+                bool ready = await TeleportToCityAsync(rig.Coordinator);
+
+                Assert.True(ready);
+                Assert.Equal(1, rig.Nudges);
+                Assert.Equal(startCameraBits, cameraWhenRefreshWWasSent);
+                Assert.Contains(rig.Log, line =>
+                    line.Contains("[StartCam] TeleportToCity") &&
+                    line.Contains(routeFile) &&
+                    line.Contains("BEFORE the position-refresh W"));
+            }
+            finally
+            {
+                File.Delete(routePath);
+            }
         }
 
         [Fact]
@@ -809,6 +953,15 @@ namespace DriverScanTester.Tests
             return await task!;
         }
 
+        private static async Task<bool> TeleportToCityAsync(BotWorkflowCoordinator coordinator)
+        {
+            var task = (Task<bool>?)TeleportToCityMethod.Invoke(
+                coordinator,
+                new object[] { CancellationToken.None });
+            Assert.NotNull(task);
+            return await task!;
+        }
+
         private static void InvokeAdvanceRoute(
             BotWorkflowCoordinator coordinator,
             BotFlowStep step,
@@ -948,6 +1101,8 @@ namespace DriverScanTester.Tests
             public short Y = 100;
             public bool InCity;
             public short VerticalLock = BotConstants.Camera.StationaryVerticalLock;
+            public int CameraAngleBits = BotConstants.CameraAngleBits.North_0Deg;
+            public int? LastWrittenCameraAngleBits;
             public bool FailPointer;
             public bool FailMap;
             public bool FailPosition;
@@ -1003,6 +1158,9 @@ namespace DriverScanTester.Tests
                 if (address == CameraBase + BotConstants.MemoryOffsets.CameraVerticalLockOffset)
                     return Copy(buffer, BitConverter.GetBytes(VerticalLock), out bytesRead);
 
+                if (address == CameraBase + BotConstants.MemoryOffsets.CameraAngle)
+                    return Copy(buffer, BitConverter.GetBytes(CameraAngleBits), out bytesRead);
+
                 if (address >= PlayerBase && address < PlayerBase + 0x2000)
                 {
                     ulong offset = address - PlayerBase;
@@ -1030,6 +1188,14 @@ namespace DriverScanTester.Tests
                 {
                     VerticalLock = BitConverter.ToInt16(buffer, 0);
                     bytesWritten = 2;
+                    return true;
+                }
+
+                if (address == CameraBase + BotConstants.MemoryOffsets.CameraAngle && buffer.Length == 4)
+                {
+                    CameraAngleBits = BitConverter.ToInt32(buffer, 0);
+                    LastWrittenCameraAngleBits = CameraAngleBits;
+                    bytesWritten = 4;
                     return true;
                 }
                 return false;

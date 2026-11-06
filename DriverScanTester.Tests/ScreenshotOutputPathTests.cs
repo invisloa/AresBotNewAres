@@ -13,9 +13,14 @@ namespace DriverScanTester.Tests
     public sealed class ScreenshotOutputPathTests
     {
         [Fact]
-        public void AutomaticLootCaptureDefaultsToTheVisibleProjectFolder()
+        public void AutomaticLootCaptureIsDisabledByDefault()
         {
-            Assert.True(ScreenshotService.LootScanCaptureEnabled);
+            Assert.False(ScreenshotService.LootScanCaptureEnabled);
+        }
+
+        [Fact]
+        public void AutomaticLootCaptureUsesTheVisibleProjectFolderWhenEnabled()
+        {
             Assert.True(ScreenshotService.LootScanCaptureToProjectScreenshots);
             Assert.EndsWith(
                 Path.Combine("Screenshots", ScreenshotService.DiagnosticLootScreenshotsFolder),

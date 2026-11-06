@@ -68,9 +68,10 @@ namespace DriverScanTester.Models
         }
 
         /// <summary>
-        /// Editor text for <see cref="StartCameraAngleBits"/>. Accepts blank (none),
-        /// radians (1.5736735 / 1.5736735rad), degrees (90deg / 90°) or a raw bit
-        /// pattern (0x3FC96E22 / 1070165538). Not persisted separately.
+        /// Editor text for <see cref="StartCameraAngleBits"/>. Shows the raw 4-byte value
+        /// exactly like the address list (e.g. 1070780928 / 0x3FD2D200). Accepts blank
+        /// (none), that same raw value, degrees (90deg / 90°) or radians (1.5736735rad).
+        /// Not persisted separately.
         /// </summary>
         [JsonIgnore]
         public string StartCameraAngleText
@@ -87,7 +88,7 @@ namespace DriverScanTester.Models
             }
         }
 
-        /// <summary>Read-only decode of the configured angle (raw bits / radians / degrees).</summary>
+        /// <summary>Read-only decode of the configured angle (raw value / degrees / radians).</summary>
         [JsonIgnore]
         public string StartCameraAngleDescription =>
             CameraAngleValue.Describe(StartCameraAngleBits);

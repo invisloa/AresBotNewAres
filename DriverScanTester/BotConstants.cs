@@ -54,6 +54,46 @@ namespace DriverScanTester
             /// </summary>
             public const int StartAngleSettleMs = 100;
 
+            /// <summary>
+            /// Minimum time (ms) the bot must hold W at a waypoint's configured start
+            /// camera angle. While this window runs the configured yaw is locked: no
+            /// bearing-derived camera write and no A/D turn may change it. The window
+            /// only starts counting as satisfied once the player has actually moved (see
+            /// <see cref="StartAngleLockMinMovementTiles"/>), because right after a town
+            /// teleport the client can ignore W while the map is still loading.
+            /// </summary>
+            public const int StartAngleLockMs = 500;
+
+            /// <summary>
+            /// Displacement (world units) the player must make while W is held before the
+            /// start-angle lock may release. This prevents the post-teleport case where the
+            /// client is still loading (action=1), W produces no movement for 500 ms, the
+            /// lock releases, and the stuck recovery turns the camera away from the
+            /// configured angle. The lock is released by time alone only after
+            /// <see cref="StartAngleLockMaxMs"/>.
+            /// </summary>
+            public const float StartAngleLockMinMovementTiles = 0.75f;
+
+            /// <summary>
+            /// Hard upper bound (ms) for holding the start-angle lock without any movement.
+            /// When it expires the configured angle could not produce movement (blocked
+            /// spawn / wrong spot), so normal steering and stuck recovery are allowed to take
+            /// over again.
+            /// </summary>
+            public const int StartAngleLockMaxMs = 4000;
+
+            /// <summary>
+            /// Minimum interval (ms) between re-assertions of a locked start angle, so a
+            /// game-side yaw change is corrected without write-spamming every update.
+            /// </summary>
+            public const int StartAngleLockRewriteMs = 60;
+
+            /// <summary>
+            /// Yaw deviation (degrees) from the locked start angle that still counts as
+            /// "locked". Smaller deviations are treated as float noise, not drift.
+            /// </summary>
+            public const float StartAngleLockToleranceDeg = 1.0f;
+
             /// <summary>Camera distance used only during SOD/SOP pink-pixel loot scans.</summary>
             public const short SodSopLootScanDistance = 17050;
 

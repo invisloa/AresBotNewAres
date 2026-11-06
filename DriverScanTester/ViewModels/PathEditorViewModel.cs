@@ -413,7 +413,7 @@ namespace DriverScanTester.ViewModels
             }
 
             SelectedPoint.StartCameraAngleBits = angleBits;
-            StatusText = $"Captured current camera angle {CameraAngleValue.Format(angleBits)} rad (0x{angleBits:X8}) into point ({SelectedPoint.X}, {SelectedPoint.Y}).";
+            StatusText = $"Captured current camera angle {CameraAngleValue.Describe(angleBits)} into point ({SelectedPoint.X}, {SelectedPoint.Y}).";
         }
 
         private void CapturePosition()

@@ -2,6 +2,7 @@
 using System.Threading;
 using System.Threading.Tasks;
 using DriverScanTester.Models;
+using DriverScanTester.Utils;
 
 namespace DriverScanTester.Services
 {
@@ -532,6 +533,10 @@ namespace DriverScanTester.Services
         public async Task PressWRefreshAsync(CancellationToken token)
         {
             _focusGameWindow();
+            string cameraBeforeW = _memory.TryGetCameraAngleBits(out int cameraBitsBeforeW)
+                ? CameraAngleValue.Describe(cameraBitsBeforeW)
+                : "unreadable";
+            _log($"[PositionSync] W refresh camera BEFORE W: {cameraBeforeW}.");
             _log($"[PositionSync] Tapping W for {_options.NudgeKeyDownMs} ms (bounded mini-W refresh)...");
             bool cameraOwnerAcquired = false;
             if (_wKeyCameraController != null && _wKeyCameraOwner != null)
@@ -575,6 +580,10 @@ namespace DriverScanTester.Services
                     "W refresh could not confirm the physical W-up; the camera session is blocked.");
             }
 
+            string cameraAfterW = _memory.TryGetCameraAngleBits(out int cameraBitsAfterW)
+                ? CameraAngleValue.Describe(cameraBitsAfterW)
+                : "unreadable";
+            _log($"[PositionSync] W refresh camera AFTER W: {cameraAfterW}.");
             _log("[PositionSync] W refresh completed: KeyUpCallbackCompleted=True (game-side release not independently verified).");
         }
 

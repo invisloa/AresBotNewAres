@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using DriverScanTester.Models;
+using DriverScanTester.Utils;
 
 namespace DriverScanTester.Services
 {
@@ -2682,6 +2683,10 @@ namespace DriverScanTester.Services
             if (route == null)
                 return false;
 
+            // The route's own start camera must cover the bounded W refresh that route
+            // entry validation may send, not just the first W of the path leg.
+            ApplyRouteStartCameraBeforeWRefresh(route, $"{stageName} route entry");
+
             int expectedMap = route.ProtectionMapNumber;
 
             DestinationValidationContext? destination = route.StartCheckEnabled
@@ -2915,6 +2920,12 @@ namespace DriverScanTester.Services
 
             _log($"[Startup] Location confirmed: map {snapshot.Map}, position ({snapshot.X},{snapshot.Y}) (map read {stableReads}x stable).");
 
+            // A configured waypoint start camera must also cover the bounded mini-W refresh
+            // PositionSync may use to prove this location live. The startup route is chosen
+            // by map alone, so its first positional point's angle is already known here —
+            // write it now, before PositionSync can send any W.
+            ApplyStartupRouteStartCameraBeforeWRefresh(snapshot.Map);
+
             // ── 3. Post-transition freshness through the existing PositionSync lifecycle ──
             PositionSyncResult sync;
 
@@ -2984,6 +2995,63 @@ namespace DriverScanTester.Services
 
             _log($"[Startup] Position validated: {sync.State.Describe()} DestinationStatus={sync.DestinationStatus}.");
             return sync.State;
+        }
+
+        /// <summary>
+        /// Writes the startup route's first positional waypoint start camera BEFORE any
+        /// position-freshness W refresh is sent. The startup route is selected by the
+        /// confirmed map only, so this cannot depend on the not-yet-verified position.
+        /// Without it the mini-W refresh at startup is the first W of the run and it would
+        /// be pressed on the previous camera, violating the "start camera before W"
+        /// contract before the path even starts.
+        /// </summary>
+        private void ApplyStartupRouteStartCameraBeforeWRefresh(int map)
+        {
+            BotStartupSelection selection = BotStartupActionSelector.Select(_profile, map);
+            if (!selection.HasSelection || selection.Step == null)
+                return;
+
+            List<BotRouteStep>? routes = BotStartupActionSelector.GetCandidateRoutes(selection.Step);
+            if (selection.RouteIndex < 0 || routes == null || selection.RouteIndex >= routes.Count)
+                return;
+
+            BotRouteStep? route = routes[selection.RouteIndex];
+            if (route == null || string.IsNullOrWhiteSpace(route.PathFile))
+                return;
+
+            ApplyRouteStartCameraBeforeWRefresh(route, "Startup");
+        }
+
+        /// <summary>
+        /// Writes a route's first positional waypoint start camera before any
+        /// position-freshness W refresh can be sent for that route. Logged with the exact
+        /// previous yaw so the ordering is provable from the bot log.
+        /// </summary>
+        private void ApplyRouteStartCameraBeforeWRefresh(BotRouteStep route, string context)
+        {
+            if (route == null || string.IsNullOrWhiteSpace(route.PathFile))
+                return;
+
+            int? angleBits = _pathLoader.LoadFirstPositionalStartCameraAngleBits(route.PathFile);
+            if (!angleBits.HasValue)
+                return;
+
+            string before = _memoryService.TryGetCameraAngleBits(out int beforeBits)
+                ? CameraAngleValue.Describe(beforeBits)
+                : "unreadable";
+            bool applied = _pathRunner.WCameraController != null
+                ? _pathRunner.WCameraController.TrySetCameraAngleBits(angleBits.Value)
+                : _memoryService.TrySetCameraAngleBits(angleBits.Value);
+            string description = CameraAngleValue.Describe(angleBits);
+
+            if (applied)
+            {
+                _log($"[StartCam] {context} — route '{route.PathFile}' first waypoint camera {description} applied BEFORE the position-refresh W (was {before}).");
+            }
+            else
+            {
+                _log($"[StartCam] {context} — route '{route.PathFile}' first waypoint camera {description} could NOT be applied before the position-refresh W (was {before}); a refresh W would run on the old camera.");
+            }
         }
 
         /// <summary>
@@ -3611,6 +3679,27 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// Applies the next repot path's first-waypoint start camera before the mandatory
+        /// town-teleport W refresh. The refresh W is physically pressed right after the
+        /// teleport, i.e. before the repot path is selected — without this it runs on the
+        /// yaw left over from the exp route (reported: 172° instead of the repot 89°).
+        /// </summary>
+        private void ApplyRepotStartCameraBeforeTownTeleportWRefresh()
+        {
+            var repotStep = _profile.FlowSteps?.FirstOrDefault(
+                step => step != null && step.Type == BotFlowStepType.Repot);
+            var routes = repotStep?.RepotPaths;
+            if (routes == null || routes.Count == 0)
+                return;
+
+            int index = _repotPathIndex;
+            if (index < 0 || index >= routes.Count)
+                index = 0;
+
+            ApplyRouteStartCameraBeforeWRefresh(routes[index], "TeleportToCity");
+        }
+
+        /// <summary>
         /// Teleports to the city with the profile's teleport key, waits for the game UI
         /// to settle and validates the post-transition position. A screenshot is captured
         /// right after the teleport scroll is triggered (before the town loads) into
@@ -3693,6 +3782,12 @@ namespace DriverScanTester.Services
             // stale merely because the coordinates did not change. The route start of the
             // location we teleported AWAY from is never used here.
             DestinationValidationContext? townDestination = CreateTownDestinationValidationContext();
+
+            // The mandatory W refresh below is the first W after the teleport. Set the next
+            // repot path's configured start camera first, so the refresh is pressed at the
+            // angle the repot leg must use instead of the previous exp/scan yaw.
+            ApplyRepotStartCameraBeforeTownTeleportWRefresh();
+
             _log($"[Teleport] Waiting for PositionSync after town teleport... InCity={_memoryService.GetIsInCity()} Destination={(townDestination != null ? townDestination.Describe() : "none")}");
             PositionSyncResult sync = await _positionSync.SynchronizeAsync(expectedMap: 0, destination: townDestination, token);
             _lastTownTeleportSync = sync;

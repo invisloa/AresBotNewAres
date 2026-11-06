@@ -9,11 +9,15 @@ namespace DriverScanTester.Utils
     /// value captured from the game (or typed as radians/degrees/raw bits) round-trips
     /// without precision loss.
     ///
+    /// The editor shows the value the same way the address list (C_CameraHorizontal at
+    /// [Ares.exe + 0x4883F0] + 0x1A8) shows it: the raw 4-byte value, e.g. 1070780928 /
+    /// 0x3FD2D200. Radians are never the stored/displayed form.
+    ///
     /// Accepted input (blank = no start angle):
-    ///   1.5736735       radians (decimal value, optional "rad" suffix)
-    ///   90deg / 90°     degrees, converted to radians
-    ///   0x3FC96E22      raw 32-bit camera-yaw bit pattern
-    ///   1070165538      raw bit pattern as a decimal integer
+    ///   1070165538          raw 4-byte value, exactly as the address list / Cheat Engine shows it
+    ///   0x3FC96E22          raw 32-bit camera-yaw bit pattern
+    ///   90deg / 90°         degrees, converted to radians
+    ///   1.5736735rad        radians (explicit "rad" suffix, or a decimal point)
     /// </summary>
     public static class CameraAngleValue
     {
@@ -108,13 +112,13 @@ namespace DriverScanTester.Utils
         }
 
         /// <summary>
-        /// Formats the stored bit pattern as an exact (round-trip) radian value. This
-        /// is the concrete camera-angle value shown in the editor.
+        /// Formats the stored bit pattern the way the address list shows the field:
+        /// the raw 4-byte value as a decimal integer (e.g. 1070780928), not radians.
+        /// Parsing this text yields the identical bit pattern again.
         /// </summary>
         public static string Format(int angleBits)
         {
-            float radians = BitConverter.Int32BitsToSingle(angleBits);
-            return radians.ToString("R", CultureInfo.InvariantCulture);
+            return angleBits.ToString(CultureInfo.InvariantCulture);
         }
 
         /// <summary>Human-readable decode shown next to the editor field.</summary>
@@ -130,7 +134,13 @@ namespace DriverScanTester.Utils
             if (degrees < 0d)
                 degrees += 360d;
 
-            return $"0x{bits:X8} = {radians.ToString("R", CultureInfo.InvariantCulture)} rad = {degrees:F2}°";
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "{0} (0x{1:X8}) = {2:F2}\u00B0 = {3} rad",
+                bits,
+                bits,
+                degrees,
+                radians.ToString("R", CultureInfo.InvariantCulture));
         }
 
         private static bool TryParseNumber(string text, out double value)

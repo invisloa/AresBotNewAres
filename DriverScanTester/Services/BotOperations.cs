@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using DriverScanTester.Models;
 using DriverScanTester.Utils;
 
 namespace DriverScanTester.Services
@@ -214,6 +215,12 @@ namespace DriverScanTester.Services
             if (currentMap != previousMap)
             {
                 ctx.Log("[Operation] GoInsideCOT: map changed — success.");
+
+                // The coordinator's position sync (and its bounded W refresh) runs right
+                // after this operation returns. Set the COT exp path's configured start
+                // camera now so that W is pressed at the configured angle instead of the
+                // seller-scan yaw.
+                ApplyCotExpStartCamera(ctx, currentMap);
                 return true;
             }
 
@@ -223,6 +230,99 @@ namespace DriverScanTester.Services
                 "MapDidNotChange",
                 npcDetected: true,
                 clickPosition: ctx.ItemSeller.LastNpcRightClickScreenPosition);
+        }
+
+        /// <summary>
+        /// Applies the start camera configured on the COT exp path's first waypoint after
+        /// the map changed. Runs inside GoInsideCOT, before the coordinator's PositionSync
+        /// W refresh, so the refresh W goes down at the configured yaw.
+        /// </summary>
+        private static void ApplyCotExpStartCamera(OperationContext ctx, int mapAfterEntering)
+        {
+            try
+            {
+                BotRouteStep? route = FindCotExpRoute(ctx.Profile, mapAfterEntering);
+                if (route == null || string.IsNullOrWhiteSpace(route.PathFile))
+                {
+                    ctx.Log("[StartCam] GoInsideCOT: no COT exp route configured — start camera not applied.");
+                    return;
+                }
+
+                int? angleBits = new SavedPathLoader(ctx.Log)
+                    .LoadFirstPositionalStartCameraAngleBits(route.PathFile);
+                if (!angleBits.HasValue)
+                {
+                    ctx.Log($"[StartCam] GoInsideCOT: route '{route.PathFile}' first waypoint has no StartCam — camera left unchanged.");
+                    return;
+                }
+
+                string before = ctx.Memory.TryGetCameraAngleBits(out int beforeBits)
+                    ? CameraAngleValue.Describe(beforeBits)
+                    : "unreadable";
+                bool applied = ctx.WCameraController != null
+                    ? ctx.WCameraController.TrySetCameraAngleBits(angleBits.Value)
+                    : ctx.Memory.TrySetCameraAngleBits(angleBits.Value);
+                string description = CameraAngleValue.Describe(angleBits);
+
+                if (applied)
+                {
+                    ctx.Log($"[StartCam] GoInsideCOT: COT exp route '{route.PathFile}' start camera {description} applied after entering map {mapAfterEntering} and BEFORE the position-refresh W (was {before}).");
+                }
+                else
+                {
+                    ctx.Log($"[StartCam] GoInsideCOT: COT exp route '{route.PathFile}' start camera {description} could NOT be applied (was {before}); the position-refresh W would run on the old camera.");
+                }
+            }
+            catch (Exception ex)
+            {
+                ctx.Log($"[StartCam] GoInsideCOT: could not apply the COT exp start camera: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Finds the profile's COT exp route: an ExpLoop route whose starting map matches
+        /// the map the bot just entered. Falls back to the first ExpLoop route, then to a
+        /// Path route for that map, so a profile without map metadata still gets its
+        /// configured camera.
+        /// </summary>
+        private static BotRouteStep? FindCotExpRoute(BotProfile? profile, int mapAfterEntering)
+        {
+            if (profile?.FlowSteps == null)
+                return null;
+
+            BotRouteStep? mapMatch = null;
+            BotRouteStep? firstExpLoop = null;
+            BotRouteStep? firstPath = null;
+
+            foreach (BotFlowStep? step in profile.FlowSteps)
+            {
+                if (step == null || step.Type is not (BotFlowStepType.ExpLoop or BotFlowStepType.Path))
+                    continue;
+
+                List<BotRouteStep>? routes = BotStartupActionSelector.GetRoutePool(step);
+                if (routes == null)
+                    continue;
+
+                bool isExpLoop = step.Type == BotFlowStepType.ExpLoop;
+                foreach (BotRouteStep? route in routes)
+                {
+                    if (route == null || string.IsNullOrWhiteSpace(route.PathFile))
+                        continue;
+
+                    int routeMap = route.StartMapNumber > 0 ? route.StartMapNumber : step.StartMapNumber;
+
+                    if (routeMap == mapAfterEntering && isExpLoop)
+                        return route;
+                    if (routeMap == mapAfterEntering && mapMatch == null)
+                        mapMatch = route;
+                    if (isExpLoop && firstExpLoop == null)
+                        firstExpLoop = route;
+                    if (!isExpLoop && firstPath == null)
+                        firstPath = route;
+                }
+            }
+
+            return mapMatch ?? firstExpLoop ?? firstPath;
         }
 
         /// <summary>

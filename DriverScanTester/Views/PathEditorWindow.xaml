@@ -53,7 +53,7 @@
                                     <DataGridTextColumn.HeaderStyle>
                                         <Style TargetType="DataGridColumnHeader">
                                             <Setter Property="ToolTip"
-                                                    Value="Horizontal camera yaw (left/right camera) at +0x1A8, applied once before W at the start of this waypoint's leg. Blank = leave the camera untouched. Use the Capture current camera angle button in Selected Point to insert the live value."/>
+                                                    Value="Raw 4-byte value of the horizontal camera yaw (left/right camera) at +0x1A8, exactly as the address list shows it (e.g. 1070780928 / 0x3FD2D200). Applied once before W at the start of this waypoint's leg. Blank = leave the camera untouched. Use the Capture current camera angle button in Selected Point to insert the live value."/>
                                         </Style>
                                     </DataGridTextColumn.HeaderStyle>
                                 </DataGridTextColumn>
@@ -155,10 +155,10 @@
 
                             <GroupBox Header="Selected Point" Margin="0,0,0,8" Padding="5">
                                 <StackPanel>
-                                    <Label Content="Start camera angle (left/right yaw):" Padding="2,2,2,0"/>
+                                    <Label Content="Start camera angle (left/right yaw, raw value at +0x1A8):" Padding="2,2,2,0"/>
                                     <TextBox Text="{Binding SelectedPoint.StartCameraAngleText, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
                                              Margin="2,2,2,3" Padding="3"
-                                             ToolTip="Horizontal camera yaw at +0x1A8. Applied once when the bot starts moving toward the selected point, while W is released and before the first W-down. Blank = leave the camera untouched.">
+                                             ToolTip="Raw 4-byte value of the horizontal camera yaw at +0x1A8, as the address list shows it (e.g. 1070780928 / 0x3FD2D200). Applied once when the bot starts moving toward the selected point, while W is released and before the first W-down. Blank = leave the camera untouched.">
                                         <TextBox.Style>
                                             <Style TargetType="TextBox">
                                                 <Setter Property="IsEnabled" Value="True"/>
@@ -185,7 +185,7 @@
                                     </Button>
                                     <TextBlock Text="{Binding SelectedPoint.StartCameraAngleDescription}"
                                                TextWrapping="Wrap" Foreground="Gray" FontSize="10" Margin="3,0,3,3"/>
-                                    <TextBlock Text="Blank = none. Type radians (1.5736735), degrees (90deg / 90°) or raw bits (0x3FC96E22 / 1070165538). The button reads the current camera yaw from the game and inserts its exact value; the bot sets it before W."
+                                    <TextBlock Text="Raw 4-byte value of C_CameraHorizontal ([Ares.exe + 0x4883F0] + 0x1A8), shown exactly as the address list shows it: 1070780928 / 0x3FD2D200. Blank = none. Degrees (90deg / 90°) and radians (1.5736735rad) are also accepted. The button reads the current camera yaw from the game and inserts its exact value; the bot sets it before W."
                                                TextWrapping="Wrap" Foreground="Gray" FontSize="10" Margin="3,0,3,6"/>
                                     <CheckBox Content="Standalone method step (ignore position)"
                                               IsChecked="{Binding SelectedPoint.IsOperationStep, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
