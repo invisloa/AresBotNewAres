@@ -155,6 +155,8 @@ namespace DriverScanTester.Tests
             public bool PlayerPositionValid { get; set; } = true;
             public bool GatherNav { get; set; } = true;
             public BotMode Mode { get; set; } = BotMode.MoveAndAttack;
+            /// <summary>True when the host can steer a gather toward the detected mob cluster.</summary>
+            public bool CanApproachMobs { get; set; }
             public float Radius { get; set; } = BotConstants.MobGrouping.ExpectedMarkerRadiusPx;
             public float Confidence { get; set; } = 1f;
             public MobGroupingDecision LastDecision { get; private set; }
@@ -177,7 +179,7 @@ namespace DriverScanTester.Tests
                     PlayerX, PlayerY, GatherNav, WaypointX, WaypointY,
                     MovementSteeringMode.KeyboardTurn, LootBarrier,
                     CameraYawDegrees * (MathF.PI / 180f), HasCameraYaw,
-                    ClientWidth, ClientHeight);
+                    ClientWidth, ClientHeight, CanApproachMobs);
             }
 
             public MobGroupingDecision Tick()
@@ -250,21 +252,49 @@ namespace DriverScanTester.Tests
         // ── Two-mob behaviour ──────────────────────────────────────────────────
 
         [Fact]
-        public void ExactlyTwoDistantMarkersWithStaticFormationDoNotStartGathering()
+        public void ExactlyTwoDistantMarkersWithStaticFormationDoNotClaimConvergence()
         {
             // Scenario A: two ranged enemies that keep their attack distance and show no
-            // convergence trend. A pair is now eligible for gathering, but the temporal gate
-            // (two consecutive formation improvements) still refuses the walk: pure time loss.
+            // convergence trend. A pair is now eligible for a bounded gather, but without evidence
+            // of improvement the walk may never be reported as a confirmed convergence.
             var lines = new List<string>();
             var controller = new MobGroupingController(lines.Add);
             var encounter = new Encounter(controller, TwoDistant) { Convergence = 1f };
 
-            AssertNeverStartsGathering(encounter, 30);
-            Assert.NotEqual(MobGroupingState.GroupingMove, controller.State);
+            for (int i = 0; i < 30; i++)
+            {
+                MobGroupingDecision decision = encounter.Tick();
+                if (decision.Directive == MobGroupingDirective.StartMove)
+                    Assert.NotEqual(MobGroupingReason.ConvergenceConfirmed, decision.Code);
+            }
+
             Assert.DoesNotContain(lines, line =>
                 line.Contains(MobGroupingReason.TwoMobNoGather, StringComparison.Ordinal));
             Assert.Contains(lines, line =>
                 line.Contains(MobGroupingReason.NoConvergenceEvidence, StringComparison.Ordinal));
+            Assert.True(controller.GroupingsThisEncounter <= 1);
+        }
+
+        [Fact]
+        public void StationaryScatteredMobsUseAMobApproachGather()
+        {
+            // Real fights: the bot stands while it attacks. With a live mob direction the gather
+            // walks toward the cluster instead of being refused for "no route progress".
+            var lines = new List<string>();
+            var controller = new MobGroupingController(lines.Add);
+            var encounter = new Encounter(controller, ScatteredPoints)
+            {
+                StepX = 0f,
+                StepY = 0f,
+                CanApproachMobs = true
+            };
+
+            MobGroupingDecision decision = encounter.RunUntilStartMove();
+
+            Assert.Equal(MobGroupingDirective.StartMove, decision.Directive);
+            Assert.Equal(MobGroupingGatherTarget.ApproachMobs, decision.GatherTarget);
+            Assert.Equal(MobGroupingReason.StationaryApproach, decision.Code);
+            Assert.Equal(MobGroupingState.GroupingMove, controller.State);
         }
 
         [Fact]
@@ -443,17 +473,25 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void ImprovementBelowTheNoiseThresholdDoesNotQualifyGathering()
+        public void SlowConvergenceNeverClaimsConfirmedConvergence()
         {
             // Slow convergence: the accumulated change stays inside the noise tolerance, so the
-            // trend is not treated as positive evidence.
+            // trend is not treated as positive evidence. The bounded approach may still run, but
+            // it must never be reported as a confirmed convergence.
             var lines = new List<string>();
             var controller = new MobGroupingController(lines.Add);
             var encounter = new Encounter(controller, ScatteredPoints) { Convergence = 0.999f };
 
-            AssertNeverStartsGathering(encounter, 20);
+            for (int i = 0; i < 20; i++)
+            {
+                MobGroupingDecision decision = encounter.Tick();
+                Assert.NotEqual(MobFormationTrend.Improving, controller.LastTrend.Trend);
+                if (decision.Directive == MobGroupingDirective.StartMove)
+                    Assert.NotEqual(MobGroupingReason.ConvergenceConfirmed, decision.Code);
+            }
+
             Assert.Contains(lines, line =>
-                line.Contains(MobGroupingReason.NoConvergenceEvidence, StringComparison.Ordinal));
+                line.Contains($"[{MobGroupingReason.NoConvergenceEvidence}]", StringComparison.Ordinal));
         }
 
         [Fact]
@@ -471,10 +509,10 @@ namespace DriverScanTester.Tests
             encounter.CameraYawDegrees += 25f;
             encounter.Tick(2);
 
-            Assert.NotEqual(MobGroupingState.GroupingMove, controllerUnderTest.State);
-            Assert.Equal(0, controllerUnderTest.GroupingsThisEncounter);
             Assert.NotEqual(MobFormationTrend.Improving, controllerUnderTest.LastTrend.Trend);
-            Assert.DoesNotContain(lines, line => line.Contains("gather started", StringComparison.Ordinal));
+            Assert.DoesNotContain(lines, line =>
+                line.Contains($"gather started [{MobGroupingReason.ConvergenceConfirmed}]",
+                    StringComparison.Ordinal));
         }
 
         [Fact]
@@ -507,11 +545,14 @@ namespace DriverScanTester.Tests
             for (int i = 0; i < 12; i++)
             {
                 MobGroupingDecision decision = encounter.Tick();
-                Assert.NotEqual(MobGroupingDirective.StartMove, decision.Directive);
                 Assert.NotEqual(MobFormationTrend.Improving, controller.LastTrend.Trend);
+                if (decision.Directive == MobGroupingDirective.StartMove)
+                    Assert.NotEqual(MobGroupingReason.ConvergenceConfirmed, decision.Code);
             }
 
-            Assert.Equal(0, controller.GroupingsThisEncounter);
+            Assert.DoesNotContain(lines, line =>
+                line.Contains($"gather started [{MobGroupingReason.ConvergenceConfirmed}]",
+                    StringComparison.Ordinal));
         }
 
         [Fact]
@@ -1036,7 +1077,7 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void MovingMarkersWithNoConvergenceNeverStartInEitherMode()
+        public void MovingMarkersWithNoConvergenceNeverClaimConfirmedConvergence()
         {
             foreach (BotMode mode in new[] { BotMode.MoveAndAttack, BotMode.MoveAndAttackAndLoot })
             {
@@ -1046,7 +1087,16 @@ namespace DriverScanTester.Tests
                     Mode = mode,
                     Convergence = 1f
                 };
-                AssertNeverStartsGathering(encounter, 20);
+
+                for (int i = 0; i < 20; i++)
+                {
+                    MobGroupingDecision decision = encounter.Tick();
+                    if (decision.Directive == MobGroupingDirective.StartMove)
+                        Assert.NotEqual(MobGroupingReason.ConvergenceConfirmed, decision.Code);
+                }
+
+                // Still exactly one bounded attempt per encounter, never a start/cancel cycle.
+                Assert.True(controller.GroupingsThisEncounter <= 1);
             }
         }
 
@@ -1511,9 +1561,16 @@ namespace DriverScanTester.Tests
         [Fact]
         public void SuppressionLoggingIsEventDrivenNotPerObservation()
         {
+            // A stationary player with no mob approach direction has no target at all, so the
+            // refusal is logged exactly once (event-driven), never once per observation.
             var lines = new List<string>();
             var controller = new MobGroupingController(lines.Add);
-            var encounter = new Encounter(controller, TwoDistant) { Convergence = 1f };
+            var encounter = new Encounter(controller, TwoDistant)
+            {
+                Convergence = 1f,
+                StepX = 0f,
+                StepY = 0f
+            };
 
             encounter.Tick(30);
 
@@ -2120,6 +2177,74 @@ namespace DriverScanTester.Tests
             Assert.DoesNotContain(markers, marker =>
                 marker.Source == MobMarkerSource.MagentaRing &&
                 Math.Abs(marker.Center.X - 90) <= 3 && Math.Abs(marker.Center.Y - 50) <= 3);
+        }
+
+        [Fact]
+        public void MobApproachTargetMapsTheScreenDirectionThroughCameraYaw()
+        {
+            // The standstill gather walks toward the detected mob cluster: the analysis gives a
+            // screen-space direction, the camera yaw turns it into an absolute world bearing.
+            MovementSystem movement = CreateMovementSystem();
+            try
+            {
+                FieldInfo analysisField = typeof(MovementSystem).GetField("_lastMobGroupingAnalysis",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!;
+                FieldInfo hasYawField = typeof(MovementSystem).GetField("_lastMobGroupingHasCameraYaw",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!;
+                FieldInfo yawField = typeof(MovementSystem).GetField("_lastMobGroupingCameraYawRadians",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!;
+                MethodInfo resolve = typeof(MovementSystem).GetMethod("TryResolveMobApproachTarget",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+                // Markers straight ABOVE the player anchor on screen = camera forward.
+                var markers = new[]
+                {
+                    new MobMarker(new MobPoint(690, 200), 18f, 1f, MobMarkerSource.CyanCenter),
+                    new MobMarker(new MobPoint(710, 210), 18f, 1f, MobMarkerSource.CyanCenter)
+                };
+                MobGroupAnalysis analysis = MobGroupAnalyzer.Analyze(markers, new MobPoint(700, 400));
+                Assert.True(analysis.HasDominantMobDirection);
+
+                analysisField.SetValue(movement, analysis);
+                hasYawField.SetValue(movement, true);
+
+                // Camera facing North: the approach target lies north (+Y) of the player.
+                yawField.SetValue(movement, GeometryUtils.ConvertBearingToRadians(0f));
+                object?[] north = { 100f, 100f, 0f, 0f };
+                Assert.True((bool)resolve.Invoke(movement, north)!);
+                Assert.InRange((float)north[2]!, 98.5f, 101.5f);
+                Assert.InRange((float)north[3]!, 110.5f, 113.5f);
+
+                // Camera facing East: screen-up is East, so the target lies east (+X).
+                yawField.SetValue(movement, GeometryUtils.ConvertBearingToRadians(90f));
+                object?[] east = { 100f, 100f, 0f, 0f };
+                Assert.True((bool)resolve.Invoke(movement, east)!);
+                Assert.InRange((float)east[2]!, 110.5f, 113.5f);
+                Assert.InRange((float)east[3]!, 98.5f, 101.5f);
+
+                // Screen-right with a North-facing camera = East.
+                var rightMarkers = new[]
+                {
+                    new MobMarker(new MobPoint(900, 400), 18f, 1f, MobMarkerSource.CyanCenter),
+                    new MobMarker(new MobPoint(900, 416), 18f, 1f, MobMarkerSource.CyanCenter)
+                };
+                analysisField.SetValue(movement,
+                    MobGroupAnalyzer.Analyze(rightMarkers, new MobPoint(700, 400)));
+                yawField.SetValue(movement, GeometryUtils.ConvertBearingToRadians(0f));
+                object?[] screenRight = { 100f, 100f, 0f, 0f };
+                Assert.True((bool)resolve.Invoke(movement, screenRight)!);
+                Assert.InRange((float)screenRight[2]!, 110.5f, 113.5f);
+                Assert.InRange((float)screenRight[3]!, 98.5f, 101.5f);
+
+                // No camera yaw = no approach target (never invent a direction).
+                hasYawField.SetValue(movement, false);
+                object?[] noYaw = { 100f, 100f, 0f, 0f };
+                Assert.False((bool)resolve.Invoke(movement, noYaw)!);
+            }
+            finally
+            {
+                movement.DisposeMobGroupingDetector();
+            }
         }
 
         [Fact]

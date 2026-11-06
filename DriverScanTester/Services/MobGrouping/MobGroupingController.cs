@@ -30,7 +30,12 @@ namespace DriverScanTester.Services
         /// <summary>False when no camera yaw could be observed (trend comparisons are then skipped).</summary>
         bool HasCameraYaw = false,
         int ClientWidth = 0,
-        int ClientHeight = 0);
+        int ClientHeight = 0,
+        /// <summary>
+        /// True when a live mob-cluster direction is available, so a gather walk can steer
+        /// toward the mobs even when the bot is NOT walking the route (the normal combat case).
+        /// </summary>
+        bool CanApproachMobs = false);
 
     /// <summary>
     /// Tick-driven, deterministic grouping state machine. It has no image, combat, keyboard,
@@ -93,6 +98,8 @@ namespace DriverScanTester.Services
         private bool _lootBarrierBlockLogged;
         /// <summary>Code of the last logged "gather not started" decision (event-driven logging).</summary>
         private string _lastSuppressionCode = "";
+        /// <summary>Code of the last non-blocking advisory (trend/standstill approach) log line.</summary>
+        private string _lastAdvisoryCode = "";
         /// <summary>
         /// Code of the last logged suppression, exposed read-only so the host can attach a
         /// diagnostic snapshot to exactly the moment a gather was refused.
@@ -267,41 +274,62 @@ namespace DriverScanTester.Services
                 return default;
             }
 
-            // No positional route target to walk toward: never invent an escape direction.
+            // No positional target to walk toward: never invent an escape direction.
             // The candidate stays fresh so the gather can still start once the ordinary
-            // path pipeline advances past a reached waypoint and exposes a valid target.
-            if (!input.HasGatherNavigationTarget)
+            // path pipeline advances past a reached waypoint and exposes a valid target -
+            // or immediately, when a mob-cluster approach direction is available (the bot is
+            // standing still in melee, which is the normal combat case).
+            if (!input.HasGatherNavigationTarget && !input.CanApproachMobs)
             {
                 LogSuppression(MobGroupingReason.NoNavigationTarget,
-                    "no live route waypoint for a gather walk");
+                    "no live route waypoint and no mob approach direction for a gather walk");
                 return default;
             }
 
-            // Temporal requirement: two consecutive reliable improvements of the normalized
-            // local formation quality. Inconclusive evidence never starts a movement.
+            // Temporal requirement. The formation trend is ADVISORY: screen-space geometry is
+            // measured against a flapping pixel detector (marker counts 2-18 per second), so a
+            // hard "two consecutive improvements" gate refused every gather in 124 recorded
+            // evaluations. Only an explicitly deteriorating formation still blocks a walk.
             MobFormationTrendResult trend = _lastTrend;
-            if (!trend.IsImproving)
+            if (trend.Trend == MobFormationTrend.Deteriorating &&
+                trend.ComparableObservations >= BotConstants.MobGrouping.MinimumTrendObservations)
             {
-                string code = trend.Trend == MobFormationTrend.Deteriorating
-                    ? MobGroupingReason.FormationDeteriorated
-                    : MobGroupingReason.NoConvergenceEvidence;
-                LogSuppression(code,
+                LogSuppression(MobGroupingReason.FormationDeteriorated,
                     $"{trend.Reason} (trend={trend.Trend}, " +
                     $"samples={trend.ComparableObservations}, " +
                     $"change={trend.RelativeChange:P0})");
                 return default;
             }
 
-            // The player must already be making meaningful world-position progress in a
-            // direction that is compatible with the live waypoint: gathering continues an
-            // existing useful walk, it never invents a new travel direction.
-            if (!IsRouteCompatibleProgress(input, out string progressCode, out string progressDetail))
+            if (trend.Trend != MobFormationTrend.Improving)
+            {
+                LogAdvisory(MobGroupingReason.NoConvergenceEvidence,
+                    $"{trend.Reason} (trend={trend.Trend}, " +
+                    $"samples={trend.ComparableObservations}, " +
+                    $"change={trend.RelativeChange:P0})");
+            }
+
+            // A gather walk must have a usable steering target. Continuing an existing
+            // route-compatible walk is preferred; otherwise the walk approaches the mob cluster
+            // (the bot stands still while fighting, so requiring route progress made the whole
+            // feature unreachable).
+            bool routeCompatible = IsRouteCompatibleProgress(input, out string progressCode, out string progressDetail);
+            if (!routeCompatible && !input.CanApproachMobs)
             {
                 LogSuppression(progressCode, progressDetail);
                 return default;
             }
 
-            return StartGather(input, _candidateAnalysis, trend);
+            MobGroupingGatherTarget gatherTarget = routeCompatible
+                ? MobGroupingGatherTarget.Route
+                : MobGroupingGatherTarget.ApproachMobs;
+            if (!routeCompatible)
+            {
+                LogAdvisory(MobGroupingReason.StationaryApproach,
+                    $"{progressCode}: {progressDetail}; walking toward the mob cluster instead");
+            }
+
+            return StartGather(input, _candidateAnalysis, trend, gatherTarget);
         }
 
         /// <summary>
@@ -387,7 +415,10 @@ namespace DriverScanTester.Services
         /// shortened by a stop condition, never extended.
         /// </summary>
         private MobGroupingDecision StartGather(
-            in MobGroupingTickInput input, MobGroupAnalysis analysis, MobFormationTrendResult trend)
+            in MobGroupingTickInput input,
+            MobGroupAnalysis analysis,
+            MobFormationTrendResult trend,
+            MobGroupingGatherTarget gatherTarget)
         {
             _groupingsThisEncounter++;
             _movesStarted = 1;
@@ -412,12 +443,23 @@ namespace DriverScanTester.Services
             _candidateAnalysis = null;
             SetState(MobGroupingState.GroupingMove);
 
-            string reason = MobGroupingReason.Describe(MobGroupingReason.ConvergenceConfirmed,
-                "route-compatible convergence");
+            // The decision code states HOW the walk was justified: an established convergence
+            // trend, a bounded scattered approach along the route, or a standing approach toward
+            // the mob cluster. Nothing ever claims confirmation without evidence.
+            string startCode = gatherTarget == MobGroupingGatherTarget.ApproachMobs
+                ? MobGroupingReason.StationaryApproach
+                : trend.IsImproving
+                    ? MobGroupingReason.ConvergenceConfirmed
+                    : MobGroupingReason.ScatteredMove;
+
+            string reason = MobGroupingReason.Describe(startCode,
+                gatherTarget == MobGroupingGatherTarget.Route
+                    ? trend.IsImproving ? "route-compatible convergence" : "route-compatible scattered approach"
+                    : "standing approach toward the mob cluster");
             _lastDecisionReason = reason;
 
-            _log($"[MobGrouping] gather started [{MobGroupingReason.ConvergenceConfirmed}]: " +
-                 $"route-compatible convergence (trend={trend.Trend}, samples={trend.ComparableObservations}, " +
+            _log($"[MobGrouping] gather started [{startCode}]: " +
+                 $"target={gatherTarget} (trend={trend.Trend}, samples={trend.ComparableObservations}, " +
                  $"change={trend.RelativeChange:P0}); mobs={analysis.DetectedMobCount}, " +
                  $"localCluster={analysis.BestLocalClusterSize}, bestPair={analysis.BestPairDistanceNormalized:F2}r, " +
                  $"quality={analysis.FormationQuality:F3}, player=({input.PlayerX:F1},{input.PlayerY:F1}), " +
@@ -432,7 +474,8 @@ namespace DriverScanTester.Services
                 analysis.RecommendedEscapeDirection,
                 _movesStarted,
                 reason,
-                MobGroupingReason.ConvergenceConfirmed);
+                startCode,
+                gatherTarget);
         }
 
         /// <summary>
@@ -863,6 +906,19 @@ namespace DriverScanTester.Services
                 return;
             _lastSuppressionCode = code;
             _log($"[MobGrouping] gather not started [{code}]: {detail}.");
+        }
+
+        /// <summary>
+        /// Logs a non-blocking observation (trend unavailable, standstill approach) once per code
+        /// change. It deliberately does NOT touch <see cref="LastSuppressionCode"/>: the gather is
+        /// proceeding, so nothing was suppressed.
+        /// </summary>
+        private void LogAdvisory(string code, string detail)
+        {
+            if (string.Equals(_lastAdvisoryCode, code, StringComparison.Ordinal))
+                return;
+            _lastAdvisoryCode = code;
+            _log($"[MobGrouping] advisory [{code}]: {detail}.");
         }
 
         /// <summary>

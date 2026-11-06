@@ -548,6 +548,12 @@ namespace DriverScanTester
             /// </summary>
             public const float MaximumGatherDisplacement = 2.0f;
             /// <summary>
+            /// Synthetic world distance of the implicit target used when the gather walks toward
+            /// the mob cluster (the bot is standing in combat). Only the direction matters - the
+            /// gather itself is bounded by the time/displacement budget.
+            /// </summary>
+            public const float ApproachTargetDistance = 12f;
+            /// <summary>
             /// One gather attempt per encounter. A failed attempt is never retried in the same
             /// encounter, so scattered mobs can never cause start/cancel/restart cycling.
             /// </summary>

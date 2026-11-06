@@ -52,18 +52,35 @@ namespace DriverScanTester.Services
         Cancelled
     }
 
+    /// <summary>
+    /// Where a gather walk takes its steering target from. Real fights showed that the bot is
+    /// almost always STANDING while it fights, so a route-only target made the whole feature
+    /// dead (NoMovementProgress in every evaluation). A standstill gather therefore walks
+    /// toward the detected mob cluster instead of the route waypoint.
+    /// </summary>
+    public enum MobGroupingGatherTarget
+    {
+        /// <summary>Continue the live route waypoint (the bot is already walking the route).</summary>
+        Route,
+        /// <summary>Walk toward the detected mob cluster (the bot is standing in combat).</summary>
+        ApproachMobs
+    }
+
     public readonly record struct MobGroupingDecision(
         MobGroupingDirective Directive,
         /// <summary>
         /// Mob-direction analysis carried alongside the decision for diagnostics only.
         /// It never drives gather movement: MovementSystem resolves gather steering from
-        /// the live route waypoint through MoveTowards.
+        /// the live route waypoint through MoveTowards (or from the mob approach vector when
+        /// <see cref="GatherTarget"/> is <see cref="MobGroupingGatherTarget.ApproachMobs"/>).
         /// </summary>
         MobGroupingDirection? Direction = null,
         int MoveNumber = 0,
         string Reason = "",
         /// <summary>Stable machine-readable decision code (see <see cref="MobGroupingReason"/>).</summary>
-        string Code = "");
+        string Code = "",
+        /// <summary>Steering target the host must use for this gather walk.</summary>
+        MobGroupingGatherTarget GatherTarget = MobGroupingGatherTarget.Route);
 
     /// <summary>
     /// Stable diagnostic codes for grouping decisions. They are logged at state transitions
@@ -75,8 +92,19 @@ namespace DriverScanTester.Services
         public const string TwoMobNoGather = "TwoMobNoGather";
         public const string CompactLocalGroup = "CompactLocalGroup";
         public const string NoConvergenceEvidence = "NoConvergenceEvidence";
-        /// <summary>Two consecutive route-compatible improvements were established: the walk starts.</summary>
+        /// <summary>
+        /// A scattered formation is approached toward the route waypoint although the formation
+        /// trend is not (yet) measurable. The walk is still bounded (time/displacement budget,
+        /// one attempt per encounter); the trend is advisory evidence, not a hard gate.
+        /// </summary>
+        public const string ScatteredMove = "ScatteredMove";
+        /// <summary>Two route-compatible improvements were established: the walk starts.</summary>
         public const string ConvergenceConfirmed = "ConvergenceConfirmed";
+        /// <summary>
+        /// The bot is standing in combat (no route-compatible progress), so the gather walks
+        /// toward the detected mob cluster instead of the route waypoint.
+        /// </summary>
+        public const string StationaryApproach = "StationaryApproach";
         public const string MovementNotAligned = "MovementNotAligned";
         public const string NoMovementProgress = "NoMovementProgress";
         public const string NoFormationImprovement = "NoFormationImprovement";

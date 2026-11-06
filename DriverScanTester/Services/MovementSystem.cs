@@ -264,6 +264,8 @@ namespace DriverScanTester.Services
         private string _lastMobGroupingDecisionKey = "";
         private DateTime _nextMobGroupingSnapshotAt = DateTime.MinValue;
         private bool _mobGroupingOwnsMovement;
+        /// <summary>Steering target of the active gather walk (route waypoint or mob cluster).</summary>
+        private MobGroupingGatherTarget _mobGroupingGatherTarget = MobGroupingGatherTarget.Route;
         private bool _resumeCombatSkillAfterGrouping;
         private bool _mobGroupingDisposed;
 
@@ -805,7 +807,8 @@ namespace DriverScanTester.Services
             _lastMobGroupingDecisionKey = key;
             _nextMobGroupingSnapshotAt = now.AddMilliseconds(MobGroupingSnapshotMinIntervalMs);
 
-            string summary = $"DECISION={decision.Directive} | code={(string.IsNullOrEmpty(code) ? "-" : code)} | " +
+            string summary = $"DECISION={decision.Directive} | target={decision.GatherTarget} | " +
+                             $"code={(string.IsNullOrEmpty(code) ? "-" : code)} | " +
                              $"suppression={(string.IsNullOrEmpty(suppressionCode) ? "-" : suppressionCode)} | " +
                              $"state={_mobGroupingController.State} | decisionMobs={analysis.DetectedMobCount} | " +
                              $"maxPerEncounter={BotConstants.MobGrouping.MaxGroupingsPerEncounter} | " +
@@ -919,11 +922,54 @@ namespace DriverScanTester.Services
         /// </summary>
         private bool ApplyGatherMovement(float currX, float currY)
         {
+            // Standing in combat: walk toward the detected mob cluster. Screen-space mob
+            // direction + camera yaw give the world bearing, so the ordinary MoveTowards path
+            // (KeyboardTurn / DirectCamera) does the steering exactly as on a route.
+            if (_mobGroupingGatherTarget == MobGroupingGatherTarget.ApproachMobs &&
+                TryResolveMobApproachTarget(currX, currY, out float approachX, out float approachY))
+            {
+                MoveTowards(currX, currY, approachX, approachY,
+                    ResolveSteeringMode(null, _steeringMode));
+                return true;
+            }
+
             if (!TryGetGatherNavigationTarget(currX, currY,
                     out float targetX, out float targetY, out MovementSteeringMode steeringMode))
                 return false;
 
             MoveTowards(currX, currY, targetX, targetY, steeringMode);
+            return true;
+        }
+
+        /// <summary>
+        /// Projects the detected mob cluster onto a world-space point in front of the player:
+        /// the analysis gives the cluster direction as a screen vector, the camera yaw converts
+        /// that into an absolute world bearing (0° = North, +90° = East).
+        /// </summary>
+        private bool TryResolveMobApproachTarget(float currX, float currY, out float targetX, out float targetY)
+        {
+            targetX = currX;
+            targetY = currY;
+
+            if (!_lastMobGroupingHasCameraYaw)
+                return false;
+
+            if (_lastMobGroupingAnalysis is not { IsValid: true, HasDominantMobDirection: true } analysis)
+                return false;
+
+            float screenX = analysis.DominantMobDirectionX;
+            float screenY = analysis.DominantMobDirectionY;
+            if (Math.Abs(screenX) < 0.001f && Math.Abs(screenY) < 0.001f)
+                return false;
+
+            // Screen angle: 0 = straight up (camera forward), +90 = screen right.
+            float screenAngleDeg = MathF.Atan2(screenX, -screenY) * (180f / MathF.PI);
+            float cameraBearingDeg = GeometryUtils.ConvertRadiansToBearingDeg(_lastMobGroupingCameraYawRadians);
+            float bearingDeg = GeometryUtils.NormalizeBearingDeg(cameraBearingDeg + screenAngleDeg);
+
+            float distance = BotConstants.MobGrouping.ApproachTargetDistance;
+            targetX = currX + GeometryUtils.BearingToDeltaX(bearingDeg) * distance;
+            targetY = currY + GeometryUtils.BearingToDeltaY(bearingDeg) * distance;
             return true;
         }
 
@@ -1218,7 +1264,25 @@ namespace DriverScanTester.Services
                 _lastMobGroupingCameraYawRadians,
                 _lastMobGroupingHasCameraYaw,
                 _lastMobGroupingClientWidth,
-                _lastMobGroupingClientHeight);
+                _lastMobGroupingClientHeight,
+                CanApproachDetectedMobs());
+        }
+
+        /// <summary>
+        /// True when the last analysis carries a usable mob-cluster direction AND the camera yaw
+        /// that is needed to turn that screen vector into a world bearing. This is what lets a
+        /// gather walk steer toward the mobs while the bot is standing in combat.
+        /// </summary>
+        private bool CanApproachDetectedMobs()
+        {
+            if (!_lastMobGroupingHasCameraYaw)
+                return false;
+
+            return _lastMobGroupingAnalysis is
+            {
+                IsValid: true,
+                HasDominantMobDirection: true
+            };
         }
 
         private void ApplyMobGroupingDecision(MobGroupingDecision decision, DateTime nowUtc)
@@ -1226,6 +1290,7 @@ namespace DriverScanTester.Services
             switch (decision.Directive)
             {
                 case MobGroupingDirective.StartMove:
+                    _mobGroupingGatherTarget = decision.GatherTarget;
                     StartMobGroupingMove(decision);
                     break;
                 case MobGroupingDirective.StopMovement:
