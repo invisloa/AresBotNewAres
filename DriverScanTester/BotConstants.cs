@@ -215,11 +215,73 @@ namespace DriverScanTester
             /// <summary>Attack speed value at which bot drinks speed potions (key 7 + key 8).</summary>
             public const short AttackSpeedThreshold = 16341; //16341 +2 speed //16384 +3 speed (archer bos+giko)
 
+            /// <summary>
+            /// Sorcerer/Mage buff detection by RUN speed (the white potion raises run speed,
+            /// not attack speed). BYTE at <see cref="MemoryOffsets.RunSpeed"/>
+            /// (<c>[Ares.exe + 0x489BC8] + 0xEFA</c>) while the white potion is NOT active —
+            /// verified live: 0x80 = 128 = run speed +0 (normal run).
+            /// The bot drinks the white potion exactly when the read equals this value.
+            /// </summary>
+            public const byte RunSpeedNoPotionValue = 0x80; // 128 = +0 run speed (normal)
+
+            /// <summary>
+            /// Sorcerer/Mage buff detection: RUN speed value WITH the white potion active —
+            /// verified live: 0xB3 = 179 = +2 run speed. Documented for diagnostics only —
+            /// the decision compares against <see cref="RunSpeedNoPotionValue"/>.
+            /// </summary>
+            public const byte RunSpeedWhitePotValue = 0xB3; // 179 = +2 run speed (white pot)
+
             /// <summary>Interval in seconds between attack-speed checks.</summary>
             public const double CheckIntervalSeconds = 5.0;
 
             /// <summary>Delay in ms after pressing potion key 7 before pressing key 8.</summary>
             public const int PostPotionDelayMs = 500;
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  CAST SPEED BUFF — value semantics for MemoryOffsets.CastSpeedBuff
+        // ════════════════════════════════════════════════════════════════
+        public static class CastSpeed
+        {
+            /// <summary>
+            /// 16-bit value at <see cref="MemoryOffsets.CastSpeedBuff"/> while the cast-speed
+            /// buff is NOT active (verified live; 0xBF80 = -16512, the upper half of the
+            /// float -1.0f). Any other readable value is treated as the buff being active.
+            /// </summary>
+            public const short BuffInactiveValue = unchecked((short)0xBF80);
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  REBUFF — class buff timing (currently the Sorcerer/Mage rebuff)
+        // ════════════════════════════════════════════════════════════════
+        public static class Rebuff
+        {
+            /// <summary>
+            /// 16-bit buff-slot value that identifies the mage rapid buff as ACTIVE.
+            /// Verified live in the lock tool: FirstSlotBuff held 3384 (0x0D38). Any of
+            /// the six buff slots may carry the value while the buff is active; when none
+            /// of the readable slots equals it, the buff is inactive and must be recast.
+            /// </summary>
+            public const short RapidBuffActiveValue = 3384; // 0x0D38
+
+            /// <summary>
+            /// Gap in ms between the two buff-key (4) presses of the mage rebuff — the mage
+            /// buff is cast by pressing key 4 twice, roughly half a second apart.
+            /// </summary>
+            public const int KeyPressIntervalMs = 500;
+
+            /// <summary>
+            /// Settle time (ms) after releasing W/A/D before the first buff-key (4) press.
+            /// The client ignores the buff key while the character is still running, so the
+            /// bot must stop and let the movement state settle before rebuffing.
+            /// </summary>
+            public const int StopMovementSettleMs = 200;
+
+            /// <summary>
+            /// Settle time (ms) after the second buff-key (4) press, still with movement
+            /// stopped, so the cast can finish before W is pressed again on the next tick.
+            /// </summary>
+            public const int PostCastSettleMs = 200;
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -895,7 +957,11 @@ namespace DriverScanTester
             public const ulong CurrentMap = 0x5F8;
             public const ulong CurrentWeight = 0xC70;
             public const ulong MaxWeight = 0xC74;
-            public const ulong RunSpeed = 0x150A;
+            // Run speed is a single BYTE (lock-tool name: A_RunSpeed, ValueType = Byte):
+            //   [Ares.exe + 0x489BC8] + 0xEFA
+            // Verified live values: 0x80 (128) = +0 run speed, 0xB3 (179) = +2 run speed
+            // (white pot active). Use SpeedPotion.RunSpeedNoPotionValue / RunSpeedWhitePotValue.
+            public const ulong RunSpeed = 0xEFA;
             public const ulong SkillSpeed = 0xACA;
             public const ulong Animation1 = 0x3ba;
             public const ulong Animation2 = 0x3be;
@@ -912,6 +978,14 @@ namespace DriverScanTester
             public const ulong AttackSpeed1 = 0x47A;
             public const ulong AttackSpeed2 = 0x47E;
             public const ulong CurrentAction = 0x3B0;
+
+            // Currently playing character class id — 32-bit int read from the player base:
+            //   [Ares.exe + 0x489BC8] + 0xA9C     (lock-tool name: M_CurrentCLassPlayer)
+            // Verified live value 1 = Archer. The numbering matches the legacy
+            // AresTrainerV3_oldBot mapping (PointersAndValues.classSelected = 0x7D4):
+            //   0 = Knight, 1 = Archer, 2 = Mage/Sorcerer, 3 = Spear.
+            // Use PlayerClassIds for the values; never compare against bare numbers.
+            public const ulong CurrentClassPlayer = 0xA9C;
 
             // Camera structure
             public const ulong CameraPtr = 0x4883F0;
@@ -966,6 +1040,33 @@ namespace DriverScanTester
             public const int DialogOpenPtr = 0xBC;
             public const int DialogOpen1 = 0xE8;
 
+            // Cast-speed buff state, also rooted at the UI window pointer
+            // [Ares.exe + 0x489BE8] (lock-tool name: "CastSpeedBuff?"):
+            //   CastSpeedBuff = [[UiWindow] + 0x178] + 0x13A   (16-bit / Int16 read)
+            // Verified live in the lock tool: resolved address 0x3EFF9FFA held the Int16
+            // value -16512 (0xBF80) = cast-speed buff NOT active. Read width is 2 bytes —
+            // the sibling short at +0x13A is what the tool displayed as "-16512 (0xBF80)".
+            // See BotConstants.CastSpeed.BuffInactiveValue.
+            // NOTE: rebuff decisions use the six-slot buff array below
+            // (BotConstants.Rebuff.RapidBuffActiveValue); this field is kept for
+            // diagnostics/backwards compatibility only.
+            public const int CastSpeedBuffPtr = 0x178;
+            public const int CastSpeedBuff = 0x13A;
+
+            // Buff-slot array — six 16-bit values sharing the CastSpeedBuff holder:
+            //   BuffSlot[i] = [[UiWindow] + 0x178] + 0x12C + (i * 0x50)   (i = 0..5)
+            // Verified live in the lock tool: slot 0 = 0x3EFF9FEC (value 3384) and
+            // slot 1 = 0x3EFFA03C, so the slot stride is 0x3EFFA03C - 0x3EFF9FEC = 0x50.
+            // Holding pointer = 0x3EFF9FFA (CastSpeedBuff) - 0x13A = 0x3EFF9EC0, which
+            // makes slot 0 = holder + 0x12C and CastSpeedBuff = slot 0 + 0xE.
+            // Computed absolute slot addresses for that session:
+            //   0: 0x3EFF9FEC  1: 0x3EFFA03C  2: 0x3EFFA08C
+            //   3: 0x3EFFA0DC  4: 0x3EFFA12C  5: 0x3EFFA17C
+            public const int BuffSlotsPtr = 0x178;
+            public const int FirstBuffSlot = 0x12C;
+            public const int BuffSlotSize = 0x50;
+            public const int BuffSlotCount = 6;
+
             // Loot
             public const ulong CurrentItemHighlightedType = 0x8C9Fd0;
             public const int PositionX = 0x23c;
@@ -991,6 +1092,27 @@ namespace DriverScanTester
             // scan view and 16160 for the tilted movement (W-held) view.
             // Distinct from the float vertical angle at +0x1B0 (CameraVerticalAngle).
             public const ulong CameraVerticalLockOffset = 0x1BE;
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  PLAYER CLASS — values of MemoryOffsets.CurrentClassPlayer
+        // ════════════════════════════════════════════════════════════════
+        public static class PlayerClassIds
+        {
+            /// <summary>Sentinel for an unreadable or unrecognized class value.</summary>
+            public const int Unknown = -1;
+
+            /// <summary>0 — Knight (legacy ClassKnight).</summary>
+            public const int Knight = 0;
+
+            /// <summary>1 — Archer (legacy ClassArcher).</summary>
+            public const int Archer = 1;
+
+            /// <summary>2 — Mage / Sorcerer (legacy ClassSorcerer).</summary>
+            public const int Mage = 2;
+
+            /// <summary>3 — Spear (legacy ClassSpear).</summary>
+            public const int Spear = 3;
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -1152,6 +1274,10 @@ namespace DriverScanTester
             // Key 3 (attack skill)
             public const byte Vk3 = 0x33;
             public const byte Scan3 = 0x04;
+
+            // Key 4 (class buff / rebuff)
+            public const byte Vk4 = 0x34;
+            public const byte Scan4 = 0x05;
 
             // Key 7 (potion 1)
             public const byte Vk7 = 0x37;

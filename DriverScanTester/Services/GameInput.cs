@@ -25,6 +25,8 @@ namespace DriverScanTester.Services
         internal const byte SCAN_TAB = BotConstants.Keyboard.ScanTab;
         internal const byte VK_3 = BotConstants.Keyboard.Vk3;
         internal const byte SCAN_3 = BotConstants.Keyboard.Scan3;
+        internal const byte VK_4 = BotConstants.Keyboard.Vk4;
+        internal const byte SCAN_4 = BotConstants.Keyboard.Scan4;
         internal const byte VK_7 = BotConstants.Keyboard.Vk7;
         internal const byte SCAN_7 = BotConstants.Keyboard.Scan7;
         internal const byte VK_8 = BotConstants.Keyboard.Vk8;

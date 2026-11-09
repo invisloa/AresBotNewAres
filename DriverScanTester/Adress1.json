@@ -1,5 +1,53 @@
 [
   {
+    "AddressText": "[[Ares.exe \u002B 0x489BE8] \u002B 0x178] \u002B 0x12C",
+    "NameText": "FirstSlotBuff",
+    "ValueText": "3384",
+    "ValueType": 1,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x489BE8] \u002B 0x178] \u002B 0x17C",
+    "NameText": "SecondSlotBuff",
+    "ValueText": "",
+    "ValueType": 1,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x489BE8] \u002B 0x178] \u002B 0x1CC",
+    "NameText": "ThirdSlotBuff",
+    "ValueText": "",
+    "ValueType": 1,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x489BE8] \u002B 0x178] \u002B 0x21C",
+    "NameText": "FourthSlotBuff",
+    "ValueText": "",
+    "ValueType": 1,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x489BE8] \u002B 0x178] \u002B 0x26C",
+    "NameText": "FifthSlotBuff",
+    "ValueText": "",
+    "ValueType": 1,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x489BE8] \u002B 0x178] \u002B 0x2BC",
+    "NameText": "SixthSlotBuff",
+    "ValueText": "",
+    "ValueType": 1,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
     "AddressText": "[[Ares.exe \u002B 0x489BE8] \u002B 0xBC] \u002B 0xE8",
     "NameText": "S_IsDialogOpen1",
     "ValueText": "",
@@ -284,6 +332,22 @@
     "NameText": "Sell_FirstSellSlotItem",
     "ValueText": "",
     "ValueType": 1,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x489BE8] \u002B 0x178] \u002B 0x13A",
+    "NameText": "CastSpeedBuff?",
+    "ValueText": "",
+    "ValueType": 1,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "[Ares.exe \u002B 0x489BC8] \u002B 0xEFA",
+    "NameText": "A_RunSpeed",
+    "ValueText": "",
+    "ValueType": 0,
     "Priority": 2,
     "LockGroup": 0
   }

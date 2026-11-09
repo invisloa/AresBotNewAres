@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
+using DriverScanTester.Models;
 
 namespace DriverScanTester.Services
 {
@@ -76,6 +77,8 @@ namespace DriverScanTester.Services
         private DateTime _lastNonIdleActionTime = DateTime.MinValue;
         private DateTime _lastMoveModeTabTime = DateTime.MinValue;
         private DateTime _lastAttackSpeedCheck = DateTime.MinValue;
+        private DateTime _lastRunSpeedCheck = DateTime.MinValue;
+        private DateTime _lastRebuffCheck = DateTime.MinValue;
         private DateTime _combatIdleStartTime = DateTime.MinValue;
 
         // ── Combat stuck detection (mana + position based) ──
@@ -148,6 +151,101 @@ namespace DriverScanTester.Services
                 return attackSpeed == BotConstants.SpeedPotion.AttackSpeedThreshold;
             }
             return false;
+        }
+
+        /// <summary>Last run-speed value read by <see cref="CheckRunSpeed"/> (0 = never read).</summary>
+        public int LastRunSpeed { get; private set; }
+
+        /// <summary>
+        /// Sorcerer/Mage speed-potion check. The white potion raises RUN speed, not attack
+        /// speed, so the attack-speed check used by every other class never sees this buff.
+        /// Run speed is the byte at <c>[Ares.exe + 0x489BC8] + 0xEFA</c>: 0x80 (128) = no
+        /// white pot (normal run), 0xB3 (179) = +2 run speed (buff active). Returns true
+        /// (drink the white potion) exactly while the read still equals the no-potion value;
+        /// any other value means the buff is active.
+        ///
+        /// A failed/zero read never triggers drinking (the bot must not spam potions on an
+        /// unreadable address). Throttled to the same interval as the attack-speed check.
+        /// </summary>
+        public bool CheckRunSpeed(GameMemoryService memoryService)
+        {
+            if (_externallySuspended)
+                return false;
+
+            if ((DateTime.Now - _lastRunSpeedCheck).TotalSeconds >= BotConstants.SpeedPotion.CheckIntervalSeconds)
+            {
+                int runSpeed = memoryService.GetRunSpeed();
+                LastRunSpeed = runSpeed;
+                _lastRunSpeedCheck = DateTime.Now;
+                return runSpeed != 0 &&
+                       runSpeed == BotConstants.SpeedPotion.RunSpeedNoPotionValue;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Buff-slot values read by the last <see cref="CheckRebuff"/> call (six 16-bit
+        /// slots, index 0 = FirstSlotBuff). Empty until a successful full read.
+        /// </summary>
+        public short[] LastBuffSlotValues { get; private set; } = Array.Empty<short>();
+
+        /// <summary>
+        /// Result of the last successful buff-slot read: true when any slot held
+        /// <see cref="BotConstants.Rebuff.RapidBuffActiveValue"/> (rapid buff active).
+        /// </summary>
+        public bool LastRapidBuffActive { get; private set; }
+
+        /// <summary>
+        /// Decides whether the class rebuff must run in this check cycle. Evaluated on the
+        /// SAME throttled cadence as the white/red speed-potion check (every
+        /// <see cref="BotConstants.SpeedPotion.CheckIntervalSeconds"/> seconds) and only
+        /// OUTSIDE the city.
+        ///
+        /// Currently only the Sorcerer/Mage defines a condition: NONE of the six buff slots
+        /// may hold <see cref="BotConstants.Rebuff.RapidBuffActiveValue"/> (3384 / 0x0D38,
+        /// a 16-bit slot value). If any slot equals that value the rapid buff is active and
+        /// no rebuff is needed; when the buff is missing from every slot the bot recasts it.
+        /// Other classes will get their own conditions here — until then they never rebuff.
+        ///
+        /// A failed read of the city flag or of ANY buff slot means "do not rebuff": the bot
+        /// must never fire buff keys based on an unknown state.
+        /// </summary>
+        public bool CheckRebuff(GameMemoryService memoryService, PlayerClass playerClass)
+        {
+            if (_externallySuspended)
+                return false;
+
+            if ((DateTime.Now - _lastRebuffCheck).TotalSeconds < BotConstants.SpeedPotion.CheckIntervalSeconds)
+                return false;
+
+            _lastRebuffCheck = DateTime.Now;
+
+            // No class condition defined yet apart from the mage.
+            if (playerClass != PlayerClass.Mage)
+                return false;
+
+            // Rebuff is forbidden inside the city — and an unreadable city flag is not
+            // permission to press buff keys.
+            if (!memoryService.TryGetIsInCity(out bool isInCity) || isInCity)
+                return false;
+
+            // Read all six slots. A partial read is unknown, never "buff missing".
+            if (!memoryService.TryGetBuffSlotValues(out short[] buffValues))
+                return false;
+
+            LastBuffSlotValues = buffValues;
+            LastRapidBuffActive = false;
+
+            for (int i = 0; i < buffValues.Length; i++)
+            {
+                if (buffValues[i] == BotConstants.Rebuff.RapidBuffActiveValue)
+                {
+                    LastRapidBuffActive = true;
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         /// <summary>
@@ -516,6 +614,8 @@ namespace DriverScanTester.Services
             ShiftTimestamp(ref _lastNonIdleActionTime, suspension);
             ShiftTimestamp(ref _lastMoveModeTabTime, suspension);
             ShiftTimestamp(ref _lastAttackSpeedCheck, suspension);
+            ShiftTimestamp(ref _lastRunSpeedCheck, suspension);
+            ShiftTimestamp(ref _lastRebuffCheck, suspension);
             ShiftTimestamp(ref _combatIdleStartTime, suspension);
             ShiftTimestamp(ref _lastManaChangeAt, suspension);
             ShiftTimestamp(ref _lastCombatPosChangeAt, suspension);

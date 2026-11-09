@@ -64,6 +64,7 @@ namespace DriverScanTester.Services
         private const ulong AttackSpeed1Offset = BotConstants.MemoryOffsets.AttackSpeed1;
         private const ulong AttackSpeed2Offset = BotConstants.MemoryOffsets.AttackSpeed2;
         private const ulong CurrentActionOffset = BotConstants.MemoryOffsets.CurrentAction;
+        private const ulong CurrentClassPlayerOffset = BotConstants.MemoryOffsets.CurrentClassPlayer;
         // A_CurrentAction values: 0=idle, 3=running, 4=being hit, 7=attacking -knight no weapon
         // A_CurrentAction values: 25=idle, 27=running, 28wd=being hit, 39=attacking -knight sword
 
@@ -90,6 +91,15 @@ namespace DriverScanTester.Services
         // --- Dialog box open state (S_IsDialogOpen1) ---
         private const int DialogOpenPtrOffset = BotConstants.MemoryOffsets.DialogOpenPtr;
         private const int DialogOpen1Offset = BotConstants.MemoryOffsets.DialogOpen1;
+
+        // --- Cast-speed buff state ([[Ares.exe + 0x489BE8] + 0x178] + 0x13A) ---
+        private const int CastSpeedBuffPtrOffset = BotConstants.MemoryOffsets.CastSpeedBuffPtr;
+        private const int CastSpeedBuffOffset = BotConstants.MemoryOffsets.CastSpeedBuff;
+
+        // --- Buff-slot array ([[Ares.exe + 0x489BE8] + 0x178] + 0x12C + i * 0x50) ---
+        private const int BuffSlotsPtrOffset = BotConstants.MemoryOffsets.BuffSlotsPtr;
+        private const int FirstBuffSlotOffset = BotConstants.MemoryOffsets.FirstBuffSlot;
+        private const int BuffSlotSize = BotConstants.MemoryOffsets.BuffSlotSize;
 
         private const int SellerWindow2MOffset = BotConstants.MemoryOffsets.SellerWindow2M;
         private const int InventoryWindow2MOffset = BotConstants.MemoryOffsets.InventoryWindow2M;
@@ -164,6 +174,17 @@ namespace DriverScanTester.Services
                 return false;
 
             value = _pointerSize == 8 ? BitConverter.ToUInt64(buf, 0) : BitConverter.ToUInt32(buf, 0);
+            return true;
+        }
+
+        private bool TryReadByte(ulong address, out byte value)
+        {
+            value = 0;
+            byte[] buf = new byte[sizeof(byte)];
+            if (!_read(_pid, address, buf, out uint bytesRead) || bytesRead != sizeof(byte))
+                return false;
+
+            value = buf[0];
             return true;
         }
 
@@ -817,6 +838,41 @@ namespace DriverScanTester.Services
             return ReadShort(playerBase + SkillSpeedOffset);
         }
 
+        /// <summary>
+        /// Reads the player's current run-speed value (single BYTE at
+        /// <c>[Ares.exe + 0x489BC8] + 0xEFA</c>). The Sorcerer/Mage speed-potion check uses
+        /// it because the white potion raises RUN speed, not attack speed:
+        /// 0x80 (128) = no white pot (normal run), 0xB3 (179) = white pot active (+2 run speed).
+        /// The byte is widened to int for logging/threshold checks. Returns 0 when the player
+        /// pointer or the value cannot be read; callers must not treat 0 as a valid sample
+        /// (the real no-potion value is 128, never 0).
+        /// </summary>
+        public int GetRunSpeed()
+        {
+            ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
+            if (playerBase == 0) return 0;
+
+            return ReadByte(playerBase + RunSpeedOffset);
+        }
+
+        /// <summary>
+        /// Explicit-success variant of <see cref="GetRunSpeed"/> so a failed read is never
+        /// mistaken for a real run-speed value.
+        /// </summary>
+        public bool TryGetRunSpeed(out int runSpeed)
+        {
+            runSpeed = 0;
+
+            ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
+            if (playerBase == 0) return false;
+
+            if (!TryReadByte(playerBase + RunSpeedOffset, out byte value))
+                return false;
+
+            runSpeed = value;
+            return true;
+        }
+
         public (int hp, int mana, bool success) GetHpMana()
         {
             ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
@@ -891,6 +947,69 @@ namespace DriverScanTester.Services
             return ReadInt(playerBase + IsInCityOffset) == 1;
         }
 
+        /// <summary>
+        /// Explicit-success variant of <see cref="GetIsInCity"/> so callers that must never
+        /// act on a failed read (e.g. a rebuff that is forbidden inside the city) can tell
+        /// "not in city" apart from "could not read".
+        /// </summary>
+        public bool TryGetIsInCity(out bool isInCity)
+        {
+            isInCity = false;
+
+            ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
+            if (playerBase == 0) return false;
+
+            if (!TryReadInt(playerBase + IsInCityOffset, out int value))
+                return false;
+
+            isInCity = value == 1;
+            return true;
+        }
+
+        /// <summary>
+        /// Reads the currently playing character class id from the player structure
+        /// (<c>[Ares.exe + 0x489BC8] + 0xA9C</c>, 32-bit int; lock-tool name
+        /// M_CurrentCLassPlayer). Values: 0 = Knight, 1 = Archer, 2 = Mage/Sorcerer,
+        /// 3 = Spear (see <see cref="BotConstants.PlayerClassIds"/>).
+        /// Returns false when the player pointer or the class value cannot be read, so a
+        /// failed read is never reported as a valid class.
+        /// </summary>
+        public bool TryGetPlayerClass(out int classId)
+        {
+            // Never let the low-level reader's failure default (0) escape as a valid
+            // class: 0 means Knight, so a failed read must stay Unknown.
+            classId = BotConstants.PlayerClassIds.Unknown;
+
+            ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
+            if (playerBase == 0) return false;
+
+            if (!TryReadInt(playerBase + CurrentClassPlayerOffset, out int value))
+                return false;
+
+            classId = value;
+            return true;
+        }
+
+        /// <summary>
+        /// Convenience wrapper around <see cref="TryGetPlayerClass"/> that maps the raw
+        /// value onto <see cref="PlayerClass"/>. Unreadable or unrecognized values are
+        /// reported as <see cref="PlayerClass.Unknown"/>, never as Knight (0).
+        /// </summary>
+        public PlayerClass GetPlayerClass()
+        {
+            if (!TryGetPlayerClass(out int classId))
+                return PlayerClass.Unknown;
+
+            return classId switch
+            {
+                BotConstants.PlayerClassIds.Knight => PlayerClass.Knight,
+                BotConstants.PlayerClassIds.Archer => PlayerClass.Archer,
+                BotConstants.PlayerClassIds.Mage => PlayerClass.Mage,
+                BotConstants.PlayerClassIds.Spear => PlayerClass.Spear,
+                _ => PlayerClass.Unknown,
+            };
+        }
+
         public (int current, int max) GetWeight()
         {
             ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
@@ -941,6 +1060,97 @@ namespace DriverScanTester.Services
             if (dialogPtr == 0) return false;
 
             return ReadByte(dialogPtr + (ulong)DialogOpen1Offset) == 1;
+        }
+
+        /// <summary>
+        /// Reads the cast-speed buff state, rooted at the UI window pointer:
+        ///   [[Ares.exe + 0x489BE8] + 0x178] + 0x13A   (16-bit)
+        /// A verified live value of -16512 (0xBF80) means the buff is NOT active
+        /// (<see cref="BotConstants.CastSpeed.BuffInactiveValue"/>).
+        /// Returns false when any link of the pointer chain or the value cannot be read, so
+        /// an unreadable sample is never mistaken for an active or inactive buff.
+        /// </summary>
+        public bool TryGetCastSpeedBuff(out short value)
+        {
+            value = 0;
+
+            ulong uiWindow = GetUiWindowAddress();
+            if (uiWindow == 0) return false;
+
+            ulong castSpeedHolder = ReadPointer(uiWindow + (ulong)CastSpeedBuffPtrOffset);
+            if (castSpeedHolder == 0) return false;
+
+            return TryReadShort(castSpeedHolder + (ulong)CastSpeedBuffOffset, out value);
+        }
+
+        /// <summary>
+        /// Cast-speed buff state as a tri-state: <c>true</c> = active, <c>false</c> = inactive,
+        /// <c>null</c> = unreadable (callers must decide, never guess).
+        /// The only verified fingerprint is the inactive value
+        /// <see cref="BotConstants.CastSpeed.BuffInactiveValue"/>; any other readable value is
+        /// reported as active.
+        /// </summary>
+        public bool? IsCastSpeedBuffActive()
+        {
+            if (!TryGetCastSpeedBuff(out short value))
+                return null;
+
+            return value != BotConstants.CastSpeed.BuffInactiveValue;
+        }
+
+        /// <summary>
+        /// Reads one 16-bit buff-slot value from the six-slot array:
+        ///   [[Ares.exe + 0x489BE8] + 0x178] + 0x12C + slotIndex * 0x50
+        /// where slotIndex 0 = FirstSlotBuff (verified live at 0x3EFF9FEC, value 3384)
+        /// and slotIndex 1 = SecondSlotBuff (0x3EFFA03C). Slots 2..5 continue with the
+        /// same 0x50 stride. Returns false for an out-of-range index, a broken pointer
+        /// chain, or an unreadable value — it never fabricates a zero sample.
+        /// </summary>
+        public bool TryGetBuffSlotValue(int slotIndex, out short value)
+        {
+            value = 0;
+            if (slotIndex < 0 || slotIndex >= BotConstants.MemoryOffsets.BuffSlotCount)
+                return false;
+
+            ulong uiWindow = GetUiWindowAddress();
+            if (uiWindow == 0) return false;
+
+            ulong buffHolder = ReadPointer(uiWindow + (ulong)BuffSlotsPtrOffset);
+            if (buffHolder == 0) return false;
+
+            ulong slotAddress = buffHolder
+                + (ulong)FirstBuffSlotOffset
+                + (ulong)(slotIndex * BuffSlotSize);
+            return TryReadShort(slotAddress, out value);
+        }
+
+        /// <summary>
+        /// Reads all six 16-bit buff-slot values in one pass:
+        ///   [[Ares.exe + 0x489BE8] + 0x178] + 0x12C + i * 0x50   (i = 0..5)
+        /// Returns false when any link of the pointer chain or ANY slot value cannot be
+        /// read. Callers that must never act on an unknown state (the mage rebuff) treat
+        /// false as "do not press buff keys" instead of "no buff is active".
+        /// </summary>
+        public bool TryGetBuffSlotValues(out short[] values)
+        {
+            values = new short[BotConstants.MemoryOffsets.BuffSlotCount];
+
+            ulong uiWindow = GetUiWindowAddress();
+            if (uiWindow == 0) return false;
+
+            ulong buffHolder = ReadPointer(uiWindow + (ulong)BuffSlotsPtrOffset);
+            if (buffHolder == 0) return false;
+
+            for (int i = 0; i < values.Length; i++)
+            {
+                ulong slotAddress = buffHolder
+                    + (ulong)FirstBuffSlotOffset
+                    + (ulong)(i * BuffSlotSize);
+                if (!TryReadShort(slotAddress, out values[i]))
+                    return false;
+            }
+
+            return true;
         }
 
         public bool IsInventoryOpen()

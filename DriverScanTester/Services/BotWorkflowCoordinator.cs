@@ -485,6 +485,26 @@ namespace DriverScanTester.Services
         // ======================== Lifecycle ========================
 
         /// <summary>
+        /// Logs the class detected in memory once per workflow start. The value is read from
+        /// <see cref="BotConstants.MemoryOffsets.CurrentClassPlayer"/> and is informational
+        /// only — no behaviour branches on it yet.
+        /// </summary>
+        private void LogPlayingClass()
+        {
+            PlayerClass playerClass = _memoryService.GetPlayerClass();
+            if (playerClass == PlayerClass.Unknown)
+            {
+                if (_memoryService.TryGetPlayerClass(out int rawValue))
+                    _log($"[Class] Playing class could not be recognized (raw value {rawValue}).");
+                else
+                    _log("[Class] Playing class could not be read (player pointer or class value unavailable).");
+                return;
+            }
+
+            _log($"[Class] Playing class detected: {playerClass} (raw value {(int)playerClass}).");
+        }
+
+        /// <summary>
         /// Starts the workflow loop.
         /// </summary>
         public async Task StartAsync()
@@ -515,6 +535,7 @@ namespace DriverScanTester.Services
             _focusGameWindow();
             _log("[Coordinator] Workflow started.");
             _log($"[Coordinator] Profile: {_profile.Name}");
+            LogPlayingClass();
             LogFlowPlan();
 
             // ── Auto potion drinking ──

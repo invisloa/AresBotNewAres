@@ -303,10 +303,11 @@ namespace DriverScanTester.Services
         public bool InternalRepotEnabled { get; set; } = true;
 
         /// <summary>
-        /// If true (default), the production speed-potion rebuff (keys 7+8) runs in every
-        /// mode exactly as before. The movement-synchronization diagnostic sets this to
-        /// false for TEST 9 so its isolated OnlyMove experiment cannot emit unrelated
-        /// potion input. Production callers never change it.
+        /// If true (default), the production speed-potion rebuff (keys 7+8) and the class
+        /// rebuff (key 4 for the mage) run in every mode exactly as before. The
+        /// movement-synchronization diagnostic sets this to false for TEST 9 so its isolated
+        /// OnlyMove experiment cannot emit unrelated potion or buff input. Production callers
+        /// never change it.
         /// </summary>
         public bool AllowSpeedPotionBuff { get; set; } = true;
 
@@ -1616,11 +1617,46 @@ namespace DriverScanTester.Services
         private int _attackRetryTargetId;
         private bool _attackSuppressedForCurrentWaypoint = false;
         /// <summary>
-        /// One-shot flag for the speed-pot slot-reserve log: while red or white
-        /// potions sit at the reserve (1), keys 7+8 are skipped and this suppresses
-        /// the repeat log until drinking resumes.
+        /// One-shot flag for the speed-pot slot-reserve log: while a consumed potion type
+        /// sits at the reserve (1), its key(s) are skipped and this suppresses the repeat
+        /// log until drinking resumes.
         /// </summary>
         private bool _speedPotReserveLogged = false;
+
+        /// <summary>
+        /// One-shot flag for the sorcerer run-speed diagnostic: logs (once) when the read
+        /// value matches neither the no-potion nor the white-pot fingerprint, so a patched
+        /// client or an unexpected speed bonus cannot silently disable the white-pot buff.
+        /// </summary>
+        private bool _speedPotUnknownRunSpeedLogged = false;
+
+        /// <summary>
+        /// One-shot flag for the mage white-potion verification: logs once when pressing the
+        /// white-potion key does not decrease the white-potion count, so a wrong hotkey or an
+        /// empty slot becomes visible instead of being silently retried every cycle.
+        /// </summary>
+        private bool _speedPotWhiteCountWarningLogged = false;
+
+        /// <summary>
+        /// Hotkey currently used for the mage white potion. Starts at key 8 (legacy
+        /// SkillSelectorMageAlliance mapping) and is corrected at runtime when key 8 is
+        /// observed to consume a red potion instead of a white one.
+        /// </summary>
+        private byte _mageWhitePotionVk = GameInput.VK_8;
+        private byte _mageWhitePotionScan = GameInput.SCAN_8;
+
+        /// <summary>
+        /// Last time the class was resolved for the speed-potion decision. The class never
+        /// changes mid-run, so re-reading it every movement tick is unnecessary work.
+        /// </summary>
+        private DateTime _lastPlayerClassResolveAt = DateTime.MinValue;
+
+        /// <summary>
+        /// Last successfully read player class, used only by the speed-potion decision.
+        /// A transient read failure must never flip the behaviour — a Sorcerer would
+        /// otherwise start pressing the red-potion key 7 again.
+        /// </summary>
+        private PlayerClass _lastConfirmedPlayerClass = PlayerClass.Unknown;
         private int _startMoveCount = 0;
         private int _stopMoveCount = 0;
         private static readonly Random _rng = new Random();
@@ -1755,6 +1791,98 @@ namespace DriverScanTester.Services
                 _waypoints.Enqueue(wp);
                 _log($"[Path] Single target: ({wp.X:F1}, {wp.Y:F1}) Precision:{wp.Precision} Mode:{wp.Mode} CamLock:{wp.CameraDistanceLock} AtkDis:{wp.AttackDisengageDistance}");
             }
+        }
+
+        /// <summary>
+        /// The speed-potion keys the current class may press on one rebuff.
+        /// <see cref="WhitePotionOnly"/> is carried so the reserve log can name the keys.
+        /// </summary>
+        internal readonly record struct SpeedPotionPlan(
+            bool PressRed,
+            bool PressWhite,
+            bool BlockedByReserve,
+            bool WhitePotionOnly);
+
+        /// <summary>
+        /// Performs the class rebuff. Today only the Sorcerer/Mage rebuff is defined: the
+        /// class buff is cast by pressing key 4 twice, roughly half a second apart. Other
+        /// classes have no rebuff action yet (their conditions will be added in
+        /// <see cref="CombatHandler.CheckRebuff"/>), so nothing is pressed for them.
+        /// </summary>
+        internal async Task PerformRebuffAsync(PlayerClass playerClass, CancellationToken token)
+        {
+            if (playerClass != PlayerClass.Mage)
+                return;
+
+            // The client ignores the buff key while the character is running. Release W
+            // (and any A/D turn / camera W hold) and let the movement state settle before
+            // pressing key 4. The main loop is awaiting, so nothing re-presses W until the
+            // whole two-key rebuff sequence has finished.
+            StopMoving();
+            await Task.Delay(BotConstants.Rebuff.StopMovementSettleMs, token);
+
+            string slotValues = string.Join(", ", _combatHandler.LastBuffSlotValues);
+            _log($"[Tick {_tickCount}] [Rebuff] Mage rapid buff inactive (no buff slot = {BotConstants.Rebuff.RapidBuffActiveValue}; slots=[{slotValues}]) — movement stopped, pressing key 4 twice, {BotConstants.Rebuff.KeyPressIntervalMs} ms apart.");
+            _log("[Key] 4 (rebuff, first press)");
+            GameInput.PressKey(GameInput.VK_4, GameInput.SCAN_4);
+            await Task.Delay(BotConstants.Rebuff.KeyPressIntervalMs, token);
+            _log("[Key] 4 (rebuff, second press)");
+            GameInput.PressKey(GameInput.VK_4, GameInput.SCAN_4);
+
+            // Keep movement stopped for one more short window so the cast animation can
+            // finish before the next movement tick presses W again.
+            await Task.Delay(BotConstants.Rebuff.PostCastSettleMs, token);
+        }
+
+        /// <summary>
+        /// Decides which speed-potion keys a class may press.
+        ///
+        /// Sorcerer/Mage uses ONLY the white potion: the legacy bot's
+        /// SkillSelectorMageAlliance rebuffed with checkForWhitePotBuff(), while every other
+        /// class called checkForWhiteRed() (keys 7 and 8). The actual white-pot key is verified
+        /// at runtime in the movement loop (it starts on key 8 and switches to key 7 when key 8
+        /// is observed to consume a red potion). An unreadable or unknown class keeps the
+        /// historical two-key behaviour.
+        ///
+        /// The last potion of a CONSUMED type is never drunk
+        /// (<see cref="BotConstants.Repot.PotionSlotReserve"/>). For the mage only the white
+        /// count gates the rebuff, because a mage carrying no red pots (the class never
+        /// drinks them) must still receive the speed buff.
+        /// </summary>
+        internal static SpeedPotionPlan PlanSpeedPotions(PlayerClass playerClass, int redPots, int whitePots)
+        {
+            bool whitePotionOnly = playerClass == PlayerClass.Mage;
+            int reserve = BotConstants.Repot.PotionSlotReserve;
+
+            bool blocked = whitePotionOnly
+                ? whitePots <= reserve
+                : redPots <= reserve || whitePots <= reserve;
+
+            if (blocked)
+                return new SpeedPotionPlan(false, false, true, whitePotionOnly);
+
+            return new SpeedPotionPlan(!whitePotionOnly, true, false, whitePotionOnly);
+        }
+
+        /// <summary>
+        /// Resolves the class used by the speed-potion decision. Returns the last confirmed
+        /// class when the current read fails, so a single unreadable sample can never switch
+        /// a mage back to the red-potion key.
+        /// </summary>
+        internal PlayerClass ResolvePlayerClassForPotions()
+        {
+            // Cached for one speed-potion interval: the class cannot change during a run,
+            // and the read costs a pointer resolve on every movement tick.
+            if (_lastConfirmedPlayerClass != PlayerClass.Unknown &&
+                (DateTime.UtcNow - _lastPlayerClassResolveAt).TotalSeconds < BotConstants.SpeedPotion.CheckIntervalSeconds)
+                return _lastConfirmedPlayerClass;
+
+            PlayerClass current = _memoryService.GetPlayerClass();
+            _lastPlayerClassResolveAt = DateTime.UtcNow;
+            if (current != PlayerClass.Unknown)
+                _lastConfirmedPlayerClass = current;
+
+            return _lastConfirmedPlayerClass;
         }
 
         private void StopForUnresponsiveGame(string reason)
@@ -4023,35 +4151,149 @@ namespace DriverScanTester.Services
             // speed, which is exactly what city walking needs. Previously this was
             // suppressed under OnlyMove, so the bot never rebuffed speed pots while
             // walking the city (repot/shop paths) even with the buff missing.
-            // CheckAttackSpeed throttles itself to once per CheckIntervalSeconds.
-            if (AllowSpeedPotionBuff && _combatHandler.CheckAttackSpeed(_memoryService))
+            //
+            // Trigger by class: every other class reads ATTACK speed (unchanged), but the
+            // Sorcerer/Mage white potion raises RUN speed instead, so that class reads run
+            // speed and drinks while it still equals the no-potion value. Both checks
+            // throttle themselves to once per CheckIntervalSeconds.
+            PlayerClass playerClass = AllowSpeedPotionBuff
+                ? ResolvePlayerClassForPotions()
+                : PlayerClass.Unknown;
+            bool speedPotionDue = AllowSpeedPotionBuff &&
+                (playerClass == PlayerClass.Mage
+                    ? _combatHandler.CheckRunSpeed(_memoryService)
+                    : _combatHandler.CheckAttackSpeed(_memoryService));
+
+            if (speedPotionDue)
             {
-                // Slot reserve: the last red/white potion is never drunk — one of each
-                // must stay so the inventory slots keep their places. The 7:red / 8:white
-                // mapping is not pinned down anywhere in code, so when EITHER type is at
-                // reserve both keys are skipped — a mapping-independent rule that can never
+                // Slot reserve: the last potion of a CONSUMED type is never drunk — it must
+                // stay so the inventory slot keeps its place. The 7:red / 8:white mapping is
+                // not pinned down anywhere in code, so for classes that drink both, a reserve
+                // on EITHER type skips both keys — a mapping-independent rule that can never
                 // eat the last potion of the wrong type. Buff is sacrificed to save the slot.
+                //
+                // Sorcerer/Mage drinks ONLY the white potion (key 8): the legacy bot's
+                // SkillSelectorMageAlliance rebuffed with checkForWhitePotBuff() while every
+                // other class called checkForWhiteRed(). The red potion is never consumed by
+                // this class, so its count (often 0) must not gate the white pot either —
+                // otherwise a mage carrying no red pots could never get the speed buff.
                 int redPots = _memoryService.GetRedPotionCount();
                 int whitePots = _memoryService.GetWhitePotionCount();
-                if (redPots <= BotConstants.Repot.PotionSlotReserve ||
-                    whitePots <= BotConstants.Repot.PotionSlotReserve)
+                SpeedPotionPlan plan = PlanSpeedPotions(playerClass, redPots, whitePots);
+
+                string speedDetail = playerClass == PlayerClass.Mage
+                    ? $"runSpeed={_combatHandler.LastRunSpeed}, no-potion={BotConstants.SpeedPotion.RunSpeedNoPotionValue}"
+                    : $"atkSpd={_combatHandler.LastAttackSpeed}, need!={BotConstants.SpeedPotion.AttackSpeedThreshold}";
+
+                if (plan.BlockedByReserve)
                 {
                     if (!_speedPotReserveLogged)
                     {
-                        _log($"[Tick {_tickCount}] Speed pot buff missing but potions at slot reserve (red={redPots}, white={whitePots}) — keeping last potions, skipping keys 7+8.");
+                        string keys = plan.WhitePotionOnly ? "key 8" : "keys 7+8";
+                        _log($"[Tick {_tickCount}] Speed pot buff missing but potions at slot reserve (red={redPots}, white={whitePots}) — keeping last potions, skipping {keys}.");
                         _speedPotReserveLogged = true;
                     }
                 }
-                else
+                else if (plan.PressRed && plan.PressWhite)
                 {
                     _speedPotReserveLogged = false;
-                    _log($"[Tick {_tickCount}] Speed pot buff missing (atkSpd={_combatHandler.LastAttackSpeed}, need!={BotConstants.SpeedPotion.AttackSpeedThreshold}) — using potions (keys 7+8)");
+                    _log($"[Tick {_tickCount}] Speed pot buff missing ({speedDetail}) — using potions (keys 7+8)");
                     _log("[Key] 7 (pot1)");
                     GameInput.PressKey(GameInput.VK_7, GameInput.SCAN_7);
                     await Task.Delay(BotConstants.SpeedPotion.PostPotionDelayMs, token);
                     _log("[Key] 8 (pot2)");
                     GameInput.PressKey(GameInput.VK_8, GameInput.SCAN_8);
                 }
+                else if (plan.PressWhite)
+                {
+                    _speedPotReserveLogged = false;
+                    int potionKey = _mageWhitePotionVk == GameInput.VK_7 ? 7 : 8;
+                    _log($"[Tick {_tickCount}] Speed pot buff missing ({speedDetail}, red={redPots}, white={whitePots}) — mage/sorcerer class uses the white potion only (key {potionKey})");
+                    _log($"[Key] {potionKey} (white pot, mage class)");
+                    GameInput.PressKey(_mageWhitePotionVk, _mageWhitePotionScan);
+
+                    // Give the client a full input frame to consume the potion BEFORE the
+                    // class rebuff presses key 4 on the same movement tick. Without this gap
+                    // the rebuff was issued ~20 ms after the potion and the white pot was
+                    // never actually applied (run speed stayed at the no-potion value).
+                    await Task.Delay(BotConstants.SpeedPotion.PostPotionDelayMs, token);
+
+                    int whiteAfter = _memoryService.GetWhitePotionCount();
+                    int redAfter = _memoryService.GetRedPotionCount();
+                    int runSpeedAfter = _memoryService.GetRunSpeed();
+                    _log($"[SpeedPot] Mage white pot press result: key {potionKey}, white {whitePots}->{whiteAfter}, red {redPots}->{redAfter}, runSpeed={runSpeedAfter}.");
+
+                    if (whiteAfter < whitePots)
+                    {
+                        // The configured key really is the white-potion key.
+                        _speedPotWhiteCountWarningLogged = false;
+                    }
+                    else
+                    {
+                        // Key 8 may be the RED potion on this client/build. Prove it by
+                        // pressing the other key (7/8) and watching which potion count moves.
+                        byte otherVk = _mageWhitePotionVk == GameInput.VK_7
+                            ? GameInput.VK_8
+                            : GameInput.VK_7;
+                        byte otherScan = otherVk == GameInput.VK_7
+                            ? GameInput.SCAN_7
+                            : GameInput.SCAN_8;
+                        int otherKey = otherVk == GameInput.VK_7 ? 7 : 8;
+
+                        _log($"[SpeedPot] Key {potionKey} did not consume a white potion (white {whitePots}->{whiteAfter}, red {redPots}->{redAfter}) — testing key {otherKey}.");
+                        GameInput.PressKey(otherVk, otherScan);
+                        await Task.Delay(BotConstants.SpeedPotion.PostPotionDelayMs, token);
+
+                        int whiteAfterOther = _memoryService.GetWhitePotionCount();
+                        int redAfterOther = _memoryService.GetRedPotionCount();
+                        int runSpeedAfterOther = _memoryService.GetRunSpeed();
+                        _log($"[SpeedPot] Mage white pot check key {otherKey}: white {whiteAfter}->{whiteAfterOther}, red {redAfter}->{redAfterOther}, runSpeed={runSpeedAfterOther}.");
+
+                        if (whiteAfterOther < whiteAfter)
+                        {
+                            _mageWhitePotionVk = otherVk;
+                            _mageWhitePotionScan = otherScan;
+                            _speedPotWhiteCountWarningLogged = false;
+                            _log($"[SpeedPot] White potion is on key {otherKey} for this client — the mage white-pot key has been switched to {otherKey}.");
+                        }
+                        else if (!_speedPotWhiteCountWarningLogged)
+                        {
+                            _log($"[SpeedPot] WARNING: neither key {potionKey} nor key {otherKey} consumed a white potion (white {whitePots}->{whiteAfterOther}) — check the white-potion hotkey/slot; runSpeed={runSpeedAfterOther}.");
+                            _speedPotWhiteCountWarningLogged = true;
+                        }
+                    }
+                }
+            }
+            else if (playerClass == PlayerClass.Mage)
+            {
+                // One-shot diagnostic: with the sorcerer trigger now bound to run speed, an
+                // unexpected value (client patch, speed gear, wrong offset) must be visible in
+                // the log instead of silently disabling the buff forever.
+                int runSpeed = _combatHandler.LastRunSpeed;
+                bool unknownRunSpeed = runSpeed != 0 &&
+                    runSpeed != BotConstants.SpeedPotion.RunSpeedNoPotionValue &&
+                    runSpeed != BotConstants.SpeedPotion.RunSpeedWhitePotValue;
+
+                if (unknownRunSpeed && !_speedPotUnknownRunSpeedLogged)
+                {
+                    _log($"[SpeedPot] Mage run speed {runSpeed} (0x{runSpeed:X2}) is neither the no-potion value ({BotConstants.SpeedPotion.RunSpeedNoPotionValue} = 0x{BotConstants.SpeedPotion.RunSpeedNoPotionValue:X2}) nor the white-pot value ({BotConstants.SpeedPotion.RunSpeedWhitePotValue} = 0x{BotConstants.SpeedPotion.RunSpeedWhitePotValue:X2}) — buff treated as active, key 8 not pressed.");
+                    _speedPotUnknownRunSpeedLogged = true;
+                }
+                else if (!unknownRunSpeed)
+                {
+                    _speedPotUnknownRunSpeedLogged = false;
+                }
+            }
+
+            // ── Class rebuff (same check cycle as the speed potions) ──
+            // Evaluated on the SAME throttle as the white/red potion check and only outside
+            // the city. The condition itself lives in CombatHandler.CheckRebuff: today only
+            // the Sorcerer/Mage has one (no buff slot holds the rapid-buff value 3384); other
+            // classes will get theirs there and never rebuff until then.
+            if (playerClass == PlayerClass.Mage &&
+                _combatHandler.CheckRebuff(_memoryService, playerClass))
+            {
+                await PerformRebuffAsync(playerClass, token);
             }
 
             var (currX, currY, success) = _memoryService.GetPlayerPosition();
