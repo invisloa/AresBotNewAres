@@ -37,6 +37,13 @@ namespace DriverScanTester.Services
 
         internal (uint ProcessId, ulong ModuleBase) CameraSessionIdentity => (_pid, _moduleBase);
 
+        /// <summary>
+        /// Identity of the attached game session (process id + module base). Used to scope
+        /// session-only state that must never leak into another game launch (e.g. the
+        /// MouseOver calibration markers). Never persisted.
+        /// </summary>
+        internal (uint ProcessId, ulong ModuleBase) GameSessionIdentity => (_pid, _moduleBase);
+
         // --- Offsets from MovementSystem ---
         private const ulong PlayerPtrOffset = BotConstants.MemoryOffsets.PlayerPtr;
         private const ulong XOffset = BotConstants.MemoryOffsets.X;
@@ -724,6 +731,27 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// Explicit-success variant of <see cref="IsNpcMousePointed"/>: distinguishes a
+        /// failed pointer chain / read (false) from a successfully read "not highlighted"
+        /// flag (true + <paramref name="pointed"/> = false). The slow NPC discovery scan
+        /// uses the flag only as a diagnostic hint next to the hovered value.
+        /// </summary>
+        public bool TryReadIsNpcMousePointed(out bool pointed)
+        {
+            pointed = false;
+
+            ulong ptrAddr = _moduleBase + IsNpcMousePointedPtrOffset;
+            if (!TryReadPointer(ptrAddr, out ulong baseAddr) || baseAddr == 0)
+                return false;
+
+            if (!TryReadByte(baseAddr + IsNpcMousePointedOffset, out byte value))
+                return false;
+
+            pointed = value == 1;
+            return true;
+        }
+
+        /// <summary>
         /// Reads the seller mouseover int (clong / 32-bit) from <c>[Ares.exe + 0x4883E8] + 0xC</c>.
         /// Returns 0 when the pointer chain fails (treat 0 as "not pointed").
         /// The expected value while the mouse is pointing at the seller/NPC is 138599240
@@ -736,6 +764,23 @@ namespace DriverScanTester.Services
             ulong baseAddr = ReadPointer(ptrAddr);
             if (baseAddr == 0) return 0;
             return ReadInt(baseAddr + IsSellerPointedOffset);
+        }
+
+        /// <summary>
+        /// Explicit-success variant of <see cref="ReadIsSellerPointed"/>: distinguishes a
+        /// failed pointer chain / memory read (false) from a successfully read value —
+        /// including a real 0 that means "nothing is under the cursor". The slow NPC
+        /// discovery scan must never mistake a transient read failure for "no object".
+        /// </summary>
+        public bool TryReadIsSellerPointed(out int value)
+        {
+            value = 0;
+
+            ulong ptrAddr = _moduleBase + IsSellerPointedPtrOffset;
+            if (!TryReadPointer(ptrAddr, out ulong baseAddr) || baseAddr == 0)
+                return false;
+
+            return TryReadInt(baseAddr + IsSellerPointedOffset, out value);
         }
 
         /// <summary>
@@ -824,10 +869,25 @@ namespace DriverScanTester.Services
 
         public short GetAttackSpeed()
         {
-            ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
-            if (playerBase == 0) return 0;
+            return TryGetAttackSpeed(out short attackSpeed) ? attackSpeed : (short)0;
+        }
 
-            return ReadShort(playerBase + AttackSpeed1Offset);
+        /// <summary>
+        /// Explicit-success variant of <see cref="GetAttackSpeed"/> for A_attack1
+        /// (<c>[Ares.exe + 0x489BC8] + 0x47A</c>). Returns false when the player pointer
+        /// cannot be read or the value behind it cannot be read — the same condition the
+        /// lock tool renders as "?". The connection watchdog uses this as the crash
+        /// heartbeat, so a failed read must never be confused with a real 0 value.
+        /// </summary>
+        public bool TryGetAttackSpeed(out short attackSpeed)
+        {
+            attackSpeed = 0;
+
+            ulong playerPointerAddress = _moduleBase + PlayerPtrOffset;
+            if (!TryReadPointer(playerPointerAddress, out ulong playerBase) || playerBase == 0)
+                return false;
+
+            return TryReadShort(playerBase + AttackSpeed1Offset, out attackSpeed);
         }
 
         public short GetSkillSpeed()

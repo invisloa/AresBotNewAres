@@ -775,7 +775,7 @@ namespace DriverScanTester.ViewModels
                 }
             }
 
-            StartGameConnectionMonitor();
+            StartGameConnectionMonitor(memoryService);
         }
 
         /// <summary>
@@ -3219,6 +3219,7 @@ namespace DriverScanTester.ViewModels
         private int _standalonePlayerDeathHandled;
         private readonly object _gameConnectionMonitorLock = new();
         private CancellationTokenSource? _gameConnectionMonitorCts;
+        private GameMemoryService? _gameConnectionMonitorMemoryService;
 
         // --- Pause / Resume ---
         // Pause never cancels anything: every bot loop suspends in place at its next
@@ -3570,7 +3571,7 @@ namespace DriverScanTester.ViewModels
             };
 
             _workflowTask = Task.Run(() => _workflowCoordinator.StartAsync());
-            StartGameConnectionMonitor();
+            StartGameConnectionMonitor(memoryService);
 
             OnPropertyChanged(nameof(IsWorkflowRunning));
             OnPropertyChanged(nameof(WorkflowPhaseText));
@@ -3678,11 +3679,19 @@ namespace DriverScanTester.ViewModels
             }
         }
 
-        private void StartGameConnectionMonitor()
+        private void StartGameConnectionMonitor(GameMemoryService memoryService)
         {
+            if (memoryService == null)
+                throw new ArgumentNullException(nameof(memoryService));
+
             CancellationTokenSource monitorCts;
             lock (_gameConnectionMonitorLock)
             {
+                // Keep the newest service. A second bot can start while this monitor is
+                // already running; it still points at the same PID/module, so refreshing
+                // the reference is enough and avoids a second monitor task.
+                _gameConnectionMonitorMemoryService = memoryService;
+
                 if (_gameConnectionMonitorCts is { IsCancellationRequested: false })
                     return;
 
@@ -3692,23 +3701,72 @@ namespace DriverScanTester.ViewModels
 
             _ = Task.Run(async () =>
             {
+                var attackReadWatchdog = new GameMemoryReadWatchdog();
+                bool attackReadFailureLogged = false;
+                string attackDescription =
+                    $"A_attack1 ([Ares.exe + 0x{BotConstants.MemoryOffsets.PlayerPtr:X}] + 0x{BotConstants.MemoryOffsets.AttackSpeed1:X})";
+
                 try
                 {
-                    var detector = new GameDisconnectDialogDetector();
+                    GameDisconnectDialogDetector? detector = new GameDisconnectDialogDetector();
                     if (!detector.IsAvailable)
                     {
-                        AppendBotLog("[ConnectionWatchdog] Disconnect-dialog template unavailable; memory/movement watchdogs remain active.");
-                        return;
+                        AppendBotLog("[ConnectionWatchdog] Disconnect-dialog template unavailable; attack-pointer and movement watchdogs remain active.");
+                        detector = null;
+                    }
+                    else
+                    {
+                        AppendBotLog("[ConnectionWatchdog] Watching the game window for the server-disconnected dialog.");
                     }
 
-                    AppendBotLog("[ConnectionWatchdog] Watching the game window for the server-disconnected dialog.");
+                    AppendBotLog($"[ConnectionWatchdog] Watching {attackDescription} for the crash (\"?\") state; timeout {BotConstants.Connection.AttackReadFailureTimeoutMs / 1000.0:F0} seconds.");
                     while (!monitorCts.IsCancellationRequested)
                     {
-                        using var frame = ScreenshotService.CaptureGameClientFrame();
-                        if (detector.IsDisconnected(frame))
+                        GameMemoryService? memoryService;
+                        lock (_gameConnectionMonitorLock)
+                            memoryService = _gameConnectionMonitorMemoryService;
+
+                        bool botRuntimeActive = _isMovementBotRunning || _isHealManaBotRunning ||
+                            _isLootBotRunning || _workflowCoordinator?.IsRunning == true;
+
+                        if (memoryService != null && botRuntimeActive)
                         {
-                            HandleGameConnectionFailure("Detected the game message: 'The connection to server has been disconnected.'");
-                            return;
+                            bool attackReadable = memoryService.TryGetAttackSpeed(out _);
+                            if (!attackReadable && !attackReadFailureLogged)
+                            {
+                                AppendBotLog($"[ConnectionWatchdog] {attackDescription} is unreadable (\"?\"); starting the {BotConstants.Connection.AttackReadFailureTimeoutMs / 1000.0:F0}-second crash timeout.");
+                                attackReadFailureLogged = true;
+                            }
+                            else if (attackReadable && attackReadFailureLogged)
+                            {
+                                AppendBotLog($"[ConnectionWatchdog] {attackDescription} is readable again; crash timeout cleared.");
+                                attackReadFailureLogged = false;
+                            }
+
+                            if (attackReadWatchdog.Observe(attackReadable, DateTime.UtcNow))
+                            {
+                                HandleGameConnectionFailure(
+                                    $"{attackDescription} stayed unreadable (\"?\") for {BotConstants.Connection.AttackReadFailureTimeoutMs / 1000.0:F0} seconds; the game client has likely crashed.");
+                                return;
+                            }
+                        }
+                        else
+                        {
+                            // The standalone bot stop paths may leave this monitor alive for
+                            // the visual dialog check. Never report a crashed game when the
+                            // user has already stopped every bot action.
+                            attackReadWatchdog.Reset();
+                            attackReadFailureLogged = false;
+                        }
+
+                        if (detector != null)
+                        {
+                            using var frame = ScreenshotService.CaptureGameClientFrame();
+                            if (detector.IsDisconnected(frame))
+                            {
+                                HandleGameConnectionFailure("Detected the game message: 'The connection to server has been disconnected.'");
+                                return;
+                            }
                         }
 
                         await Task.Delay(500, monitorCts.Token);
@@ -3717,14 +3775,17 @@ namespace DriverScanTester.ViewModels
                 catch (OperationCanceledException) { }
                 catch (Exception ex)
                 {
-                    AppendBotLog($"[ConnectionWatchdog] Visual monitor error: {ex.Message}; memory/movement watchdogs remain active.");
+                    AppendBotLog($"[ConnectionWatchdog] Monitor error: {ex.Message}; other watchdogs remain active.");
                 }
                 finally
                 {
                     lock (_gameConnectionMonitorLock)
                     {
                         if (ReferenceEquals(_gameConnectionMonitorCts, monitorCts))
+                        {
                             _gameConnectionMonitorCts = null;
+                            _gameConnectionMonitorMemoryService = null;
+                        }
                     }
                     monitorCts.Dispose();
                 }
@@ -3738,6 +3799,7 @@ namespace DriverScanTester.ViewModels
             {
                 monitorCts = _gameConnectionMonitorCts;
                 _gameConnectionMonitorCts = null;
+                _gameConnectionMonitorMemoryService = null;
             }
 
             try { monitorCts?.Cancel(); } catch { }
@@ -4290,11 +4352,14 @@ namespace DriverScanTester.ViewModels
                 /// <summary>
                 /// Captures the full mouseover dump while the cursor hovers a loot item.
                 /// Saves the dump to MouseOverValues_Log.txt for later analysis and sets
-                /// BotConstants.GameMagicValues.LootMouseOverValue to the item's cl value
-                /// (kept for reference only — live loot detection in
-                /// GameMemoryService.IsLootMouseOver() is structural and does not use it).
-                /// The captured value is also persisted to MouseCalibration.json and
-                /// restored automatically on the next app start.
+                /// BotConstants.GameMagicValues.LootMouseOverValue to the item's cl value —
+                /// the value live loot detection compares against in
+                /// GameMemoryService.IsLootMouseOver(). The captured value is also persisted
+                /// to MouseCalibration.json and restored automatically on the next app start.
+                ///
+                /// A manual capture also marks the item value as known for the current game
+                /// session, so the automatic item re-discovery (triggered by an NPC value
+                /// auto-calibration) does not run a needless slow scan afterwards.
                 /// </summary>
                 public void CaptureItemMouseOver()
                 {
@@ -4323,6 +4388,7 @@ namespace DriverScanTester.ViewModels
                         }
 
                         BotConstants.GameMagicValues.LootMouseOverValue = dump.Cl;
+                        MouseOverCalibrationSession.Current.MarkItemValueDiscovered((_attachedPid, baseAddr));
                         AppendLog($"=== Mouseover Item: LootMouseOverValue={dump.Cl} (0x{(uint)dump.Cl:X8}) [obiekt: 0x{dump.Pointer48:X12}] ===");
                         SaveMouseOverDump("ITEM", dump);
                         SaveMouseCalibration("ITEM");
@@ -4489,7 +4555,7 @@ namespace DriverScanTester.ViewModels
                             ToggleLootBot(true);
                         }
                         if (_isMovementBotRunning || _isLootBotRunning)
-                            StartGameConnectionMonitor();
+                            StartGameConnectionMonitor(memoryService);
                     }
                 }
 
@@ -4533,7 +4599,7 @@ namespace DriverScanTester.ViewModels
                         var healManaToken = _healManaBotCts.Token;
                         _healManaBotTask = Task.Run(() => HealManaBotLoop(healManaToken), healManaToken);
                         AppendBotLog("Heal/Mana Bot started.");
-                        StartGameConnectionMonitor();
+                        StartGameConnectionMonitor(memoryService);
                     }
                 }
 
@@ -4573,6 +4639,7 @@ namespace DriverScanTester.ViewModels
                         // and runtime registration are one atomic startup decision. A
                         // concurrent movement/workflow/operation-test start cannot create
                         // a camera session between the check and this registration.
+                        GameMemoryService? connectionMonitorMemory = null;
                         lock (_cameraRuntimeStartupGate)
                         {
                             if (_isLootBotRunning)
@@ -4608,6 +4675,7 @@ namespace DriverScanTester.ViewModels
                             FocusGameWindow();
 
                             var memoryService = new GameMemoryService(_attachedPid, DriverRead, DriverWrite, baseAddr, GetPointerSize(), AppendBotLog);
+                            connectionMonitorMemory = memoryService;
                             var profile = _workflowCoordinator?.ActiveProfile ?? new BotProfile();
                             if (!_isMovementBotRunning && !_isHealManaBotRunning && !_isLootBotRunning &&
                                 _workflowCoordinator?.IsRunning != true)
@@ -4629,8 +4697,8 @@ namespace DriverScanTester.ViewModels
                             CameraRuntimeStartupGateHeldForTests?.Invoke();
                         }
 
-                        if (!_isMovementBotRunning)
-                            StartGameConnectionMonitor();
+                        if (!_isMovementBotRunning && connectionMonitorMemory != null)
+                            StartGameConnectionMonitor(connectionMonitorMemory);
                     }
                 }
         

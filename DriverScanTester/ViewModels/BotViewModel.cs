@@ -2,6 +2,8 @@ using DriverScanTester.Models;
 using DriverScanTester.Services;
 using DriverScanTester.Utils;
 using System;
+using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Windows.Input;
 using static DriverScanTester.BotConstants;
@@ -10,6 +12,8 @@ namespace DriverScanTester.ViewModels
 {
     public sealed class BotViewModel : BaseViewModel, IDisposable
     {
+        private const string GameClientShortcutPath = @"C:\Users\Public\Desktop\Play Legend of Ares.lnk";
+
         private readonly MainViewModel _main;
 
         private string _hpThresholdText = HealMana.HpThreshold.ToString();
@@ -87,6 +91,7 @@ namespace DriverScanTester.ViewModels
             // configuration/logging keeps working while detached (the whole point of the
             // offline mode). Stop/Pause/Resume deliberately never require attachment so a
             // running bot can always be stopped.
+            StartGameClientCommand = new RelayCommand(_ => StartGameClient());
             RunBotCommand = new RelayCommand(_ => RunBot(), _ => _main.IsAttached && !_main.MovementDiagnostic.BlocksOtherRuntimes);
             StopBotCommand = new RelayCommand(_ => StopAllBots(), _ => IsAnyRuntimeActive);
             PauseBotCommand = new RelayCommand(_ => PauseBots(), _ => !IsBotPaused && IsAnyRuntimeActive);
@@ -443,6 +448,7 @@ namespace DriverScanTester.ViewModels
         }
 
         public ICommand RunBotCommand { get; }
+        public ICommand StartGameClientCommand { get; }
         public ICommand StopBotCommand { get; }
         public ICommand PauseBotCommand { get; }
         public ICommand ResumeBotCommand { get; }
@@ -1124,6 +1130,30 @@ namespace DriverScanTester.ViewModels
             double minutes = ParseRunDurationMinutes();
             if (minutes > 0)
                 _main.StartAutoStopTimer(minutes, "Bot");
+        }
+
+        private void StartGameClient()
+        {
+            if (!File.Exists(GameClientShortcutPath))
+            {
+                AppendBotLog($"[Startup] Game client shortcut not found: {GameClientShortcutPath}");
+                return;
+            }
+
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = GameClientShortcutPath,
+                    UseShellExecute = true
+                });
+
+                AppendBotLog($"[Startup] Step 1 complete: launched the game client using '{GameClientShortcutPath}'. Attach to its process when it is ready.");
+            }
+            catch (Exception ex)
+            {
+                AppendBotLog($"[Startup] Failed to launch the game client shortcut: {ex.Message}");
+            }
         }
 
         private void StopAllBots()

@@ -104,9 +104,11 @@ namespace DriverScanTester.Services
         /// 1. Zoom the camera to the known NPC scan view (distance 16720, top-down
         ///    vertical lock 16330) so the shop NPC is in its expected on-screen position.
         /// 2. Scan the game window from the center outward, moving the mouse until
-        ///    S_IsSellerPointed == SellerPointedValue (the mouse is over the NPC),
+        ///    S_IsSellerPointed equals the active NPC value (the mouse is over the NPC),
         ///    then right-click the NPC, click the "Shop" option and verify the shop
         ///    window actually opened.
+        /// 3. When that fast scan fails, the slow discovery stage tries to find and
+        ///    validate a NEW MouseOver NPC value automatically (right-click + dialogue).
         /// Returns true when the shop window is open.
         /// </summary>
         public bool OpenSellerDialog()
@@ -132,7 +134,7 @@ namespace DriverScanTester.Services
                 }
 
                 CaptureSellFailureScreenshot();
-                _log("ItemSeller: Seller mouseover (S_IsSellerPointed == 143850200) not found after scanning. Seller dialog NOT opened.");
+                _log($"ItemSeller: Seller NPC not found with the active mouseover value {MouseOverValueDiscovery.Describe(SellerPointedValue)} and automatic calibration did not confirm a new value. Seller dialog NOT opened.");
                 return false;
             }
             finally
@@ -152,7 +154,15 @@ namespace DriverScanTester.Services
         /// <see cref="SellerMaxFullScans"/>; pass 1 to make exactly one full scan
         /// (used by the COT entry operations — no NPC found after one sweep = fail).
         /// </param>
-        public bool ScanAndRightClickNpc(int maxFullScans = SellerMaxFullScans)
+        /// <param name="allowCalibration">
+        /// When true (default) a failed fast scan starts the slow discovery stage that can
+        /// re-calibrate the MouseOver NPC value automatically (see
+        /// <see cref="TryDiscoverNpcMouseOverValue"/>). Pass false for callers that must
+        /// never change the active value.
+        /// </param>
+        public bool ScanAndRightClickNpc(
+            int maxFullScans = SellerMaxFullScans,
+            bool allowCalibration = true)
         {
             LastNpcRightClickScreenPosition = null;
 
@@ -170,7 +180,10 @@ namespace DriverScanTester.Services
                     return true;
                 }
 
-                return TryOpenSellerDialogByScanning(clickShopOption: false, maxFullScans: maxFullScans);
+                return TryOpenSellerDialogByScanning(
+                    clickShopOption: false,
+                    maxFullScans: maxFullScans,
+                    allowCalibration: allowCalibration);
             }
             finally
             {
@@ -207,10 +220,12 @@ namespace DriverScanTester.Services
             // 1. Force the known NPC scan camera (distance 16720, top-down vertical
             //    lock 16330) so the shop NPC is in its expected on-screen position.
             // 2. If the dialog is already open, skip scanning and continue.
-            // 3. Otherwise, scan the game window from center outward looking for
-            //    S_IsSellerPointed == 143850200 and right-click when found.
-            // 4. If after 5 full scans no seller mouseover is detected, take a
-            //    screenshot and stop gracefully — do not run the old sell logic.
+            // 3. Otherwise, scan the game window from center outward looking for the
+            //    active S_IsSellerPointed value and right-click when found.
+            // 4. If the fast scan finds nothing, the slow discovery stage tries to
+            //    re-calibrate the MouseOver NPC value (validated by a real dialogue).
+            // 5. If that also fails, take a screenshot and stop gracefully — do not run
+            //    the old sell logic.
             if (!SetSellCameraView())
             {
                 _log("ItemSeller: Verified seller camera view could not be established. Skipping sell.");
@@ -222,7 +237,7 @@ namespace DriverScanTester.Services
                 if (!TryOpenSellerDialogByScanning())
                 {
                     CaptureSellFailureScreenshot();
-                    _log("ItemSeller: Seller mouseover (S_IsSellerPointed == 143850200) not found after 5 full window scans. Skipping sell.");
+                    _log($"ItemSeller: Seller NPC not found with the active mouseover value {MouseOverValueDiscovery.Describe(SellerPointedValue)} after scanning + automatic calibration. Skipping sell.");
                     return;
                 }
             }
@@ -1218,22 +1233,39 @@ namespace DriverScanTester.Services
         // actually being open before the existing sell logic runs.
         // ════════════════════════════════════════════════════════════════
 
-        /// <summary>Expected value of S_IsSellerPointed (read as clong / 32-bit) when the mouse is over the seller NPC.
-        /// Updated per user observation: 143850200 → 149110376 → 138599240 (Sesja 3, 2026-08-03).
-        /// Can be set per session via the 'Mouseover NPC' button in the Bot window
-        /// (MainViewModel.CaptureNpcMouseOver), which also saves the full mouseover dump to
-        /// MouseOverValues_Log.txt for analysis.
-        /// WARNING (Sesja 3): the NPC-256 rule failed — the value is likely the hovered object's
-        /// address/ID, so this constant may only match ONE specific NPC. If the seller scan stops
-        /// matching, re-read the value while hovering the ACTUAL seller NPC.</summary>
+        /// <summary>
+        /// ACTIVE MouseOver NPC value compared against S_IsSellerPointed
+        /// (<c>[Ares.exe + 0x4883E8] + 0xC</c>) while the cursor sweeps the game window.
+        ///
+        /// The ADDRESS CHAIN is stable, but the VALUE stored at that address is the hovered
+        /// object's heap address/ID (see MouseOverValues_Log.txt), so it changes between game
+        /// launches. That is why a previously configured value can stop matching. It can be
+        /// set in two ways:
+        ///   1. manually — hover the NPC and press 'Mouseover NPC' in the Bot window
+        ///      (MainViewModel.CaptureNpcMouseOver; persisted to MouseCalibration.json), or
+        ///   2. automatically — the slow discovery stage validates a candidate with a real
+        ///      right-click + NPC-dialogue check and writes the confirmed value here
+        ///      (see <see cref="TryDiscoverNpcMouseOverValue"/>).
+        /// An automatically discovered value lives in memory for the CURRENT game session
+        /// only: it is deliberately NOT persisted, so the next launch never assumes that a
+        /// value captured in another game session is still valid.
+        /// </summary>
         public static int SellerPointedValue = 138599240;
 
         /// <summary>
-        /// Step in pixels between scan points when sweeping the game window for the
-        /// seller NPC. 17 px ≈ 10% fewer points than the 16 px grid — still ~2.35x
-        /// denser than the original 40 px, so the hover zone cannot slip between points.
+        /// Step in pixels between scan points when sweeping the game window for the seller NPC.
+        ///
+        /// 54 px = the former 17 px grid × √10. The number of scan points grows with
+        /// 1 / step², so this grid visits about 1/10 of the former points per sweep
+        /// (~2451 → ~247 on a 1024x768 client) and both scan stages finish roughly 10x faster.
+        ///
+        /// TRADE-OFF (requested): a 54 px grid can step OVER a small NPC hover zone. The
+        /// previous 17 px grid was chosen so the hover zone could not slip between points;
+        /// if the seller/NPC stops being detected, restore a smaller step here (17 px was
+        /// the dense value). This single constant drives the fast scan AND the slow
+        /// discovery scan, so both stages always use the same grid.
         /// </summary>
-        private const int SellerScanStepPx = 17;
+        internal const int SellerScanStepPx = 54;
 
         /// <summary>Number of full game-window scans attempted before giving up.</summary>
         private const int SellerMaxFullScans = 5;
@@ -1263,6 +1295,55 @@ namespace DriverScanTester.Services
         /// </summary>
         private const int SellerCameraSettleDelayMs = 500;
         private const int SellerScanYawCheckIntervalPoints = 32;
+
+        // ── STAGE 2: SLOW NPC DISCOVERY (automatic MouseOver NPC calibration) ──
+        // Runs only after the fast scan above failed to match the active value. It sweeps
+        // the SAME center-outward points (EnumerateSellerScanPoints) but samples slowly
+        // enough for the game to publish the hovered object's value, collects candidates and
+        // validates each one with a real right-click + NPC-dialogue check.
+
+        /// <summary>Settle time after the cursor arrives at a slow-scan point (ms). At least one game frame.</summary>
+        private const int NpcDiscoveryPointSettleMs = 16;
+
+        /// <summary>Gap between the two reads that must agree before a sample counts (ms).</summary>
+        private const int NpcDiscoveryConfirmSampleMs = 8;
+
+        /// <summary>
+        /// Hard upper bound for one slow discovery run (ms). The center-outward spiral reaches
+        /// the NPC's expected on-screen position (around the player, i.e. the client center)
+        /// long before this bound; the budget only limits how far into the outer corners the
+        /// slow scan may go when nothing can be confirmed.
+        /// </summary>
+        private const int NpcDiscoveryTimeoutMs = 90_000;
+
+        /// <summary>Maximum number of candidates validated with a right-click per run.</summary>
+        private const int NpcDiscoveryMaxCandidateTests = MouseOverValueDiscovery.DefaultMaxCandidateTests;
+
+        /// <summary>How many rejected values the run remembers.</summary>
+        private const int NpcDiscoveryMaxRejectedValues = MouseOverValueDiscovery.DefaultMaxRejectedValues;
+
+        /// <summary>How long to wait for the NPC dialogue to appear after the right-click (ms).</summary>
+        private const int NpcDiscoveryDialogOpenTimeoutMs = 700;
+
+        /// <summary>Polling interval while waiting for a dialogue/window state change (ms).</summary>
+        private const int NpcDiscoveryStatePollMs = 25;
+
+        /// <summary>
+        /// How long to wait for the "Shop" option to open the shop window after a candidate
+        /// dialogue opened. Uses the existing repot shop-open budget so the seller workflow
+        /// behaves exactly like the fast path.
+        /// </summary>
+        private const int NpcDiscoveryShopOpenTimeoutMs =
+            BotConstants.Repot.OpenShopRetries * BotConstants.Delays.OpenShopRetryMs;
+
+        /// <summary>Populate delay after a shop opened through a calibrated value (same as the fast path).</summary>
+        private const int NpcDiscoveryShopPopulateDelayMs = 500;
+
+        /// <summary>How often the foreground/cancel condition is re-checked during slow discovery (points).</summary>
+        private const int NpcDiscoveryForegroundCheckIntervalPoints = 32;
+
+        /// <summary>Progress line interval during slow discovery (points).</summary>
+        private const int NpcDiscoveryProgressLogIntervalPoints = 500;
 
         private bool TryAcquireSellerCamera(out object? owner)
         {
@@ -1342,22 +1423,47 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Tries to open the seller dialog by sweeping the mouse from the center of the
-        /// game window outward in a square spiral, looking for
-        /// <see cref="SellerPointedValue"/> from S_IsSellerPointed. When the value is
-        /// observed, the mouse is right-clicked and the existing IsShopOpen() check is
-        /// re-evaluated. Up to <see cref="SellerMaxFullScans"/> camera-safe client sweeps are
-        /// attempted. Returns true when IsShopOpen() becomes true at any point.
-        ///
-        /// Before each full scan starts, the foreground window is checked: when the
-        /// game window is no longer the selected window (the user switched away,
-        /// e.g. to read the log), a <see cref="BotStopRequestedException"/> is thrown
-        /// so the workflow stops the bot instead of continuing the sweep.
-        ///
-        /// Scan points use the actual client rectangle and stay outside the edge band
-        /// that can rotate the camera, regardless of window position or resolution.
+        /// Takes one STABLE mouseover sample: two reads of S_IsSellerPointed separated by
+        /// <see cref="NpcDiscoveryConfirmSampleMs"/> must both succeed and agree. A failed read
+        /// is never treated as "nothing under the cursor" (0), and a value that is still
+        /// settling after the cursor move is never treated as a candidate.
+        /// The NPC-highlight flag is captured for diagnostics only.
         /// </summary>
-        private bool TryOpenSellerDialogByScanning(bool clickShopOption = true, int maxFullScans = SellerMaxFullScans)
+        private MouseOverValueSample ReadStableMouseOverSample()
+        {
+            bool firstReadSucceeded = _memory.TryReadIsSellerPointed(out int firstValue);
+            Thread.Sleep(NpcDiscoveryConfirmSampleMs);
+            bool confirmReadSucceeded = _memory.TryReadIsSellerPointed(out int confirmValue);
+            bool npcHighlighted = _memory.TryReadIsNpcMousePointed(out bool highlighted) && highlighted;
+
+            return MouseOverValueSample.FromReads(
+                firstReadSucceeded, firstValue,
+                confirmReadSucceeded, confirmValue,
+                npcHighlighted);
+        }
+
+        /// <summary>
+        /// STAGE 1 (fast) + optional STAGE 2 (slow discovery / automatic calibration).
+        ///
+        /// Stage 1 sweeps the mouse from the center of the game window outward in a square
+        /// spiral looking for exactly <see cref="SellerPointedValue"/>, right-clicks the match
+        /// and verifies the shop window. When it fails and calibration is allowed,
+        /// <see cref="TryDiscoverNpcMouseOverValue"/> sweeps the SAME points slowly, looking
+        /// for a stable NEW value that follows the cursor, and validates it with a real
+        /// right-click + NPC-dialogue check before saving it.
+        ///
+        /// Before each full fast scan starts, the foreground window is checked: when the game
+        /// window is no longer the selected window (the user switched away, e.g. to read the
+        /// log), a <see cref="BotStopRequestedException"/> is thrown so the workflow stops the
+        /// bot instead of continuing the sweep.
+        ///
+        /// Scan points use the actual client rectangle and stay outside the edge band that can
+        /// rotate the camera, regardless of window position or resolution.
+        /// </summary>
+        private bool TryOpenSellerDialogByScanning(
+            bool clickShopOption = true,
+            int maxFullScans = SellerMaxFullScans,
+            bool allowCalibration = true)
         {
             int? stableCameraAngleBits = null;
             if (_memory.TryGetCameraAngleBits(out int cameraAngleBits) &&
@@ -1374,13 +1480,48 @@ namespace DriverScanTester.Services
             _sellerScanYawRestoreWarningLogged = false;
             try
             {
-                return TryOpenSellerDialogByScanningCore(clickShopOption, maxFullScans, stableCameraAngleBits);
+                if (TryOpenSellerDialogByScanningCore(clickShopOption, maxFullScans, stableCameraAngleBits))
+                    return true;
+
+                if (!allowCalibration)
+                    return false;
+
+                return TryRunNpcCalibration(clickShopOption, stableCameraAngleBits);
             }
             finally
             {
                 if (stableCameraAngleBits.HasValue)
                     RestoreSellerScanYaw(stableCameraAngleBits.Value);
             }
+        }
+
+        /// <summary>
+        /// Stage 2 entry point: logs why the slow scan starts, runs it and reports the result.
+        /// A confirmed calibration returns true so the caller continues the original NPC
+        /// workflow — the validating right-click already opened the dialog/shop it needs, so
+        /// the NPC is never clicked a second time.
+        /// </summary>
+        private bool TryRunNpcCalibration(bool clickShopOption, int? stableCameraAngleBits)
+        {
+            _log($"[NPC Scan] Normal scan finished without a match — the active MouseOver NPC value {MouseOverValueDiscovery.Describe(SellerPointedValue)} may be stale for this game session.");
+            _log("[NPC Calibration] Starting slow discovery.");
+
+            if (TryDiscoverNpcMouseOverValue(clickShopOption, stableCameraAngleBits, out string failureReason))
+            {
+                _log("[NPC Scan] Continuing original NPC workflow.");
+                return true;
+            }
+
+            // Same final gate the fast scan uses: if the shop window did open (e.g. late),
+            // the workflow is satisfied even though discovery itself did not confirm a value.
+            if (clickShopOption && _memory.IsShopOpen())
+            {
+                _log("[NPC Calibration] Shop window is open — continuing the original NPC workflow without changing the active value.");
+                return true;
+            }
+
+            _log($"[NPC Calibration] Slow discovery did not confirm a new value: {failureReason}");
+            return false;
         }
 
         private bool TryOpenSellerDialogByScanningCore(
@@ -1400,13 +1541,63 @@ namespace DriverScanTester.Services
                 return false;
             }
 
-            int centerClientX = clientWidth / 2;
-            int centerClientY = clientHeight / 2;
-            int step = Math.Max(1, SellerScanStepPx);
-            int maxRadius = Math.Max(clientWidth, clientHeight); // spiral upper bound
+            // 0 means "not calibrated". Comparing against it would match the first hovered
+            // object and right-click it, so the fast scan is skipped and stage 2 discovers
+            // (and validates) the value instead.
+            if (SellerPointedValue == 0)
+            {
+                _log("ItemSeller: No MouseOver NPC value configured (0) — skipping the fast scan.");
+                return false;
+            }
 
-            _log($"ItemSeller: Starting seller mouseover scan. client=({clientOriginX},{clientOriginY}) size=({clientWidth}x{clientHeight}), step={step}px, edgeGuard={SellerScanCameraEdgeGuardPx}px, maxFullScans={maxFullScans}.");
+            _log($"ItemSeller: Starting seller mouseover scan. client=({clientOriginX},{clientOriginY}) size=({clientWidth}x{clientHeight}), step={SellerScanStepPx}px, edgeGuard={SellerScanCameraEdgeGuardPx}px, maxFullScans={maxFullScans}, activeValue={MouseOverValueDiscovery.Describe(SellerPointedValue)}.");
 
+            NpcScanSweepState state = SweepNpcScanPoints(
+                clientOriginX, clientOriginY, clientWidth, clientHeight,
+                maxFullScans,
+                "Seller",
+                (clientX, clientY, scanIndex, pointIndex) =>
+                    ScanSellerAtClientPoint(clientX, clientY,
+                                            clientOriginX, clientOriginY,
+                                            clientWidth, clientHeight,
+                                            scanIndex, pointIndex,
+                                            stableCameraAngleBits, clickShopOption)
+                        ? NpcScanSweepState.Found
+                        : NpcScanSweepState.Continue);
+
+            if (state == NpcScanSweepState.Found)
+                return true;
+
+            return clickShopOption && _memory.IsShopOpen();
+        }
+
+        /// <summary>State a single scanned point reports back to the sweep loop.</summary>
+        private enum NpcScanSweepState
+        {
+            /// <summary>Nothing found at this point; keep scanning.</summary>
+            Continue,
+
+            /// <summary>The requested NPC/dialog/shop is open — stop the sweep successfully.</summary>
+            Found,
+
+            /// <summary>The sweep must stop without success (timeout, exhausted budget, unusable UI).</summary>
+            Aborted
+        }
+
+        /// <summary>Handles one scan point. Returns how the sweep has to continue.</summary>
+        private delegate NpcScanSweepState NpcScanPointHandler(
+            int clientX, int clientY, int scanIndex, int pointIndex);
+
+        /// <summary>
+        /// Runs the shared center-outward NPC scan pattern and delegates every point to
+        /// <paramref name="handlePoint"/>. The foreground check and the "dialog already open"
+        /// short-circuit are applied before every full sweep, exactly as the fast scan always
+        /// did, so both stages share one scanning architecture.
+        /// </summary>
+        private NpcScanSweepState SweepNpcScanPoints(
+            int clientOriginX, int clientOriginY, int clientWidth, int clientHeight,
+            int maxFullScans, string scanLabel, NpcScanPointHandler handlePoint)
+        {
             for (int scanIndex = 0; scanIndex < maxFullScans; scanIndex++)
             {
                 // Before each full scan, verify the game window is still the selected
@@ -1422,68 +1613,87 @@ namespace DriverScanTester.Services
                 if (_memory.IsShopOpen())
                 {
                     _log($"ItemSeller: Seller dialog opened before scan #{scanIndex + 1} started.");
-                    return true;
+                    return NpcScanSweepState.Found;
                 }
 
-                _log($"ItemSeller: Seller scan #{scanIndex + 1}/{maxFullScans} — center-outward spiral.");
+                _log($"ItemSeller: {scanLabel} scan #{scanIndex + 1}/{maxFullScans} — center-outward spiral.");
 
-                // Square spiral: start at center, then expand outward in concentric squares.
-                // The scan-point guard below limits physical cursor moves to the safe client interior.
-                // We sample on a step grid along the spiral path.
                 int pointsThisScan = 0;
-                bool sellerDetectedThisScan = false;
-
-                // Center first
-                if (ScanSellerAtClientPoint(centerClientX, centerClientY,
-                                            clientOriginX, clientOriginY,
-                                            clientWidth, clientHeight,
-                                            scanIndex, pointsThisScan++, stableCameraAngleBits, clickShopOption))
-                    return true;
-
-                for (int radius = step; radius <= maxRadius && !sellerDetectedThisScan; radius += step)
+                foreach ((int clientX, int clientY) in EnumerateSellerScanPoints(clientWidth, clientHeight))
                 {
-                    // Top edge: from -radius to +radius
-                    for (int dx = -radius; dx <= radius; dx += step)
-                    {
-                        if (ScanSellerAtClientPoint(centerClientX + dx, centerClientY - radius,
-                                                    clientOriginX, clientOriginY,
-                                                    clientWidth, clientHeight,
-                                                    scanIndex, pointsThisScan++, stableCameraAngleBits, clickShopOption))
-                            return true;
-                    }
-                    // Right edge: from -radius+step to +radius-step
-                    for (int dy = -radius + step; dy <= radius; dy += step)
-                    {
-                        if (ScanSellerAtClientPoint(centerClientX + radius, centerClientY + dy,
-                                                    clientOriginX, clientOriginY,
-                                                    clientWidth, clientHeight,
-                                                    scanIndex, pointsThisScan++, stableCameraAngleBits, clickShopOption))
-                            return true;
-                    }
-                    // Bottom edge: from +radius-step down to -radius
-                    for (int dx = radius - step; dx >= -radius; dx -= step)
-                    {
-                        if (ScanSellerAtClientPoint(centerClientX + dx, centerClientY + radius,
-                                                    clientOriginX, clientOriginY,
-                                                    clientWidth, clientHeight,
-                                                    scanIndex, pointsThisScan++, stableCameraAngleBits, clickShopOption))
-                            return true;
-                    }
-                    // Left edge: from +radius-step up to -radius+step
-                    for (int dy = radius - step; dy >= -radius + step; dy -= step)
-                    {
-                        if (ScanSellerAtClientPoint(centerClientX - radius, centerClientY + dy,
-                                                    clientOriginX, clientOriginY,
-                                                    clientWidth, clientHeight,
-                                                    scanIndex, pointsThisScan++, stableCameraAngleBits, clickShopOption))
-                            return true;
-                    }
+                    NpcScanSweepState pointState = handlePoint(clientX, clientY, scanIndex, pointsThisScan);
+                    pointsThisScan++;
+
+                    if (pointState != NpcScanSweepState.Continue)
+                        return pointState;
                 }
 
-                _log($"ItemSeller: Seller scan #{scanIndex + 1}/{maxFullScans} finished — no S_IsSellerPointed=={SellerPointedValue} match ({pointsThisScan} points checked).");
+                _log($"ItemSeller: {scanLabel} scan #{scanIndex + 1}/{maxFullScans} finished — no match ({pointsThisScan} points checked).");
             }
 
-            return clickShopOption && _memory.IsShopOpen();
+            return NpcScanSweepState.Continue;
+        }
+
+        /// <summary>
+        /// Enumerates the NPC scan points in the exact center-outward square-spiral order used
+        /// by BOTH the fast scan and the slow discovery scan: center first, then concentric
+        /// squares of radius step, step*2, ... clamped to the camera-safe client interior.
+        /// </summary>
+        /// <param name="stepPx">
+        /// Grid spacing. Defaults to the step both production stages use
+        /// (<see cref="SellerScanStepPx"/>); an explicit value is only useful for callers
+        /// that need to compare/inspect another grid (e.g. tests).
+        /// </param>
+        internal static IEnumerable<(int X, int Y)> EnumerateSellerScanPoints(
+            int clientWidth, int clientHeight, int stepPx = SellerScanStepPx)
+        {
+            if (clientWidth <= 0 || clientHeight <= 0)
+                yield break;
+
+            int centerClientX = clientWidth / 2;
+            int centerClientY = clientHeight / 2;
+            int step = Math.Max(1, stepPx);
+            int maxRadius = Math.Max(clientWidth, clientHeight); // spiral upper bound
+
+            // Center first.
+            if (IsSellerScanPointWithinSafeArea(centerClientX, centerClientY, clientWidth, clientHeight))
+                yield return (centerClientX, centerClientY);
+
+            for (int radius = step; radius <= maxRadius; radius += step)
+            {
+                // Top edge: from -radius to +radius
+                for (int dx = -radius; dx <= radius; dx += step)
+                {
+                    int x = centerClientX + dx;
+                    int y = centerClientY - radius;
+                    if (IsSellerScanPointWithinSafeArea(x, y, clientWidth, clientHeight))
+                        yield return (x, y);
+                }
+                // Right edge: from -radius+step to +radius-step
+                for (int dy = -radius + step; dy <= radius; dy += step)
+                {
+                    int x = centerClientX + radius;
+                    int y = centerClientY + dy;
+                    if (IsSellerScanPointWithinSafeArea(x, y, clientWidth, clientHeight))
+                        yield return (x, y);
+                }
+                // Bottom edge: from +radius-step down to -radius
+                for (int dx = radius - step; dx >= -radius; dx -= step)
+                {
+                    int x = centerClientX + dx;
+                    int y = centerClientY + radius;
+                    if (IsSellerScanPointWithinSafeArea(x, y, clientWidth, clientHeight))
+                        yield return (x, y);
+                }
+                // Left edge: from +radius-step up to -radius+step
+                for (int dy = radius - step; dy >= -radius + step; dy -= step)
+                {
+                    int x = centerClientX - radius;
+                    int y = centerClientY + dy;
+                    if (IsSellerScanPointWithinSafeArea(x, y, clientWidth, clientHeight))
+                        yield return (x, y);
+                }
+            }
         }
 
         /// <summary>
@@ -1525,15 +1735,7 @@ namespace DriverScanTester.Services
             // Movement steering is also gated by the shared camera lease. This periodic
             // readback catches any camera yaw changed by the game itself while the scan
             // moves the cursor; restore the exact pre-scan angle before testing hover.
-            if (stableCameraAngleBits.HasValue && pointIndex % SellerScanYawCheckIntervalPoints == 0 &&
-                _memory.TryGetCameraAngleBits(out int currentAngleBits) &&
-                currentAngleBits != stableCameraAngleBits.Value &&
-                !_memory.TrySetCameraAngleBits(stableCameraAngleBits.Value) &&
-                !_sellerScanYawRestoreWarningLogged)
-            {
-                _sellerScanYawRestoreWarningLogged = true;
-                _log("ItemSeller: WARNING — camera yaw drifted during scan and could not be restored.");
-            }
+            RestoreScanYawIfDrifted(pointIndex, stableCameraAngleBits);
 
             int screenX = clientOriginX + clientX;
             int screenY = clientOriginY + clientY;
@@ -1608,6 +1810,487 @@ namespace DriverScanTester.Services
 
             _log("ItemSeller: Right-click + Shop-option click sent but shop window did not open — continuing scan.");
             return false;
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  STAGE 2 — SLOW NPC DISCOVERY + AUTOMATIC CALIBRATION
+        //
+        //  The fast scan above can only match the configured value. After a game launch
+        //  the hovered NPC's value (the object address/ID stored at a stable address) may
+        //  differ, so the fast scan finds nothing even though the NPC is on screen.
+        //
+        //  This stage sweeps the SAME points slowly, reads the mouseover value at every
+        //  point, keeps stable NON-ZERO values that follow the cursor as CANDIDATES, and
+        //  accepts one only after a real right-click made an actual NPC dialogue open
+        //  (plus, for the seller workflow, the Shop option actually opened the shop).
+        //  Memory evidence alone never counts as calibration.
+        // ════════════════════════════════════════════════════════════════
+
+        /// <summary>Mutable state of one slow discovery run.</summary>
+        private sealed class NpcDiscoveryContext
+        {
+            public NpcDiscoveryContext(
+                MouseOverValueDiscovery discovery,
+                Stopwatch stopwatch,
+                bool clickShopOption,
+                int? stableCameraAngleBits)
+            {
+                Discovery = discovery;
+                Stopwatch = stopwatch;
+                ClickShopOption = clickShopOption;
+                StableCameraAngleBits = stableCameraAngleBits;
+            }
+
+            public MouseOverValueDiscovery Discovery { get; }
+            public Stopwatch Stopwatch { get; }
+            public bool ClickShopOption { get; }
+            public int? StableCameraAngleBits { get; }
+
+            /// <summary>Stable sample read at the previous scan point (hover-transition baseline).</summary>
+            public MouseOverValueSample? PreviousSample { get; set; }
+
+            /// <summary>Most recent scan point that published value 0 (cursor is over nothing).</summary>
+            public (int ScreenX, int ScreenY)? LastEmptyScreenPoint { get; set; }
+
+            public int PointsScanned { get; set; }
+            public int StableObjectSamples { get; set; }
+            public string AbortReason { get; set; } = string.Empty;
+        }
+
+        /// <summary>Result of validating one candidate with a right-click.</summary>
+        private enum NpcCandidateTestOutcome
+        {
+            /// <summary>An NPC dialogue (and, when required, the shop) opened — value saved.</summary>
+            Confirmed,
+
+            /// <summary>The candidate was rejected (or became unreadable) — keep scanning.</summary>
+            NotConfirmed,
+
+            /// <summary>Discovery cannot continue safely (the game UI is in an unusable state).</summary>
+            AbortDiscovery
+        }
+
+        /// <summary>
+        /// Runs the slow discovery sweep and, on success, updates
+        /// <see cref="SellerPointedValue"/> — the single active NPC detection value.
+        /// Returns false with a human-readable <paramref name="failureReason"/> when no
+        /// candidate could be confirmed; the active value is never overwritten then.
+        /// </summary>
+        private bool TryDiscoverNpcMouseOverValue(
+            bool clickShopOption,
+            int? stableCameraAngleBits,
+            out string failureReason)
+        {
+            failureReason = string.Empty;
+
+            if (_memory.IsShopOpen())
+            {
+                _log("[NPC Calibration] Shop window is already open — no calibration needed.");
+                return true;
+            }
+
+            // If the mouseover buffer itself cannot be read, no scan can discover anything:
+            // fail fast instead of sweeping the whole time budget with an unusable chain.
+            if (!_memory.TryReadIsSellerPointed(out _))
+            {
+                failureReason = "the MouseOver buffer ([Ares.exe + 0x4883E8] + 0xC) could not be read";
+                _log($"[NPC Calibration] {failureReason} — slow discovery aborted.");
+                return false;
+            }
+
+            if (!TryGetGameClientArea(out int clientOriginX, out int clientOriginY, out int clientWidth, out int clientHeight))
+            {
+                failureReason = "game client area could not be resolved";
+                return false;
+            }
+
+            // A dialogue that was already open would make "did MY click open it?"
+            // undecidable, and it blocks world hover reads. Close it first.
+            if (!TryCloseOpenNpcDialog("before slow NPC discovery", out string closeFailure))
+            {
+                failureReason = closeFailure;
+                return false;
+            }
+
+            var discovery = new MouseOverValueDiscovery(
+                () => SellerPointedValue,
+                value => SellerPointedValue = value,
+                _log,
+                NpcDiscoveryMaxCandidateTests,
+                NpcDiscoveryMaxRejectedValues);
+
+            var context = new NpcDiscoveryContext(
+                discovery,
+                Stopwatch.StartNew(),
+                clickShopOption,
+                stableCameraAngleBits);
+
+            _log($"[NPC Calibration] Slow scan: client=({clientOriginX},{clientOriginY}) size=({clientWidth}x{clientHeight}), step={SellerScanStepPx}px, settle={NpcDiscoveryPointSettleMs}ms, confirmSample={NpcDiscoveryConfirmSampleMs}ms, timeout={NpcDiscoveryTimeoutMs}ms, maxCandidateTests={NpcDiscoveryMaxCandidateTests}.");
+
+            NpcScanSweepState state;
+            try
+            {
+                state = SweepNpcScanPoints(
+                    clientOriginX, clientOriginY, clientWidth, clientHeight,
+                    1,
+                    "Slow NPC discovery",
+                    (clientX, clientY, scanIndex, pointIndex) => HandleNpcDiscoveryPoint(
+                        clientX, clientY, pointIndex,
+                        clientOriginX, clientOriginY, clientWidth, clientHeight,
+                        context));
+            }
+            catch (BotStopRequestedException)
+            {
+                _log($"[NPC Calibration] Cancelled after {context.Stopwatch.ElapsedMilliseconds}ms ({context.PointsScanned} points scanned, {discovery.CandidateTestCount} candidate(s) tested).");
+                throw;
+            }
+
+            long elapsedMs = context.Stopwatch.ElapsedMilliseconds;
+
+            if (state == NpcScanSweepState.Found)
+            {
+                _log($"[NPC Calibration] Discovery succeeded in {elapsedMs}ms ({context.PointsScanned} points scanned, {discovery.CandidateTestCount} candidate(s) tested).");
+                return true;
+            }
+
+            if (state == NpcScanSweepState.Aborted && !string.IsNullOrEmpty(context.AbortReason))
+                failureReason = context.AbortReason;
+
+            string detail =
+                $"{context.PointsScanned} points scanned, {context.StableObjectSamples} stable object samples, " +
+                $"{discovery.CandidateTestCount} candidate(s) tested, {discovery.RejectedValueCount} rejected";
+
+            failureReason = string.IsNullOrEmpty(failureReason)
+                ? $"no NPC value could be validated ({detail})"
+                : $"{failureReason} ({detail})";
+
+            _log($"[NPC Calibration] Discovery ended after {elapsedMs}ms without a confirmed value.");
+            return false;
+        }
+
+        /// <summary>
+        /// One slow-scan point: move, settle, take a stable sample and, when the value looks
+        /// like a new hovered object, validate it with a right-click.
+        /// </summary>
+        private NpcScanSweepState HandleNpcDiscoveryPoint(
+            int clientX, int clientY, int pointIndex,
+            int clientOriginX, int clientOriginY, int clientWidth, int clientHeight,
+            NpcDiscoveryContext context)
+        {
+            if (!IsSellerScanPointWithinSafeArea(clientX, clientY, clientWidth, clientHeight))
+                return NpcScanSweepState.Continue;
+
+            // Stop/cancel and the hard time bound are checked periodically so the bot reacts
+            // promptly instead of after the whole sweep.
+            if (pointIndex % NpcDiscoveryForegroundCheckIntervalPoints == 0 && !IsGameWindowForeground())
+            {
+                throw new BotStopRequestedException(
+                    "Game window is not the selected window — stopping the bot (slow NPC discovery aborted).");
+            }
+
+            if (context.Stopwatch.ElapsedMilliseconds >= NpcDiscoveryTimeoutMs)
+            {
+                context.AbortReason = $"slow scan timed out after {NpcDiscoveryTimeoutMs}ms ({context.PointsScanned} points searched from the screen center outwards)";
+                return NpcScanSweepState.Aborted;
+            }
+
+            RestoreScanYawIfDrifted(pointIndex, context.StableCameraAngleBits);
+
+            if (pointIndex > 0 && pointIndex % NpcDiscoveryProgressLogIntervalPoints == 0)
+            {
+                _log($"[NPC Calibration] Slow scan progress: {pointIndex} points, {context.StableObjectSamples} stable object samples, {context.Discovery.CandidateTestCount} candidate(s) tested, {context.Stopwatch.ElapsedMilliseconds}ms.");
+            }
+
+            int screenX = clientOriginX + clientX;
+            int screenY = clientOriginY + clientY;
+
+            MouseOperations.SetCursorPositionAbsolute(screenX, screenY);
+            Thread.Sleep(NpcDiscoveryPointSettleMs);
+
+            MouseOverValueSample sample = ReadStableMouseOverSample();
+            context.PointsScanned++;
+
+            if (!sample.ReadSucceeded)
+            {
+                // A failed read is "unknown", never "nothing hovered". Drop the hover
+                // baseline so the next point is not compared against a stale value.
+                context.PreviousSample = null;
+                return NpcScanSweepState.Continue;
+            }
+
+            MouseOverValueSample? previousSample = context.PreviousSample;
+            context.PreviousSample = sample;
+
+            if (sample.Value == 0)
+            {
+                context.LastEmptyScreenPoint = (screenX, screenY);
+                return NpcScanSweepState.Continue;
+            }
+
+            if (sample.Stable)
+                context.StableObjectSamples++;
+
+            // Transition evidence: the previous point published a different (stable) value, so
+            // the cursor ARRIVING here changed the value. When it did not (e.g. the value lags
+            // by one point or a large sprite spans several points), the probe below moves the
+            // cursor to a known empty point and back. The probe is invoked lazily by
+            // MouseOverValueDiscovery, i.e. only for values that are otherwise testable.
+            bool naturalHoverChange = previousSample is { ReadSucceeded: true, Stable: true } previous
+                                      && previous.Value != sample.Value;
+
+            bool probeUsed = false;
+            Func<bool> hoverChangeProbe = () =>
+            {
+                if (naturalHoverChange)
+                    return true;
+
+                if (context.LastEmptyScreenPoint is not { } emptyPoint)
+                    return true; // no reference point yet — cannot contradict the sample
+
+                probeUsed = true;
+                return ProbeHoverChange(sample.Value, screenX, screenY, emptyPoint);
+            };
+
+            MouseOverCandidateDecision decision = context.Discovery.Evaluate(sample, hoverChangeProbe);
+            if (decision != MouseOverCandidateDecision.Candidate)
+                return NpcScanSweepState.Continue;
+
+            // Never start a candidate validation that could outlive the run's time budget.
+            if (context.Stopwatch.ElapsedMilliseconds >= NpcDiscoveryTimeoutMs)
+            {
+                context.AbortReason = $"slow scan timed out after {NpcDiscoveryTimeoutMs}ms ({context.PointsScanned} points searched from the screen center outwards)";
+                return NpcScanSweepState.Aborted;
+            }
+
+            int attempt = context.Discovery.StartCandidateTest(sample.Value);
+            string hoverEvidence = naturalHoverChange
+                ? "point transition"
+                : probeUsed ? "leave/return probe" : "unverified";
+            _log($"[NPC Calibration] Candidate value detected: {MouseOverValueDiscovery.Describe(sample.Value)} at client ({clientX},{clientY}) screen ({screenX},{screenY}) [attempt {attempt}/{NpcDiscoveryMaxCandidateTests}, stableObservations={context.Discovery.ObservationCount(sample.Value)}, hoverChange={hoverEvidence}, npcHighlight={sample.NpcHighlighted}].");
+
+            switch (TestNpcCandidate(sample.Value, screenX, screenY, context))
+            {
+                case NpcCandidateTestOutcome.Confirmed:
+                    return NpcScanSweepState.Found;
+
+                case NpcCandidateTestOutcome.AbortDiscovery:
+                    context.AbortReason = "candidate validation left the game UI in an unusable state";
+                    return NpcScanSweepState.Aborted;
+
+                default:
+                    return NpcScanSweepState.Continue;
+            }
+        }
+
+        /// <summary>
+        /// Confirms that <paramref name="candidateValue"/> is tied to the cursor position:
+        /// the cursor moves to a known empty point (the value must stop matching) and then
+        /// returns to the candidate (the value must be published again). The cursor always
+        /// ends on the candidate point, so a confirmed candidate can be right-clicked at once.
+        ///
+        /// An inconclusive probe (a failed/unstable read at either location) returns true: it
+        /// must never block a candidate that the right-click + dialogue check can still verify.
+        /// </summary>
+        private bool ProbeHoverChange(int candidateValue, int screenX, int screenY, (int ScreenX, int ScreenY) emptyPoint)
+        {
+            MouseOperations.SetCursorPositionAbsolute(emptyPoint.ScreenX, emptyPoint.ScreenY);
+            Thread.Sleep(NpcDiscoveryPointSettleMs);
+            MouseOverValueSample away = ReadStableMouseOverSample();
+
+            MouseOperations.SetCursorPositionAbsolute(screenX, screenY);
+            Thread.Sleep(NpcDiscoveryPointSettleMs);
+            MouseOverValueSample back = ReadStableMouseOverSample();
+
+            if (!away.ReadSucceeded || !away.Stable || !back.ReadSucceeded || !back.Stable)
+                return true;
+
+            return away.Value != candidateValue && back.Value == candidateValue;
+        }
+
+        /// <summary>
+        /// Validates one candidate exactly the way the bot would use it: keep the cursor on the
+        /// object, right-click it and require an ACTUAL NPC dialogue to open. A memory change
+        /// or a sent click is never treated as success.
+        ///
+        /// On success the confirmed value becomes the active NPC value. When the caller needs
+        /// the shop (repot/seller flow) the Shop option must also open the shop window; a
+        /// dialogue that opens but is not usable for the workflow is closed again and the
+        /// candidate is rejected without touching the active value.
+        /// </summary>
+        private NpcCandidateTestOutcome TestNpcCandidate(
+            int candidateValue, int screenX, int screenY, NpcDiscoveryContext context)
+        {
+            MouseOverValueDiscovery discovery = context.Discovery;
+
+            if (_memory.IsShopOpen())
+            {
+                _log("[NPC Calibration] Shop window is already open — keeping the current NPC value and continuing the workflow.");
+                return NpcCandidateTestOutcome.Confirmed;
+            }
+
+            // A dialogue left open before the click would make the transition ambiguous.
+            if (!TryCloseOpenNpcDialog("before testing a candidate", out string closeFailure))
+            {
+                _log($"[NPC Calibration] Cannot test candidate {MouseOverValueDiscovery.Describe(candidateValue)}: {closeFailure}.");
+                return NpcCandidateTestOutcome.AbortDiscovery;
+            }
+
+            // The candidate must still be under the cursor right before the click.
+            Thread.Sleep(NpcDiscoveryPointSettleMs);
+            MouseOverValueSample current = ReadStableMouseOverSample();
+            if (!current.ReadSucceeded || !current.Stable || current.Value != candidateValue)
+            {
+                _log($"[NPC Calibration] Candidate {MouseOverValueDiscovery.Describe(candidateValue)} is no longer under the cursor — skipping the click.");
+                return NpcCandidateTestOutcome.NotConfirmed;
+            }
+
+            _log($"[NPC Calibration] Testing candidate {MouseOverValueDiscovery.Describe(candidateValue)} with a right-click.");
+            LastNpcRightClickScreenPosition = (screenX, screenY);
+
+            MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.RightDown);
+            Thread.Sleep(50);
+            MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.RightUp);
+
+            // Bounded wait for the dialogue state transition CLOSED -> OPEN. A dialogue that
+            // was already open was closed above, so only this click can have opened it.
+            var dialogWait = Stopwatch.StartNew();
+            bool dialogOpened = false;
+            while (true)
+            {
+                if (_memory.IsDialogOpen())
+                {
+                    dialogOpened = true;
+                    break;
+                }
+
+                if (dialogWait.ElapsedMilliseconds >= NpcDiscoveryDialogOpenTimeoutMs)
+                    break;
+
+                Thread.Sleep(NpcDiscoveryStatePollMs);
+            }
+
+            if (!dialogOpened)
+            {
+                discovery.Reject(candidateValue,
+                    $"NPC dialogue did not open within {NpcDiscoveryDialogOpenTimeoutMs}ms after the right-click");
+                return NpcCandidateTestOutcome.NotConfirmed;
+            }
+
+            _log($"[NPC Calibration] NPC dialogue confirmed for candidate {MouseOverValueDiscovery.Describe(candidateValue)} after {dialogWait.ElapsedMilliseconds}ms (S_IsDialogOpen1=1).");
+
+            if (!context.ClickShopOption)
+            {
+                int previousValue = discovery.Confirm(candidateValue);
+                NoteNpcMouseOverValueAutoCalibrated();
+                _log($"[NPC Calibration] Calibration complete: {MouseOverValueDiscovery.Describe(previousValue)} -> {MouseOverValueDiscovery.Describe(candidateValue)}. The dialogue stays open for the caller.");
+                return NpcCandidateTestOutcome.Confirmed;
+            }
+
+            // Seller workflow: the dialogue must also expose the Shop option, otherwise it
+            // belongs to some other NPC and cannot satisfy the current repot action.
+            ClickShopOptionInDialog();
+
+            var shopWait = Stopwatch.StartNew();
+            while (true)
+            {
+                if (_memory.IsShopOpen())
+                    break;
+
+                if (shopWait.ElapsedMilliseconds >= NpcDiscoveryShopOpenTimeoutMs)
+                    break;
+
+                Thread.Sleep(NpcDiscoveryStatePollMs);
+            }
+
+            if (_memory.IsShopOpen())
+            {
+                // Same populate delay the fast path uses, then apply the value in memory.
+                Thread.Sleep(NpcDiscoveryShopPopulateDelayMs);
+                int previousValue = discovery.Confirm(candidateValue);
+                NoteNpcMouseOverValueAutoCalibrated();
+                _log($"[NPC Calibration] Calibration complete: shop window opened through the candidate's dialogue, {MouseOverValueDiscovery.Describe(previousValue)} -> {MouseOverValueDiscovery.Describe(candidateValue)}.");
+                return NpcCandidateTestOutcome.Confirmed;
+            }
+
+            _log($"[NPC Calibration] Candidate {MouseOverValueDiscovery.Describe(candidateValue)} opened a dialogue, but the Shop option did not open the shop window within {NpcDiscoveryShopOpenTimeoutMs}ms — not usable for the seller workflow. Closing the dialogue and continuing discovery.");
+            discovery.Reject(candidateValue,
+                "dialogue opened but the Shop option did not open the shop window");
+
+            if (!TryCloseOpenNpcDialog("after an unusable NPC dialogue", out string unusableCloseFailure))
+            {
+                _log($"[NPC Calibration] {unusableCloseFailure}.");
+                return NpcCandidateTestOutcome.AbortDiscovery;
+            }
+
+            return NpcCandidateTestOutcome.NotConfirmed;
+        }
+
+        /// <summary>
+        /// Marks this game session as "the NPC MouseOver value was discovered automatically".
+        /// Both the NPC and the item MouseOver values change together with the game launch, so
+        /// the loot system uses this marker to re-discover the item value on its next scan
+        /// (see <see cref="MouseOverCalibrationSession.NeedsItemValueDiscovery"/>).
+        /// </summary>
+        private void NoteNpcMouseOverValueAutoCalibrated()
+        {
+            MouseOverCalibrationSession.Current.MarkNpcValueDiscovered(_memory.GameSessionIdentity);
+            _log("[Item Calibration] NPC value was auto-calibrated in this game session — the item MouseOver value is now queued for automatic discovery on the next loot scan.");
+        }
+
+        /// <summary>
+        /// Closes any open NPC dialogue / shop window with Escape (the existing UI mechanism —
+        /// never a click, which could walk the character) and waits, bounded, for the state to
+        /// clear. Returns false when the UI stayed open: candidate validation is impossible then.
+        /// </summary>
+        private bool TryCloseOpenNpcDialog(string logContext, out string failureReason)
+        {
+            failureReason = string.Empty;
+
+            // Never close the shop window: it is the state the repot/seller workflow needs.
+            // (Stage 2 starts only when no shop is open; this guards the rare late-open case.)
+            if (_memory.IsShopOpen())
+            {
+                failureReason = $"the shop window is open {logContext} — not closing it";
+                return false;
+            }
+
+            if (!_memory.IsDialogOpen())
+                return true;
+
+            _log($"[NPC Calibration] Closing the open NPC dialogue with Escape {logContext}.");
+            GameInput.PressKey(GameInput.VK_ESCAPE, GameInput.SCAN_ESCAPE);
+
+            var wait = Stopwatch.StartNew();
+            while (wait.ElapsedMilliseconds < NpcDiscoveryDialogOpenTimeoutMs)
+            {
+                if (!_memory.IsDialogOpen() && !_memory.IsShopOpen())
+                    return true;
+
+                Thread.Sleep(NpcDiscoveryStatePollMs);
+            }
+
+            failureReason = $"the open NPC dialogue did not close within {NpcDiscoveryDialogOpenTimeoutMs}ms {logContext}";
+            return false;
+        }
+
+        /// <summary>
+        /// Periodic yaw-drift guard shared by the fast scan and the slow discovery scan: if
+        /// the cursor sweep itself changed the camera yaw, restore the exact pre-scan angle so
+        /// the on-screen NPC positions stay valid. Warns once per scan when the restore fails.
+        /// </summary>
+        private void RestoreScanYawIfDrifted(int pointIndex, int? stableCameraAngleBits)
+        {
+            if (!stableCameraAngleBits.HasValue || pointIndex % SellerScanYawCheckIntervalPoints != 0)
+                return;
+
+            if (_memory.TryGetCameraAngleBits(out int currentAngleBits) &&
+                currentAngleBits != stableCameraAngleBits.Value &&
+                !_memory.TrySetCameraAngleBits(stableCameraAngleBits.Value) &&
+                !_sellerScanYawRestoreWarningLogged)
+            {
+                _sellerScanYawRestoreWarningLogged = true;
+                _log("ItemSeller: WARNING — camera yaw drifted during scan and could not be restored.");
+            }
         }
 
         private void RestoreSellerScanYaw(int expectedAngleBits)

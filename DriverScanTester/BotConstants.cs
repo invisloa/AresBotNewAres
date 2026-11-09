@@ -1336,6 +1336,13 @@ namespace DriverScanTester
             /// This exceeds the map-transition settle timeout so a normal loading transition is not
             /// mistaken for a disconnect.</summary>
             public const int PositionReadFailureTimeoutMs = 7_000;
+
+            /// <summary>How long the attack pointer chain may stay unreadable before the client is
+            /// treated as crashed. The live value is A_attack1
+            /// (<c>[Ares.exe + 0x489BC8] + 0x47A</c>); the lock tool shows it as "?" when the
+            /// player pointer or the value behind it can no longer be read. 15 seconds is longer
+            /// than a normal map-transition settle, so a loading screen is not mistaken for a crash.</summary>
+            public const int AttackReadFailureTimeoutMs = 15_000;
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -1500,6 +1507,14 @@ namespace DriverScanTester
             /// Kept short enough that a bounded spatial-coverage sweep stays fast.
             /// </summary>
             public const int NormalLootMouseOverSettleMs = 12;
+
+            /// <summary>
+            /// Mouseover settle time (ms) used while the loot scan re-discovers a stale item
+            /// MouseOver value. The automatic calibration hovers item candidates SLOWLY so the
+            /// game publishes the hovered value reliably before every read; normal loot keeps
+            /// its fast settle below.
+            /// </summary>
+            public const int ItemCalibrationMouseOverSettleMs = 45;
 
             /// <summary>Extra bounded mouseover re-reads after a negative normal-loot probe.</summary>
             public const int NormalLootMouseOverExtraPolls = 2;
@@ -1918,6 +1933,35 @@ namespace DriverScanTester
 
             /// <summary>Selected G9 ground-drop texture: exact painted blue channel (170).</summary>
             public const int AquamarinePixelB = 170;
+
+            /// <summary>
+            /// How many CONSECUTIVE complete loot scans that found no item must run before the
+            /// slow item MouseOver calibration is attempted. A successful automatic NPC
+            /// calibration in the same game session requests the item calibration immediately
+            /// instead (both values change together with the game launch).
+            /// </summary>
+            public const int ItemCalibrationAfterEmptyScans = 5;
+
+            /// <summary>
+            /// How many DIFFERENT item candidates must publish the same raw mouseover value
+            /// before it is accepted as the item MouseOver value. One hover (or one blob) is
+            /// never enough: the value must be consistent across different items.
+            /// </summary>
+            public const int ItemCalibrationRequiredDistinctItems = 3;
+
+            /// <summary>
+            /// Upper bound of slow calibration probes per scan attempt. When it is reached
+            /// without a confirmation the attempt ends and the scan returns to normal speed;
+            /// the next attempt needs another <see cref="ItemCalibrationAfterEmptyScans"/>
+            /// empty scans.
+            /// </summary>
+            public const int ItemCalibrationMaxProbes = 120;
+
+            /// <summary>
+            /// Minimum separation (px, per axis) between two counted item candidates. Probes
+            /// closer than this belong to the same item blob and count as one item.
+            /// </summary>
+            public const int ItemCalibrationMinItemSeparationPx = 12;
 
             /// <summary>Minimum width (px) a connected pink blob must have to be probed as a
             /// SOD/SOP drop. The painted loot square is at least 10x10 px; smaller pink

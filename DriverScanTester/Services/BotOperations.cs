@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -39,6 +39,7 @@ namespace DriverScanTester.Services
                 ["WaitForInCity"] = WaitForInCity,
                 ["GoInsideCOT"] = GoInsideCOT,
                 ["Enter_COT"] = EnterCOT,
+                ["ScanForNpc"] = ScanForNpc,
                 ["EtanaRepotUnstuck"] = EtanaRepotUnstuck,
             };
 
@@ -469,6 +470,77 @@ namespace DriverScanTester.Services
 
             ctx.Log("[Operation] Enter_COT: map did not change. Failed.");
             return false;
+        }
+
+        /// <summary>
+        /// DIAGNOSTIC NPC SCAN — runs the PRODUCTION NPC scan once, exactly as the repot
+        /// seller flow does, including the automatic MouseOver NPC calibration:
+        ///   1. fast center-outward scan with the active
+        ///      <see cref="ItemSellerService.SellerPointedValue"/>,
+        ///   2. when that finds nothing: slow discovery (stable memory reads while the cursor
+        ///      moves) + right-click/dialogue validation of each candidate, then the confirmed
+        ///      value becomes the active one,
+        ///   3. logs the active value before/after — a change means it was calibrated.
+        ///
+        /// It is meant for the Tools tab ("Test Operation — diagnostic tool"): the log shows
+        /// the '[NPC Scan]' and '[NPC Calibration]' stages, so NPC detection and calibration
+        /// can be verified without starting a workflow. A dialogue opened by the test is
+        /// closed again with Escape so the game is left in the pre-test state.
+        ///
+        /// The scan (production and diagnostic alike) sweeps the
+        /// <see cref="ItemSellerService.SellerScanStepPx"/> grid: 54 px, i.e. ~1/10 of the
+        /// points the former 17 px grid visited per sweep. That is ~10x faster but cannot
+        /// guarantee it hits a small hover zone, so a negative result does not prove that the
+        /// active value is wrong.
+        /// </summary>
+        public static async Task<bool> ScanForNpc(OperationContext ctx, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            ctx.FocusGameWindow();
+
+            int valueBefore = ItemSellerService.SellerPointedValue;
+            bool shopOpenBefore = ctx.Memory.IsShopOpen();
+            bool dialogOpenBefore = ctx.Memory.IsDialogOpen();
+
+            ctx.Log($"[Operation] ScanForNpc: starting the production NPC scan (step={ItemSellerService.SellerScanStepPx}px ≈ 1/10 of the former 17 px scan points; active MouseOver NPC value {MouseOverValueDiscovery.Describe(valueBefore)}, automatic calibration enabled). Switching the game window away stops it (the same stop mechanism the workflow uses).");
+
+            // ScanAndRightClickNpc is a blocking, mouse-driven routine (fast scan + slow
+            // discovery). Run it off the calling (UI) thread so the log and the Tools tab
+            // stay responsive while it sweeps the game window.
+            bool found = await Task.Run(
+                () => ctx.ItemSeller.ScanAndRightClickNpc(),
+                token);
+
+            int valueAfter = ItemSellerService.SellerPointedValue;
+            bool calibrated = valueAfter != valueBefore;
+            bool dialogOpenAfter = ctx.Memory.IsDialogOpen();
+
+            if (shopOpenBefore)
+            {
+                ctx.Log($"[Operation] ScanForNpc: a shop/NPC window was already open before the test, so the scan was skipped (same behaviour as the workflow). Active MouseOver NPC value: {MouseOverValueDiscovery.Describe(valueAfter)}.");
+                return true;
+            }
+
+            if (found)
+            {
+                ctx.Log(calibrated
+                    ? $"[Operation] ScanForNpc: NPC found and right-clicked. IsDialogOpen={dialogOpenAfter}. MouseOver NPC value CALIBRATED: {MouseOverValueDiscovery.Describe(valueBefore)} -> {MouseOverValueDiscovery.Describe(valueAfter)}."
+                    : $"[Operation] ScanForNpc: NPC found and right-clicked. IsDialogOpen={dialogOpenAfter}. Active MouseOver NPC value unchanged: {MouseOverValueDiscovery.Describe(valueAfter)}.");
+            }
+            else
+            {
+                ctx.Log($"[Operation] ScanForNpc: NPC NOT found with the active value and calibration did not confirm a new one. Active MouseOver NPC value: {MouseOverValueDiscovery.Describe(valueAfter)}. See the '[NPC Scan]' and '[NPC Calibration]' lines above for the failure details.");
+            }
+
+            // Leave the game as it was: close ONLY the dialogue this test opened (Escape —
+            // the existing UI mechanism; never a click, which could move the character).
+            if (!dialogOpenBefore && dialogOpenAfter && !ctx.Memory.IsShopOpen())
+            {
+                ctx.Log("[Operation] ScanForNpc: closing the NPC dialogue opened by the test (Escape).");
+                GameInput.PressKey(GameInput.VK_ESCAPE, GameInput.SCAN_ESCAPE);
+            }
+
+            return found;
         }
 
         /// <summary>
