@@ -285,10 +285,10 @@ namespace DriverScanTester
         }
 
         // ════════════════════════════════════════════════════════════════
-        //  SORCERER MANA SKILL — automatic mana restoration (key 6)
+        //  MANA REGEN — automatic Sorcerer mana restoration (key 6)
         // ════════════════════════════════════════════════════════════════
         /// <summary>
-        /// Sorcerer/Mage automatic mana restoration during EXP hunting. The skill is cast
+        /// Mana regen — automatic Sorcerer/Mage mana restoration during EXP hunting. The skill is cast
         /// with key 6, but ONLY after the existing enemy check finished WITHOUT acquiring a
         /// monster — never during combat, a pending retarget scan, loot collection/scanning,
         /// mob grouping, recovery, travel, repot or city operations.
@@ -296,10 +296,10 @@ namespace DriverScanTester
         /// HOTKEY CONFLICT: key 6 is also the red speed potion of every non-mage class, the
         /// key the mage white-potion auto-detection may switch to, and the town teleport of
         /// any profile whose <c>TeleportKey</c> is 0x36 ('6'). The game must bind the
-        /// Sorcerer mana skill to 6 and the town teleport to a DIFFERENT hotkey (the shipped
+        /// mana regen skill to 6 and the town teleport to a DIFFERENT hotkey (the shipped
         /// profiles use 0x38 = '8'); the existing teleport/recovery logic is unchanged.
         /// </summary>
-        public static class SorcererManaSkill
+        public static class ManaRegen
         {
             /// <summary>
             /// Fraction of maximum mana below which the skill is cast. The condition is

@@ -10,7 +10,7 @@ using Xunit;
 namespace DriverScanTester.Tests
 {
     /// <summary>
-    /// Sorcerer/Mage automatic mana skill (key 6) for the EXP hunting loop.
+    /// Mana regen — Sorcerer/Mage automatic mana skill (key 6) for the EXP hunting loop.
     ///
     /// The feature is enabled only when ALL of the following hold:
     ///   • the run is the workflow ExpLoop step (<see cref="MovementSystem.ExpHuntLoopMode"/>,
@@ -22,7 +22,7 @@ namespace DriverScanTester.Tests
     ///     evaluated on the following tick), no retarget scan is pending, no loot/grouping/
     ///     recovery owns the input, and the 5-second cooldown elapsed.
     /// </summary>
-    public sealed class SorcererManaSkillTests
+    public sealed class ManaRegenTests
     {
         private const ulong ModuleBase = 0;
         private const ulong PlayerBase = 0x100000;
@@ -31,20 +31,20 @@ namespace DriverScanTester.Tests
         // ── 1. the happy path ─────────────────────────────────────────────────
 
         [Fact]
-        public async Task Sorcerer_LowMana_NoEnemyAfterCompletedTargetCheck_PressesKey6Once()
+        public async Task ManaRegen_LowMana_NoEnemyAfterCompletedTargetCheck_PressesKey6Once()
         {
             var memory = new Memory { Mana = 40, MaxMana = 100 };
             var rig = new Rig(memory.Create());
 
-            rig.ArmSorcererManaCastOpportunity("TAB target cycle");
-            bool consumed = await rig.TryCastSorcererManaSkillAsync(CancellationToken.None);
+            rig.ArmManaRegenCastOpportunity("TAB target cycle");
+            bool consumed = await rig.TryCastManaRegenAsync(CancellationToken.None);
 
             Assert.True(consumed);
             Assert.Equal(1, rig.KeyPressCount);
         }
 
         [Fact]
-        public async Task Sorcerer_FinalWaypointStandby_LowMana_PressesKey6Once()
+        public async Task ManaRegen_FinalWaypointStandby_LowMana_PressesKey6Once()
         {
             var memory = new Memory { Mana = 40, MaxMana = 100 };
             var rig = new Rig(memory.Create(), BotMode.MoveAndAttackAndLoot);
@@ -53,8 +53,8 @@ namespace DriverScanTester.Tests
             SetPrivateField(rig, "_finalStandbyX", 5000f);
             SetPrivateField(rig, "_finalStandbyY", 5000f);
 
-            rig.ArmSorcererManaCastOpportunity("TAB target cycle in final standby");
-            bool consumed = await rig.TryCastSorcererManaSkillAsync(CancellationToken.None);
+            rig.ArmManaRegenCastOpportunity("TAB target cycle in final standby");
+            bool consumed = await rig.TryCastManaRegenAsync(CancellationToken.None);
 
             Assert.True(consumed);
             Assert.Equal(1, rig.KeyPressCount);
@@ -63,17 +63,17 @@ namespace DriverScanTester.Tests
         // ── 2. mana threshold ─────────────────────────────────────────────────
 
         [Fact]
-        public async Task Sorcerer_SufficientMana_DoesNotCast()
+        public async Task ManaRegen_SufficientMana_DoesNotCast()
         {
             var memory = new Memory { Mana = 60, MaxMana = 100 };
             var rig = new Rig(memory.Create());
 
-            rig.ArmSorcererManaCastOpportunity("TAB target cycle");
-            bool consumed = await rig.TryCastSorcererManaSkillAsync(CancellationToken.None);
+            rig.ArmManaRegenCastOpportunity("TAB target cycle");
+            bool consumed = await rig.TryCastManaRegenAsync(CancellationToken.None);
 
             Assert.False(consumed);
             Assert.Equal(0, rig.KeyPressCount);
-            Assert.False(rig.TryEvaluateSorcererManaCastEligibility(out _));
+            Assert.False(rig.TryEvaluateManaRegenCastEligibility(out _));
         }
 
         [Theory]
@@ -84,7 +84,7 @@ namespace DriverScanTester.Tests
         [InlineData(100, 200, false)] // exactly 50% → no cast
         public void ManaThreshold_IsHalfOfMaxMana(int currentMana, int maxMana, bool expected)
         {
-            Assert.Equal(expected, MovementSystem.IsSorcererManaCastEligible(
+            Assert.Equal(expected, MovementSystem.IsManaRegenCastEligible(
                 expHuntLoopMode: true,
                 effectiveMode: BotMode.MoveAndAttack,
                 playerClass: PlayerClass.Mage,
@@ -96,25 +96,25 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void SorcererManaSkillConstants_AreConfiguredAsSpecified()
+        public void ManaRegenConstants_AreConfiguredAsSpecified()
         {
-            Assert.Equal(0.5, BotConstants.SorcererManaSkill.ManaThresholdFraction);
-            Assert.Equal(5_000, BotConstants.SorcererManaSkill.CooldownMs);
-            Assert.Equal(BotConstants.Rebuff.StopMovementSettleMs, BotConstants.SorcererManaSkill.StopMovementSettleMs);
-            Assert.Equal(BotConstants.Rebuff.PostCastSettleMs, BotConstants.SorcererManaSkill.PostCastSettleMs);
-            Assert.True(BotConstants.SorcererManaSkill.OpportunityMaxAgeMs > 0);
+            Assert.Equal(0.5, BotConstants.ManaRegen.ManaThresholdFraction);
+            Assert.Equal(5_000, BotConstants.ManaRegen.CooldownMs);
+            Assert.Equal(BotConstants.Rebuff.StopMovementSettleMs, BotConstants.ManaRegen.StopMovementSettleMs);
+            Assert.Equal(BotConstants.Rebuff.PostCastSettleMs, BotConstants.ManaRegen.PostCastSettleMs);
+            Assert.True(BotConstants.ManaRegen.OpportunityMaxAgeMs > 0);
         }
 
         // ── 3. enemy detection has priority ───────────────────────────────────
 
         [Fact]
-        public async Task Sorcerer_LowMana_EnemyAcquired_AttacksInsteadOfCasting()
+        public async Task ManaRegen_LowMana_EnemyAcquired_AttacksInsteadOfCasting()
         {
             var memory = new Memory { Mana = 40, MaxMana = 100, TargetId = MonsterTargetId };
             var rig = new Rig(memory.Create());
 
-            rig.ArmSorcererManaCastOpportunity("TAB target cycle");
-            bool consumed = await rig.TryCastSorcererManaSkillAsync(CancellationToken.None);
+            rig.ArmManaRegenCastOpportunity("TAB target cycle");
+            bool consumed = await rig.TryCastManaRegenAsync(CancellationToken.None);
 
             Assert.False(consumed);
             Assert.Equal(0, rig.KeyPressCount);
@@ -124,11 +124,11 @@ namespace DriverScanTester.Tests
         public void EnemyPresentGate_BlocksTheCast()
         {
             Assert.Equal(
-                MovementSystem.SorcererManaCastGate.EnemyPresent,
-                MovementSystem.EvaluateSorcererManaCastGate(
+                MovementSystem.ManaRegenCastGate.EnemyPresent,
+                MovementSystem.EvaluateManaRegenCastGate(
                     opportunityArmed: true,
                     opportunityAge: TimeSpan.FromMilliseconds(100),
-                    maxOpportunityAgeMs: BotConstants.SorcererManaSkill.OpportunityMaxAgeMs,
+                    maxOpportunityAgeMs: BotConstants.ManaRegen.OpportunityMaxAgeMs,
                     contextChanged: false,
                     enemyPresent: true,
                     searchPending: false,
@@ -152,8 +152,8 @@ namespace DriverScanTester.Tests
             };
             var rig = new Rig(memory.Create());
 
-            rig.ArmSorcererManaCastOpportunity("TAB target cycle");
-            bool consumed = await rig.TryCastSorcererManaSkillAsync(CancellationToken.None);
+            rig.ArmManaRegenCastOpportunity("TAB target cycle");
+            bool consumed = await rig.TryCastManaRegenAsync(CancellationToken.None);
 
             Assert.False(consumed);
             Assert.Equal(0, rig.KeyPressCount);
@@ -165,11 +165,11 @@ namespace DriverScanTester.Tests
         public void PendingRetargetSearch_BlocksTheCast()
         {
             Assert.Equal(
-                MovementSystem.SorcererManaCastGate.SearchPending,
-                MovementSystem.EvaluateSorcererManaCastGate(
+                MovementSystem.ManaRegenCastGate.SearchPending,
+                MovementSystem.EvaluateManaRegenCastGate(
                     opportunityArmed: true,
                     opportunityAge: TimeSpan.FromMilliseconds(100),
-                    maxOpportunityAgeMs: BotConstants.SorcererManaSkill.OpportunityMaxAgeMs,
+                    maxOpportunityAgeMs: BotConstants.ManaRegen.OpportunityMaxAgeMs,
                     contextChanged: false,
                     enemyPresent: false,
                     searchPending: true,
@@ -184,10 +184,10 @@ namespace DriverScanTester.Tests
             var memory = new Memory { Mana = 40, MaxMana = 100 };
             var rig = new Rig(memory.Create());
 
-            rig.ArmSorcererManaCastOpportunity("TAB target cycle");
+            rig.ArmManaRegenCastOpportunity("TAB target cycle");
             rig.StartCombatRetargetSearch();
 
-            bool consumed = await rig.TryCastSorcererManaSkillAsync(CancellationToken.None);
+            bool consumed = await rig.TryCastManaRegenAsync(CancellationToken.None);
 
             Assert.False(consumed);
             Assert.Equal(0, rig.KeyPressCount);
@@ -199,11 +199,11 @@ namespace DriverScanTester.Tests
         public void LootOrMobGroupingOwnership_BlocksTheCast()
         {
             Assert.Equal(
-                MovementSystem.SorcererManaCastGate.LootOrGroupingOwnsInput,
-                MovementSystem.EvaluateSorcererManaCastGate(
+                MovementSystem.ManaRegenCastGate.LootOrGroupingOwnsInput,
+                MovementSystem.EvaluateManaRegenCastGate(
                     opportunityArmed: true,
                     opportunityAge: TimeSpan.FromMilliseconds(100),
-                    maxOpportunityAgeMs: BotConstants.SorcererManaSkill.OpportunityMaxAgeMs,
+                    maxOpportunityAgeMs: BotConstants.ManaRegen.OpportunityMaxAgeMs,
                     contextChanged: false,
                     enemyPresent: false,
                     searchPending: false,
@@ -216,11 +216,11 @@ namespace DriverScanTester.Tests
         public void RecoveryOwnership_BlocksTheCast()
         {
             Assert.Equal(
-                MovementSystem.SorcererManaCastGate.RecoveryOwnsInput,
-                MovementSystem.EvaluateSorcererManaCastGate(
+                MovementSystem.ManaRegenCastGate.RecoveryOwnsInput,
+                MovementSystem.EvaluateManaRegenCastGate(
                     opportunityArmed: true,
                     opportunityAge: TimeSpan.FromMilliseconds(100),
-                    maxOpportunityAgeMs: BotConstants.SorcererManaSkill.OpportunityMaxAgeMs,
+                    maxOpportunityAgeMs: BotConstants.ManaRegen.OpportunityMaxAgeMs,
                     contextChanged: false,
                     enemyPresent: false,
                     searchPending: false,
@@ -238,7 +238,7 @@ namespace DriverScanTester.Tests
         [InlineData(PlayerClass.Unknown)]
         public void OtherClasses_NeverCast(PlayerClass playerClass)
         {
-            Assert.False(MovementSystem.IsSorcererManaCastEligible(
+            Assert.False(MovementSystem.IsManaRegenCastEligible(
                 expHuntLoopMode: true,
                 effectiveMode: BotMode.MoveAndAttack,
                 playerClass: playerClass,
@@ -255,12 +255,12 @@ namespace DriverScanTester.Tests
             var memory = new Memory { Mana = 10, MaxMana = 100 };
             var rig = new Rig(memory.Create(), BotMode.OnlyMove);
 
-            rig.ArmSorcererManaCastOpportunity("TAB target cycle");
-            bool consumed = await rig.TryCastSorcererManaSkillAsync(CancellationToken.None);
+            rig.ArmManaRegenCastOpportunity("TAB target cycle");
+            bool consumed = await rig.TryCastManaRegenAsync(CancellationToken.None);
 
             Assert.False(consumed);
             Assert.Equal(0, rig.KeyPressCount);
-            Assert.False(rig.TryEvaluateSorcererManaCastEligibility(out _));
+            Assert.False(rig.TryEvaluateManaRegenCastEligibility(out _));
         }
 
         [Fact]
@@ -270,12 +270,12 @@ namespace DriverScanTester.Tests
             var memory = new Memory { Mana = 10, MaxMana = 100 };
             var rig = new Rig(memory.Create(), BotMode.MoveAndAttack, expHuntLoop: false, loopPath: true);
 
-            rig.ArmSorcererManaCastOpportunity("TAB target cycle");
-            bool consumed = await rig.TryCastSorcererManaSkillAsync(CancellationToken.None);
+            rig.ArmManaRegenCastOpportunity("TAB target cycle");
+            bool consumed = await rig.TryCastManaRegenAsync(CancellationToken.None);
 
             Assert.False(consumed);
             Assert.Equal(0, rig.KeyPressCount);
-            Assert.False(MovementSystem.IsSorcererManaCastEligible(
+            Assert.False(MovementSystem.IsManaRegenCastEligible(
                 expHuntLoopMode: false,
                 effectiveMode: BotMode.MoveAndAttack,
                 playerClass: PlayerClass.Mage,
@@ -294,7 +294,7 @@ namespace DriverScanTester.Tests
             var memory = new Memory { ClassValue = null, Mana = 10, MaxMana = 100 };
             var rig = new Rig(memory.Create());
 
-            Assert.False(rig.TryEvaluateSorcererManaCastEligibility(out _));
+            Assert.False(rig.TryEvaluateManaRegenCastEligibility(out _));
         }
 
         [Fact]
@@ -303,7 +303,7 @@ namespace DriverScanTester.Tests
             var memory = new Memory { Mana = null, MaxMana = 100 };
             var rig = new Rig(memory.Create());
 
-            Assert.False(rig.TryEvaluateSorcererManaCastEligibility(out _));
+            Assert.False(rig.TryEvaluateManaRegenCastEligibility(out _));
         }
 
         [Fact]
@@ -312,7 +312,7 @@ namespace DriverScanTester.Tests
             var memory = new Memory { Mana = 10, MaxMana = null };
             var rig = new Rig(memory.Create());
 
-            Assert.False(rig.TryEvaluateSorcererManaCastEligibility(out _));
+            Assert.False(rig.TryEvaluateManaRegenCastEligibility(out _));
         }
 
         [Theory]
@@ -320,7 +320,7 @@ namespace DriverScanTester.Tests
         [InlineData(-5)]
         public void InvalidMaxMana_NeverCasts(int maxMana)
         {
-            Assert.False(MovementSystem.IsSorcererManaCastEligible(
+            Assert.False(MovementSystem.IsManaRegenCastEligible(
                 expHuntLoopMode: true,
                 effectiveMode: BotMode.MoveAndAttack,
                 playerClass: PlayerClass.Mage,
@@ -337,10 +337,10 @@ namespace DriverScanTester.Tests
             var memory = new Memory { Hp = 0, Mana = 40, MaxMana = 100 };
             var rig = new Rig(memory.Create());
 
-            Assert.False(rig.TryEvaluateSorcererManaCastEligibility(out _));
+            Assert.False(rig.TryEvaluateManaRegenCastEligibility(out _));
 
-            rig.ArmSorcererManaCastOpportunity("TAB target cycle");
-            bool consumed = await rig.TryCastSorcererManaSkillAsync(CancellationToken.None);
+            rig.ArmManaRegenCastOpportunity("TAB target cycle");
+            bool consumed = await rig.TryCastManaRegenAsync(CancellationToken.None);
 
             Assert.False(consumed);
             Assert.Equal(0, rig.KeyPressCount);
@@ -354,13 +354,13 @@ namespace DriverScanTester.Tests
             var memory = new Memory { Mana = 40, MaxMana = 100 };
             var rig = new Rig(memory.Create());
 
-            rig.ArmSorcererManaCastOpportunity("first TAB target cycle");
-            Assert.True(await rig.TryCastSorcererManaSkillAsync(CancellationToken.None));
+            rig.ArmManaRegenCastOpportunity("first TAB target cycle");
+            Assert.True(await rig.TryCastManaRegenAsync(CancellationToken.None));
             Assert.Equal(1, rig.KeyPressCount);
 
             // The very next eligible no-enemy opportunity is inside the 5 s cooldown.
-            rig.ArmSorcererManaCastOpportunity("second TAB target cycle");
-            Assert.False(await rig.TryCastSorcererManaSkillAsync(CancellationToken.None));
+            rig.ArmManaRegenCastOpportunity("second TAB target cycle");
+            Assert.False(await rig.TryCastManaRegenAsync(CancellationToken.None));
             Assert.Equal(1, rig.KeyPressCount);
         }
 
@@ -368,11 +368,11 @@ namespace DriverScanTester.Tests
         public void CooldownGate_AllowsTheNextAttemptOnceElapsed()
         {
             Assert.Equal(
-                MovementSystem.SorcererManaCastGate.CooldownActive,
-                MovementSystem.EvaluateSorcererManaCastGate(
+                MovementSystem.ManaRegenCastGate.CooldownActive,
+                MovementSystem.EvaluateManaRegenCastGate(
                     opportunityArmed: true,
                     opportunityAge: TimeSpan.FromMilliseconds(100),
-                    maxOpportunityAgeMs: BotConstants.SorcererManaSkill.OpportunityMaxAgeMs,
+                    maxOpportunityAgeMs: BotConstants.ManaRegen.OpportunityMaxAgeMs,
                     contextChanged: false,
                     enemyPresent: false,
                     searchPending: false,
@@ -381,11 +381,11 @@ namespace DriverScanTester.Tests
                     cooldownElapsed: false));
 
             Assert.Equal(
-                MovementSystem.SorcererManaCastGate.Ready,
-                MovementSystem.EvaluateSorcererManaCastGate(
+                MovementSystem.ManaRegenCastGate.Ready,
+                MovementSystem.EvaluateManaRegenCastGate(
                     opportunityArmed: true,
                     opportunityAge: TimeSpan.FromMilliseconds(100),
-                    maxOpportunityAgeMs: BotConstants.SorcererManaSkill.OpportunityMaxAgeMs,
+                    maxOpportunityAgeMs: BotConstants.ManaRegen.OpportunityMaxAgeMs,
                     contextChanged: false,
                     enemyPresent: false,
                     searchPending: false,
@@ -400,11 +400,11 @@ namespace DriverScanTester.Tests
         public void ExpiredOrSupersededOpportunity_NeverCasts()
         {
             Assert.Equal(
-                MovementSystem.SorcererManaCastGate.Expired,
-                MovementSystem.EvaluateSorcererManaCastGate(
+                MovementSystem.ManaRegenCastGate.Expired,
+                MovementSystem.EvaluateManaRegenCastGate(
                     opportunityArmed: true,
-                    opportunityAge: TimeSpan.FromMilliseconds(BotConstants.SorcererManaSkill.OpportunityMaxAgeMs + 1),
-                    maxOpportunityAgeMs: BotConstants.SorcererManaSkill.OpportunityMaxAgeMs,
+                    opportunityAge: TimeSpan.FromMilliseconds(BotConstants.ManaRegen.OpportunityMaxAgeMs + 1),
+                    maxOpportunityAgeMs: BotConstants.ManaRegen.OpportunityMaxAgeMs,
                     contextChanged: false,
                     enemyPresent: false,
                     searchPending: false,
@@ -413,11 +413,11 @@ namespace DriverScanTester.Tests
                     cooldownElapsed: true));
 
             Assert.Equal(
-                MovementSystem.SorcererManaCastGate.ContextChanged,
-                MovementSystem.EvaluateSorcererManaCastGate(
+                MovementSystem.ManaRegenCastGate.ContextChanged,
+                MovementSystem.EvaluateManaRegenCastGate(
                     opportunityArmed: true,
                     opportunityAge: TimeSpan.FromMilliseconds(100),
-                    maxOpportunityAgeMs: BotConstants.SorcererManaSkill.OpportunityMaxAgeMs,
+                    maxOpportunityAgeMs: BotConstants.ManaRegen.OpportunityMaxAgeMs,
                     contextChanged: true,
                     enemyPresent: false,
                     searchPending: false,
@@ -426,11 +426,11 @@ namespace DriverScanTester.Tests
                     cooldownElapsed: true));
 
             Assert.Equal(
-                MovementSystem.SorcererManaCastGate.NotArmed,
-                MovementSystem.EvaluateSorcererManaCastGate(
+                MovementSystem.ManaRegenCastGate.NotArmed,
+                MovementSystem.EvaluateManaRegenCastGate(
                     opportunityArmed: false,
                     opportunityAge: TimeSpan.Zero,
-                    maxOpportunityAgeMs: BotConstants.SorcererManaSkill.OpportunityMaxAgeMs,
+                    maxOpportunityAgeMs: BotConstants.ManaRegen.OpportunityMaxAgeMs,
                     contextChanged: false,
                     enemyPresent: false,
                     searchPending: false,
@@ -445,11 +445,11 @@ namespace DriverScanTester.Tests
             var memory = new Memory { Mana = 40, MaxMana = 100 };
             var rig = new Rig(memory.Create(), BotMode.MoveAndAttackAndLoot);
 
-            rig.ArmSorcererManaCastOpportunity("TAB target cycle");
+            rig.ArmManaRegenCastOpportunity("TAB target cycle");
             // The route moved on to an OnlyMove waypoint before the opportunity was evaluated.
             rig.ReplaceWaypointForTest(new Waypoint(6000, 6000, MovementPrecision.Medium, BotMode.OnlyMove));
 
-            bool consumed = await rig.TryCastSorcererManaSkillAsync(CancellationToken.None);
+            bool consumed = await rig.TryCastManaRegenAsync(CancellationToken.None);
 
             Assert.False(consumed);
             Assert.Equal(0, rig.KeyPressCount);
@@ -463,8 +463,8 @@ namespace DriverScanTester.Tests
             var memory = new Memory { Mana = 40, MaxMana = 100 };
             var rig = new Rig(memory.Create());
 
-            rig.ArmSorcererManaCastOpportunity("TAB target cycle");
-            Assert.True(await rig.TryCastSorcererManaSkillAsync(CancellationToken.None));
+            rig.ArmManaRegenCastOpportunity("TAB target cycle");
+            Assert.True(await rig.TryCastManaRegenAsync(CancellationToken.None));
 
             // The attack key is not held and the movement input was released.
             Assert.False(rig.IsAttackKeyHeld);
@@ -472,13 +472,13 @@ namespace DriverScanTester.Tests
 
             // The opportunity is consumed: the next tick without a new enemy check does not
             // press 6 again (and no cooldown-less repeat can happen).
-            Assert.False(await rig.TryCastSorcererManaSkillAsync(CancellationToken.None));
+            Assert.False(await rig.TryCastManaRegenAsync(CancellationToken.None));
             Assert.Equal(1, rig.KeyPressCount);
 
             // Mana recovered above the threshold → the next opportunity is a no-op.
             memory.Mana = 90;
-            rig.ArmSorcererManaCastOpportunity("TAB target cycle after mana recovery");
-            Assert.False(await rig.TryCastSorcererManaSkillAsync(CancellationToken.None));
+            rig.ArmManaRegenCastOpportunity("TAB target cycle after mana recovery");
+            Assert.False(await rig.TryCastManaRegenAsync(CancellationToken.None));
             Assert.Equal(1, rig.KeyPressCount);
         }
 
@@ -517,7 +517,7 @@ namespace DriverScanTester.Tests
                 queue.Enqueue(waypoint);
             }
 
-            protected override void SendSorcererManaSkillKey() => KeyPressCount++;
+            protected override void SendManaRegenKey() => KeyPressCount++;
 
             protected override void SendSkillThreeKeyEvent(bool keyUp) { }
             protected override void SendSyntheticForwardKeyEvent(bool keyUp) { }
@@ -525,7 +525,7 @@ namespace DriverScanTester.Tests
         }
 
         /// <summary>
-        /// Memory stub for the Sorcerer mana skill: player pointer, class, HP/max HP,
+        /// Memory stub for the mana regen skill: player pointer, class, HP/max HP,
         /// mana/max mana and the selected target id, each with an explicit "unreadable"
         /// switch (null) so a failed read can never look like a valid zero.
         /// </summary>

@@ -1587,7 +1587,7 @@ namespace DriverScanTester.Services
                 ignoreAlliancePlayers: _profile.IgnoreAlliancePlayers,
                 ignoreEmpirePlayers: _profile.IgnoreEmpirePlayers,
                 // Explicit EXP-loop flag: this is the only call site that enables the
-                // Sorcerer automatic mana skill (key 6). Travel, repot, city and recovery
+                // Mana regen (key 6). Travel, repot, city and recovery
                 // routes never pass it, regardless of their loop flag.
                 expHuntLoop: true);
 

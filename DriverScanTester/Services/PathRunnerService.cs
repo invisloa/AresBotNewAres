@@ -92,7 +92,7 @@ namespace DriverScanTester.Services
         /// <param name="expHuntLoop">Explicit EXP-loop flag. True only when the active workflow
         /// step is <c>ExpLoop</c> (BotWorkflowCoordinator.ExecuteExpLoopStepAsync). It is passed
         /// to <see cref="MovementSystem.ExpHuntLoopMode"/> and is the only switch that can
-        /// enable the Sorcerer automatic mana skill (key 6) — a looped travel route is never
+        /// enable the mana regen skill (key 6) — a looped travel route is never
         /// EXP hunting, so this is never inferred from <c>loop</c>.</param>
         /// <returns>True if the path completed normally (non-loop); false if cancelled.</returns>
         public async Task<bool> RunPathAsync(
@@ -149,7 +149,7 @@ namespace DriverScanTester.Services
                     DisableAllLootOverride = disableAllLoot,
                     IgnoreAlliancePlayersOverride = ignoreAlliancePlayers,
                     IgnoreEmpirePlayersOverride = ignoreEmpirePlayers,
-                    // Explicit EXP-loop flag: enables the Sorcerer automatic mana skill only
+                    // Explicit EXP-loop flag: enables the mana regen skill only
                     // for the workflow ExpLoop step with a combat waypoint mode.
                     ExpHuntLoopMode = expHuntLoop
                 };
