@@ -8,12 +8,13 @@ namespace DriverScanTester.Services
     /// the NPC slow discovery).
     ///
     /// The loot scan cannot prove "this is an item" with a dialogue like the NPC scan can,
-    /// and not every hovered pixel is an item. The accepted proof used here is
-    /// CONSISTENCY: the raw value published while the cursor hovers item-like candidates
-    /// (the normal loot pixel classifiers) must be the SAME value on several DIFFERENT
-    /// items. A value seen on <see cref="RequiredDistinctItems"/> distinct item candidates
-    /// is therefore treated as the item MouseOver value; a single hover (or a value that
-    /// only ever appears on one blob) is never accepted.
+    /// and not every hovered pixel is an item. This class collects the probes of ONE loot
+    /// scan and offers two kinds of evidence:
+    ///  - the SAME value on several DIFFERENT items within this scan (fast path), and
+    ///  - the dominant value of the whole scan, which the caller feeds into
+    ///    <see cref="ItemMouseOverScanAgreement"/> so the same value may also be confirmed
+    ///    across SEVERAL scans (one per kill / bot run). A single hover (or a value that
+    ///    only ever appears on one blob) is never accepted on its own.
     ///
     /// Probes whose anchor is closer than <see cref="MinItemSeparationPx"/> to an anchor
     /// that already counted for the same value are the same item (many probe pixels per
@@ -33,6 +34,8 @@ namespace DriverScanTester.Services
         public const int DefaultMinItemSeparationPx = 12;
 
         private readonly Dictionary<int, List<(int X, int Y)>> _anchorsByValue = new();
+        private readonly Dictionary<int, int> _observationCountsByValue = new();
+        private readonly List<int> _valueOrder = new();
         private readonly int _requiredDistinctItems;
         private readonly int _maxObservations;
         private readonly int _minItemSeparationPx;
@@ -100,7 +103,11 @@ namespace DriverScanTester.Services
             {
                 anchors = new List<(int X, int Y)>(_requiredDistinctItems);
                 _anchorsByValue[hoveredValue] = anchors;
+                _valueOrder.Add(hoveredValue);
             }
+
+            _observationCountsByValue[hoveredValue] =
+                (_observationCountsByValue.TryGetValue(hoveredValue, out int observations) ? observations : 0) + 1;
 
             foreach ((int X, int Y) anchor in anchors)
             {
@@ -117,6 +124,55 @@ namespace DriverScanTester.Services
                 return false;
 
             ConfirmedValue = hoveredValue;
+            return true;
+        }
+
+        /// <summary>How many probes published this value during this scan.</summary>
+        public int ObservationCountFor(int value)
+            => _observationCountsByValue.TryGetValue(value, out int count) ? count : 0;
+
+        /// <summary>
+        /// The single value that best represents THIS scan: the value seen on the most
+        /// distinct item candidates (ties broken by the most probes). Returns false when no
+        /// non-zero value was observed or when two values are equally strong — an ambiguous
+        /// scan must not cast a cross-scan vote.
+        ///
+        /// This is what allows one-item scans to participate in the cross-scan agreement
+        /// (<see cref="ItemMouseOverScanAgreement"/>) instead of requiring three different
+        /// items in the same scan.
+        /// </summary>
+        public bool TryGetDominantValue(out int value)
+        {
+            value = 0;
+            int bestItemCount = 0;
+            int bestObservationCount = 0;
+            bool ambiguous = false;
+
+            foreach (int candidate in _valueOrder)
+            {
+                int itemCount = DistinctItemCountFor(candidate);
+                int observationCount = ObservationCountFor(candidate);
+
+                if (itemCount > bestItemCount ||
+                    (itemCount == bestItemCount && observationCount > bestObservationCount))
+                {
+                    value = candidate;
+                    bestItemCount = itemCount;
+                    bestObservationCount = observationCount;
+                    ambiguous = false;
+                }
+                else if (itemCount == bestItemCount && observationCount == bestObservationCount)
+                {
+                    ambiguous = true;
+                }
+            }
+
+            if (ambiguous || value == 0)
+            {
+                value = 0;
+                return false;
+            }
+
             return true;
         }
 

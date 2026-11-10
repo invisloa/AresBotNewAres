@@ -482,6 +482,18 @@ namespace DriverScanTester.Tests
         private static void RunMandatoryService(LootSystem loot, bool mobSelected = false)
             => InvokePrivate(loot, "ServiceMandatoryLootRequest", mobSelected);
 
+        /// <summary>
+        /// Simulates the post-kill SOD/SOP pass finishing without a collected drop. The pink
+        /// request must be consumed before the close-mob TAB search (which decides whether
+        /// normal items may be looted) can start.
+        /// </summary>
+        private static void FinishPostKillSodSopPassWithNoDrop(LootSystem loot)
+        {
+            Assert.True(loot.IsPinkScanPendingOrActive);
+            InvokePrivate(loot, "CancelPinkScanWork", "test: SOD/SOP pass finished with no drop");
+            Assert.False(loot.IsPinkScanPendingOrActive);
+        }
+
         private static void CompleteMandatory(
             LootSystem loot, long requestId, LootScanPassOutcome outcome)
             => InvokePrivate(loot, "CompleteMandatoryLootRequest", requestId, outcome);
@@ -971,6 +983,166 @@ namespace DriverScanTester.Tests
 
             loot.PinkLootOnlyMode = false;
             Assert.False(loot.IsPinkScanPendingOrActive);
+
+            // MoveAndAttackAndLoot runs the same SOD/SOP pass first after every kill: those
+            // drops are collected even when mobs are around.
+            using var lootWithNormalLoot = CreateLoot(_ => { });
+            lootWithNormalLoot.MoveAndAttackAndLootMode = true;
+            lootWithNormalLoot.RequestPinkScan();
+            Assert.True(lootWithNormalLoot.IsPinkScanPendingOrActive);
+            Assert.False(lootWithNormalLoot.IsLootCycleActive);
+
+            // The host pushes the per-waypoint flags on every loot tick; that push must not
+            // cancel the MoveAndAttackAndLoot post-kill SOD/SOP request.
+            lootWithNormalLoot.PinkLootOnlyMode = false;
+            Assert.True(lootWithNormalLoot.IsPinkScanPendingOrActive);
+
+            // Leaving the waypoint mode cancels the outstanding pink work.
+            lootWithNormalLoot.MoveAndAttackAndLootMode = false;
+            Assert.False(lootWithNormalLoot.IsPinkScanPendingOrActive);
+        }
+
+        [Fact]
+        public void PostKillNormalLootIsWithheldWhileTheCloseMobCheckIsOutstanding()
+        {
+            using var loot = CreateLoot(_ => { });
+            loot.MoveAndAttackAndLootMode = true;
+
+            bool closeMobCheckOutstanding = true;
+            loot.ShouldWithholdPostKillNormalLoot = () => closeMobCheckOutstanding;
+
+            long postKillId = loot.BeginMandatoryLootRequest(LootBarrierReason.PostKill);
+            loot.NotifyNavigationHeld(postKillId);
+            RunMandatoryService(loot);
+
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(postKillId, out LootRequestStatus withheld));
+            Assert.Equal(LootRequestState.Deferred, withheld.State);
+            Assert.True(loot.HasActiveMandatoryLootRequest);
+
+            // A travel-candidate verification is not part of the post-kill order.
+            loot.CancelMandatoryLootRequest(postKillId, "test: post-kill obligation replaced");
+            long travelId = loot.BeginMandatoryLootRequest(LootBarrierReason.TravelCandidateVerification);
+            loot.NotifyNavigationHeld(travelId);
+            RunMandatoryService(loot);
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(travelId, out LootRequestStatus travel));
+            Assert.Equal(LootRequestState.Running, travel.State);
+
+            // The close-mob check finished without a mob → the normal item cycle runs.
+            closeMobCheckOutstanding = false;
+            loot.CancelMandatoryLootRequest(travelId, "test: travel verification finished");
+            long releasedId = loot.BeginMandatoryLootRequest(LootBarrierReason.PostKill);
+            loot.NotifyNavigationHeld(releasedId);
+            RunMandatoryService(loot);
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(releasedId, out LootRequestStatus running));
+            Assert.Equal(LootRequestState.Running, running.State);
+        }
+
+        [Fact]
+        public async Task PostKillCloseMobCheckIsSkippedWhenTheWaypointAttackIsDisengaged()
+        {
+            bool groupingWasEnabled = MobGroupingRuntimeSettings.Enabled;
+            try
+            {
+                MobGroupingRuntimeSettings.Enabled = false;
+                using var scenario = CreateRetargetScenario();
+                object handler = typeof(MovementSystem).GetField("_combatHandler", PrivateInstance)!
+                    .GetValue(scenario.Movement)!;
+                SetPrivateField(handler, "_wasAttacking", true);
+
+                // 1. The kill happens while the player is still inside the attack boundary.
+                scenario.Memory.X = 0;
+                await scenario.Movement.Update(CancellationToken.None);
+                Assert.True(scenario.Movement.IsPostKillCloseMobCheckPending);
+                Assert.True(scenario.Loot.IsPinkScanPendingOrActive);
+
+                FinishPostKillSodSopPassWithNoDrop(scenario.Loot);
+
+                // 2. The player is now outside the waypoint's attack-disengage boundary (AtkDis 60),
+                // so the CombatGate disabled the attack until the waypoint is reached. A TAB target
+                // search cannot run in that state (the pipeline clears it every tick), which used to
+                // re-arm the same ladder start forever: the bot stood still while mobs hit it.
+                scenario.Memory.X = 100;
+                await scenario.Movement.Update(CancellationToken.None);
+
+                Assert.False(scenario.Movement.IsPostKillCloseMobCheckPending, string.Join("\n", scenario.Log));
+                Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+                Assert.Contains(scenario.Log, line => line.Contains(
+                    "waypoint attack is disengaged by CombatGate", StringComparison.Ordinal));
+
+                // The normal item cycle is released again so the drops next to the killed mob
+                // are looted before the bot walks on to the waypoint.
+                Assert.True(scenario.Loot.TryGetActiveMandatoryLootRequest(out long requestId, out _));
+                RunMandatoryService(scenario.Loot);
+                Assert.True(scenario.Loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus running));
+                Assert.Equal(LootRequestState.Running, running.State);
+
+                // Later ticks must never re-arm the close-mob search or repeat its start log.
+                await scenario.Movement.Update(CancellationToken.None);
+                Assert.False(scenario.Movement.IsPostKillCloseMobCheckPending);
+                Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+                Assert.Equal(0, scenario.Log.Count(line => line.Contains(
+                    "SOD/SOP pass finished — checking for nearby mobs", StringComparison.Ordinal)));
+            }
+            finally
+            {
+                MobGroupingRuntimeSettings.Enabled = groupingWasEnabled;
+            }
+        }
+
+        [Fact]
+        public async Task PostKillNormalLootStartsOnlyAfterCloseMobSearchFindsNoMob()
+        {
+            bool groupingWasEnabled = MobGroupingRuntimeSettings.Enabled;
+            try
+            {
+                MobGroupingRuntimeSettings.Enabled = false;
+                using var scenario = CreateRetargetScenario();
+                object handler = typeof(MovementSystem).GetField("_combatHandler", PrivateInstance)!
+                    .GetValue(scenario.Movement)!;
+                SetPrivateField(handler, "_wasAttacking", true);
+
+                await scenario.Movement.Update(CancellationToken.None);
+
+                Assert.True(scenario.Loot.TryGetActiveMandatoryLootRequest(out long requestId, out _));
+                Assert.True(scenario.Loot.IsPinkScanPendingOrActive);
+                Assert.True(scenario.Movement.IsPostKillCloseMobCheckPending);
+
+                // Normal items are never serviced while the mob check is outstanding.
+                RunMandatoryService(scenario.Loot);
+                Assert.True(scenario.Loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus withheld));
+                Assert.Equal(LootRequestState.Deferred, withheld.State);
+
+                FinishPostKillSodSopPassWithNoDrop(scenario.Loot);
+                await scenario.Movement.Update(CancellationToken.None);
+                Assert.Equal("VeryLowSearch", typeof(MovementSystem)
+                    .GetField("_combatRetargetCameraStage", PrivateInstance)!.GetValue(scenario.Movement)!.ToString());
+
+                // The whole very-low → low → mid ladder finds no mob.
+                scenario.Movement.OnTargetCycle = () => { };
+                for (int stage = 0; stage < 4; stage++)
+                {
+                    await InvokePrivateBoolAsync(scenario.Movement,
+                        "HandleCombatRetargetCameraStageAsync",
+                        BotMode.MoveAndAttackAndLoot, (short)17020, CancellationToken.None);
+                }
+
+                Assert.Equal(new[] { (short)16880, (short)16910, (short)16950 },
+                    scenario.Movement.TargetCycleCameraDistances);
+                Assert.False(scenario.Movement.IsPostKillCloseMobCheckPending);
+
+                // White-item loot is released only now — after the mob check.
+                RunMandatoryService(scenario.Loot);
+                Assert.True(scenario.Loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus running));
+                Assert.Equal(LootRequestState.Running, running.State);
+
+                CompleteMandatory(scenario.Loot, requestId, ValidEmptyOutcome());
+                await scenario.Movement.Update(CancellationToken.None);
+                Assert.False(scenario.Movement.IsLootNavigationBlocked);
+            }
+            finally
+            {
+                MobGroupingRuntimeSettings.Enabled = groupingWasEnabled;
+            }
         }
 
         [Fact]
@@ -1168,7 +1340,7 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public async Task FullPostKillFlowIsTargetReleaseLoot16880TabThenAuthorizedAttack()
+        public async Task FullPostKillFlowIsTargetReleaseSodSop16880TabThenAuthorizedAttack()
         {
             bool groupingWasEnabled = MobGroupingRuntimeSettings.Enabled;
             try
@@ -1189,26 +1361,44 @@ namespace DriverScanTester.Tests
                 Assert.Equal(0, scenario.Movement.SkillThreeDowns);
                 Assert.Contains(scenario.Log, line => line.Contains("[PostKillTarget] Request=", StringComparison.Ordinal));
 
+                // Post-kill order: the SOD/SOP pink scan is requested first — it is
+                // collected even while mobs are around.
+                Assert.True(scenario.Loot.IsPinkScanPendingOrActive);
+
+                await scenario.Movement.Update(CancellationToken.None);
+                Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+                Assert.Equal(0, scenario.Movement.SkillThreeDowns);
+
+                // The normal item cycle is withheld while the SOD/SOP pass is outstanding:
+                // servicing the mandatory request may not start area loot or a normal scan.
+                RunMandatoryService(scenario.Loot);
+                Assert.True(scenario.Loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus withheld));
+                Assert.Equal(LootRequestState.Deferred, withheld.State);
+                Assert.True(scenario.Movement.IsLootNavigationBlocked);
+
+                // No SOD/SOP dropped → the close-mob TAB search runs next, before any
+                // normal item loot.
+                FinishPostKillSodSopPassWithNoDrop(scenario.Loot);
+
                 await scenario.Movement.Update(CancellationToken.None);
                 Assert.Equal(0, scenario.Memory.TargetId);
                 Assert.Equal(new[] { "Mouse:LeftDown", "Mouse:LeftUp" }, scenario.Movement.InputOrder);
                 Assert.Equal(0, scenario.Movement.TargetCyclePresses);
                 Assert.Equal(0, scenario.Movement.SkillThreeDowns);
 
-                RunMandatoryService(scenario.Loot);
-                Assert.True(scenario.Loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus running));
-                Assert.Equal(LootRequestState.Running, running.State);
-                CompleteMandatory(scenario.Loot, requestId, ValidEmptyOutcome());
-
                 await scenario.Movement.Update(CancellationToken.None);
                 Assert.Equal(0, scenario.Movement.TargetCyclePresses);
-                Assert.Contains(scenario.Log, line => line.Contains(
-                    $"PostKill completed request={requestId} cameraVerified=True", StringComparison.Ordinal));
+                Assert.Equal(0, scenario.Movement.ForwardKeyDowns);
+                Assert.True(scenario.Movement.IsLootNavigationBlocked);
+                Assert.Equal("VeryLowSearch", typeof(MovementSystem)
+                    .GetField("_combatRetargetCameraStage", PrivateInstance)!.GetValue(scenario.Movement)!.ToString());
 
                 scenario.Movement.OnTargetCycle = () => scenario.Memory.TargetId = 16386;
                 await scenario.Movement.Update(CancellationToken.None);
                 Assert.Equal(new[] { (short)16880 }, scenario.Movement.TargetCycleCameraDistances);
                 Assert.Equal((short)16880, scenario.Memory.CameraDistance);
+                Assert.Equal(1, scenario.Movement.TargetCyclePresses);
+                Assert.Equal(0, scenario.Movement.SkillThreeDowns);
 
                 await scenario.Movement.Update(CancellationToken.None);
                 Assert.Equal(1, scenario.Movement.TargetCyclePresses);
@@ -1221,8 +1411,15 @@ namespace DriverScanTester.Tests
                 int tab = scenario.Movement.InputOrder.IndexOf("TAB");
                 int attack = scenario.Movement.InputOrder.IndexOf("Skill3Down");
                 Assert.True(clickUp < tab && tab < attack);
-                Assert.True(scenario.Log.FindIndex(line => line.Contains("PostKill completed request=", StringComparison.Ordinal)) <
-                            scenario.Log.FindIndex(line => line.Contains("TAB sent stage=VeryLow", StringComparison.Ordinal)));
+                Assert.True(scenario.Log.FindIndex(line => line.Contains("SOD/SOP scan requested", StringComparison.Ordinal)) <
+                            scenario.Log.FindIndex(line => line.Contains("TAB sent stage=VeryLow", StringComparison.Ordinal)),
+                    "the SOD/SOP pass must be requested before the close-mob TAB check");
+
+                // The normal-loot obligation survived the whole sequence: the nearby mob is
+                // fought first instead of looting the normal items.
+                Assert.True(scenario.Loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus afterMob));
+                Assert.Equal(LootRequestState.Deferred, afterMob.State);
+                Assert.True(scenario.Movement.IsLootNavigationBlocked);
             }
             finally
             {
@@ -1266,19 +1463,29 @@ namespace DriverScanTester.Tests
                 Assert.Equal(0, scenario.Movement.TargetCyclePresses);
                 Assert.Equal(0, scenario.Movement.ForwardKeyDowns);
 
+                // SOD/SOP found nothing → the close-mob TAB check runs while the normal
+                // items stay withheld, so standby still must not walk back.
+                // The loot task services the obligation every tick in production; do the same
+                // here so the gate can keep it Deferred instead of Pending.
                 RunMandatoryService(scenario.Loot);
-                CompleteMandatory(scenario.Loot, requestId, ValidEmptyOutcome());
+                Assert.True(scenario.Loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus withheld));
+                Assert.Equal(LootRequestState.Deferred, withheld.State);
+                FinishPostKillSodSopPassWithNoDrop(scenario.Loot);
 
                 await scenario.Movement.Update(CancellationToken.None);
-                Assert.False(scenario.Movement.IsLootNavigationBlocked);
+                Assert.True(scenario.Movement.IsLootNavigationBlocked);
                 Assert.Equal("VeryLowSearch", typeof(MovementSystem)
                     .GetField("_combatRetargetCameraStage", PrivateInstance)!.GetValue(scenario.Movement)!.ToString());
                 Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+                Assert.Equal(0, scenario.Movement.ForwardKeyDowns);
 
                 await scenario.Movement.Update(CancellationToken.None);
                 Assert.Equal(new[] { (short)16880 }, scenario.Movement.TargetCycleCameraDistances);
                 Assert.Equal(1, scenario.Movement.TargetCyclePresses);
                 Assert.Equal(0, scenario.Movement.ForwardKeyDowns);
+
+                // Only a search without a mob may release the normal item cycle.
+                Assert.True(scenario.Movement.IsLootNavigationBlocked);
             }
             finally
             {

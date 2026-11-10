@@ -5,7 +5,14 @@ namespace DriverScanTester.Services
     /// <summary>Why movement armed a loot obligation.</summary>
     public enum LootBarrierReason
     {
-        /// <summary>A real combat target was killed; drops must be checked before walking on.</summary>
+        /// <summary>
+        /// A real combat target was killed. MoveAndAttackAndLoot services it in this order:
+        /// (1) the SOD/SOP pink scan runs immediately — those drops are collected even while
+        /// mobs are around; (2) the close-camera TAB search looks for a nearby mob and a found
+        /// mob is fought first; (3) only when that search ends without a mob does the normal
+        /// item cycle run for the ordinary drops found earlier. The obligation therefore
+        /// stays Deferred (navigation blocked, no normal loot) for the whole sequence.
+        /// </summary>
         PostKill,
 
         /// <summary>

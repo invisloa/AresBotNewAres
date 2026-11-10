@@ -135,6 +135,57 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void DominantValueIsTheValueSeenOnTheMostDistinctItems()
+        {
+            var calibration = new ItemMouseOverCalibration(requiredDistinctItems: 3);
+
+            calibration.RecordObservation(100, 100, 111);
+            calibration.RecordObservation(300, 100, 111);
+            calibration.RecordObservation(500, 300, 222);
+
+            Assert.True(calibration.TryGetDominantValue(out int value));
+            Assert.Equal(111, value);
+        }
+
+        [Fact]
+        public void SingleItemScanStillProducesAVoteForTheCrossScanAgreement()
+        {
+            // One visible drop must not be wasted just because the scan contains only one item.
+            var calibration = new ItemMouseOverCalibration(requiredDistinctItems: 3);
+
+            Assert.False(calibration.RecordObservation(100, 100, 121498128));
+            Assert.False(calibration.IsComplete);
+
+            Assert.True(calibration.TryGetDominantValue(out int value));
+            Assert.Equal(121498128, value);
+            Assert.Equal(1, calibration.ObservationCountFor(value));
+        }
+
+        [Fact]
+        public void AmbiguousScanDoesNotCastACrossScanVote()
+        {
+            var calibration = new ItemMouseOverCalibration(requiredDistinctItems: 3);
+
+            calibration.RecordObservation(100, 100, 111);
+            calibration.RecordObservation(500, 300, 222);
+
+            Assert.False(calibration.TryGetDominantValue(out int value));
+            Assert.Equal(0, value);
+        }
+
+        [Fact]
+        public void ScanWithOnlyZeroReadsHasNoDominantValue()
+        {
+            var calibration = new ItemMouseOverCalibration(requiredDistinctItems: 3);
+
+            calibration.RecordObservation(100, 100, 0);
+            calibration.RecordObservation(300, 300, 0);
+
+            Assert.False(calibration.TryGetDominantValue(out int value));
+            Assert.Equal(0, value);
+        }
+
+        [Fact]
         public void InvalidSettingsAreRejected()
         {
             Assert.Throws<ArgumentOutOfRangeException>(() => new ItemMouseOverCalibration(requiredDistinctItems: 1));

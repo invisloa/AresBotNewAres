@@ -1246,9 +1246,9 @@ namespace DriverScanTester.Services
         ///   2. automatically — the slow discovery stage validates a candidate with a real
         ///      right-click + NPC-dialogue check and writes the confirmed value here
         ///      (see <see cref="TryDiscoverNpcMouseOverValue"/>).
-        /// An automatically discovered value lives in memory for the CURRENT game session
-        /// only: it is deliberately NOT persisted, so the next launch never assumes that a
-        /// value captured in another game session is still valid.
+        /// Both paths persist the confirmed value to MouseCalibration.json, so the next bot
+        /// run / app start reuses it. A value loaded from an older game launch is simply
+        /// replaced by the automatic calibration when it no longer matches.
         /// </summary>
         public static int SellerPointedValue = 138599240;
 
@@ -2226,14 +2226,32 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Marks this game session as "the NPC MouseOver value was discovered automatically".
+        /// Marks this game session as "the NPC MouseOver value was discovered automatically"
+        /// and persists the new value to MouseCalibration.json, so the next bot run / app
+        /// start reuses it instead of falling back to the previous in-memory value.
         /// Both the NPC and the item MouseOver values change together with the game launch, so
-        /// the loot system uses this marker to re-discover the item value on its next scan
-        /// (see <see cref="MouseOverCalibrationSession.NeedsItemValueDiscovery"/>).
+        /// the loot system uses the session marker to re-discover the item value on its next
+        /// scan (see <see cref="MouseOverCalibrationSession.NeedsItemValueDiscovery"/>).
         /// </summary>
         private void NoteNpcMouseOverValueAutoCalibrated()
         {
             MouseOverCalibrationSession.Current.MarkNpcValueDiscovered(_memory.GameSessionIdentity);
+
+            bool saved = MouseCalibrationStore.Save(
+                SellerPointedValue,
+                BotConstants.GameMagicValues.LootMouseOverValue);
+
+            if (saved)
+            {
+                _log($"[NPC Calibration] Calibration saved to {MouseCalibrationStore.FilePath} — " +
+                     "the next bot run/app start reuses the new value.");
+            }
+            else
+            {
+                _log($"[NPC Calibration] WARNING: could not save the confirmed NPC value to {MouseCalibrationStore.FilePath} — " +
+                     "the running bot uses it, but a restart would fall back to the previous calibration.");
+            }
+
             _log("[Item Calibration] NPC value was auto-calibrated in this game session — the item MouseOver value is now queued for automatic discovery on the next loot scan.");
         }
 

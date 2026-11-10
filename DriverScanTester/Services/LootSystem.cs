@@ -140,6 +140,14 @@ namespace DriverScanTester.Services
             => scanMode == LootScanMode.NormalCombined ||
                (scanMode == LootScanMode.PinkOnly && pinkLootOnlyMode);
 
+        /// <summary>
+        /// True while a pink-only scan pass may run: the MoveAndAttack SOD/SOP-only mode, or
+        /// the post-kill SOD/SOP phase of a MoveAndAttackAndLoot waypoint. The latter exists
+        /// so SOD/SOP drops are still collected when mobs are around.
+        /// </summary>
+        private bool IsPinkScanAuthorized =>
+            _pinkLootOnlyMode || _lootState == LootMachineState.PinkScan;
+
         internal static int MouseOverSettleMsForCandidate(LootCandidateKind candidateKind)
             => candidateKind == LootCandidateKind.SodSopPink
                 ? BotConstants.Delays.SodSopMouseOverSettleMs
@@ -215,10 +223,11 @@ namespace DriverScanTester.Services
         //                  if no change after several tries → switch to Scan
         //   Scan        → one combined aquamarine + pink pixel scan; label each family
         //                  independently and probe only accepted loot-like components
-        //   PinkScan   → SOD/SOP-only mode (MoveAndAttack waypoints): after the close-mob
-        //                  check, sweep the WHOLE captured client bitmap for PINK pixels
-        //                  in ONE continuous mouse pass over every candidate pixel,
-        //                  found, and repeat a fresh sweep after each successful pickup.
+        //   PinkScan   → SOD/SOP-only pass. MoveAndAttack: after the close-mob check found
+        //                  no mob. MoveAndAttackAndLoot: immediately after every kill, even
+        //                  while mobs are around. Sweeps the WHOLE captured client bitmap
+        //                  for PINK pixels in ONE continuous mouse pass over every candidate
+        //                  pixel, and repeats a fresh sweep after each successful pickup.
         //                  When a confirmed SOD/SOP pickup cannot fit (bag at the weight
         //                  limit) the player first drinks the potion type it has more of
         //                  (HP/mana) — one potion frees enough weight for one 1-lb scroll.
@@ -239,10 +248,13 @@ namespace DriverScanTester.Services
         /// <summary>Last time an item was actually collected (spacebar pickup or pixel-scan click).</summary>
         private DateTime _lastItemCollectedAt = DateTime.MinValue;
 
-        // ── SOD/SOP pink-scan request (MoveAndAttack post-kill) ──
-        // The movement system requests the pink scan only after its close-camera TAB check
-        // finds no nearby mob. There is exactly one post-kill pass: when that check finds a
-        // mob the bot keeps fighting and no scan is armed.
+        // ── SOD/SOP pink-scan request (post-kill) ──
+        // MoveAndAttack: the movement system requests the pink scan only after its
+        // close-camera TAB check finds no nearby mob. There is exactly one post-kill pass:
+        // when that check finds a mob the bot keeps fighting and no scan is armed.
+        // MoveAndAttackAndLoot: the pink scan is requested FIRST after every kill and runs
+        // even while mobs are around; the normal item cycle only starts after the separate
+        // close-mob TAB check found no mob (ShouldWithholdPostKillNormalLoot).
         private CancellationToken _scanToken;
 
         /// <summary>0 = idle, 1 = a manual diagnostic scan owns the capture and cursor.</summary>
@@ -283,20 +295,31 @@ namespace DriverScanTester.Services
 
         // ── Automatic MouseOver ITEM value re-discovery (auto calibration) ──
         // The loot scan cannot prove "this is an item" with a dialogue, so the accepted
-        // proof is consistency: the SAME raw hovered value on several DIFFERENT item
-        // candidates found by the normal loot pixel classifiers. The slow discovery is
-        // requested either by a successful NPC auto-calibration in this game session (both
-        // values change with the game launch) or by BotConstants.Loot.
-        // ItemCalibrationAfterEmptyScans consecutive scans that found nothing.
-        // Once a discovery attempt ran and did NOT confirm a value, the request stays armed
-        // (_itemValueDiscoveryPending) and every following loot scan probes again until a value
-        // is confirmed — there is no back-off that would require another empty-scan streak.
+        // proof is consistency of the raw hovered value. A normal loot pass often contains
+        // only ONE drop, so the value does not have to agree on several items in the SAME
+        // scan: the dominant value of each scan is recorded, and the same value observed in
+        // BotConstants.Loot.ItemCalibrationRequiredScans SEPARATE loot scans confirms it.
+        // The cross-scan counts are persisted (MouseCalibrationStore), so the scans may be
+        // spread over different kills and even different bot runs.
+        // The slow discovery is requested either by a successful NPC auto-calibration in
+        // this game session (both values change with the game launch) or by
+        // BotConstants.Loot.ItemCalibrationAfterEmptyScans consecutive scans that found
+        // nothing. Once a discovery attempt ran and did NOT confirm a value, the request
+        // stays armed (_itemValueDiscoveryPending) and every following loot scan probes
+        // again until a value is confirmed.
         private ItemMouseOverCalibration? _itemCalibration;
         private string _itemCalibrationReason = string.Empty;
         private DateTime _itemCalibrationStartedUtc = DateTime.MinValue;
         private int _consecutiveEmptyItemScans;
         private bool _itemCalibrationAttemptedForNpcTrigger;
         private bool _itemValueDiscoveryPending;
+
+        /// <summary>Cross-scan agreement values restored from the previous run.</summary>
+        private ItemMouseOverScanAgreement? _itemScanAgreement;
+        private (uint ProcessId, ulong ModuleBase) _itemScanAgreementIdentity;
+        private int _itemScanAgreementActiveValue;
+        private int _itemScanAgreementNpcGeneration;
+        private bool _itemScanProgressSaveFailedLogged;
 
         // ── Automatic-loot disable policy (profile/path) ──
         // One authoritative switch for every automatic loot operation. It is set by the
@@ -463,8 +486,37 @@ namespace DriverScanTester.Services
         public bool MoveAndAttackAndLootMode
         {
             get => _moveAndAttackAndLootMode;
-            set => _moveAndAttackAndLootMode = value;
+            set
+            {
+                lock (_cameraCursorOwnershipGate)
+                {
+                    bool changed = _moveAndAttackAndLootMode != value;
+                    _moveAndAttackAndLootMode = value;
+                    if (!value && !_pinkLootOnlyMode &&
+                        (changed || _pinkScanRequested || _pinkScanOwnsCameraCursor ||
+                         _lootState == LootMachineState.PinkScan))
+                    {
+                        // The post-kill SOD/SOP phase belongs to this mode only: leaving it
+                        // cancels outstanding pink work instead of leaking it into the next
+                        // waypoint mode.
+                        CancelPinkModeWorkLocked();
+                    }
+                }
+            }
         }
+
+        /// <summary>
+        /// Optional live gate owned by MovementSystem: true while the post-kill close-mob
+        /// TAB search of a MoveAndAttackAndLoot waypoint is still outstanding.
+        ///
+        /// While it returns true the mandatory post-kill normal-loot request stays
+        /// Deferred — normal items are only looted after the check confirmed that no mob
+        /// can be selected nearby. SOD/SOP pink loot is not affected: it is collected
+        /// right after the kill, even when mobs are around. Null keeps the legacy
+        /// behaviour (the normal item cycle starts as soon as the post-kill request is
+        /// serviced).
+        /// </summary>
+        public Func<bool>? ShouldWithholdPostKillNormalLoot { get; set; }
 
         /// <summary>
         /// Effective profile/path automatic-loot policy. When true, no automatic loot
@@ -716,6 +768,14 @@ namespace DriverScanTester.Services
         /// <summary>Most recently resolved game window handle.</summary>
         private nint _hwnd;
 
+        /// <summary>Cached process-scoped game window handle (fallback when no title matches).</summary>
+        private nint _processGameWindow;
+
+        /// <summary>Throttles the "loot work cleared" log so a persistent state cannot spam.</summary>
+        private string _lastLootWorkClearedReason = string.Empty;
+        private DateTime _lastLootWorkClearedAt = DateTime.MinValue;
+        private const int LootWorkClearedLogCooldownMs = 5000;
+
         /// <summary>
         /// Loot-priority mode (profile flag "Loot Priority"): when a mob is killed, loot
         /// starts immediately instead of TABbing to check for more mobs first. The loot
@@ -749,6 +809,7 @@ namespace DriverScanTester.Services
                     bool changed = _pinkLootOnlyMode != value;
                     _pinkLootOnlyMode = value;
                     if (!value &&
+                        !_moveAndAttackAndLootMode &&
                         (changed || _pinkScanRequested || _pinkScanOwnsCameraCursor ||
                          _lootState == LootMachineState.PinkScan))
                     {
@@ -835,9 +896,12 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Requests the immediate post-kill SOD/SOP pink scan after MovementSystem has
-        /// tried a close-camera TAB and found no nearby mob. No-op unless
-        /// <see cref="PinkLootOnlyMode"/> is enabled. The request is consumed by
+        /// Requests the immediate post-kill SOD/SOP pink scan. In MoveAndAttack this happens
+        /// after MovementSystem tried a close-camera TAB and found no nearby mob. In
+        /// MoveAndAttackAndLoot it is requested immediately after every kill and runs even
+        /// while mobs are around (the normal item cycle is withheld separately until the
+        /// close-mob check finds none). No-op when automatic loot is disabled or when
+        /// neither post-kill pink mode applies. The request is consumed by
         /// <see cref="Update"/>.
         /// </summary>
         public void RequestPinkScan()
@@ -848,22 +912,31 @@ namespace DriverScanTester.Services
                 if (_automaticLootDisabled)
                     return;
 
-                if (!_pinkLootOnlyMode)
+                if (!_pinkLootOnlyMode && !_moveAndAttackAndLootMode)
                     return;
 
                 _pinkScanRequestedAt = now;
                 _pinkScanRequested = true;
             }
-            _log("[Loot] SOD/SOP pink scan requested (no close mob found after kill).");
+            _log(_pinkLootOnlyMode
+                ? "[Loot] SOD/SOP pink scan requested (no close mob found after kill)."
+                : "[Loot] SOD/SOP pink scan requested (post-kill first pass — collected even while mobs are around).");
         }
 
         /// <summary>
-        /// True while a post-kill SOD/SOP pink scan is requested or running. The
+        /// True while the post-kill SOD/SOP pink scan is requested or running. The
         /// movement system holds combat/movement while this is true, so the drop check
         /// always finishes before the bot walks away or starts the next fight.
         /// </summary>
         public bool IsPinkScanPendingOrActive =>
             _pinkScanRequested || _lootState == LootMachineState.PinkScan;
+
+        /// <summary>
+        /// True while the post-kill SOD/SOP pink scan pass is actually executing (the
+        /// request was already consumed). MovementSystem uses it to distinguish a scan in
+        /// progress from a request that never started.
+        /// </summary>
+        internal bool IsPinkScanRunning => _lootState == LootMachineState.PinkScan;
 
         /// <summary>
         /// Runs a movement camera write only when loot does not own the camera. The
@@ -1051,6 +1124,12 @@ namespace DriverScanTester.Services
         [DllImport("user32.dll", SetLastError = true)]
         private static extern nint GetForegroundWindow();
 
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern uint GetWindowThreadProcessId(nint hWnd, out uint lpdwProcessId);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsWindow(nint hWnd);
+
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT
         {
@@ -1129,13 +1208,47 @@ namespace DriverScanTester.Services
             return geometry;
         }
 
-        private static nint FindGameWindow()
+        /// <summary>
+        /// Resolves the game window. The known window titles are tried first (they keep the
+        /// capture geometry identical to the historical behaviour); when none matches, the
+        /// attached game process's main window is used so a changed/localized caption can
+        /// never break loot capture and focus checks.
+        /// </summary>
+        private nint FindGameWindow()
         {
             nint hwnd = FindWindow(null, "Legend of Ares");
             if (hwnd == nint.Zero) hwnd = FindWindow(null, "Ares");
             if (hwnd == nint.Zero) hwnd = FindWindow(null, "Nostalgia");
             if (hwnd == nint.Zero) hwnd = FindWindow(null, "Epic Of Ares Client");
-            return hwnd;
+            if (hwnd != nint.Zero)
+                return hwnd;
+
+            // Fallback: process-scoped resolution (same source of truth the movement system
+            // uses). Cached while the window is still alive.
+            if (_processGameWindow != nint.Zero && IsWindow(_processGameWindow))
+                return _processGameWindow;
+
+            _processGameWindow = nint.Zero;
+            try
+            {
+                using var process = System.Diagnostics.Process.GetProcessById((int)GameProcessId);
+                _processGameWindow = process.MainWindowHandle;
+            }
+            catch
+            {
+                _processGameWindow = nint.Zero;
+            }
+            return _processGameWindow;
+        }
+
+        /// <summary>Attached game process id (0 when it is unknown).</summary>
+        private uint GameProcessId
+        {
+            get
+            {
+                try { return _memoryService.GameSessionIdentity.ProcessId; }
+                catch { return 0; }
+            }
         }
 
         private void ApplyClientGeometry(LootClientGeometry geometry)
@@ -1227,12 +1340,78 @@ namespace DriverScanTester.Services
         /// <summary>
         /// Checks whether the game window is the foreground (focused) window.
         /// If it is not, the loot bot must NOT scan or click to avoid acting on other windows.
+        ///
+        /// The check accepts any window that belongs to the attached game process, not just
+        /// the exact handle of the resolved title: game clients create overlay/child windows
+        /// and can change their caption, and a handle-only comparison then reports
+        /// "not foreground" while the player is visibly in the game (which used to clear the
+        /// loot work on every tick and freeze the bot).
         /// </summary>
         private bool IsGameWindowFocused()
         {
             nint currentGameWindow = FindGameWindow();
-            _hwnd = currentGameWindow;
-            return currentGameWindow != nint.Zero && GetForegroundWindow() == currentGameWindow;
+            if (currentGameWindow != nint.Zero)
+                _hwnd = currentGameWindow;
+
+            return IsGameWindowForeground(_hwnd);
+        }
+
+        /// <summary>True when the window belongs to the attached game process.</summary>
+        private bool IsGameProcessWindow(nint hwnd)
+        {
+            uint gameProcessId = GameProcessId;
+            if (hwnd == nint.Zero || gameProcessId == 0)
+                return false;
+
+            _ = GetWindowThreadProcessId(hwnd, out uint windowProcessId);
+            return windowProcessId != 0 && windowProcessId == gameProcessId;
+        }
+
+        /// <summary>
+        /// True when the game window owns the foreground (input-safe). MovementSystem uses it
+        /// to avoid sending TAB/other input to whatever window happens to be on top.
+        ///
+        /// It is only enforced once a real game frame was captured (that is when the game
+        /// window is known and input could actually land somewhere): without a resolved
+        /// capture the legacy behaviour applies instead of inventing a focus loss.
+        /// </summary>
+        internal bool IsGameWindowForegroundForInput
+        {
+            get
+            {
+                try
+                {
+                    if (!_lastStableCaptureGeometry.HasValue)
+                        return true;
+
+                    nint gameWindow = FindGameWindow();
+                    if (gameWindow != nint.Zero)
+                        _hwnd = gameWindow;
+                    if (_hwnd == nint.Zero)
+                        return true;
+                    return IsGameWindowForeground(_hwnd);
+                }
+                catch
+                {
+                    return true;
+                }
+            }
+        }
+
+        /// <summary>
+        /// True when the foreground window belongs to the game: either the expected handle
+        /// itself or any other window owned by the attached game process (overlay/child
+        /// windows created by the client). Never treat a different process's window as the
+        /// game: input would be sent to it.
+        /// </summary>
+        private bool IsGameWindowForeground(nint expectedHwnd)
+        {
+            nint foreground = GetForegroundWindow();
+            if (foreground == nint.Zero)
+                return false;
+            if (expectedHwnd != nint.Zero && foreground == expectedHwnd)
+                return true;
+            return IsGameProcessWindow(foreground);
         }
 
         /// <summary>
@@ -1616,7 +1795,8 @@ namespace DriverScanTester.Services
                 return;
             }
 
-            if (!PinkLootOnlyMode && _lootState == LootMachineState.PinkScan)
+            if (!PinkLootOnlyMode && !MoveAndAttackAndLootMode &&
+                _lootState == LootMachineState.PinkScan)
                 CancelPinkScanWork("waypoint mode changed");
 
             if (ConfirmPlayerMarkerIfDue())
@@ -1629,10 +1809,11 @@ namespace DriverScanTester.Services
             // ── Track mob selection to detect mob death ──
             bool isMobSelected = _memoryService.IsMobSelected();
 
-            // ── Post-kill SOD/SOP pink-scan request (MoveAndAttack) ──
+            // ── Post-kill SOD/SOP pink-scan request ──
             // Keep a fresh request marked pending until it is atomically transferred to
             // the PinkScan state, so movement cannot steal camera/cursor ownership in
-            // the handoff.
+            // the handoff. Valid in MoveAndAttack (SOD/SOP-only waypoints) and in the
+            // post-kill phase of MoveAndAttackAndLoot (pink loot even with mobs around).
             bool pinkScanRequested = false;
             bool droppedPinkRequest = false;
             bool modeChangedPinkRequest = false;
@@ -1642,12 +1823,13 @@ namespace DriverScanTester.Services
                 {
                     bool fresh = (DateTime.UtcNow - _pinkScanRequestedAt).TotalMilliseconds <=
                                  BotConstants.Loot.PinkScanRequestTtlMs;
-                    if (!_pinkLootOnlyMode || !fresh)
+                    bool modeAllowsPinkScan = _pinkLootOnlyMode || _moveAndAttackAndLootMode;
+                    if (!modeAllowsPinkScan || !fresh)
                     {
                         _pinkScanRequested = false;
                         _pinkScanRequestedAt = DateTime.MinValue;
                         droppedPinkRequest = !fresh;
-                        modeChangedPinkRequest = fresh && !_pinkLootOnlyMode;
+                        modeChangedPinkRequest = fresh && !modeAllowsPinkScan;
                     }
                     else
                     {
@@ -1677,11 +1859,14 @@ namespace DriverScanTester.Services
                     // The mandatory post-kill request belongs to MovementSystem.
                     // Never start the legacy timer-driven collector here: that was the
                     // source of repeated stationary scans during ordinary travel.
+                    // Post-kill order: SOD/SOP pink loot first (it is collected even when
+                    // mobs are around), then the close-mob TAB check, and only when that
+                    // check finds no mob may the normal item cycle start.
                     _lootState = LootMachineState.Idle;
                     _nextActionTime = DateTime.UtcNow;
                     _consecutiveEmptySpacePresses = 0;
                     IsLootingActive = false;
-                    _log("[Loot] Mob killed — waiting for the mandatory post-kill loot request (reason=PostKillMandatory).");
+                    _log("[Loot] Mob killed — waiting for the mandatory post-kill loot request (reason=PostKillMandatory); SOD/SOP first, normal items only after the close-mob check.");
                 }
                 else if (LootPriorityMode)
                 {
@@ -1708,7 +1893,9 @@ namespace DriverScanTester.Services
             {
                 lock (_cameraCursorOwnershipGate)
                 {
-                    if (_pinkLootOnlyMode && _pinkScanRequested && _lootState != LootMachineState.PinkScan)
+                    bool modeAllowsPinkScan = _pinkLootOnlyMode || _moveAndAttackAndLootMode;
+                    if (modeAllowsPinkScan && _pinkScanRequested &&
+                        _lootState != LootMachineState.PinkScan)
                     {
                         _pinkScanRequested = false;
                         _pinkScanRequestedAt = DateTime.MinValue;
@@ -1727,7 +1914,9 @@ namespace DriverScanTester.Services
                 }
             }
             if (pinkScanStarted)
-                _log($"[Loot] SOD/SOP pink scan starting after close-mob check (big region, pink pixels; waiting {BotConstants.Delays.LootPostKillDelayMs}ms for drops).");
+                _log(MoveAndAttackAndLootMode
+                    ? $"[Loot] Post-kill SOD/SOP pink scan starting first (big region, pink pixels; waiting {BotConstants.Delays.LootPostKillDelayMs}ms for drops) — normal items stay withheld until the close-mob check is clear."
+                    : $"[Loot] SOD/SOP pink scan starting after close-mob check (big region, pink pixels; waiting {BotConstants.Delays.LootPostKillDelayMs}ms for drops).");
 
             // ── Mandatory post-kill / travel-candidate obligation ──
             // The request is serviced only after the combat pause and pink-scan
@@ -2146,14 +2335,14 @@ namespace DriverScanTester.Services
 
                     // If the game window lost focus, stop spamming to avoid
                     // sending keypresses to whatever window is on top.
-                    if (GetForegroundWindow() != _hwnd)
+                    if (!IsGameWindowForeground(_hwnd))
                         break;
 
                     // Double-press spacebar with 30ms gap (same pattern as AreaLoot).
                     if (LootRuntimeSettings.SpacebarLootEnabled)
                         GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                     Thread.Sleep(30);
-                    if (token.IsCancellationRequested || GetForegroundWindow() != _hwnd ||
+                    if (token.IsCancellationRequested || !IsGameWindowForeground(_hwnd) ||
                         !LootRuntimeSettings.SpacebarLootEnabled)
                         break;
                     if (LootRuntimeSettings.SpacebarLootEnabled)
@@ -2532,6 +2721,18 @@ namespace DriverScanTester.Services
             if (isMobSelected)
             {
                 DeferMandatoryLootRequest(request.Id, "combat target selected");
+                return;
+            }
+
+            // ── MoveAndAttackAndLoot post-kill order ──
+            // MovementSystem owns the close-mob TAB check. While it is outstanding the
+            // normal item cycle must not start: a nearby mob is fought first and only a
+            // search that ends without a mob releases these items. SOD/SOP pink loot has
+            // already been collected by the post-kill pink scan and is not affected.
+            if (request.Reason == LootBarrierReason.PostKill &&
+                ShouldWithholdPostKillNormalLoot?.Invoke() == true)
+            {
+                DeferMandatoryLootRequest(request.Id, "close-mob check pending (normal items withheld)");
                 return;
             }
 
@@ -3012,11 +3213,15 @@ namespace DriverScanTester.Services
         //  value IsLootMouseOver() compares against, and it changes with the game launch.
         //  Unlike the NPC scan, a single hover cannot prove "this is an item": a pixel
         //  probe may hover the ground or an NPC, and a scan may simply find nothing. The
-        //  accepted proof is therefore CONSISTENCY — the same raw hovered value must be
-        //  published by several DIFFERENT item candidates found by the normal loot pixel
-        //  classifiers (see ItemMouseOverCalibration).
+        //  accepted proof is therefore CONSISTENCY — the same raw hovered value recorded in
+        //  several SEPARATE loot scans. A scan does NOT need three different items: its
+        //  dominant value is one observation, and the observations persist across kills and
+        //  bot runs until the required number of scans agree (see
+        //  ItemMouseOverScanAgreement). The older three-distinct-items-in-one-scan rule is
+        //  kept only as a fast path when such a scan happens to occur.
         //
         //  Triggers:
+        //   - immediate: saved cross-scan progress exists for this game session/value,
         //   - immediate: the NPC MouseOver value was auto-calibrated in this game session
         //     (both values change together), unless the item value is already known,
         //   - immediate: a previous discovery attempt ended without a confirmed value — the
@@ -3033,7 +3238,8 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Decides whether THIS loot scan runs the slow item MouseOver discovery and, when
-        /// it does, creates the tracker for it. Called at the start of every bot loot pass.
+        /// it does, creates the per-scan probe tracker. Called at the start of every bot loot
+        /// pass.
         /// </summary>
         private void BeginItemCalibrationIfNeeded()
         {
@@ -3043,6 +3249,23 @@ namespace DriverScanTester.Services
 
             if (_diagnosticScanActive != 0 || _automaticLootDisabled)
                 return;
+
+            ItemMouseOverScanAgreement agreement = GetOrCreateItemScanAgreement();
+
+            // Recovered after a stop/crash between recording the agreeing scans and applying
+            // the value: finish the calibration immediately.
+            if (agreement.IsComplete)
+            {
+                ApplyCalibratedItemMouseOverValue(
+                    agreement.ConfirmedValue!.Value,
+                    $"already confirmed by {agreement.RequiredScans} separate loot scans");
+                return;
+            }
+
+            // Saved progress exists for this game session: continue the accumulation on this
+            // scan even when the empty-scan streak/NPC trigger would not request it.
+            if (agreement.HasPendingObservations)
+                _itemValueDiscoveryPending = true;
 
             int activeValue = BotConstants.GameMagicValues.LootMouseOverValue;
             if (!TryGetItemCalibrationReason(
@@ -3072,9 +3295,71 @@ namespace DriverScanTester.Services
             _itemCalibrationStartedUtc = DateTime.UtcNow;
 
             _log($"[Item Calibration] Starting slow item MouseOver discovery: {reason}. " +
-                 $"Active value {MouseOverValueDiscovery.Describe(activeValue)}; waiting for " +
-                 $"{_itemCalibration.RequiredDistinctItems} different item candidates to publish the same value " +
-                 $"(settle {BotConstants.Delays.ItemCalibrationMouseOverSettleMs}ms, max {BotConstants.Loot.ItemCalibrationMaxProbes} probes).");
+                 $"Active value {MouseOverValueDiscovery.Describe(activeValue)}; each loot scan records its value and " +
+                 $"{agreement.RequiredScans} separate scans must publish the same value " +
+                 $"(saved progress: {agreement.DescribeProgress()}; settle {BotConstants.Delays.ItemCalibrationMouseOverSettleMs}ms, " +
+                 $"max {BotConstants.Loot.ItemCalibrationMaxProbes} probes).");
+        }
+
+        /// <summary>
+        /// Returns the cross-scan agreement tracker for the CURRENT game session and active
+        /// item value. Progress persisted by an earlier bot run is restored once; a different
+        /// game session (or a re-calibrated active value) starts from zero so stale values can
+        /// never be confirmed.
+        /// </summary>
+        private ItemMouseOverScanAgreement GetOrCreateItemScanAgreement()
+        {
+            (uint ProcessId, ulong ModuleBase) identity = CalibrationSessionIdentity;
+            int activeValue = BotConstants.GameMagicValues.LootMouseOverValue;
+            int npcGeneration = MouseOverCalibrationSession.Current.NpcCalibrationGeneration(identity);
+
+            if (_itemScanAgreement != null &&
+                _itemScanAgreementIdentity == identity &&
+                _itemScanAgreementActiveValue == activeValue &&
+                _itemScanAgreementNpcGeneration == npcGeneration)
+            {
+                return _itemScanAgreement;
+            }
+
+            _itemScanAgreementIdentity = identity;
+            _itemScanAgreementActiveValue = activeValue;
+            _itemScanAgreementNpcGeneration = npcGeneration;
+
+            int requiredScans = BotConstants.Loot.ItemCalibrationRequiredScans;
+            if (MouseCalibrationStore.LoadItemScanProgress(
+                    identity.ProcessId, identity.ModuleBase, activeValue, out Dictionary<int, int> persisted))
+            {
+                _itemScanAgreement = new ItemMouseOverScanAgreement(requiredScans, persisted);
+                _log($"[Item Calibration] Restored saved item MouseOver discovery progress for this game session: " +
+                     $"{_itemScanAgreement.DescribeProgress()}.");
+            }
+            else
+            {
+                _itemScanAgreement = new ItemMouseOverScanAgreement(requiredScans);
+            }
+
+            return _itemScanAgreement;
+        }
+
+        /// <summary>
+        /// Persists the cross-scan counts after every recorded scan, so a stopped/restarted
+        /// bot (or app) continues the same accumulation instead of starting over.
+        /// </summary>
+        private void PersistItemScanAgreement(ItemMouseOverScanAgreement agreement)
+        {
+            (uint ProcessId, ulong ModuleBase) identity = _itemScanAgreementIdentity;
+            if (MouseCalibrationStore.SaveItemScanProgress(
+                    identity.ProcessId, identity.ModuleBase, _itemScanAgreementActiveValue, agreement.Snapshot()))
+            {
+                return;
+            }
+
+            if (_itemScanProgressSaveFailedLogged)
+                return;
+
+            _itemScanProgressSaveFailedLogged = true;
+            _log($"[Item Calibration] WARNING: could not save item MouseOver discovery progress to " +
+                 $"{MouseCalibrationStore.FilePath} — the current run still continues, but a bot restart would lose it.");
         }
 
         /// <summary>
@@ -3128,8 +3413,11 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Ends a discovery attempt. A failed attempt backs off: the next one needs another
-        /// full streak of empty scans, so an unproductive slow scan cannot repeat forever.
+        /// Ends a per-scan discovery attempt. The dominant value of the scan becomes ONE
+        /// observation in the cross-scan agreement; the observation is persisted immediately,
+        /// so the next loot scan (or the next bot run) compares against it instead of starting
+        /// over. The active value is only replaced once the required number of separate scans
+        /// published the same value.
         /// </summary>
         private void EndItemCalibration()
         {
@@ -3149,6 +3437,9 @@ namespace DriverScanTester.Services
 
             if (calibration.Observations == 0)
             {
+                if (!_itemValueDiscoveryPending)
+                    return; // the scan already proved the active value (item collected)
+
                 // The scan never reached a single probe (capture/camera failure). That is not a
                 // failed discovery: keep the trigger armed instead of consuming the attempt.
                 _itemCalibrationAttemptedForNpcTrigger = false;
@@ -3158,10 +3449,36 @@ namespace DriverScanTester.Services
             }
 
             _consecutiveEmptyItemScans = 0;
+
+            if (!_itemValueDiscoveryPending)
+                return; // an item was collected; the active value is proven, no vote needed
+
+            if (calibration.TryGetDominantValue(out int scanValue))
+            {
+                ItemMouseOverScanAgreement agreement = GetOrCreateItemScanAgreement();
+                bool confirmed = agreement.RecordScan(scanValue);
+                PersistItemScanAgreement(agreement);
+
+                if (confirmed)
+                {
+                    ApplyCalibratedItemMouseOverValue(
+                        scanValue,
+                        $"the same value was read in {agreement.RequiredScans} separate loot scans");
+                    return;
+                }
+
+                _itemValueDiscoveryPending = true;
+                _log($"[Item Calibration] Loot scan recorded {MouseOverValueDiscovery.Describe(scanValue)} " +
+                     $"({agreement.ScanCountFor(scanValue)}/{agreement.RequiredScans} separate scans with this value; " +
+                     $"saved for the next loot scan/bot run, reason={reason}, elapsed={elapsedMs}ms). " +
+                     "The active value is kept for now and the next scan compares its value.");
+                return;
+            }
+
             _itemValueDiscoveryPending = true;
-            _log($"[Item Calibration] Discovery attempt finished without a confirmed value " +
+            _log($"[Item Calibration] Discovery attempt finished without a usable value " +
                  $"({calibration.DescribeObservations()}; reason={reason}, elapsed={elapsedMs}ms) — keeping the active value. " +
-                 "Discovery stays armed: the next loot scan probes again (no empty-scan wait).");
+                 "Discovery stays armed: the next loot scan probes again.");
         }
 
         /// <summary>
@@ -3178,6 +3495,16 @@ namespace DriverScanTester.Services
                 // A collected item proves the active value works in this game session.
                 _itemValueDiscoveryPending = false;
                 MouseOverCalibrationSession.Current.MarkItemValueDiscovered(CalibrationSessionIdentity);
+
+                // Any pending cross-scan candidate is obsolete now: the active value was
+                // proven by a real pickup, so it must not be replaced by older observations.
+                if (_itemScanAgreement is { HasPendingObservations: true } agreement)
+                {
+                    agreement.Reset();
+                    MouseCalibrationStore.ClearItemScanProgress();
+                    _log("[Item Calibration] Item collected with the active value — saved item discovery progress cleared.");
+                }
+
                 return;
             }
 
@@ -3225,31 +3552,34 @@ namespace DriverScanTester.Services
 
             if (confirmed)
             {
-                ApplyCalibratedItemMouseOverValue(calibration);
+                ApplyCalibratedItemMouseOverValue(
+                    calibration.ConfirmedValue!.Value,
+                    $"confirmed on {calibration.DistinctItemCountFor(hoveredValue)} different item candidates in one scan");
                 return;
             }
 
             if (firstObservationOfValue)
             {
                 _log($"[Item Calibration] Candidate item value detected: {MouseOverValueDiscovery.Describe(hoveredValue)} " +
-                     $"at bitmap-local ({anchorX},{anchorY}) — needs {calibration.RequiredDistinctItems} different items with the same value " +
+                     $"at bitmap-local ({anchorX},{anchorY}) — the scan will record it as one observation " +
                      $"(probe {calibration.Observations}/{BotConstants.Loot.ItemCalibrationMaxProbes}).");
             }
             else if (calibration.DistinctItemCountFor(hoveredValue) == calibration.RequiredDistinctItems - 1)
             {
                 _log($"[Item Calibration] Value {MouseOverValueDiscovery.Describe(hoveredValue)} seen on " +
-                     $"{calibration.DistinctItemCountFor(hoveredValue)}/{calibration.RequiredDistinctItems} different item candidates.");
+                     $"{calibration.DistinctItemCountFor(hoveredValue)}/{calibration.RequiredDistinctItems} different item candidates in this scan.");
             }
         }
 
         /// <summary>
         /// Applies a confirmed item value to the single source of truth used by
         /// <see cref="GameMemoryService.IsLootMouseOver"/>, so the very next probe (and every
-        /// later scan) uses it. Kept in memory for the current game session only.
+        /// later scan) uses it, then persists it to MouseCalibration.json together with the NPC
+        /// value. The next bot run / app start therefore reuses the new value instead of the
+        /// stale in-memory one, and no further slow scans are needed.
         /// </summary>
-        private void ApplyCalibratedItemMouseOverValue(ItemMouseOverCalibration calibration)
+        private void ApplyCalibratedItemMouseOverValue(int confirmedValue, string evidence)
         {
-            int confirmedValue = calibration.ConfirmedValue!.Value;
             int previousValue = BotConstants.GameMagicValues.LootMouseOverValue;
 
             BotConstants.GameMagicValues.LootMouseOverValue = confirmedValue;
@@ -3257,14 +3587,33 @@ namespace DriverScanTester.Services
             _consecutiveEmptyItemScans = 0;
             _itemValueDiscoveryPending = false;
 
+            // The agreement belongs to the active value; the confirmed value becomes active and
+            // its pending observations are no longer needed.
+            _itemScanAgreement = null;
+            _itemScanAgreementActiveValue = confirmedValue;
+
+            bool saved = MouseCalibrationStore.Save(
+                ItemSellerService.SellerPointedValue,
+                BotConstants.GameMagicValues.LootMouseOverValue);
+
             long elapsedMs = _itemCalibrationStartedUtc == DateTime.MinValue
                 ? 0
                 : (long)(DateTime.UtcNow - _itemCalibrationStartedUtc).TotalMilliseconds;
 
             _log($"[Item Calibration] Active item MouseOver value updated: " +
                  $"{MouseOverValueDiscovery.Describe(previousValue)} -> {MouseOverValueDiscovery.Describe(confirmedValue)} " +
-                 $"(confirmed on {calibration.DistinctItemCountFor(confirmedValue)} different item candidates, elapsed={elapsedMs}ms).");
-            _log("[Item Calibration] Loot scans continue with the new value; it is kept in memory for the current game session only.");
+                 $"({evidence}, elapsed={elapsedMs}ms).");
+
+            if (saved)
+            {
+                _log($"[Item Calibration] Calibration saved to {MouseCalibrationStore.FilePath} — " +
+                     "the next bot run/app start reuses it and the slow item discovery stops.");
+            }
+            else
+            {
+                _log($"[Item Calibration] WARNING: could not save the confirmed value to {MouseCalibrationStore.FilePath} — " +
+                     "the running bot uses it, but a restart would fall back to the previous calibration.");
+            }
         }
 
         /// <summary>
@@ -3739,7 +4088,7 @@ namespace DriverScanTester.Services
                 if (_automaticLootDisabled)
                     return FinishRegion(LootScanPassResult.Cancelled, "automatic-loot-disabled");
 
-                if (!IsLootScanModeAuthorized(scanMode, PinkLootOnlyMode))
+                if (!IsLootScanModeAuthorized(scanMode, IsPinkScanAuthorized))
                 {
                     return FinishRegion(LootScanPassResult.Cancelled, "pink-only-mode-disabled");
                 }
@@ -3936,7 +4285,7 @@ namespace DriverScanTester.Services
                 while (probePlanner.TryNext(out int candidateIndex, out Point probe))
                 {
                     if (ShouldAbortLoot() || _scanToken.IsCancellationRequested ||
-                        !IsLootScanModeAuthorized(scanMode, PinkLootOnlyMode))
+                        !IsLootScanModeAuthorized(scanMode, IsPinkScanAuthorized))
                     {
                         ClearLootProbeProgress();
                         return FinishRegion(LootScanPassResult.Cancelled, "cancelled-before-probe");
@@ -4417,8 +4766,26 @@ namespace DriverScanTester.Services
                 IsLootingActive = false;
                 ReleaseLootScanCameraLocked($"all loot work cleared: {reason}");
             }
-            if (hadWork)
+            // Log once per episode. A Deferred obligation keeps "hadWork" true every tick
+            // (e.g. while the game window is not focused), which used to print this line on
+            // every loot tick and flood the log.
+            if (hadWork && ShouldLogLootWorkCleared(reason))
                 _log($"[Loot] Pink/loot work cleared: {reason}.");
+            else if (!hadWork)
+                _lastLootWorkClearedReason = string.Empty;
+        }
+
+        private bool ShouldLogLootWorkCleared(string reason)
+        {
+            DateTime now = DateTime.UtcNow;
+            string normalized = reason ?? string.Empty;
+            if (string.Equals(_lastLootWorkClearedReason, normalized, StringComparison.Ordinal) &&
+                (now - _lastLootWorkClearedAt).TotalMilliseconds < LootWorkClearedLogCooldownMs)
+                return false;
+
+            _lastLootWorkClearedReason = normalized;
+            _lastLootWorkClearedAt = now;
+            return true;
         }
 
         private void CancelPinkScanWork(string reason)
@@ -5399,7 +5766,7 @@ namespace DriverScanTester.Services
         private LootProbeResult CheckProbeCaptureOwnership(LootScanMode scanMode)
         {
             if (_automaticLootDisabled || _scanToken.IsCancellationRequested || ShouldAbortLoot() ||
-                !IsLootScanModeAuthorized(scanMode, PinkLootOnlyMode))
+                !IsLootScanModeAuthorized(scanMode, IsPinkScanAuthorized))
                 return LootProbeResult.Cancelled;
 
             lock (_captureGate)
@@ -5410,7 +5777,7 @@ namespace DriverScanTester.Services
                     _log("[LootCapture] Probe aborted: current client geometry became invalid.");
                     return LootProbeResult.CaptureInvalid;
                 }
-                if (GetForegroundWindow() != current.Value.WindowHandle)
+                if (!IsGameWindowForeground(current.Value.WindowHandle))
                     return LootProbeResult.Cancelled;
 
                 if (!_lastStableCaptureGeometry.HasValue ||

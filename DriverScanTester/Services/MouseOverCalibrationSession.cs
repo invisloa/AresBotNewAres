@@ -26,10 +26,14 @@ namespace DriverScanTester.Services
         private bool _hasIdentity;
         private bool _npcValueDiscovered;
         private bool _itemValueDiscovered;
+        private int _npcCalibrationGeneration;
 
         /// <summary>
         /// Marks that the NPC MouseOver value was discovered automatically in this game
-        /// session (validated by a real right-click + NPC dialogue).
+        /// session (validated by a real right-click + NPC dialogue). Every successful
+        /// calibration starts a new generation, so the loot system can discard item-value
+        /// observations that were collected before the NPC (and therefore possibly the item)
+        /// value changed.
         /// </summary>
         public void MarkNpcValueDiscovered((uint ProcessId, ulong ModuleBase) identity)
         {
@@ -37,6 +41,7 @@ namespace DriverScanTester.Services
             {
                 EnsureIdentityLocked(identity);
                 _npcValueDiscovered = true;
+                _npcCalibrationGeneration++;
             }
         }
 
@@ -61,6 +66,20 @@ namespace DriverScanTester.Services
             {
                 EnsureIdentityLocked(identity);
                 return _npcValueDiscovered;
+            }
+        }
+
+        /// <summary>
+        /// Monotonic counter of successful NPC auto-calibrations in this game session. It lets
+        /// the loot system reset saved item observations after the NPC value (which changes
+        /// together with the item value) was re-discovered.
+        /// </summary>
+        public int NpcCalibrationGeneration((uint ProcessId, ulong ModuleBase) identity)
+        {
+            lock (_gate)
+            {
+                EnsureIdentityLocked(identity);
+                return _npcCalibrationGeneration;
             }
         }
 
@@ -97,6 +116,7 @@ namespace DriverScanTester.Services
             _hasIdentity = true;
             _npcValueDiscovered = false;
             _itemValueDiscovered = false;
+            _npcCalibrationGeneration = 0;
         }
     }
 }

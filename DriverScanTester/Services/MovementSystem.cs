@@ -500,22 +500,65 @@ namespace DriverScanTester.Services
         private bool _combatGateTargetReleaseWaitLogged;
         private bool _combatGateTargetReleaseVerified;
 
-        // ── Post-kill SOD/SOP pink-scan hold (MoveAndAttack) ──
-        // After a kill, first TAB at the closest camera distance. A nearby mob takes
-        // priority; only when that check finds none does the loot system run its pink
-        // scan, holding combat/movement until the drop check finishes.
+        // ── Post-kill SOD/SOP pink-scan hold ──
+        // MoveAndAttack: after a kill, first TAB at the closest camera distance. A nearby
+        // mob takes priority; only when that check finds none does the loot system run its
+        // pink scan, holding combat/movement until the drop check finishes.
+        // MoveAndAttackAndLoot: the pink scan runs first (even with mobs around) and the
+        // close-mob TAB check follows it — see the post-kill loot order fields below.
         /// <summary>True while the pink-scan hold is active (prevents log spam).</summary>
         private bool _pinkScanHoldActive = false;
         /// <summary>When the current pink-scan hold started (UtcNow) — safety timeout.</summary>
         private DateTime _pinkScanHoldSince = DateTime.MinValue;
         /// <summary>True once the current pink-scan hold was force-released by the safety timeout.</summary>
 
+        // ── Post-kill loot order (MoveAndAttackAndLoot) ──
+        // After every kill the SOD/SOP pink scan runs FIRST: those drops are collected
+        // even while mobs are around. Only then does the close-camera TAB search look for
+        // a nearby mob. A found mob is fought first; the normal item cycle stays withheld
+        // (mandatory obligation Deferred) until a search ends without a mob, and only then
+        // are the normal items found earlier looted.
+        /// <summary>True while the post-kill SOD/SOP + close-mob phase owns the sequence.</summary>
+        private volatile bool _postKillCloseMobCheckActive;
+        /// <summary>When the current post-kill phase started (UtcNow) — pink-request TTL guard.</summary>
+        private DateTime _postKillCloseMobCheckSince = DateTime.MinValue;
+        /// <summary>Log throttle for the SOD/SOP hold inside the post-kill phase.</summary>
+        private bool _postKillCloseMobHoldLogged;
+        /// <summary>Log throttle for the close-mob TAB search start of the current phase.</summary>
+        private bool _postKillCloseMobLadderStartLogged;
+
+        private LootSystem? _lootSystemRef;
+
         /// <summary>
         /// Optional reference to the running LootSystem (set by the host — workflow
         /// coordinator or MainViewModel). Used to hold movement until a full loot scan
         /// pass completes after a kill. Null means no loot system is running.
+        ///
+        /// Assigning a loot system also attaches the post-kill close-mob gate: the loot
+        /// system asks this movement system whether the MoveAndAttackAndLoot post-kill mob
+        /// search is still outstanding, so the normal item cycle can never start while a
+        /// mob may be nearby.
         /// </summary>
-        public LootSystem? LootSystemRef { get; set; }
+        public LootSystem? LootSystemRef
+        {
+            get => _lootSystemRef;
+            set
+            {
+                _lootSystemRef = value;
+                if (value != null)
+                    value.ShouldWithholdPostKillNormalLoot = () => IsPostKillCloseMobCheckPending;
+            }
+        }
+
+        /// <summary>
+        /// True while the MoveAndAttackAndLoot post-kill close-mob TAB search is still
+        /// outstanding. The loot system withholds the normal post-kill item cycle while
+        /// this is true: a nearby mob is fought first, and only a search that ended
+        /// without a mob allows normal items to be looted. SOD/SOP pink loot is not
+        /// affected — it is collected right after the kill.
+        /// </summary>
+        internal bool IsPostKillCloseMobCheckPending =>
+            _postKillCloseMobCheckActive && !IsAutomaticLootDisabled;
 
         /// <summary>
         /// Profile-level override for the current run. When true this MovementSystem
@@ -2382,6 +2425,8 @@ namespace DriverScanTester.Services
         /// </summary>
         private void ReleaseLootBarrierForDisabledPolicy(string reason)
         {
+            EndPostKillCloseMobCheck(releaseNormalLoot: false, reason);
+
             bool hadOwnership = _lootNavigationBarrierHoldsInput ||
                                 _lootBarrier.IsActive ||
                                 _lootBarrier.HasTerminalFailure;
@@ -2507,6 +2552,8 @@ namespace DriverScanTester.Services
 
             if (!RequiresMandatoryLootBarrier(CurrentMode))
             {
+                EndPostKillCloseMobCheck(releaseNormalLoot: false, $"mode changed to {CurrentMode}");
+
                 if (_lootBarrier.IsActive || _lootBarrier.HasTerminalFailure)
                 {
                     if (_lootBarrier.TryGetRequestId(out long cancelledId))
@@ -3940,6 +3987,23 @@ namespace DriverScanTester.Services
             ClearCombatRetargetSearch();
             _resumeCombatSkillAfterGrouping = false;
 
+            // The target release could NOT be confirmed (the click kept failing): the suppressed
+            // monster is still selected. Keeping it suppressed would leave the bot with a
+            // selected-but-never-fought target — and because the loot system defers while any
+            // mob is selected, the still-Deferred post-kill obligation could then never finish
+            // and navigation stayed blocked forever (bot standing still doing nothing).
+            // The return already brought the player inside the attack-disengage boundary, so the
+            // monster may be fought normally from here on; the central target-safety validation
+            // still refuses players/NPCs/unknown targets.
+            if (!_combatGateTargetReleaseVerified &&
+                targetId > 0 &&
+                targetId == _combatGateSuppressedTargetId &&
+                _memoryService.GetSelectedTargetId() == targetId)
+            {
+                _log($"[CombatGate] Target {targetId} is still selected after the return — clearing the attack suppression so combat (and the pending loot obligation) can resume.");
+                ClearCombatGateTargetSuppression();
+            }
+
             _log($"[CombatGateReturn] REACHED waypoint pos=({x:F1},{y:F1}) waypoint=({waypointX:F1},{waypointY:F1}) " +
                  $"distance={distance:F2} reachThreshold={reachThreshold:F2} manhattan={manhattan:F1} " +
                  $"attackDisengage={attackDisengage:F1} elapsed={elapsedMs:F0}ms request={requestId} target={targetId}.");
@@ -4440,10 +4504,22 @@ namespace DriverScanTester.Services
             // "waiting for the loot scan" line to spam once per tick. It is cleared in
             // the else branch when the loot phase actually ends.
 
-            // ── Post-kill SOD/SOP pink-scan hold (MoveAndAttack) ──
-            // The close-camera TAB check runs first. If it found no nearby mob, the
-            // loot system scans for SOD/SOP drops and repeats until no pink pixels are
-            // left; combat and waypoint movement stay suspended for that whole scan.
+            // ── Post-kill target release (before the SOD/SOP pass and the item cycle) ──
+            // The killed mob's selection must be cleared before loot camera/cursor work. In
+            // MoveAndAttackAndLoot the SOD/SOP pass follows the kill immediately and would
+            // otherwise hold this code path, so the release is processed here — ahead of the
+            // pink hold and before the close-mob TAB search.
+            if (_postKillTargetReleaseId > 0)
+            {
+                ProcessPostKillTargetRelease(token);
+                return;
+            }
+
+            // ── Post-kill SOD/SOP pink-scan hold ──
+            // MoveAndAttack: the close-camera TAB check runs first; only when it found no
+            // nearby mob does the loot system scan for SOD/SOP drops. MoveAndAttackAndLoot:
+            // the pink pass runs immediately after the kill, even when mobs are around.
+            // Either way combat and waypoint movement stay suspended for that whole scan.
             if (LootSystemRef != null && LootSystemRef.IsPinkScanPendingOrActive)
             {
                 if (_pinkScanHoldSince == DateTime.MinValue)
@@ -4803,7 +4879,8 @@ namespace DriverScanTester.Services
             }
 
             if (_finalStandbyActive && _lootBarrier.IsBlockingNavigation &&
-                !confirmedMonsterTarget && !_combatGateReturnActive)
+                !confirmedMonsterTarget && !_combatGateReturnActive &&
+                !IsPostKillCloseMobCheckPending)
             {
                 if (await HoldNavigationForMandatoryLootAsync(token))
                     return;
@@ -4977,7 +5054,11 @@ namespace DriverScanTester.Services
             if (_combatRetargetCameraStage != CombatRetargetCameraStage.None)
             {
                 bool retargetMonsterSelected = IsCurrentCombatRetargetMonsterSelected();
-                if (_lootBarrier.IsBlockingNavigation && !retargetMonsterSelected)
+                // The MoveAndAttackAndLoot post-kill close-mob check owns this tick: it is
+                // the authoritative reason the normal-loot obligation stays Deferred, so the
+                // TAB search must run before the mandatory loot hold could freeze it.
+                bool closeMobCheckOwnsTick = IsPostKillCloseMobCheckPending;
+                if (_lootBarrier.IsBlockingNavigation && !retargetMonsterSelected && !closeMobCheckOwnsTick)
                 {
                     if (_combatGateReturnActive &&
                         await TickCombatGateWaypointReturnUnderLootBarrierAsync(
@@ -5179,6 +5260,21 @@ namespace DriverScanTester.Services
                             _postKillTargetReleaseRefusalLogged = false;
                             _postKillTargetReleaseRetryAtUtc = DateTime.MinValue;
                             _log($"[PostKillTarget] Request={requestId} PreviousTarget={targetId}");
+
+                            // Post-kill order: SOD/SOP pink loot first — it is collected
+                            // even when other mobs are around. The normal item cycle of the
+                            // mandatory request stays Deferred until the close-mob TAB
+                            // search that follows confirms there is no mob nearby.
+                            _postKillCloseMobCheckActive = true;
+                            _postKillCloseMobCheckSince = DateTime.UtcNow;
+                            _postKillCloseMobHoldLogged = false;
+                            _postKillCloseMobLadderStartLogged = false;
+                            // The waypoint mode is authoritative here: make sure the loot
+                            // component is in the MoveAndAttackAndLoot post-kill phase before
+                            // the SOD/SOP request is armed (the host also pushes it per tick).
+                            loot!.MoveAndAttackAndLootMode = true;
+                            loot.RequestPinkScan();
+                            _log("[PostKillLoot] SOD/SOP scan first; the normal item loot waits until the TAB mob check finds no mob.");
                         }
                         else
                         {
@@ -6756,7 +6852,12 @@ namespace DriverScanTester.Services
 
         private bool TryApplyMovementCameraDistance(short distance)
         {
-            if (!IsAutomaticLootDisabled && _lootNavigationBarrierHoldsInput)
+            // The mandatory loot hold normally freezes camera writes so the loot zoom cannot
+            // race navigation. The MoveAndAttackAndLoot post-kill close-mob search is the
+            // exception: it owns the tick while the normal-loot obligation is Deferred on
+            // purpose, so its camera ladder (and the final restore) must be allowed.
+            if (!IsAutomaticLootDisabled && _lootNavigationBarrierHoldsInput &&
+                !IsPostKillCloseMobCheckPending)
                 return false;
 
             void Apply() => _memoryService.SetCameraDistance(distance);
@@ -6779,7 +6880,10 @@ namespace DriverScanTester.Services
         private bool TryApplyVerifiedMovementCameraDistance(short distance, out bool writeFailed)
         {
             writeFailed = false;
-            if (!IsAutomaticLootDisabled && _lootNavigationBarrierHoldsInput)
+            // Same exception as <see cref="TryApplyMovementCameraDistance"/>: the post-kill
+            // close-mob search owns the camera while the normal-loot obligation is Deferred.
+            if (!IsAutomaticLootDisabled && _lootNavigationBarrierHoldsInput &&
+                !IsPostKillCloseMobCheckPending)
                 return false;
 
             bool writeSucceeded = false;
@@ -9591,6 +9695,164 @@ namespace DriverScanTester.Services
             _combatRetargetFailed = false;
         }
 
+        /// <summary>
+        /// Drives the MoveAndAttackAndLoot post-kill loot order. The SOD/SOP pink scan runs
+        /// first — its drops are collected even while mobs are around. When that scan has
+        /// finished, the close-camera TAB search looks for a nearby mob: a found mob is
+        /// fought first, and the withheld normal item cycle only starts when the search
+        /// ends without a mob. Returns true while the phase owns the tick.
+        /// </summary>
+        private async Task<bool> TickPostKillCloseMobCheckAsync(BotMode currentMode, CancellationToken token)
+        {
+            if (!_postKillCloseMobCheckActive)
+                return false;
+
+            if (IsAutomaticLootDisabled)
+            {
+                EndPostKillCloseMobCheck(releaseNormalLoot: false, "automatic loot disabled by profile/path policy");
+                return false;
+            }
+
+            if (currentMode != BotMode.MoveAndAttackAndLoot)
+            {
+                EndPostKillCloseMobCheck(releaseNormalLoot: false, $"mode changed to {currentMode}");
+                return false;
+            }
+
+            LootSystem? loot = LootSystemRef;
+
+            // The SOD/SOP pass keeps priority over target selection: the drops next to the
+            // killed mob are collected first, even when other mobs are visible.
+            if (loot != null && loot.IsPinkScanPendingOrActive)
+            {
+                // A request that never starts (loot task stopped/disabled at runtime) must
+                // not block the post-kill order forever; the request expires with the same
+                // TTL inside the loot system.
+                bool requestExpired =
+                    !loot.IsPinkScanRunning &&
+                    (DateTime.UtcNow - _postKillCloseMobCheckSince).TotalMilliseconds >
+                        BotConstants.Loot.PinkScanRequestTtlMs;
+                if (!requestExpired)
+                {
+                    if (!_postKillCloseMobHoldLogged)
+                    {
+                        _postKillCloseMobHoldLogged = true;
+                        _log("[PostKillLoot] Holding the post-kill sequence until the SOD/SOP pink scan finishes.");
+                    }
+                    SetLootNavigationBarrierHoldsInput(true);
+                    StopMoving();
+                    ReleaseSkillThree();
+                    await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                    return true;
+                }
+
+                _log("[PostKillLoot] SOD/SOP request never started within its TTL — continuing with the close-mob TAB check.");
+            }
+
+            if (_combatGateReturnActive)
+                return false;
+
+            // ── CombatGate: attack disabled for this waypoint leg ──
+            // The player is outside the waypoint's AttackDisengageDistance ("attack disabled until
+            // waypoint is reached") or the CombatGate deliberately suppresses the selected target.
+            // In that state a TAB-driven target search can never run — the ordinary pipeline clears
+            // the retarget search on every such tick — so the withheld item cycle would freeze the
+            // bot with a mob beating on it (the exact "stands still and stares" report). The SOD/SOP
+            // pass has already run, so release the normal item cycle here: it still stops by itself
+            // the moment a mob is selected, and waypoint movement / CombatGate recovery continues.
+            if (_attackSuppressedForCurrentWaypoint || IsCombatGateTargetSuppressionActive)
+            {
+                EndPostKillCloseMobCheck(
+                    releaseNormalLoot: true,
+                    "waypoint attack is disengaged by CombatGate — close-mob TAB check skipped");
+                return false;
+            }
+
+            if (_combatRetargetCameraStage != CombatRetargetCameraStage.None)
+                return false;
+
+            // A selected entity keeps this tick for combat/target validation. Only the
+            // TAB search below is allowed to look for the next mob.
+            if (_memoryService.IsMobSelected())
+                return false;
+
+            // Never send TAB input while another window owns the foreground: the mob check
+            // resumes as soon as the game is focused again. The obligation stays alive.
+            if (loot != null && !loot.IsGameWindowForegroundForInput)
+            {
+                if (!_postKillCloseMobHoldLogged)
+                {
+                    _postKillCloseMobHoldLogged = true;
+                    _log("[PostKillLoot] Game window is not in the foreground — holding the close-mob TAB check until it is.");
+                }
+                SetLootNavigationBarrierHoldsInput(true);
+                StopMoving();
+                ReleaseSkillThree();
+                await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                return true;
+            }
+
+            // A Pending/Running mandatory request owns the target cycle. The TAB search may
+            // only run once the loot system serviced the obligation and the close-mob gate
+            // kept it Deferred (never while it could still start a normal loot cycle).
+            if (loot != null &&
+                loot.TryGetActiveMandatoryLootRequest(out long activeRequestId, out _) &&
+                loot.TryGetMandatoryLootRequestStatus(activeRequestId, out LootRequestStatus activeStatus) &&
+                (activeStatus.State == LootRequestState.Pending ||
+                 activeStatus.State == LootRequestState.Running))
+            {
+                if (!_postKillCloseMobHoldLogged)
+                {
+                    _postKillCloseMobHoldLogged = true;
+                    _log("[PostKillLoot] Waiting for the post-kill obligation to be withheld before the close-mob TAB check.");
+                }
+                await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
+                return true;
+            }
+
+            SetLootNavigationBarrierHoldsInput(true);
+            StopMoving();
+            ReleaseSkillThree();
+            if (!_postKillCloseMobLadderStartLogged)
+            {
+                _postKillCloseMobLadderStartLogged = true;
+                _log($"[PostKillLoot] SOD/SOP pass finished — checking for nearby mobs at {CombatRetargetVeryLowCameraDistance}; " +
+                     "normal item loot stays withheld until that check finds no mob.");
+            }
+            StartCombatRetargetSearch();
+            await Task.Delay(BotConstants.Delays.CombatRetargetTabMs, token);
+            return true;
+        }
+
+        /// <summary>
+        /// Ends the MoveAndAttackAndLoot post-kill SOD/SOP + close-mob phase. With
+        /// <paramref name="releaseNormalLoot"/> the search concluded without a mob and the
+        /// withheld normal item cycle may start; otherwise the phase is abandoned and the
+        /// ordinary barrier lifecycle decides (mode change / teardown).
+        /// </summary>
+        private void EndPostKillCloseMobCheck(bool releaseNormalLoot, string reason)
+        {
+            if (!_postKillCloseMobCheckActive)
+                return;
+
+            _postKillCloseMobCheckActive = false;
+            _postKillCloseMobCheckSince = DateTime.MinValue;
+            _postKillCloseMobHoldLogged = false;
+            _postKillCloseMobLadderStartLogged = false;
+
+            if (releaseNormalLoot)
+            {
+                // The mob search is finished: the completed normal-loot obligation must not
+                // start a second retarget search afterwards.
+                _postKillRetargetRequestId = 0;
+                _log($"[PostKillLoot] Close-mob check finished ({reason}) — normal item loot runs as soon as no mob is selected.");
+            }
+            else
+            {
+                _log($"[PostKillLoot] Close-mob check ended — {reason}.");
+            }
+        }
+
         private async Task<bool> HandlePostKillRetargetRequestAsync(CancellationToken token)
         {
             long requestId = _postKillRetargetRequestId;
@@ -9632,6 +9894,12 @@ namespace DriverScanTester.Services
 
             if (!requestCompleted)
             {
+                // Post-kill loot order (MoveAndAttackAndLoot): while the SOD/SOP +
+                // close-mob phase is active it owns the sequence. The normal-loot
+                // obligation deliberately stays Deferred until that check found no mob.
+                if (_postKillCloseMobCheckActive)
+                    return await TickPostKillCloseMobCheckAsync(CurrentMode, token);
+
                 int currentTargetId = _memoryService.GetSelectedTargetId();
                 CombatTargetValidation currentTarget = currentTargetId > 0
                     ? _targetSafety.Validate()
@@ -9699,6 +9967,8 @@ namespace DriverScanTester.Services
             {
                 _log($"[CombatRetarget] Monster selected targetId={selectedTargetId} stage={GetCombatRetargetStageName(stage)}");
                 ClearCombatRetargetSearch();
+                // Post-kill order: a nearby mob beats the withheld normal item loot.
+                EndPostKillCloseMobCheck(releaseNormalLoot: true, "a nearby mob is selected — combat takes over");
                 return false;
             }
 
@@ -9741,6 +10011,9 @@ namespace DriverScanTester.Services
                     if (!TryApplyMovementCameraDistance(restoreCameraDistance))
                         return true;
                     ClearCombatRetargetSearch();
+                    // Post-kill order: the search ended without a mob, so the normal items
+                    // found before may now be looted.
+                    EndPostKillCloseMobCheck(releaseNormalLoot: true, "no mob selected at any retarget camera stage");
                     // The whole multi-stage search finished WITHOUT a monster: only now may the
                     // mana regen be considered (on the following tick).
                     ArmManaRegenCastOpportunity("multi-stage retarget search finished without a monster");
@@ -9812,8 +10085,9 @@ namespace DriverScanTester.Services
             TryApplyMovementCameraDistance(restoreCameraDistance);
             ClearCombatRetargetSearch();
             _combatRetargetFailed = true;
-            // The search ended without acquiring a monster (camera verification failed), so the
-            // mana regen may be considered on the following tick.
+            // The search ended without acquiring a monster (camera verification failed), so normal
+            // items may be looted and the mana regen may be considered on the following tick.
+            EndPostKillCloseMobCheck(releaseNormalLoot: true, "retarget camera verification failed without a mob");
             ArmManaRegenCastOpportunity("retarget search aborted without a monster");
         }
 
@@ -9905,6 +10179,9 @@ namespace DriverScanTester.Services
             _postKillTargetReleaseRetryAtUtc = DateTime.MinValue;
             _postKillCloseTargetCheckPending = false;
             _postKillTargetIdBeforeTab = 0;
+            // An abandoned sequence never releases normal loot: the barrier lifecycle
+            // (mode change / teardown) decides from here.
+            EndPostKillCloseMobCheck(releaseNormalLoot: false, "post-kill retarget state reset");
             ClearCombatRetargetSearch();
         }
 

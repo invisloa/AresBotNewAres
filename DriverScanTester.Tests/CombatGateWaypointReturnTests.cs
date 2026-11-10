@@ -595,6 +595,39 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public async Task UnconfirmedTargetReleaseDoesNotFreezeCombatAfterTheReturnCompletes()
+        {
+            using var scenario = new ReturnScenario();
+            scenario.Movement.ReleaseTargetOnLeftUp = false;
+            scenario.ArmPostKill();
+            scenario.DeferForCombat();
+
+            await TickUntilAsync(scenario, () => scenario.ReturnActive);
+            Assert.Contains(scenario.Log, l => l.Contains("Target release FAILED", StringComparison.Ordinal));
+            Assert.Equal(ProductionMobTargetId, scenario.Stub.TargetId);
+            Assert.True(GetBoolField(scenario.Movement, "_isMovingForward"));
+
+            // Approach the waypoint so the dedicated return completes successfully.
+            scenario.Stub.X = 166f;
+            scenario.Stub.Y = 140f;
+            await TickUntilAsync(scenario, () =>
+                scenario.Log.Any(l => l.Contains("[CombatGateReturn] COMPLETE", StringComparison.Ordinal)));
+
+            // The selection could never be cleared after the bounded release attempts. Keeping
+            // that monster suppressed would leave a selected-but-never-fought target: the
+            // Deferred post-kill obligation defers while any mob is selected, so the bot stood
+            // still indefinitely ("Fwd:False Unst:False Mob:True" freeze).
+            Assert.Equal(ProductionMobTargetId, scenario.Stub.TargetId);
+            Assert.Equal(0, (int)GetField(scenario.Movement, "_combatGateSuppressedTargetId")!);
+            Assert.Contains(scenario.Log, l => l.Contains("is still selected after the return", StringComparison.Ordinal));
+
+            // Combat resumes on the still-selected monster instead of freezing.
+            int attacksBefore = scenario.Movement.SkillThreeDowns;
+            await TickUntilAsync(scenario, () => scenario.Movement.SkillThreeDowns > attacksBefore, timeoutMs: 4000);
+            Assert.Contains(scenario.Log, l => l.Contains("Combat: Attack", StringComparison.Ordinal));
+        }
+
+        [Fact]
         public async Task SuppressionDoesNotBlockAnotherConfirmedMonsterAfterRecovery()
         {
             using var scenario = new ReturnScenario(

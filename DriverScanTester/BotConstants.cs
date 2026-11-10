@@ -1194,9 +1194,10 @@ namespace DriverScanTester
             /// <summary>
             /// Full 32-bit value of L_LootSelectedItem1 at [Ares.exe+0x4883E8]+0xC when a loot item is
             /// under the mouse cursor.  WARNING: This value changes every game launch (per-session seed).
-            /// If loot stops detecting, re-read this address as cl (32-bit int) while hovering an item
-            /// via the 'Mouseover Item' button in the Bot window (MainViewModel.CaptureItemMouseOver),
-            /// which also saves the value to MouseCalibration.json for the next launch.
+            /// It can be calibrated manually via the 'Mouseover Item' button in the Bot window
+            /// (MainViewModel.CaptureItemMouseOver) or automatically by the loot system: a value read in
+            /// several separate loot scans is confirmed and persisted to MouseCalibration.json, so the
+            /// next bot run / app start reuses it.
             ///
             /// VALUE-BASED loot detection: IsLootMouseOver() compares the hovered cl value against this
             /// constant. A MOB or NPC under the cursor produces a DIFFERENT cl value, so exact matching
@@ -1999,10 +2000,20 @@ namespace DriverScanTester
 
             /// <summary>
             /// How many DIFFERENT item candidates must publish the same raw mouseover value
-            /// before it is accepted as the item MouseOver value. One hover (or one blob) is
-            /// never enough: the value must be consistent across different items.
+            /// within ONE loot scan before it is accepted immediately. This is only the fast
+            /// path: a normal loot pass often contains a single drop, so the same value may
+            /// also be confirmed across separate scans — see
+            /// <see cref="ItemCalibrationRequiredScans"/>.
             /// </summary>
             public const int ItemCalibrationRequiredDistinctItems = 3;
+
+            /// <summary>
+            /// How many SEPARATE loot scans must publish the same raw mouseover value before
+            /// it is accepted as the item MouseOver value. The scans do not have to be in the
+            /// same bot run (e.g. one scan after each of three kills); the observations are
+            /// persisted, so a stopped/started bot continues where it left off.
+            /// </summary>
+            public const int ItemCalibrationRequiredScans = 3;
 
             /// <summary>
             /// Upper bound of slow calibration probes per scan attempt. When it is reached

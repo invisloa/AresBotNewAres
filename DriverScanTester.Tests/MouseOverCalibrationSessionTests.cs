@@ -52,6 +52,28 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void NpcCalibrationGenerationChangesWithEachDiscoveryAndSession()
+        {
+            var session = new MouseOverCalibrationSession();
+
+            Assert.Equal(0, session.NpcCalibrationGeneration(SessionA));
+
+            session.MarkNpcValueDiscovered(SessionA);
+            Assert.Equal(1, session.NpcCalibrationGeneration(SessionA));
+
+            // A second successful calibration starts a new generation, so item observations
+            // collected before it can be discarded.
+            session.MarkNpcValueDiscovered(SessionA);
+            Assert.Equal(2, session.NpcCalibrationGeneration(SessionA));
+
+            // A different game launch never inherits the generation.
+            Assert.Equal(0, session.NpcCalibrationGeneration(SessionB));
+            session.MarkNpcValueDiscovered(SessionB);
+            Assert.Equal(1, session.NpcCalibrationGeneration(SessionB));
+            Assert.Equal(0, session.NpcCalibrationGeneration(SessionA));
+        }
+
+        [Fact]
         public void AnotherGameSessionNeverInheritsTheMarkers()
         {
             var session = new MouseOverCalibrationSession();

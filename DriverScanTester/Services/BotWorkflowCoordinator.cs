@@ -1716,7 +1716,7 @@ namespace DriverScanTester.Services
                         }
                     }, expToken);
                     _log(hasAttackLootRoute
-                        ? "[ExpLoop] Loot system started (MoveAndAttackAndLoot route — normal white-pixel loot)."
+                        ? "[ExpLoop] Loot system started (MoveAndAttackAndLoot route — post-kill order: SOD/SOP pink scan first, then the TAB close-mob check, and normal white-pixel items only when no mob is nearby)."
                         : "[ExpLoop] Loot system started (MoveAndAttack route — SOD/SOP pink-pixel scan only, big region, after each kill).");
                     if (_profile.LootPriority)
                         _log("[ExpLoop] LOOT PRIORITY MODE ON — looting outranks combat; attack and waypoint movement are suspended while loot is being scanned/collected.");
