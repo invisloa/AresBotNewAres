@@ -89,6 +89,11 @@ namespace DriverScanTester.Services
         /// <param name="ignoreEmpirePlayers">Profile-level override: when true, Empire
         /// (yellow) player markers are ignored for the whole run in addition to the
         /// per-waypoint path-level flag.</param>
+        /// <param name="expHuntLoop">Explicit EXP-loop flag. True only when the active workflow
+        /// step is <c>ExpLoop</c> (BotWorkflowCoordinator.ExecuteExpLoopStepAsync). It is passed
+        /// to <see cref="MovementSystem.ExpHuntLoopMode"/> and is the only switch that can
+        /// enable the Sorcerer automatic mana skill (key 6) — a looped travel route is never
+        /// EXP hunting, so this is never inferred from <c>loop</c>.</param>
         /// <returns>True if the path completed normally (non-loop); false if cancelled.</returns>
         public async Task<bool> RunPathAsync(
             List<Waypoint> waypoints,
@@ -98,7 +103,8 @@ namespace DriverScanTester.Services
             string routeLabel = "",
             bool disableAllLoot = false,
             bool ignoreAlliancePlayers = false,
-            bool ignoreEmpirePlayers = false)
+            bool ignoreEmpirePlayers = false,
+            bool expHuntLoop = false)
         {
             LastStopReason = PathRunStopReason.None;
             if (waypoints == null || waypoints.Count == 0)
@@ -142,7 +148,10 @@ namespace DriverScanTester.Services
                     RouteLabel = routeLabel,
                     DisableAllLootOverride = disableAllLoot,
                     IgnoreAlliancePlayersOverride = ignoreAlliancePlayers,
-                    IgnoreEmpirePlayersOverride = ignoreEmpirePlayers
+                    IgnoreEmpirePlayersOverride = ignoreEmpirePlayers,
+                    // Explicit EXP-loop flag: enables the Sorcerer automatic mana skill only
+                    // for the workflow ExpLoop step with a combat waypoint mode.
+                    ExpHuntLoopMode = expHuntLoop
                 };
             }
             catch

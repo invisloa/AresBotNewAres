@@ -303,13 +303,23 @@ namespace DriverScanTester.Services
         public bool InternalRepotEnabled { get; set; } = true;
 
         /// <summary>
-        /// If true (default), the production speed-potion rebuff (keys 7+8) and the class
+        /// If true (default), the production speed-potion rebuff (keys 6+7) and the class
         /// rebuff (key 4 for the mage) run in every mode exactly as before. The
         /// movement-synchronization diagnostic sets this to false for TEST 9 so its isolated
         /// OnlyMove experiment cannot emit unrelated potion or buff input. Production callers
         /// never change it.
         /// </summary>
         public bool AllowSpeedPotionBuff { get; set; } = true;
+
+        /// <summary>
+        /// True when this run is the workflow EXP hunting loop (BotWorkflowCoordinator's
+        /// ExpLoop step). Set explicitly by <see cref="PathRunnerService"/> — the Sorcerer
+        /// automatic mana skill is NEVER inferred from <see cref="LoopPath"/>, because a
+        /// looped travel route is not EXP hunting. Combined with the effective waypoint mode
+        /// (MoveAndAttack / MoveAndAttackAndLoot) and the Mage class it is the only thing
+        /// that enables the key-6 mana skill.
+        /// </summary>
+        public bool ExpHuntLoopMode { get; set; }
 
         private bool _isWaypointSpecialRecoveryActive;
         private bool _waypointRepotRequested;
@@ -1552,7 +1562,7 @@ namespace DriverScanTester.Services
 
         /// <summary>True when the in-city stuck escalation fired while running in workflow mode
         /// (InternalRepotEnabled=false). The route cannot complete — PathRunner aborts it so the
-        /// coordinator can retry from the city instead of pressing 6 and idling for 10 minutes.</summary>
+        /// coordinator can retry from the city instead of pressing 8 and idling for 10 minutes.</summary>
         private bool _isCityStuckFatal = false;
 
         private readonly ReverseDiagonalRecovery _reverseDiagonalRecovery;
@@ -1638,12 +1648,12 @@ namespace DriverScanTester.Services
         private bool _speedPotWhiteCountWarningLogged = false;
 
         /// <summary>
-        /// Hotkey currently used for the mage white potion. Starts at key 8 (legacy
-        /// SkillSelectorMageAlliance mapping) and is corrected at runtime when key 8 is
+        /// Hotkey currently used for the mage white potion. Starts at key 7 (legacy
+        /// SkillSelectorMageAlliance mapping) and is corrected at runtime when key 7 is
         /// observed to consume a red potion instead of a white one.
         /// </summary>
-        private byte _mageWhitePotionVk = GameInput.VK_8;
-        private byte _mageWhitePotionScan = GameInput.SCAN_8;
+        private byte _mageWhitePotionVk = GameInput.VK_7;
+        private byte _mageWhitePotionScan = GameInput.SCAN_7;
 
         /// <summary>
         /// Last time the class was resolved for the speed-potion decision. The class never
@@ -1654,7 +1664,7 @@ namespace DriverScanTester.Services
         /// <summary>
         /// Last successfully read player class, used only by the speed-potion decision.
         /// A transient read failure must never flip the behaviour — a Sorcerer would
-        /// otherwise start pressing the red-potion key 7 again.
+        /// otherwise start pressing the red-potion key 6 again.
         /// </summary>
         private PlayerClass _lastConfirmedPlayerClass = PlayerClass.Unknown;
         private int _startMoveCount = 0;
@@ -1681,6 +1691,47 @@ namespace DriverScanTester.Services
             MidSearch
         }
 
+        /// <summary>
+        /// Decision of the pure Sorcerer mana-cast gate. The gate is evaluated on every tick
+        /// that reaches the idle-combat flow with an armed opportunity; <see cref="Ready"/> is
+        /// the only value that may lead to a key press.
+        /// </summary>
+        internal enum SorcererManaCastGate
+        {
+            /// <summary>No opportunity is armed — nothing to evaluate.</summary>
+            NotArmed,
+            /// <summary>The route/waypoint/mode changed since the opportunity was armed.</summary>
+            ContextChanged,
+            /// <summary>The opportunity is older than its one-shot window.</summary>
+            Expired,
+            /// <summary>A target (monster, player, NPC or unknown) is selected.</summary>
+            EnemyPresent,
+            /// <summary>An enhanced retarget search / post-pink target check is still pending.</summary>
+            SearchPending,
+            /// <summary>Loot collection/scanning, mob grouping or the loot barrier owns the input.</summary>
+            LootOrGroupingOwnsInput,
+            /// <summary>A recovery/map-transition routine owns the input.</summary>
+            RecoveryOwnsInput,
+            /// <summary>The 5-second cast cooldown has not elapsed yet.</summary>
+            CooldownActive,
+            /// <summary>All gates passed — the skill may be cast.</summary>
+            Ready
+        }
+
+        /// <summary>
+        /// Route/mode context captured when the one-shot Sorcerer mana-cast opportunity was
+        /// armed. A change to any field invalidates the opportunity, so a cast can never be
+        /// issued for a different waypoint, mode or standby phase than the one whose enemy
+        /// check came back empty.
+        /// </summary>
+        private readonly record struct SorcererManaCastOpportunity(
+            DateTime ArmedAtUtc,
+            BotMode Mode,
+            bool FinalStandby,
+            float WaypointX,
+            float WaypointY,
+            string Reason);
+
         private const short CombatRetargetVeryLowCameraDistance = BotConstants.Camera.CombatRetargetVeryLowDistance;
         private const short CombatRetargetLowCameraDistance = BotConstants.Camera.CombatRetargetLowDistance;
         private const short CombatRetargetMidCameraDistance = BotConstants.Camera.CombatRetargetMidDistance;
@@ -1697,6 +1748,13 @@ namespace DriverScanTester.Services
         private bool _postKillCloseTargetCheckPending;
         private int _postKillTargetIdBeforeTab;
         private bool _postPinkScanTargetCheckPending;
+
+        // ── Sorcerer automatic mana skill (key 6) ──
+        // One-shot opportunity armed ONLY after an enemy check finished without acquiring a
+        // monster. It is never evaluated on the same tick that pressed TAB: the TAB result
+        // is only observable on the following tick.
+        private SorcererManaCastOpportunity? _sorcererManaCastOpportunity;
+        private DateTime _lastSorcererManaCastAt = DateTime.MinValue;
 
         public MovementSystem(
             GameMemoryService memoryService,
@@ -1744,7 +1802,7 @@ namespace DriverScanTester.Services
 
             _isInitialized = true;
             _log($"MovementSystem: Initialized with GameMemoryService, Default Precision: {GlobalPrecision}, Loop: {LoopPath}");
-            _log($"[Steering] DefaultMode={_steeringMode} (per-waypoint overrides allowed) tolerance={BotConstants.Movement.KeyboardTurnToleranceDegrees:F1}°.");
+            _log($"[Steering] DefaultMode={_steeringMode} (per-waypoint overrides allowed) tolerance={BotConstants.Movement.KeyboardTurnToleranceDegrees:F1}° fastTurnAt={BotConstants.Movement.KeyboardFastTurnThresholdDegrees:F1}°.");
             _log($"[LocalMap] Initial map ID = {initialMapId}.");
             _log(_steeringMode == MovementSteeringMode.DirectCamera
                 ? "[BearingCalib] Using pure float math: Math.Atan2(target-current) → radians written directly to camera (32-bit float). Legacy direct steering active."
@@ -1834,13 +1892,368 @@ namespace DriverScanTester.Services
             await Task.Delay(BotConstants.Rebuff.PostCastSettleMs, token);
         }
 
+        // ========================================================================
+        //  SORCERER AUTOMATIC MANA SKILL (key 6, EXP hunting only)
+        // ========================================================================
+
+        /// <summary>
+        /// Physical key press of the Sorcerer mana skill. Overridable so regression tests can
+        /// count presses without sending real keyboard input.
+        /// </summary>
+        protected virtual void SendSorcererManaSkillKey()
+            => GameInput.PressKey(GameInput.VK_6, GameInput.SCAN_6);
+
+        /// <summary>
+        /// Pure eligibility test of the Sorcerer mana skill (no memory, no input):
+        ///   • the run is the workflow EXP hunting loop,
+        ///   • the effective waypoint mode is MoveAndAttack / MoveAndAttackAndLoot,
+        ///   • the class is the Sorcerer/Mage,
+        ///   • the player is alive and every mana read succeeded with a valid maximum,
+        ///   • current mana is below <see cref="BotConstants.SorcererManaSkill.ManaThresholdFraction"/>
+        ///     of the maximum mana.
+        /// An unknown class, a failed read or an invalid maximum never authorizes a cast.
+        /// </summary>
+        internal static bool IsSorcererManaCastEligible(
+            bool expHuntLoopMode,
+            BotMode effectiveMode,
+            PlayerClass playerClass,
+            bool isAlive,
+            bool manaReadSucceeded,
+            short currentMana,
+            bool maxManaReadSucceeded,
+            int maxMana)
+        {
+            if (!expHuntLoopMode)
+                return false;
+
+            if (effectiveMode != BotMode.MoveAndAttack && effectiveMode != BotMode.MoveAndAttackAndLoot)
+                return false;
+
+            if (playerClass != PlayerClass.Mage)
+                return false;
+
+            if (!isAlive || !manaReadSucceeded || !maxManaReadSucceeded || maxMana <= 0)
+                return false;
+
+            return currentMana < maxMana * BotConstants.SorcererManaSkill.ManaThresholdFraction;
+        }
+
+        /// <summary>
+        /// Pure gate of the one-shot cast opportunity (no memory, no input). The order mirrors
+        /// the required execution order: an armed opportunity from a completed enemy check is
+        /// only usable while no target was acquired, no enhanced search is still pending, no
+        /// other owner (loot, grouping, recovery) holds the input, and the cooldown elapsed.
+        /// </summary>
+        internal static SorcererManaCastGate EvaluateSorcererManaCastGate(
+            bool opportunityArmed,
+            TimeSpan opportunityAge,
+            int maxOpportunityAgeMs,
+            bool contextChanged,
+            bool enemyPresent,
+            bool searchPending,
+            bool lootOrGroupingOwnsInput,
+            bool recoveryOwnsInput,
+            bool cooldownElapsed)
+        {
+            if (!opportunityArmed)
+                return SorcererManaCastGate.NotArmed;
+
+            if (contextChanged)
+                return SorcererManaCastGate.ContextChanged;
+
+            if (opportunityAge < TimeSpan.Zero ||
+                opportunityAge.TotalMilliseconds > maxOpportunityAgeMs)
+                return SorcererManaCastGate.Expired;
+
+            // A monster (or any other selected entity) appeared after the enemy check —
+            // combat always wins over the mana skill.
+            if (enemyPresent)
+                return SorcererManaCastGate.EnemyPresent;
+
+            // An enhanced retarget scan / post-pink target check is still running. It is
+            // never interrupted; it arms a new opportunity itself when it ends empty.
+            if (searchPending)
+                return SorcererManaCastGate.SearchPending;
+
+            if (lootOrGroupingOwnsInput)
+                return SorcererManaCastGate.LootOrGroupingOwnsInput;
+
+            if (recoveryOwnsInput)
+                return SorcererManaCastGate.RecoveryOwnsInput;
+
+            return cooldownElapsed ? SorcererManaCastGate.Ready : SorcererManaCastGate.CooldownActive;
+        }
+
+        internal static string DescribeSorcererManaCastGate(SorcererManaCastGate gate)
+            => gate switch
+            {
+                SorcererManaCastGate.NotArmed => "no opportunity armed",
+                SorcererManaCastGate.ContextChanged => "route/mode changed",
+                SorcererManaCastGate.Expired => "opportunity expired",
+                SorcererManaCastGate.EnemyPresent => "enemy target present",
+                SorcererManaCastGate.SearchPending => "retarget search still pending",
+                SorcererManaCastGate.LootOrGroupingOwnsInput => "loot/mob grouping owns input",
+                SorcererManaCastGate.RecoveryOwnsInput => "recovery owns input",
+                SorcererManaCastGate.CooldownActive => "cooldown active",
+                _ => "ready"
+            };
+
+        /// <summary>
+        /// True while loot collection/scanning, the mandatory loot barrier or an active mob
+        /// grouping sequence owns the input/camera. Disabled automatic loot never blocks.
+        /// </summary>
+        private bool IsSorcererManaCastLootOrGroupingActive()
+        {
+            if (IsMobGroupingSequenceActive)
+                return true;
+
+            if (IsAutomaticLootDisabled)
+                return false;
+
+            LootSystem? loot = LootSystemRef;
+            return IsMobGroupingLootHoldActive ||
+                   loot?.IsLootCycleActive == true ||
+                   loot?.IsPinkScanPendingOrActive == true ||
+                   loot?.IsCollecting == true;
+        }
+
+        private bool IsSorcererManaCastCooldownElapsed()
+            => _lastSorcererManaCastAt == DateTime.MinValue ||
+               (DateTime.UtcNow - _lastSorcererManaCastAt).TotalMilliseconds >=
+                   BotConstants.SorcererManaSkill.CooldownMs;
+
+        /// <summary>
+        /// True while a recovery routine, the CombatGate waypoint return or a repot/town-teleport
+        /// handoff owns the input. Any of them takes precedence over the mana skill.
+        /// </summary>
+        private bool IsSorcererManaCastControlOwnedByRecovery()
+            => IsRecoveryInputOwnershipActive ||
+               _combatGateReturnActive ||
+               IsReportAndGoBackRequested;
+
+        /// <summary>
+        /// Arms the one-shot Sorcerer mana-cast opportunity after an enemy check finished
+        /// without acquiring a monster. Nothing is pressed here: the TAB/scan result is only
+        /// observable on the following tick, so the opportunity is evaluated then. The current
+        /// route context (mode, standby phase, waypoint) is captured so any change invalidates
+        /// the opportunity. Silent on purpose — the arming reason is reported when the
+        /// opportunity is consumed or dropped. Internal so regression tests can arm the
+        /// opportunity exactly the way the combat flow does.
+        /// </summary>
+        internal void ArmSorcererManaCastOpportunity(string reason)
+        {
+            if (!ExpHuntLoopMode)
+                return;
+
+            float waypointX = 0f;
+            float waypointY = 0f;
+            if (_finalStandbyActive)
+            {
+                waypointX = _finalStandbyX;
+                waypointY = _finalStandbyY;
+            }
+            else if (_waypoints.Count > 0)
+            {
+                Waypoint peeked = _waypoints.Peek();
+                waypointX = peeked.X;
+                waypointY = peeked.Y;
+            }
+
+            _sorcererManaCastOpportunity = new SorcererManaCastOpportunity(
+                DateTime.UtcNow,
+                CurrentMode,
+                _finalStandbyActive,
+                waypointX,
+                waypointY,
+                reason);
+        }
+
+        private void ClearSorcererManaCastOpportunity(string reason, bool log = true)
+        {
+            if (!_sorcererManaCastOpportunity.HasValue)
+                return;
+
+            string armedBy = _sorcererManaCastOpportunity.Value.Reason;
+            _sorcererManaCastOpportunity = null;
+            if (log)
+                _log($"[Tick {_tickCount}] [SorcererMana] Cast opportunity dropped ({reason}; armed by {armedBy}).");
+        }
+
+        /// <summary>
+        /// True when the captured route context still matches the live route: same effective
+        /// mode, same standby phase and the same waypoint the opportunity was armed on.
+        /// </summary>
+        private bool IsSorcererManaCastContextCurrent(SorcererManaCastOpportunity opportunity)
+        {
+            if (opportunity.Mode != CurrentMode || opportunity.FinalStandby != _finalStandbyActive)
+                return false;
+
+            if (_finalStandbyActive)
+                return opportunity.WaypointX == _finalStandbyX && opportunity.WaypointY == _finalStandbyY;
+
+            if (_waypoints.Count == 0)
+                return false;
+
+            Waypoint peeked = _waypoints.Peek();
+            return opportunity.WaypointX == peeked.X && opportunity.WaypointY == peeked.Y;
+        }
+
+        /// <summary>
+        /// Resolves the live eligibility inputs (class, alive state, current mana, maximum
+        /// mana) through the existing memory service methods and the existing class-resolution
+        /// logic. Returns false — with a diagnostic reason — for every condition that must
+        /// never cast: unknown class, failed mana read, invalid maximum mana, dead player.
+        /// </summary>
+        internal bool TryEvaluateSorcererManaCastEligibility(out string reason)
+        {
+            PlayerClass playerClass = ResolvePlayerClassForPotions();
+
+            // Alive state: the same HP read the heal/death system uses (a real zero is kept,
+            // a failed read is null and therefore never treated as alive).
+            (short? hp, _) = _memoryService.GetHealManaValues();
+            bool isAlive = hp.HasValue && hp.Value > 0;
+
+            bool manaReadSucceeded = _memoryService.TryGetMana(out short currentMana);
+            MaxHpManaReadResult maxStats = _memoryService.GetMaxHpMana();
+
+            bool eligible = IsSorcererManaCastEligible(
+                ExpHuntLoopMode,
+                CurrentMode,
+                playerClass,
+                isAlive,
+                manaReadSucceeded,
+                currentMana,
+                maxStats.MaxManaReadSucceeded,
+                maxStats.MaxMana);
+
+            reason = eligible
+                ? $"mana {currentMana}/{maxStats.MaxMana} below {BotConstants.SorcererManaSkill.ManaThresholdFraction * 100:F0}%"
+                : $"class={playerClass} mode={CurrentMode} expLoop={ExpHuntLoopMode} alive={isAlive} " +
+                  $"manaRead={manaReadSucceeded} mana={currentMana} " +
+                  $"maxManaRead={maxStats.MaxManaReadSucceeded} maxMana={maxStats.MaxMana}";
+
+            return eligible;
+        }
+
+        /// <summary>
+        /// Sorcerer/Mage automatic mana restoration for the EXP hunting loop.
+        ///
+        /// Called from the idle-combat flow — i.e. AFTER the existing enemy detection
+        /// (EvaluateCombatAction / TAB cycle / multi-stage retarget search) completed without
+        /// acquiring a valid monster — and BEFORE ordinary movement/target cycling resumes.
+        /// The sequence mirrors <see cref="PerformRebuffAsync"/>: release the held attack key,
+        /// stop movement, let it settle, revalidate, press key 6 exactly once, wait the short
+        /// post-cast interval and return. No new mob scanner and no changes to the existing
+        /// target-classification rules are involved.
+        /// </summary>
+        /// <returns>True when this tick was consumed by the cast attempt.</returns>
+        internal async Task<bool> TryCastSorcererManaSkillAsync(CancellationToken token)
+        {
+            if (!_sorcererManaCastOpportunity.HasValue)
+                return false;
+
+            SorcererManaCastOpportunity opportunity = _sorcererManaCastOpportunity.Value;
+            int targetId = _memoryService.GetSelectedTargetId();
+
+            SorcererManaCastGate gate = EvaluateSorcererManaCastGate(
+                opportunityArmed: true,
+                opportunityAge: DateTime.UtcNow - opportunity.ArmedAtUtc,
+                maxOpportunityAgeMs: BotConstants.SorcererManaSkill.OpportunityMaxAgeMs,
+                contextChanged: !IsSorcererManaCastContextCurrent(opportunity),
+                enemyPresent: targetId > 0,
+                searchPending: _combatRetargetCameraStage != CombatRetargetCameraStage.None ||
+                               _postPinkScanTargetCheckPending ||
+                               _combatRetargetAwaitingSelection,
+                lootOrGroupingOwnsInput: IsSorcererManaCastLootOrGroupingActive(),
+                recoveryOwnsInput: IsSorcererManaCastControlOwnedByRecovery(),
+                cooldownElapsed: IsSorcererManaCastCooldownElapsed());
+
+            switch (gate)
+            {
+                case SorcererManaCastGate.NotArmed:
+                    return false;
+
+                case SorcererManaCastGate.ContextChanged:
+                case SorcererManaCastGate.Expired:
+                case SorcererManaCastGate.EnemyPresent:
+                    ClearSorcererManaCastOpportunity(DescribeSorcererManaCastGate(gate));
+                    return false;
+
+                case SorcererManaCastGate.SearchPending:
+                case SorcererManaCastGate.LootOrGroupingOwnsInput:
+                case SorcererManaCastGate.RecoveryOwnsInput:
+                case SorcererManaCastGate.CooldownActive:
+                    // Another owner (or the cooldown) is in charge. The opportunity is not
+                    // consumed here — it expires on its own if the other owner never yields.
+                    return false;
+
+                case SorcererManaCastGate.Ready:
+                    break;
+            }
+
+            // One-shot: consume the opportunity before the awaits so a second tick can never
+            // reuse it.
+            ClearSorcererManaCastOpportunity("consumed", log: false);
+
+            if (!TryEvaluateSorcererManaCastEligibility(out string eligibility))
+            {
+                _log($"[Tick {_tickCount}] [SorcererMana] Cast skipped ({eligibility}).");
+                return false;
+            }
+
+            // The client ignores the skill key while the character is running and the attack
+            // key must never stay held across the cast: use the existing ownership helpers.
+            ReleaseCombatKeys();
+            StopMoving();
+            await Task.Delay(BotConstants.SorcererManaSkill.StopMovementSettleMs, token);
+
+            // Revalidate everything that could have changed during the settle window: a mob
+            // may have appeared, loot/grouping/recovery may have taken the input, or the
+            // player may have died. Combat always wins over the mana skill.
+            int recheckTargetId = _memoryService.GetSelectedTargetId();
+            if (recheckTargetId > 0)
+            {
+                _log($"[Tick {_tickCount}] [SorcererMana] Cast abandoned — target {recheckTargetId} appeared during the settle window; combat has priority.");
+                return false;
+            }
+
+            if (IsSorcererManaCastControlOwnedByRecovery() || IsSorcererManaCastLootOrGroupingActive())
+            {
+                _log($"[Tick {_tickCount}] [SorcererMana] Cast abandoned — another owner (recovery/loot/mob grouping) took the input during the settle window.");
+                return false;
+            }
+
+            if (_combatRetargetCameraStage != CombatRetargetCameraStage.None ||
+                _postPinkScanTargetCheckPending)
+            {
+                _log($"[Tick {_tickCount}] [SorcererMana] Cast abandoned — a retarget search started during the settle window.");
+                return false;
+            }
+
+            if (!TryEvaluateSorcererManaCastEligibility(out string recheckEligibility))
+            {
+                _log($"[Tick {_tickCount}] [SorcererMana] Cast abandoned ({recheckEligibility}).");
+                return false;
+            }
+
+            _lastSorcererManaCastAt = DateTime.UtcNow;
+            _log($"[Tick {_tickCount}] [SorcererMana] Empty enemy check and low mana ({recheckEligibility}) — movement stopped, pressing key 6 once.");
+            _log("[Key] 6 (sorcerer mana skill)");
+            SendSorcererManaSkillKey();
+
+            // Keep movement stopped for one more short window so the cast can start before
+            // the next movement tick presses W again.
+            await Task.Delay(BotConstants.SorcererManaSkill.PostCastSettleMs, token);
+            return true;
+        }
+
         /// <summary>
         /// Decides which speed-potion keys a class may press.
         ///
         /// Sorcerer/Mage uses ONLY the white potion: the legacy bot's
         /// SkillSelectorMageAlliance rebuffed with checkForWhitePotBuff(), while every other
-        /// class called checkForWhiteRed() (keys 7 and 8). The actual white-pot key is verified
-        /// at runtime in the movement loop (it starts on key 8 and switches to key 7 when key 8
+        /// class called checkForWhiteRed() (keys 6 and 7). The actual white-pot key is verified
+        /// at runtime in the movement loop (it starts on key 7 and switches to key 6 when key 7
         /// is observed to consume a red potion). An unreadable or unknown class keeps the
         /// historical two-key behaviour.
         ///
@@ -4146,7 +4559,7 @@ namespace DriverScanTester.Services
                 ResetStuckAndUnstuckState($"map-change {oldMapId}->{currentMapId}");
             }
 
-            // ── Attack speed / potion check (keys 7+8 = red/white speed pots) ──
+            // ── Attack speed / potion check (keys 6+7 = red/white speed pots) ──
             // Runs in EVERY mode, including OnlyMove/city: the white pot gives run
             // speed, which is exactly what city walking needs. Previously this was
             // suppressed under OnlyMove, so the bot never rebuffed speed pots while
@@ -4172,7 +4585,7 @@ namespace DriverScanTester.Services
                 // on EITHER type skips both keys — a mapping-independent rule that can never
                 // eat the last potion of the wrong type. Buff is sacrificed to save the slot.
                 //
-                // Sorcerer/Mage drinks ONLY the white potion (key 8): the legacy bot's
+                // Sorcerer/Mage drinks ONLY the white potion (key 7): the legacy bot's
                 // SkillSelectorMageAlliance rebuffed with checkForWhitePotBuff() while every
                 // other class called checkForWhiteRed(). The red potion is never consumed by
                 // this class, so its count (often 0) must not gate the white pot either —
@@ -4189,7 +4602,7 @@ namespace DriverScanTester.Services
                 {
                     if (!_speedPotReserveLogged)
                     {
-                        string keys = plan.WhitePotionOnly ? "key 8" : "keys 7+8";
+                        string keys = plan.WhitePotionOnly ? "key 7" : "keys 6+7";
                         _log($"[Tick {_tickCount}] Speed pot buff missing but potions at slot reserve (red={redPots}, white={whitePots}) — keeping last potions, skipping {keys}.");
                         _speedPotReserveLogged = true;
                     }
@@ -4197,17 +4610,17 @@ namespace DriverScanTester.Services
                 else if (plan.PressRed && plan.PressWhite)
                 {
                     _speedPotReserveLogged = false;
-                    _log($"[Tick {_tickCount}] Speed pot buff missing ({speedDetail}) — using potions (keys 7+8)");
-                    _log("[Key] 7 (pot1)");
-                    GameInput.PressKey(GameInput.VK_7, GameInput.SCAN_7);
+                    _log($"[Tick {_tickCount}] Speed pot buff missing ({speedDetail}) — using potions (keys 6+7)");
+                    _log("[Key] 6 (pot1, red)");
+                    GameInput.PressKey(GameInput.VK_6, GameInput.SCAN_6);
                     await Task.Delay(BotConstants.SpeedPotion.PostPotionDelayMs, token);
-                    _log("[Key] 8 (pot2)");
-                    GameInput.PressKey(GameInput.VK_8, GameInput.SCAN_8);
+                    _log("[Key] 7 (pot2, white)");
+                    GameInput.PressKey(GameInput.VK_7, GameInput.SCAN_7);
                 }
                 else if (plan.PressWhite)
                 {
                     _speedPotReserveLogged = false;
-                    int potionKey = _mageWhitePotionVk == GameInput.VK_7 ? 7 : 8;
+                    int potionKey = _mageWhitePotionVk == GameInput.VK_6 ? 6 : 7;
                     _log($"[Tick {_tickCount}] Speed pot buff missing ({speedDetail}, red={redPots}, white={whitePots}) — mage/sorcerer class uses the white potion only (key {potionKey})");
                     _log($"[Key] {potionKey} (white pot, mage class)");
                     GameInput.PressKey(_mageWhitePotionVk, _mageWhitePotionScan);
@@ -4230,15 +4643,15 @@ namespace DriverScanTester.Services
                     }
                     else
                     {
-                        // Key 8 may be the RED potion on this client/build. Prove it by
-                        // pressing the other key (7/8) and watching which potion count moves.
-                        byte otherVk = _mageWhitePotionVk == GameInput.VK_7
-                            ? GameInput.VK_8
-                            : GameInput.VK_7;
-                        byte otherScan = otherVk == GameInput.VK_7
-                            ? GameInput.SCAN_7
-                            : GameInput.SCAN_8;
-                        int otherKey = otherVk == GameInput.VK_7 ? 7 : 8;
+                        // Key 7 may be the RED potion on this client/build. Prove it by
+                        // pressing the other key (6/7) and watching which potion count moves.
+                        byte otherVk = _mageWhitePotionVk == GameInput.VK_6
+                            ? GameInput.VK_7
+                            : GameInput.VK_6;
+                        byte otherScan = otherVk == GameInput.VK_6
+                            ? GameInput.SCAN_6
+                            : GameInput.SCAN_7;
+                        int otherKey = otherVk == GameInput.VK_6 ? 6 : 7;
 
                         _log($"[SpeedPot] Key {potionKey} did not consume a white potion (white {whitePots}->{whiteAfter}, red {redPots}->{redAfter}) — testing key {otherKey}.");
                         GameInput.PressKey(otherVk, otherScan);
@@ -4276,7 +4689,7 @@ namespace DriverScanTester.Services
 
                 if (unknownRunSpeed && !_speedPotUnknownRunSpeedLogged)
                 {
-                    _log($"[SpeedPot] Mage run speed {runSpeed} (0x{runSpeed:X2}) is neither the no-potion value ({BotConstants.SpeedPotion.RunSpeedNoPotionValue} = 0x{BotConstants.SpeedPotion.RunSpeedNoPotionValue:X2}) nor the white-pot value ({BotConstants.SpeedPotion.RunSpeedWhitePotValue} = 0x{BotConstants.SpeedPotion.RunSpeedWhitePotValue:X2}) — buff treated as active, key 8 not pressed.");
+                    _log($"[SpeedPot] Mage run speed {runSpeed} (0x{runSpeed:X2}) is neither the no-potion value ({BotConstants.SpeedPotion.RunSpeedNoPotionValue} = 0x{BotConstants.SpeedPotion.RunSpeedNoPotionValue:X2}) nor the white-pot value ({BotConstants.SpeedPotion.RunSpeedWhitePotValue} = 0x{BotConstants.SpeedPotion.RunSpeedWhitePotValue:X2}) — buff treated as active, key 7 not pressed.");
                     _speedPotUnknownRunSpeedLogged = true;
                 }
                 else if (!unknownRunSpeed)
@@ -4366,6 +4779,12 @@ namespace DriverScanTester.Services
                 : default;
             bool confirmedMonsterTarget = targetValidation.IsConfirmedMonster;
             UpdateCombatGateTargetSuppression();
+
+            // Combat always wins over the Sorcerer mana skill: a confirmed monster invalidates
+            // any armed no-enemy cast opportunity immediately (the next idle tick must not
+            // press key 6 while a fight is starting).
+            if (confirmedMonsterTarget)
+                ClearSorcererManaCastOpportunity("monster target acquired", log: false);
 
             // Log position every 5 ticks (action bytes included — key for stuck diagnosis:
             // 25=idle, 27/3=running, 28=being hit, 39=attacking).
@@ -4625,6 +5044,7 @@ namespace DriverScanTester.Services
                         _combatHandler.SuspendForExternalMovement();
                         return;
                     }
+                    ArmSorcererManaCastOpportunity("post-pink target check TAB");
                     await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
                     return;
                 }
@@ -4830,6 +5250,7 @@ namespace DriverScanTester.Services
                         _combatHandler.SuspendForExternalMovement();
                         return;
                     }
+                    ArmSorcererManaCastOpportunity("TAB target cycle");
                     await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
                     return;
 
@@ -5027,6 +5448,14 @@ namespace DriverScanTester.Services
                 _lootWaitActive = false;
                 _lootWaitDeadline = DateTime.MinValue;
             }
+
+            // ── Sorcerer automatic mana skill (key 6) ──
+            // Reached only after the existing enemy detection completed without acquiring a
+            // monster, no retarget scan is pending, loot/grouping/recovery do not own the input
+            // and the route context still matches the armed opportunity. Runs in the ordinary
+            // combat flow AND in final-waypoint combat standby (both fall through here).
+            if (await TryCastSorcererManaSkillAsync(token))
+                return;
 
             // If in standby mode, don't fall through to waypoint queue logic.
             if (_finalStandbyActive)
@@ -5993,8 +6422,8 @@ namespace DriverScanTester.Services
         /// <summary>
         /// Feedback-controls A/D from the actual horizontal camera angle while keeping W held.
         /// The live camera is re-read on every update: inside the tolerance no turn key is
-        /// held, up to and including 60° A/D alone steers, and above 60° the matching mouse
-        /// edge is also held so the game's natural x2 turn applies. W stays held in every
+        /// held, below 15° A/D alone steers, and from 15° on the matching mouse edge is also
+        /// held so the game's natural x2 turn applies. W stays held in every
         /// branch; the mouse assistance is released again as soon as the error drops back to
         /// the normal A/D range.
         /// </summary>
@@ -6035,9 +6464,9 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Pure KeyboardTurn decision from the live signed bearing error: within the
-        /// inclusive tolerance no key, up to and including the fast-turn threshold normal
-        /// A/D steering, above it A/D plus the matching mouse edge. Strictly greater than
-        /// the threshold: an error of exactly 60° stays normal.
+        /// inclusive tolerance no key, below the fast-turn threshold normal A/D steering,
+        /// at or above it A/D plus the matching mouse edge. Inclusive threshold: an error
+        /// of exactly 15° already uses the mouse-assisted fast turn.
         /// </summary>
         internal static KeyboardTurnDirective DecideKeyboardTurn(float signedError)
         {
@@ -6045,7 +6474,7 @@ namespace DriverScanTester.Services
             if (absError <= BotConstants.Movement.KeyboardTurnToleranceDegrees)
                 return KeyboardTurnDirective.None;
 
-            bool fast = absError > BotConstants.Movement.KeyboardFastTurnThresholdDegrees;
+            bool fast = absError >= BotConstants.Movement.KeyboardFastTurnThresholdDegrees;
             bool left = GetTurnKeyForSignedError(signedError) == TurnKeyState.LeftA;
 
             if (left)
@@ -6093,7 +6522,7 @@ namespace DriverScanTester.Services
         }
 
         // ── Fast-turn mouse ownership ────────────────────────────────────────────
-        // Above 60° each keyboard steering update also holds the cursor near the
+        // From 15° on each keyboard steering update also holds the cursor near the
         // matching game-client edge, which makes the game turn at x2. MovementSystem
         // owns that cursor position only while the fast turn is active: it is moved to
         // the edge once on entry (and re-asserted only if something else moved it),
@@ -6119,7 +6548,7 @@ namespace DriverScanTester.Services
             TurnKeyState requestedSide = GetFastTurnMouseSide(directive);
             if (requestedSide == TurnKeyState.None)
             {
-                // Natural end of the fast turn (10°..60° / target reached): release the
+                // Natural end of the fast turn (10°..15° / target reached): release the
                 // edge without fighting a human who has taken the cursor.
                 string normalTarget = directive switch
                 {
@@ -6212,7 +6641,7 @@ namespace DriverScanTester.Services
                 _log($"[Steering] Fast turn switched to {(requestedSide == TurnKeyState.LeftA ? "LEFT" : "RIGHT")}: {details}");
             }
 
-            // Eligibility gate: heading > 60° and no human cooldown and no other mouse owner.
+            // Eligibility gate: heading >= 15° and no human cooldown and no other mouse owner.
             if (!MayUseKeyboardFastTurnMouse(
                     headingRequiresFastTurn: true,
                     gameForeground: gameForeground,
@@ -8078,12 +8507,12 @@ namespace DriverScanTester.Services
                     // Legacy mode: no external repot flow — press the town teleport and
                     // wait before retrying.
                     _log("[Unstuck] CITY STUCK LIMIT REACHED.");
-                    _log($"[Unstuck] Reached {maxAttempts} stuck attempts in city — pressing 6 and waiting 10 minutes.");
+                    _log($"[Unstuck] Reached {maxAttempts} stuck attempts in city — pressing 8 and waiting 10 minutes.");
                     StopMoving();
                     ReleaseCombatKeys();
                     if (token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
                         return;
-                    GameInput.PressKey(GameInput.VK_6, GameInput.SCAN_6);
+                    GameInput.PressKey(GameInput.VK_8, GameInput.SCAN_8);
 
                     // Screenshot immediately after the scroll is triggered — before the
                     // town starts loading — so the image shows the state at teleport time.
@@ -9171,8 +9600,14 @@ namespace DriverScanTester.Services
             => GameInput.keybd_event(GameInput.VK_3, GameInput.SCAN_3,
                 keyUp ? (uint)GameInput.KEYEVENTF_KEYUP : 0u, 0);
 
-        private void StartCombatRetargetSearch()
+        /// <summary>Starts the multi-stage retarget search (VeryLow → Low → Mid camera).
+        /// Internal so regression tests can reproduce an in-flight search.</summary>
+        internal void StartCombatRetargetSearch()
         {
+            // A new enhanced search starts: any previously armed no-enemy cast opportunity
+            // belongs to an older, already-superseded target check.
+            ClearSorcererManaCastOpportunity("new retarget scan started", log: false);
+
             _combatRetargetCameraStage = CombatRetargetCameraStage.VeryLowSearch;
             _combatRetargetAwaitingSelection = false;
             _combatRetargetCameraFailureAttempts = 0;
@@ -9332,6 +9767,9 @@ namespace DriverScanTester.Services
                     if (!TryApplyMovementCameraDistance(restoreCameraDistance))
                         return true;
                     ClearCombatRetargetSearch();
+                    // The whole multi-stage search finished WITHOUT a monster: only now may the
+                    // Sorcerer mana skill be considered (on the following tick).
+                    ArmSorcererManaCastOpportunity("multi-stage retarget search finished without a monster");
                     await Task.Delay(BotConstants.Delays.CombatAttackWaitMs, token);
                     return true;
                 }
@@ -9400,6 +9838,9 @@ namespace DriverScanTester.Services
             TryApplyMovementCameraDistance(restoreCameraDistance);
             ClearCombatRetargetSearch();
             _combatRetargetFailed = true;
+            // The search ended without acquiring a monster (camera verification failed), so the
+            // Sorcerer mana skill may be considered on the following tick.
+            ArmSorcererManaCastOpportunity("retarget search aborted without a monster");
         }
 
         private bool IsCurrentCombatRetargetMonsterSelected()
@@ -9475,6 +9916,10 @@ namespace DriverScanTester.Services
             _combatRetargetFailed = false;
             _postKillCloseTargetCheckPending = false;
             _postKillTargetIdBeforeTab = 0;
+            // The scan state changed (monster found, mode left the combat modes, or the search
+            // ended). Callers that finish a search WITHOUT a monster re-arm the opportunity
+            // explicitly AFTER this call.
+            ClearSorcererManaCastOpportunity("retarget scan state cleared", log: false);
         }
 
         private void ResetPostKillRetargetState()

@@ -17,6 +17,7 @@
 
   <ItemGroup>
     <Folder Include="Logs\" />
+    <Folder Include="GemeRunSS\" />
     <Folder Include="Screenshots\Dead\" />
     <Folder Include="Screenshots\LootTest\" />
     <Folder Include="Screenshots\LowHpPotions\" />

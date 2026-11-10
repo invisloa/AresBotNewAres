@@ -902,10 +902,10 @@ namespace DriverScanTester.Services
         /// Reads the player's current run-speed value (single BYTE at
         /// <c>[Ares.exe + 0x489BC8] + 0xEFA</c>). The Sorcerer/Mage speed-potion check uses
         /// it because the white potion raises RUN speed, not attack speed:
-        /// 0x80 (128) = no white pot (normal run), 0xB3 (179) = white pot active (+2 run speed).
+        /// 0x99 (153) = no white pot (normal run), 0xB3 (179) = white pot active (+2 run speed).
         /// The byte is widened to int for logging/threshold checks. Returns 0 when the player
         /// pointer or the value cannot be read; callers must not treat 0 as a valid sample
-        /// (the real no-potion value is 128, never 0).
+        /// (the real no-potion value is 153, never 0).
         /// </summary>
         public int GetRunSpeed()
         {

@@ -159,7 +159,7 @@ namespace DriverScanTester.Services
         /// <summary>
         /// Sorcerer/Mage speed-potion check. The white potion raises RUN speed, not attack
         /// speed, so the attack-speed check used by every other class never sees this buff.
-        /// Run speed is the byte at <c>[Ares.exe + 0x489BC8] + 0xEFA</c>: 0x80 (128) = no
+        /// Run speed is the byte at <c>[Ares.exe + 0x489BC8] + 0xEFA</c>: 0x99 (153) = no
         /// white pot (normal run), 0xB3 (179) = +2 run speed (buff active). Returns true
         /// (drink the white potion) exactly while the read still equals the no-potion value;
         /// any other value means the buff is active.

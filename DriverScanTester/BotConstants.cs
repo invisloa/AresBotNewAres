@@ -212,17 +212,17 @@ namespace DriverScanTester
         // ════════════════════════════════════════════════════════════════
         public static class SpeedPotion
         {
-            /// <summary>Attack speed value at which bot drinks speed potions (key 7 + key 8).</summary>
+            /// <summary>Attack speed value at which bot drinks speed potions (key 6 + key 7).</summary>
             public const short AttackSpeedThreshold = 16341; //16341 +2 speed //16384 +3 speed (archer bos+giko)
 
             /// <summary>
             /// Sorcerer/Mage buff detection by RUN speed (the white potion raises run speed,
             /// not attack speed). BYTE at <see cref="MemoryOffsets.RunSpeed"/>
             /// (<c>[Ares.exe + 0x489BC8] + 0xEFA</c>) while the white potion is NOT active —
-            /// verified live: 0x80 = 128 = run speed +0 (normal run).
+            /// verified live: 0x99 = 153 = run speed +0 (normal run).
             /// The bot drinks the white potion exactly when the read equals this value.
             /// </summary>
-            public const byte RunSpeedNoPotionValue = 0x80; // 128 = +0 run speed (normal)
+            public const byte RunSpeedNoPotionValue = 0x99; // 153 = +0 run speed (normal)
 
             /// <summary>
             /// Sorcerer/Mage buff detection: RUN speed value WITH the white potion active —
@@ -234,7 +234,7 @@ namespace DriverScanTester
             /// <summary>Interval in seconds between attack-speed checks.</summary>
             public const double CheckIntervalSeconds = 5.0;
 
-            /// <summary>Delay in ms after pressing potion key 7 before pressing key 8.</summary>
+            /// <summary>Delay in ms after pressing potion key 6 before pressing key 7.</summary>
             public const int PostPotionDelayMs = 500;
         }
 
@@ -282,6 +282,66 @@ namespace DriverScanTester
             /// stopped, so the cast can finish before W is pressed again on the next tick.
             /// </summary>
             public const int PostCastSettleMs = 200;
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  SORCERER MANA SKILL — automatic mana restoration (key 6)
+        // ════════════════════════════════════════════════════════════════
+        /// <summary>
+        /// Sorcerer/Mage automatic mana restoration during EXP hunting. The skill is cast
+        /// with key 6, but ONLY after the existing enemy check finished WITHOUT acquiring a
+        /// monster — never during combat, a pending retarget scan, loot collection/scanning,
+        /// mob grouping, recovery, travel, repot or city operations.
+        ///
+        /// HOTKEY CONFLICT: key 6 is also the red speed potion of every non-mage class, the
+        /// key the mage white-potion auto-detection may switch to, and the town teleport of
+        /// any profile whose <c>TeleportKey</c> is 0x36 ('6'). The game must bind the
+        /// Sorcerer mana skill to 6 and the town teleport to a DIFFERENT hotkey (the shipped
+        /// profiles use 0x38 = '8'); the existing teleport/recovery logic is unchanged.
+        /// </summary>
+        public static class SorcererManaSkill
+        {
+            /// <summary>
+            /// Fraction of maximum mana below which the skill is cast. The condition is
+            /// <c>currentMana &lt; maxMana * 0.5</c>; a tolerance of about ±10 mana points
+            /// around the 50% boundary is acceptable, so the exact boundary is never
+            /// load-bearing.
+            /// </summary>
+            public const double ManaThresholdFraction = 0.5;
+
+            /// <summary>
+            /// Accepted tolerance (mana points) around <see cref="ManaThresholdFraction"/>.
+            /// Documented only — the implemented test is the strict fraction comparison.
+            /// </summary>
+            public const int ManaThresholdTolerance = 10;
+
+            /// <summary>
+            /// Minimum time (ms) between two cast ATTEMPTS (5 s). After a cast the bot returns
+            /// to normal EXP processing and only re-reads mana at the next eligible no-enemy
+            /// opportunity.
+            /// </summary>
+            public const int CooldownMs = 5_000;
+
+            /// <summary>
+            /// Settle time (ms) after <c>StopMoving()</c> before the mana-skill key is pressed —
+            /// the client ignores the skill key while the character is still running, so the
+            /// existing rebuff settle is reused.
+            /// </summary>
+            public const int StopMovementSettleMs = Rebuff.StopMovementSettleMs;
+
+            /// <summary>
+            /// Settle time (ms) after the mana-skill key press, still with movement stopped, so
+            /// the cast animation can start before W is pressed again (existing rebuff value).
+            /// </summary>
+            public const int PostCastSettleMs = Rebuff.PostCastSettleMs;
+
+            /// <summary>
+            /// How long (ms) a one-shot no-enemy cast opportunity stays valid. The opportunity
+            /// is armed after an unsuccessful target-acquisition attempt and evaluated on the
+            /// following tick (the movement tick is 100 ms), so this window only needs to span
+            /// a few ticks before it expires on its own.
+            /// </summary>
+            public const int OpportunityMaxAgeMs = 2_000;
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -778,12 +838,13 @@ namespace DriverScanTester
             public const float KeyboardTurnToleranceDegrees = 10.0f;
 
             /// <summary>
-            /// Heading error above which KeyboardTurn steering additionally moves the cursor
+            /// Heading error at or above which KeyboardTurn steering additionally moves the cursor
             /// toward the matching game-client edge. The game then applies its natural x2 turn
-            /// while the A/D key keeps steering. Strictly greater than the threshold: an error
-            /// of exactly 60° still uses normal A/D-only steering.
+            /// while the A/D key keeps steering. Inclusive threshold: an error of exactly 15°
+            /// already uses the mouse-assisted fast turn, so any heading that the A/D-only
+            /// tolerance (10°) rejects by more than 5° is corrected at x2 speed.
             /// </summary>
-            public const float KeyboardFastTurnThresholdDegrees = 60.0f;
+            public const float KeyboardFastTurnThresholdDegrees = 15.0f;
 
             /// <summary>
             /// Horizontal/vertical margin from the game-client edge used for the fast-turn
@@ -959,7 +1020,7 @@ namespace DriverScanTester
             public const ulong MaxWeight = 0xC74;
             // Run speed is a single BYTE (lock-tool name: A_RunSpeed, ValueType = Byte):
             //   [Ares.exe + 0x489BC8] + 0xEFA
-            // Verified live values: 0x80 (128) = +0 run speed, 0xB3 (179) = +2 run speed
+            // Verified live values: 0x99 (153) = +0 run speed, 0xB3 (179) = +2 run speed
             // (white pot active). Use SpeedPotion.RunSpeedNoPotionValue / RunSpeedWhitePotValue.
             public const ulong RunSpeed = 0xEFA;
             public const ulong SkillSpeed = 0xACA;
@@ -1279,17 +1340,17 @@ namespace DriverScanTester
             public const byte Vk4 = 0x34;
             public const byte Scan4 = 0x05;
 
-            // Key 7 (potion 1)
+            // Key 6 (red potion)
+            public const byte Vk6 = 0x36;
+            public const byte Scan6 = 0x07;
+
+            // Key 7 (white potion)
             public const byte Vk7 = 0x37;
             public const byte Scan7 = 0x08;
 
-            // Key 8 (potion 2)
+            // Key 8 (town teleport)
             public const byte Vk8 = 0x38;
             public const byte Scan8 = 0x09;
-
-            // Key 6 (town teleport)
-            public const byte Vk6 = 0x36;
-            public const byte Scan6 = 0x07;
 
             // A key (strafe left)
             public const byte VkA = 0x41;
@@ -2130,11 +2191,11 @@ namespace DriverScanTester
         // ════════════════════════════════════════════════════════════════
         public static class Workflow
         {
-            /// <summary>Default teleport key virtual-key code ('6').</summary>
-            public const int DefaultTeleportKey = 0x36;
+            /// <summary>Default teleport key virtual-key code ('8').</summary>
+            public const int DefaultTeleportKey = 0x38;
 
             /// <summary>Default teleport key scan code.</summary>
-            public const int DefaultTeleportScanCode = 0x07;
+            public const int DefaultTeleportScanCode = 0x09;
         }
 
         // ════════════════════════════════════════════════════════════════

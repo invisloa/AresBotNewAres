@@ -78,6 +78,47 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void ShadedScrollCubeAtHalfSceneLightIsStillOneCandidate()
+        {
+            // The painted DeepPink cube faces render ~45-60% lit on the live maps:
+            // lit (255,20,147) becomes ~(128,10,74), darker faces ~(112,8,64).
+            using var frame = new Bitmap(64, 48, PixelFormat.Format32bppArgb);
+            using (Graphics graphics = Graphics.FromImage(frame))
+            {
+                using var litShade = new SolidBrush(Color.FromArgb(128, 10, 74));
+                using var sideShade = new SolidBrush(Color.FromArgb(112, 8, 64));
+                graphics.FillRectangle(litShade, 10, 10, 20, 12);
+                graphics.FillRectangle(sideShade, 10, 22, 20, 8);
+            }
+
+            LootSystem.PinkFrameAnalysisResult result = LootSystem.AnalyzePinkFrame(frame);
+
+            LootSystem.LootComponent candidate = Assert.Single(result.CandidateComponents);
+            Assert.Equal(new Rectangle(10, 10, 20, 20),
+                Rectangle.FromLTRB(candidate.XMin, candidate.YMin, candidate.XMax + 1, candidate.YMax + 1));
+            Assert.Equal(400, candidate.Area);
+            Assert.Equal(0, result.MobMarkerRings);
+        }
+
+        [Fact]
+        public void ShadedRedAndBrownAreStillNotLoot()
+        {
+            using var frame = new Bitmap(64, 48, PixelFormat.Format32bppArgb);
+            using (Graphics graphics = Graphics.FromImage(frame))
+            {
+                using var darkWood = new SolidBrush(Color.FromArgb(150, 25, 40));
+                using var darkRed = new SolidBrush(Color.FromArgb(120, 8, 40));
+                graphics.FillRectangle(darkWood, 4, 4, 20, 20);
+                graphics.FillRectangle(darkRed, 34, 4, 20, 20);
+            }
+
+            LootSystem.PinkFrameAnalysisResult result = LootSystem.AnalyzePinkFrame(frame);
+
+            Assert.Equal(0, result.RawPinkPixels);
+            Assert.Empty(result.CandidateComponents);
+        }
+
+        [Fact]
         public void ValidPinkCandidateSurvivesArtificialMagentaMarkerPixels()
         {
             using Bitmap frame = CreateReportedCandidateFrame();

@@ -125,14 +125,14 @@ namespace DriverScanTester.Tests
         [InlineData(5f, (int)KeyboardTurnDirective.None)]
         [InlineData(10f, (int)KeyboardTurnDirective.None)]
         [InlineData(10.1f, (int)KeyboardTurnDirective.NormalRight)]
+        [InlineData(14.9f, (int)KeyboardTurnDirective.NormalRight)]
+        [InlineData(15f, (int)KeyboardTurnDirective.FastRight)]
+        [InlineData(15.1f, (int)KeyboardTurnDirective.FastRight)]
         [InlineData(-10f, (int)KeyboardTurnDirective.None)]
         [InlineData(-10.1f, (int)KeyboardTurnDirective.NormalLeft)]
-        [InlineData(59.9f, (int)KeyboardTurnDirective.NormalRight)]
-        [InlineData(60f, (int)KeyboardTurnDirective.NormalRight)]
-        [InlineData(60.1f, (int)KeyboardTurnDirective.FastRight)]
-        [InlineData(-59.9f, (int)KeyboardTurnDirective.NormalLeft)]
-        [InlineData(-60f, (int)KeyboardTurnDirective.NormalLeft)]
-        [InlineData(-60.1f, (int)KeyboardTurnDirective.FastLeft)]
+        [InlineData(-14.9f, (int)KeyboardTurnDirective.NormalLeft)]
+        [InlineData(-15f, (int)KeyboardTurnDirective.FastLeft)]
+        [InlineData(-15.1f, (int)KeyboardTurnDirective.FastLeft)]
         [InlineData(100f, (int)KeyboardTurnDirective.FastRight)]
         [InlineData(-100f, (int)KeyboardTurnDirective.FastLeft)]
         [InlineData(150f, (int)KeyboardTurnDirective.FastRight)]
@@ -147,8 +147,8 @@ namespace DriverScanTester.Tests
         }
 
         [Theory]
-        [InlineData(350f, 10f, (int)KeyboardTurnDirective.NormalRight)]
-        [InlineData(10f, 350f, (int)KeyboardTurnDirective.NormalLeft)]
+        [InlineData(350f, 5f, (int)KeyboardTurnDirective.FastRight)]
+        [InlineData(5f, 350f, (int)KeyboardTurnDirective.FastLeft)]
         [InlineData(300f, 10f, (int)KeyboardTurnDirective.FastRight)]
         [InlineData(60f, 350f, (int)KeyboardTurnDirective.FastLeft)]
         public void DecideKeyboardTurnUsesTheShortestSignedErrorAcrossNorth(
@@ -165,7 +165,12 @@ namespace DriverScanTester.Tests
         public void KeyboardFastTurnConstantsMatchTheGameplayRequirement()
         {
             Assert.Equal(10f, BotConstants.Movement.KeyboardTurnToleranceDegrees);
-            Assert.Equal(60f, BotConstants.Movement.KeyboardFastTurnThresholdDegrees);
+            Assert.Equal(15f, BotConstants.Movement.KeyboardFastTurnThresholdDegrees);
+            // The mouse-assisted turn starts just above the A/D tolerance band, so any
+            // heading correction larger than 15° is already made at the game's x2 rate.
+            Assert.True(
+                BotConstants.Movement.KeyboardFastTurnThresholdDegrees >
+                BotConstants.Movement.KeyboardTurnToleranceDegrees);
             // The game only accelerates at the actual client boundary, so the cursor must
             // be 1–2 px inside it — a larger inset silently stays at x1.
             Assert.InRange(BotConstants.Movement.KeyboardFastTurnMouseEdgeMarginPx, 1, 2);
@@ -333,15 +338,15 @@ namespace DriverScanTester.Tests
         [Fact]
         public void KeyboardTurnTransitionsNeverOverlapAAndD()
         {
-            // 0° -> 45° -> 75° -> 45° -> 75° left -> 0°, i.e. the requested
+            // 0° -> 12° -> 20° -> 12° -> 20° left -> 0°, i.e. the requested
             // state sequence: None -> D normal -> D fast -> D normal -> A fast -> None.
             var sequence = new (float Error, KeyboardTurnDirective Expected)[]
             {
                 (0f, KeyboardTurnDirective.None),
-                (45f, KeyboardTurnDirective.NormalRight),
-                (75f, KeyboardTurnDirective.FastRight),
-                (45f, KeyboardTurnDirective.NormalRight),
-                (-75f, KeyboardTurnDirective.FastLeft),
+                (12f, KeyboardTurnDirective.NormalRight),
+                (20f, KeyboardTurnDirective.FastRight),
+                (12f, KeyboardTurnDirective.NormalRight),
+                (-20f, KeyboardTurnDirective.FastLeft),
                 (0f, KeyboardTurnDirective.None)
             };
 

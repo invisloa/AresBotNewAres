@@ -453,6 +453,99 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// Captures only the client area of the supplied top-level window. The caller must
+        /// resolve the window and enter an appropriate DPI-awareness context first so the
+        /// client origin and CopyFromScreen coordinates use the same physical-pixel space.
+        /// The caller owns and must dispose the returned bitmap.
+        /// </summary>
+        internal static Bitmap? CaptureWindowClientArea(
+            nint hwnd,
+            out Rectangle clientScreenBounds,
+            Action<string>? log = null)
+        {
+            clientScreenBounds = Rectangle.Empty;
+            if (hwnd == nint.Zero)
+            {
+                log?.Invoke("Window handle is empty.");
+                return null;
+            }
+
+            if (!GetClientRect(hwnd, out ClientRect rect))
+            {
+                log?.Invoke($"GetClientRect failed for window 0x{hwnd.ToInt64():X}.");
+                return null;
+            }
+
+            ClientPoint topLeft = new() { X = rect.Left, Y = rect.Top };
+            if (!ClientToScreen(hwnd, ref topLeft))
+            {
+                log?.Invoke($"ClientToScreen failed for window 0x{hwnd.ToInt64():X}.");
+                return null;
+            }
+
+            int width = rect.Right - rect.Left;
+            int height = rect.Bottom - rect.Top;
+            if (width <= 0 || height <= 0)
+            {
+                log?.Invoke($"Window 0x{hwnd.ToInt64():X} has an empty client area ({width}x{height}).");
+                return null;
+            }
+
+            Bitmap? frame = null;
+            try
+            {
+                frame = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+                using (Graphics graphics = Graphics.FromImage(frame))
+                {
+                    graphics.CopyFromScreen(
+                        topLeft.X,
+                        topLeft.Y,
+                        0,
+                        0,
+                        frame.Size,
+                        CopyPixelOperation.SourceCopy);
+                }
+
+                clientScreenBounds = new Rectangle(topLeft.X, topLeft.Y, width, height);
+                return frame;
+            }
+            catch (Exception ex)
+            {
+                frame?.Dispose();
+                log?.Invoke($"Window 0x{hwnd.ToInt64():X} capture failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Saves a captured launcher-client frame to the visible Screenshots/Launcher
+        /// folder. Failure screenshots are kept outside the build output in source runs.
+        /// </summary>
+        internal static string? SaveLauncherDiagnosticScreenshot(
+            Bitmap frame,
+            string reason,
+            Action<string> log)
+        {
+            try
+            {
+                string screenshotsDir = ResolveScreenshotsDir("Launcher");
+                Directory.CreateDirectory(screenshotsDir);
+
+                string fileName =
+                    $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss-fff}_{SanitizeFileNameSegment(reason)}.png";
+                string filePath = EnsureUniqueFilePath(Path.Combine(screenshotsDir, fileName));
+                frame.Save(filePath, ImageFormat.Png);
+                log($"[Startup] Launcher diagnostic screenshot saved: {filePath}");
+                return filePath;
+            }
+            catch (Exception ex)
+            {
+                log($"[Startup] Could not save launcher diagnostic screenshot: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
         /// Saves an annotated game-client frame when another player's faction marker is
         /// confirmed. The candidate, local-character exclusion, and ignored HUD regions
         /// are outlined so false positives can be diagnosed from the saved image.

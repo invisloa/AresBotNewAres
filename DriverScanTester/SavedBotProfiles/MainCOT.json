@@ -148,8 +148,8 @@
   "DisableAllLoot": false,
   "IgnoreAlliancePlayers": false,
   "IgnoreEmpirePlayers": false,
-  "TeleportKey": 54,
-  "TeleportScanCode": 7,
+  "TeleportKey": 56,
+  "TeleportScanCode": 9,
   "MaxTeleportRetries": 3,
   "WindowOffsetX": 0,
   "WindowOffsetY": 0

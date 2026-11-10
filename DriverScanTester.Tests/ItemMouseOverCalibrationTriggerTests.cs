@@ -21,6 +21,7 @@ namespace DriverScanTester.Tests
                 consecutiveEmptyScans: 0,
                 needsItemValueDiscovery: false,
                 npcTriggerAttempted: false,
+                itemValueDiscoveryPending: false,
                 out string reason,
                 out bool consumeNpcTrigger);
 
@@ -37,6 +38,7 @@ namespace DriverScanTester.Tests
                 consecutiveEmptyScans: 0,
                 needsItemValueDiscovery: true,
                 npcTriggerAttempted: false,
+                itemValueDiscoveryPending: false,
                 out string reason,
                 out bool consumeNpcTrigger);
 
@@ -53,6 +55,7 @@ namespace DriverScanTester.Tests
                 consecutiveEmptyScans: 0,
                 needsItemValueDiscovery: true,
                 npcTriggerAttempted: true,
+                itemValueDiscoveryPending: false,
                 out _,
                 out bool consumeNpcTrigger);
 
@@ -68,6 +71,7 @@ namespace DriverScanTester.Tests
                 consecutiveEmptyScans: BotConstants.Loot.ItemCalibrationAfterEmptyScans - 1,
                 needsItemValueDiscovery: false,
                 npcTriggerAttempted: true,
+                itemValueDiscoveryPending: false,
                 out _,
                 out _);
 
@@ -76,6 +80,7 @@ namespace DriverScanTester.Tests
                 consecutiveEmptyScans: BotConstants.Loot.ItemCalibrationAfterEmptyScans,
                 needsItemValueDiscovery: false,
                 npcTriggerAttempted: true,
+                itemValueDiscoveryPending: false,
                 out string reason,
                 out bool consumeNpcTrigger);
 
@@ -93,12 +98,46 @@ namespace DriverScanTester.Tests
                 consecutiveEmptyScans: BotConstants.Loot.ItemCalibrationAfterEmptyScans,
                 needsItemValueDiscovery: true,
                 npcTriggerAttempted: false,
+                itemValueDiscoveryPending: false,
                 out string reason,
                 out bool consumeNpcTrigger);
 
             Assert.True(start);
             Assert.True(consumeNpcTrigger);
             Assert.Contains("NPC", reason);
+        }
+
+        [Fact]
+        public void PendingDiscoveryRetriesOnTheNextScanWithoutAnyEmptyScans()
+        {
+            bool start = LootSystem.TryGetItemCalibrationReason(
+                ActiveValue,
+                consecutiveEmptyScans: 0,
+                needsItemValueDiscovery: false,
+                npcTriggerAttempted: true,
+                itemValueDiscoveryPending: true,
+                out string reason,
+                out bool consumeNpcTrigger);
+
+            Assert.True(start);
+            Assert.False(consumeNpcTrigger);
+            Assert.Contains("did not confirm a value", reason);
+        }
+
+        [Fact]
+        public void PendingDiscoveryDoesNotConsumeTheOneShotNpcTrigger()
+        {
+            bool start = LootSystem.TryGetItemCalibrationReason(
+                ActiveValue,
+                consecutiveEmptyScans: 0,
+                needsItemValueDiscovery: true,
+                npcTriggerAttempted: false,
+                itemValueDiscoveryPending: true,
+                out _,
+                out bool consumeNpcTrigger);
+
+            Assert.True(start);
+            Assert.False(consumeNpcTrigger);
         }
 
         [Fact]
@@ -109,6 +148,7 @@ namespace DriverScanTester.Tests
                 consecutiveEmptyScans: 0,
                 needsItemValueDiscovery: false,
                 npcTriggerAttempted: false,
+                itemValueDiscoveryPending: false,
                 out string reason,
                 out bool consumeNpcTrigger);
 

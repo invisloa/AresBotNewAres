@@ -201,7 +201,7 @@
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center" Margin="8,0,0,0">
                     <Button Content="Start Client" Command="{Binding StartGameClientCommand}"
                             Style="{StaticResource StartActionButtonStyle}" Margin="0,0,8,0"
-                            ToolTip="Step 1: launch Legend of Ares from the Public Desktop shortcut. After it starts, enter its PID and attach."/>
+                            ToolTip="Launch Legend of Ares, wait 30 seconds, and automatically click PLAY. Attach to the game after startup completes."/>
                     <TextBlock Text="PID:" VerticalAlignment="Center" Margin="0,0,4,0" Foreground="#FF6C5416" FontWeight="SemiBold"/>
                     <TextBox Text="{Binding PidText, UpdateSourceTrigger=PropertyChanged}" Width="70" VerticalAlignment="Center"/>
                     <Button Content="Attach" Command="{Binding AttachCommand}" Style="{StaticResource SecondaryActionButtonStyle}" Margin="6,0,0,0"

@@ -220,7 +220,7 @@ namespace DriverScanTester.Tests
         private static BotProfile Profile() => new()
         {
             Name = "DeathRecoveryProfile",
-            TeleportKey = 6,
+            TeleportKey = 0x38,
             FlowSteps = new List<BotFlowStep>
             {
                 new()

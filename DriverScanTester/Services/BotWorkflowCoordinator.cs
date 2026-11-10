@@ -824,7 +824,7 @@ namespace DriverScanTester.Services
                     await PausableDelayAsync(waitMs, token);
                 }
 
-                // 2. Town teleport through the existing mechanism (profile teleport key = 6).
+                // 2. Town teleport through the existing mechanism (profile teleport key = 8).
                 bool arrivedInCity;
                 if (_memoryService.GetIsInCity())
                 {
@@ -1585,7 +1585,11 @@ namespace DriverScanTester.Services
                 routeLabel: route.PathFile,
                 disableAllLoot: _profile.DisableAllLoot,
                 ignoreAlliancePlayers: _profile.IgnoreAlliancePlayers,
-                ignoreEmpirePlayers: _profile.IgnoreEmpirePlayers);
+                ignoreEmpirePlayers: _profile.IgnoreEmpirePlayers,
+                // Explicit EXP-loop flag: this is the only call site that enables the
+                // Sorcerer automatic mana skill (key 6). Travel, repot, city and recovery
+                // routes never pass it, regardless of their loop flag.
+                expHuntLoop: true);
 
             // The EXP route is a hunting route: run the loot system in parallel so drops
             // are collected while walking and after kills. MoveAndAttackAndLoot routes use
@@ -2143,7 +2147,7 @@ namespace DriverScanTester.Services
                 return true;
 
             // Teleport FIRST: the cooldown must only ever run in town. The existing
-            // TeleportToCity workflow presses the profile's town teleport key (key 6),
+            // TeleportToCity workflow presses the profile's town teleport key (key 8),
             // waits for the town UI and validates the destination through PositionSync
             // (mandatory post-teleport W refresh). A teleport without that validation is
             // never treated as success.

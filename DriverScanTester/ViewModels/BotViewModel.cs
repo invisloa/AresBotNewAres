@@ -5,6 +5,8 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Input;
 using static DriverScanTester.BotConstants;
 
@@ -13,8 +15,17 @@ namespace DriverScanTester.ViewModels
     public sealed class BotViewModel : BaseViewModel, IDisposable
     {
         private const string GameClientShortcutPath = @"C:\Users\Public\Desktop\Play Legend of Ares.lnk";
+        private const int LauncherDetectionTimeoutMs = 15_000;
+        private const int LauncherInitializationDelayMs = 30_000;
+        private const int GameStartupCheckIntervalMs = 500;
+        private const int GameWindowStartupGraceMs = 30_000;
+        private const int GameStartupWaitAfterClickMs = 20_000;
+        private const int PlayClickRetryDelayMs = 2_000;
+        private const int MaxPlayClickAttempts = 3;
+        private const int OverallGameStartupTimeoutMs = 150_000;
 
         private readonly MainViewModel _main;
+        private readonly AresLauncherWindowService _aresLauncherWindowService = new();
 
         private string _hpThresholdText = HealMana.HpThreshold.ToString();
         private string _manaThresholdText = HealMana.MpThreshold.ToString();
@@ -34,6 +45,11 @@ namespace DriverScanTester.ViewModels
         private string _workflowPhaseText = "Idle";
         private System.Threading.Timer? _statsTimer;
         private int _isDisposed;
+        private int _gameStartupGuard;
+        private bool _isGameStartupRunning;
+        private CancellationTokenSource? _gameStartupCts;
+        private AresLauncherWindowInfo? _lastDetectedLauncherWindow;
+        private bool _launcherFailureScreenshotAttempted;
 
         // Test Method control
         private System.Collections.ObjectModel.ObservableCollection<string> _availableOperationNames = new();
@@ -91,9 +107,9 @@ namespace DriverScanTester.ViewModels
             // configuration/logging keeps working while detached (the whole point of the
             // offline mode). Stop/Pause/Resume deliberately never require attachment so a
             // running bot can always be stopped.
-            StartGameClientCommand = new RelayCommand(_ => StartGameClient());
+            StartGameClientCommand = new RelayCommand(_ => StartGameClient(), _ => !_isGameStartupRunning);
             RunBotCommand = new RelayCommand(_ => RunBot(), _ => _main.IsAttached && !_main.MovementDiagnostic.BlocksOtherRuntimes);
-            StopBotCommand = new RelayCommand(_ => StopAllBots(), _ => IsAnyRuntimeActive);
+            StopBotCommand = new RelayCommand(_ => StopAllBots(), _ => IsAnyRuntimeActive || _isGameStartupRunning);
             PauseBotCommand = new RelayCommand(_ => PauseBots(), _ => !IsBotPaused && IsAnyRuntimeActive);
             ResumeBotCommand = new RelayCommand(_ => ResumeBots(), _ => IsBotPaused);
             ToggleHealManaBotCommand = new RelayCommand(_ => ToggleHealManaBot(), _ => (_main.IsAttached && !_main.MovementDiagnostic.BlocksOtherRuntimes) || IsHealManaBotRunning);
@@ -1134,30 +1150,457 @@ namespace DriverScanTester.ViewModels
 
         private void StartGameClient()
         {
-            if (!File.Exists(GameClientShortcutPath))
-            {
-                AppendBotLog($"[Startup] Game client shortcut not found: {GameClientShortcutPath}");
+            if (Interlocked.CompareExchange(ref _gameStartupGuard, 1, 0) != 0)
                 return;
-            }
 
+            _isGameStartupRunning = true;
+            _lastDetectedLauncherWindow = null;
+            _launcherFailureScreenshotAttempted = false;
+            CommandManager.InvalidateRequerySuggested();
+            var startupCts = new CancellationTokenSource();
+            _gameStartupCts = startupCts;
+            _ = StartGameClientAsync(startupCts);
+        }
+
+        private async Task StartGameClientAsync(CancellationTokenSource startupCts)
+        {
+            CancellationToken token = startupCts.Token;
+            var overallTimer = Stopwatch.StartNew();
             try
             {
-                Process.Start(new ProcessStartInfo
+                if (!_aresLauncherWindowService.TryCaptureGameProcessIds(
+                        out HashSet<int> gameProcessIdsBeforeLaunch,
+                        out string gameProcessError))
                 {
-                    FileName = GameClientShortcutPath,
-                    UseShellExecute = true
-                });
+                    AppendGameStartupFailure($"Could not check for an existing Ares process; launch aborted to avoid a duplicate instance. {gameProcessError}");
+                    return;
+                }
+                if (gameProcessIdsBeforeLaunch.Count > 0)
+                {
+                    AppendBotLog(
+                        $"[Launcher] Ares is already running (PID(s) {string.Join(", ", gameProcessIdsBeforeLaunch)}). " +
+                        "No duplicate client launch or PLAY click was made.");
+                    return;
+                }
 
-                AppendBotLog($"[Startup] Step 1 complete: launched the game client using '{GameClientShortcutPath}'. Attach to its process when it is ready.");
+                HashSet<int> launcherProcessIdsBeforeLaunch = _aresLauncherWindowService.CaptureLauncherProcessIds();
+                int shortcutProcessId = 0;
+                string shortcutProcessName = "unknown";
+                if (launcherProcessIdsBeforeLaunch.Count > 0)
+                {
+                    if (launcherProcessIdsBeforeLaunch.Count == 1)
+                        shortcutProcessId = launcherProcessIdsBeforeLaunch.First();
+                    shortcutProcessName = "Launcher";
+                    AppendBotLog(
+                        $"[Startup] Reusing existing Launcher.exe process(es) (PID(s) {string.Join(", ", launcherProcessIdsBeforeLaunch)}); " +
+                        "no second launcher was started.");
+                }
+                else
+                {
+                    if (!File.Exists(GameClientShortcutPath))
+                    {
+                        AppendGameStartupFailure($"Game client shortcut not found: {GameClientShortcutPath}");
+                        return;
+                    }
+
+                    using (Process? shortcutProcess = Process.Start(new ProcessStartInfo
+                    {
+                        FileName = GameClientShortcutPath,
+                        UseShellExecute = true
+                    }))
+                    {
+                        if (shortcutProcess != null)
+                        {
+                            try
+                            {
+                                shortcutProcessId = shortcutProcess.Id;
+                                shortcutProcessName = shortcutProcess.ProcessName;
+                            }
+                            catch
+                            {
+                                // Shell execution may not expose the associated process.
+                            }
+                        }
+                    }
+
+                    AppendBotLog(
+                        $"[Startup] Launched the game client shortcut '{GameClientShortcutPath}'" +
+                        (shortcutProcessId > 0 ? $" (PID={shortcutProcessId}, process={shortcutProcessName})." : "."));
+                }
+
+                AppendBotLog(
+                    $"[Launcher] Waiting {LauncherInitializationDelayMs / 1000} seconds after starting/reusing the launcher " +
+                    "before looking for its PLAY window; the update progress state is not exposed through a reliable signal.");
+                await DelayWithinGameStartupAsync(LauncherInitializationDelayMs, overallTimer, token);
+
+                AppendBotLog(
+                    $"[Launcher] Checking for a visible Ares launcher window for up to {LauncherDetectionTimeoutMs / 1000} more seconds.");
+
+                AresLauncherWindowInfo launcherWindow = default;
+                int launcherProcessId = 0;
+                string lastDetectionReason = "No Launcher.exe process was found.";
+                var detectionTimer = Stopwatch.StartNew();
+                long nextDetectionLogMs = 5_000;
+                while (detectionTimer.ElapsedMilliseconds < LauncherDetectionTimeoutMs)
+                {
+                    token.ThrowIfCancellationRequested();
+                    EnsureGameStartupHasTime(overallTimer);
+
+                    HashSet<int> currentLauncherProcessIds = _aresLauncherWindowService.CaptureLauncherProcessIds();
+                    int preferredProcessId = SelectLauncherProcessId(
+                        launcherProcessIdsBeforeLaunch,
+                        currentLauncherProcessIds,
+                        shortcutProcessId,
+                        allowSingleExistingProcess: true);
+                    if (_aresLauncherWindowService.TryFindLauncherWindow(
+                            preferredProcessId,
+                            out launcherWindow,
+                            out lastDetectionReason))
+                    {
+                        launcherProcessId = (int)launcherWindow.ProcessId;
+                        break;
+                    }
+
+                    if (detectionTimer.ElapsedMilliseconds >= nextDetectionLogMs)
+                    {
+                        AppendBotLog($"[Launcher] Still waiting for a visible launcher window: {lastDetectionReason}");
+                        nextDetectionLogMs += 5_000;
+                    }
+
+                    await DelayWithinGameStartupAsync(GameStartupCheckIntervalMs, overallTimer, token);
+                }
+
+                if (launcherWindow.Handle == nint.Zero)
+                {
+                    AppendGameStartupFailure(
+                        $"No visible Ares launcher window appeared after the {LauncherInitializationDelayMs / 1000}-second initialization wait " +
+                        $"and the additional {LauncherDetectionTimeoutMs / 1000}-second detection period. {lastDetectionReason}");
+                    return;
+                }
+
+                LogLauncherWindow(launcherWindow, launcherProcessId);
+
+                GameStartupObservation startupObservation = await WaitForGameStartupAsync(
+                    gameProcessIdsBeforeLaunch,
+                    initialWaitMs: 0,
+                    overallTimer,
+                    token);
+                if (startupObservation == GameStartupObservation.WindowDetected)
+                {
+                    LogGameStartupSuccess();
+                    return;
+                }
+                if (startupObservation == GameStartupObservation.ProcessStartedWithoutWindow)
+                {
+                    AppendGameStartupFailure("The Ares process started, but its visible game window did not appear within the startup grace period.");
+                    return;
+                }
+
+                for (int attempt = 1; attempt <= MaxPlayClickAttempts; attempt++)
+                {
+                    token.ThrowIfCancellationRequested();
+                    EnsureGameStartupHasTime(overallTimer);
+
+                    HashSet<int> currentLauncherProcessIds = _aresLauncherWindowService.CaptureLauncherProcessIds();
+                    int preferredProcessId = currentLauncherProcessIds.Contains(launcherProcessId)
+                        ? launcherProcessId
+                        : 0;
+                    if (!_aresLauncherWindowService.TryFindLauncherWindow(
+                            preferredProcessId,
+                            out launcherWindow,
+                            out string findReason))
+                    {
+                        AppendGameStartupFailure($"The launcher was no longer available before PLAY attempt {attempt}: {findReason}");
+                        return;
+                    }
+                    launcherProcessId = (int)launcherWindow.ProcessId;
+
+                    AppendBotLog(
+                        $"[Launcher] Attempt {attempt}/{MaxPlayClickAttempts}: detected HWND=0x{launcherWindow.Handle.ToInt64():X}, " +
+                        $"PID={launcherWindow.ProcessId}, client origin=({launcherWindow.ClientScreenBounds.X},{launcherWindow.ClientScreenBounds.Y}), " +
+                        $"size={launcherWindow.ClientScreenBounds.Width}x{launcherWindow.ClientScreenBounds.Height}.");
+
+                    if (!_aresLauncherWindowService.TryFocusLauncherWindow(launcherWindow, out string focusReason))
+                    {
+                        AppendBotLog($"[Launcher] PLAY attempt {attempt} skipped because the launcher could not be activated: {focusReason}");
+                    }
+                    else if (!_aresLauncherWindowService.TryRefreshLauncherWindow(
+                                 launcherWindow,
+                                 out AresLauncherWindowInfo currentWindow,
+                                 out string refreshReason))
+                    {
+                        AppendBotLog($"[Launcher] PLAY attempt {attempt} skipped because the launcher changed before clicking: {refreshReason}");
+                    }
+                    else if (!AresLauncherWindowService.TryCalculatePlayButtonPosition(
+                                 currentWindow.ClientScreenBounds,
+                                 out System.Drawing.Point playPosition,
+                                 out string coordinateReason))
+                    {
+                        AppendGameStartupFailure($"Could not calculate a safe PLAY position: {coordinateReason}");
+                        return;
+                    }
+                    else
+                    {
+                        _lastDetectedLauncherWindow = currentWindow;
+                        GameStartupObservation beforeClickObservation = await WaitForGameStartupAsync(
+                            gameProcessIdsBeforeLaunch,
+                            initialWaitMs: 0,
+                            overallTimer,
+                            token);
+                        if (beforeClickObservation == GameStartupObservation.WindowDetected)
+                        {
+                            LogGameStartupSuccess();
+                            return;
+                        }
+                        if (beforeClickObservation == GameStartupObservation.ProcessStartedWithoutWindow)
+                        {
+                            AppendGameStartupFailure("The Ares process started before the next PLAY click, but its visible game window did not appear within the startup grace period. No duplicate click was made.");
+                            return;
+                        }
+
+                        int scaledRightOffset = currentWindow.ClientScreenBounds.Right - playPosition.X;
+                        int scaledBottomOffset = currentWindow.ClientScreenBounds.Bottom - playPosition.Y;
+                        AppendBotLog(
+                            $"[Launcher] PLAY click position=({playPosition.X},{playPosition.Y}), " +
+                            $"client origin=({currentWindow.ClientScreenBounds.X},{currentWindow.ClientScreenBounds.Y}), " +
+                            $"size={currentWindow.ClientScreenBounds.Width}x{currentWindow.ClientScreenBounds.Height}, " +
+                            $"edge offsets right={scaledRightOffset}, bottom={scaledBottomOffset}, attempt={attempt}.");
+
+                        token.ThrowIfCancellationRequested();
+                        bool clickExecuted = await Task.Run(
+                            () => _aresLauncherWindowService.TryLeftClick(playPosition.X, playPosition.Y),
+                            token);
+                        if (clickExecuted)
+                            AppendBotLog("[Launcher] Left click executed.");
+                        else
+                            AppendBotLog($"[Launcher] PLAY attempt {attempt} could not move/click the mouse; checking game startup before retrying.");
+                    }
+
+                    AppendBotLog("[Launcher] Waiting for the actual Ares game process/window to appear.");
+                    startupObservation = await WaitForGameStartupAsync(
+                        gameProcessIdsBeforeLaunch,
+                        GameStartupWaitAfterClickMs,
+                        overallTimer,
+                        token);
+                    if (startupObservation == GameStartupObservation.WindowDetected)
+                    {
+                        LogGameStartupSuccess();
+                        return;
+                    }
+                    if (startupObservation == GameStartupObservation.ProcessStartedWithoutWindow)
+                    {
+                        AppendGameStartupFailure("The Ares process started, but its visible game window did not appear within the startup grace period. No duplicate PLAY click was made.");
+                        return;
+                    }
+
+                    HashSet<int> launcherProcessIdsAfterAttempt = _aresLauncherWindowService.CaptureLauncherProcessIds();
+                    int preferredAfterAttempt = launcherProcessIdsAfterAttempt.Contains(launcherProcessId)
+                        ? launcherProcessId
+                        : 0;
+                    if (!_aresLauncherWindowService.TryFindLauncherWindow(
+                            preferredAfterAttempt,
+                            out launcherWindow,
+                            out string retryFindReason))
+                    {
+                        AppendGameStartupFailure($"The Ares launcher closed before a verified game window appeared: {retryFindReason}");
+                        return;
+                    }
+                    launcherProcessId = (int)launcherWindow.ProcessId;
+                    _lastDetectedLauncherWindow = launcherWindow;
+
+                    if (attempt < MaxPlayClickAttempts)
+                    {
+                        AppendBotLog(
+                            $"[Launcher] No new Ares process/window appeared after attempt {attempt}; " +
+                            $"launcher is still present, retrying in {PlayClickRetryDelayMs / 1000} seconds.");
+                        await DelayWithinGameStartupAsync(PlayClickRetryDelayMs, overallTimer, token);
+                    }
+                }
+
+                AppendGameStartupFailure($"Ares did not start after {MaxPlayClickAttempts} PLAY click attempts.");
+            }
+            catch (OperationCanceledException)
+            {
+                AppendBotLog("[Launcher] Startup automation cancelled by Stop All.");
+            }
+            catch (TimeoutException ex)
+            {
+                AppendGameStartupFailure(ex.Message);
             }
             catch (Exception ex)
             {
-                AppendBotLog($"[Startup] Failed to launch the game client shortcut: {ex.Message}");
+                AppendGameStartupFailure($"Startup automation failed: {ex.Message}");
             }
+            finally
+            {
+                FinishGameStartup(startupCts);
+            }
+        }
+
+        private enum GameStartupObservation
+        {
+            NotStarted,
+            ProcessStartedWithoutWindow,
+            WindowDetected
+        }
+
+        private async Task<GameStartupObservation> WaitForGameStartupAsync(
+            HashSet<int> gameProcessIdsBeforeLaunch,
+            int initialWaitMs,
+            Stopwatch overallTimer,
+            CancellationToken token)
+        {
+            var phaseTimer = Stopwatch.StartNew();
+            long? firstNewProcessAtMs = null;
+
+            while (true)
+            {
+                token.ThrowIfCancellationRequested();
+                EnsureGameStartupHasTime(overallTimer);
+
+                if (!_aresLauncherWindowService.TryHasNewVisibleGameWindow(
+                        gameProcessIdsBeforeLaunch,
+                        out bool gameWindowDetected,
+                        out string windowDetectionError))
+                {
+                    throw new InvalidOperationException($"Could not inspect Ares windows: {windowDetectionError}");
+                }
+                if (gameWindowDetected)
+                    return GameStartupObservation.WindowDetected;
+
+                if (!_aresLauncherWindowService.TryHasNewGameProcess(
+                        gameProcessIdsBeforeLaunch,
+                        out bool gameProcessDetected,
+                        out string processDetectionError))
+                {
+                    throw new InvalidOperationException($"Could not inspect Ares processes: {processDetectionError}");
+                }
+                if (firstNewProcessAtMs == null && gameProcessDetected)
+                {
+                    firstNewProcessAtMs = phaseTimer.ElapsedMilliseconds;
+                    AppendBotLog("[Launcher] A new Ares game process appeared; suppressing further PLAY clicks while its window initializes.");
+                }
+
+                if (firstNewProcessAtMs.HasValue)
+                {
+                    if (phaseTimer.ElapsedMilliseconds - firstNewProcessAtMs.Value >= GameWindowStartupGraceMs)
+                        return GameStartupObservation.ProcessStartedWithoutWindow;
+                }
+                else if (phaseTimer.ElapsedMilliseconds >= initialWaitMs)
+                {
+                    return GameStartupObservation.NotStarted;
+                }
+
+                await DelayWithinGameStartupAsync(GameStartupCheckIntervalMs, overallTimer, token);
+            }
+        }
+
+        private static int SelectLauncherProcessId(
+            HashSet<int> processIdsBeforeLaunch,
+            HashSet<int> currentProcessIds,
+            int preferredProcessId,
+            bool allowSingleExistingProcess)
+        {
+            if (preferredProcessId > 0 && currentProcessIds.Contains(preferredProcessId))
+                return preferredProcessId;
+
+            int[] newProcessIds = currentProcessIds.Except(processIdsBeforeLaunch).ToArray();
+            if (newProcessIds.Length == 1)
+                return newProcessIds[0];
+            if (allowSingleExistingProcess && newProcessIds.Length == 0 && currentProcessIds.Count == 1)
+                return currentProcessIds.First();
+
+            return 0;
+        }
+
+        private void LogLauncherWindow(AresLauncherWindowInfo window, int processId)
+        {
+            _lastDetectedLauncherWindow = window;
+            AppendBotLog(
+                $"[Launcher] Ares launcher detected. Process=Launcher.exe PID={processId}, " +
+                $"HWND=0x{window.Handle.ToInt64():X}, title='{window.Title}'.");
+            AppendBotLog(
+                $"[Launcher] Client origin=({window.ClientScreenBounds.X},{window.ClientScreenBounds.Y}), " +
+                $"size={window.ClientScreenBounds.Width}x{window.ClientScreenBounds.Height}, " +
+                $"window bounds={window.WindowScreenBounds}.");
+        }
+
+        private void LogGameStartupSuccess() =>
+            AppendBotLog("[Launcher] Game detected. Startup successful; continue with the existing attach workflow.");
+
+        private void AppendGameStartupFailure(string reason)
+        {
+            AppendBotLog($"[Launcher] Startup failed: {reason}");
+            SaveLauncherFailureScreenshot(reason);
+        }
+
+        private void SaveLauncherFailureScreenshot(string reason)
+        {
+            if (_launcherFailureScreenshotAttempted)
+                return;
+
+            _launcherFailureScreenshotAttempted = true;
+            if (_lastDetectedLauncherWindow is AresLauncherWindowInfo launcherWindow)
+            {
+                try
+                {
+                    System.Drawing.Bitmap? frame = _aresLauncherWindowService.CaptureClientArea(
+                        launcherWindow,
+                        out _,
+                        out string captureReason);
+                    if (frame != null)
+                    {
+                        string? savedPath;
+                        using (frame)
+                            savedPath = ScreenshotService.SaveLauncherDiagnosticScreenshot(frame, reason, AppendBotLog);
+                        if (savedPath != null)
+                            return;
+                    }
+
+                    AppendBotLog($"[Launcher] Could not capture launcher client area: {captureReason}");
+                }
+                catch (Exception ex)
+                {
+                    AppendBotLog($"[Launcher] Launcher client screenshot failed: {ex.Message}");
+                }
+            }
+
+            ScreenshotService.CaptureFullScreen("Launcher", AppendBotLog, "[Launcher]");
+        }
+
+        private static async Task DelayWithinGameStartupAsync(
+            int delayMs,
+            Stopwatch overallTimer,
+            CancellationToken token)
+        {
+            int remainingMs = OverallGameStartupTimeoutMs - (int)overallTimer.ElapsedMilliseconds;
+            if (remainingMs <= 0)
+                throw new TimeoutException($"Ares startup exceeded the {OverallGameStartupTimeoutMs / 1000}-second timeout.");
+
+            await Task.Delay(Math.Min(delayMs, remainingMs), token);
+            EnsureGameStartupHasTime(overallTimer);
+        }
+
+        private static void EnsureGameStartupHasTime(Stopwatch overallTimer)
+        {
+            if (overallTimer.ElapsedMilliseconds >= OverallGameStartupTimeoutMs)
+                throw new TimeoutException($"Ares startup exceeded the {OverallGameStartupTimeoutMs / 1000}-second timeout.");
+        }
+
+        private void FinishGameStartup(CancellationTokenSource startupCts)
+        {
+            if (ReferenceEquals(_gameStartupCts, startupCts))
+                _gameStartupCts = null;
+            startupCts.Dispose();
+            _isGameStartupRunning = false;
+            Interlocked.Exchange(ref _gameStartupGuard, 0);
+            CommandManager.InvalidateRequerySuggested();
         }
 
         private void StopAllBots()
         {
+            try { _gameStartupCts?.Cancel(); }
+            catch (ObjectDisposedException) { }
             _main.StopAllActions("manual stop");
         }
 
@@ -1442,6 +1885,9 @@ namespace DriverScanTester.ViewModels
         {
             if (System.Threading.Interlocked.Exchange(ref _isDisposed, 1) != 0)
                 return;
+
+            try { _gameStartupCts?.Cancel(); }
+            catch (ObjectDisposedException) { }
 
             // Closing the Bot Control Panel (which hosts the diagnostic section) must
             // stop the active experiment. This is a bounded cleanup; failures are logged.

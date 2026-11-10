@@ -109,9 +109,9 @@ namespace DriverScanTester.Services
         /// </summary>
         public void ReportAndGoBack()
         {
-            _log("ReportAndGoBack: Teleporting to town. Pressing 6.");
+            _log("ReportAndGoBack: Teleporting to town. Pressing 8.");
             _stopMoving();
-            GameInput.PressKey(GameInput.VK_6, GameInput.SCAN_6);
+            GameInput.PressKey(GameInput.VK_8, GameInput.SCAN_8);
 
             // Screenshot immediately after the scroll is triggered — before the town
             // starts loading — so the image shows the state at the moment of teleport.
@@ -162,9 +162,9 @@ namespace DriverScanTester.Services
                 }
                 else
                 {
-                    _log("Repot Routine: Starting. Pressing 6 (Town Teleport).");
+                    _log("Repot Routine: Starting. Pressing 8 (Town Teleport).");
                     _stopMoving();
-                    GameInput.PressKey(GameInput.VK_6, GameInput.SCAN_6);
+                    GameInput.PressKey(GameInput.VK_8, GameInput.SCAN_8);
 
                     // Screenshot immediately after the scroll is triggered — before the
                     // town starts loading — so the image shows the state at teleport time.

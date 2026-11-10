@@ -19,7 +19,7 @@ namespace DriverScanTester.Utils
             RightUp = 0x00000010
         }
 
-        [DllImport("user32.dll", EntryPoint = "SetCursorPos")]
+        [DllImport("user32.dll", EntryPoint = "SetCursorPos", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetCursorPos(int x, int y);
 
@@ -108,6 +108,41 @@ namespace DriverScanTester.Utils
             Thread.Sleep(delay);
             LeftClick();
             Thread.Sleep(delay);
+        }
+
+        /// <summary>
+        /// Moves to an absolute desktop coordinate, confirms the cursor reached it, then
+        /// performs a left-button down/up pair. A failed move never clicks the old cursor
+        /// position, and the button is released in a finally block after every down event.
+        /// </summary>
+        public static bool TryMoveAndLeftClickAbsolute(int screenX, int screenY, int delay = 100)
+        {
+            Log?.Invoke($"[Mouse] TryMoveAndLeftClickAbsolute -> screen ({screenX},{screenY}) [no offset applied]");
+            if (!SetCursorPos(screenX, screenY))
+            {
+                Log?.Invoke($"[Mouse] SetCursorPos failed for ({screenX},{screenY}); click skipped (Win32Error={Marshal.GetLastWin32Error()}).");
+                return false;
+            }
+
+            if (!GetCursorPos(out POINT cursor) || cursor.X != screenX || cursor.Y != screenY)
+            {
+                Log?.Invoke($"[Mouse] Cursor did not reach ({screenX},{screenY}); click skipped.");
+                return false;
+            }
+
+            Thread.Sleep(Math.Max(0, delay));
+            MouseEvent(MouseEventFlags.LeftDown);
+            try
+            {
+                Thread.Sleep(50);
+            }
+            finally
+            {
+                MouseEvent(MouseEventFlags.LeftUp);
+            }
+
+            Thread.Sleep(Math.Max(0, delay));
+            return true;
         }
 
         public static void MoveAndRightClick(int x, int y, int delay = 100)

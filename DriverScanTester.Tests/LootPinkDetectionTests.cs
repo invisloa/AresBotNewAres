@@ -12,12 +12,14 @@ namespace DriverScanTester.Tests
     /// MoveAndAttack loot mode.
     ///
     /// Normal loot uses the aquamarine #00FFAA family only; SOD/SOP drops use a custom
-    /// hot-pink scroll texture whose shading/anti-aliasing produces MANY
+    /// hot-pink ground marker whose shading/anti-aliasing produces MANY
     /// pink shades (observed roughly R 239..255, G 21..109, B 148..255), so
     /// <see cref="LootSystem"/> classifies the hot-pink COLOR FAMILY — strong
     /// red, significant blue, substantially weaker green and clear magenta
     /// dominance — rather than one literal RGB value. Both the darker red/pink
-    /// and the brighter magenta areas therefore qualify, while white, gray/stone
+    /// and the brighter magenta areas therefore qualify, and the same family is
+    /// also accepted on the SHADED cube faces at ~45-60% scene light (the painted
+    /// DeepPink (255,20,147) renders as ~(128,10,74) on the live maps), while white, gray/stone
     /// gray/stone floor, green terrain and red/yellow/blue/cyan effects are
     /// rejected. Blobs must still be at least 10x10 px (the rendered loot
     /// square) while smaller pink specks are skipped; the mouseover memory check
@@ -44,8 +46,14 @@ namespace DriverScanTester.Tests
         [InlineData(255, 105, 180, true)]  // hot pink
         [InlineData(200, 20, 180, true)]   // R/sum lower bounds exactly satisfied
         [InlineData(220, 18, 127, true)]   // darkened SOD/SOP shade visible in the loot-scan screenshot
+        [InlineData(199, 20, 180, true)]   // slightly darker bright pink — shaded branch
+        // Shaded cube faces on the live dark maps (~45-60% scene light): the painted
+        // DeepPink (255,20,147) renders around (128,10,74) and darker.
+        [InlineData(128, 10, 74, true)]
+        [InlineData(112, 8, 64, true)]
+        [InlineData(140, 10, 80, true)]    // DeepPink at ~55% ground-light brightness
+        [InlineData(160, 15, 95, true)]
         // Boundary values just outside the family — must be rejected.
-        [InlineData(199, 20, 180, false)]  // R below 200
         [InlineData(255, 151, 255, false)] // G above 150
         [InlineData(255, 120, 119, false)] // B below 120
         [InlineData(229, 150, 255, false)] // R - G below 80
@@ -54,7 +62,11 @@ namespace DriverScanTester.Tests
         [InlineData(220, 26, 127, false)]  // dark-shade green limit exceeded
         [InlineData(200, 25, 129, false)]  // below the dark-shade R+B minimum
         [InlineData(255, 192, 203, false)] // classic pink (green too strong)
-        [InlineData(140, 10, 80, false)]   // DeepPink at ~55% ground-light brightness
+        // Shaded-branch limits — must still be rejected.
+        [InlineData(105, 6, 50, false)]    // shaded R+B minimum not reached
+        [InlineData(120, 8, 40, false)]    // blue too small versus red (dark red, not pink)
+        [InlineData(150, 25, 40, false)]   // dark brown/red wood
+        [InlineData(105, 20, 30, false)]   // very dark red — blue below the shaded minimum
         // Not pink / wrong hue — must be rejected.
         [InlineData(255, 255, 255, false)] // white is not pink
         [InlineData(128, 128, 128, false)] // gray floor

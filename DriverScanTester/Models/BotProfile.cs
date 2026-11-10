@@ -117,9 +117,9 @@ namespace DriverScanTester.Models
         /// </summary>
         public bool IgnoreEmpirePlayers { get; set; } = false;
 
-        /// <summary>Virtual-key code for town teleport (default 0x36 = '6').</summary>
+        /// <summary>Virtual-key code for town teleport (default 0x38 = '8').</summary>
         public int TeleportKey { get; set; } = BotConstants.Workflow.DefaultTeleportKey;
-        /// <summary>Scan code for teleport key (default 0x07 for '6').</summary>
+        /// <summary>Scan code for teleport key (default 0x09 for '8').</summary>
         public int TeleportScanCode { get; set; } = BotConstants.Workflow.DefaultTeleportScanCode;
 
         /// <summary>Maximum teleport retries before giving up.</summary>

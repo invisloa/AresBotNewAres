@@ -7,8 +7,8 @@ using Xunit;
 namespace DriverScanTester.Tests
 {
     /// <summary>
-    /// Sorcerer/Mage drinks only the white speed potion (key 8); every other class keeps
-    /// the two-key rebuff (key 7 = red, key 8 = white) inherited from the legacy bot
+    /// Sorcerer/Mage drinks only the white speed potion (key 7); every other class keeps
+    /// the two-key rebuff (key 6 = red, key 7 = white) inherited from the legacy bot
     /// (SkillSelectorMageAlliance used checkForWhitePotBuff, the rest checkForWhiteRed).
     /// </summary>
     public sealed class SpeedPotionClassTests
@@ -161,20 +161,20 @@ namespace DriverScanTester.Tests
         [Fact]
         public void MageTrigger_UnknownRunSpeedValueIsTreatedAsBuffActive()
         {
-            // Only the verified +0 value (128) means "drink". Anything else — including a
-            // value produced by run-speed gear — must not fire the potion key.
-            var memory = new SpeedMemory { RunSpeed = 153 };
+            // Only the verified +0 value (153) means "drink". Anything else — including the
+            // legacy 128 value or a value produced by run-speed gear — must not fire the key.
+            var memory = new SpeedMemory { RunSpeed = 128 };
             var combat = new CombatHandler(_ => { });
 
             Assert.False(combat.CheckRunSpeed(memory.Create()));
-            Assert.Equal(153, combat.LastRunSpeed);
+            Assert.Equal(128, combat.LastRunSpeed);
         }
 
         [Fact]
         public void RunSpeedConstants_MatchTheVerifiedLiveAddressAndValues()
         {
             Assert.Equal(0xEFAUL, BotConstants.MemoryOffsets.RunSpeed);
-            Assert.Equal(0x80, BotConstants.SpeedPotion.RunSpeedNoPotionValue); // 128 = +0 run speed
+            Assert.Equal(0x99, BotConstants.SpeedPotion.RunSpeedNoPotionValue); // 153 = +0 run speed
             Assert.Equal(0xB3, BotConstants.SpeedPotion.RunSpeedWhitePotValue); // 179 = +2 run speed
         }
 

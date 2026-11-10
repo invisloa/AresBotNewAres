@@ -64,7 +64,7 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Presses the profile's town-teleport key (default '6') and saves a screenshot
+        /// Presses the profile's town-teleport key (default '8') and saves a screenshot
         /// to Screenshots/TownPortals right after the scroll is triggered (before the
         /// town loads).
         /// </summary>

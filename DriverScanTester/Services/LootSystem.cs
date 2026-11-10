@@ -292,11 +292,15 @@ namespace DriverScanTester.Services
         // requested either by a successful NPC auto-calibration in this game session (both
         // values change with the game launch) or by BotConstants.Loot.
         // ItemCalibrationAfterEmptyScans consecutive scans that found nothing.
+        // Once a discovery attempt ran and did NOT confirm a value, the request stays armed
+        // (_itemValueDiscoveryPending) and every following loot scan probes again until a value
+        // is confirmed — there is no back-off that would require another empty-scan streak.
         private ItemMouseOverCalibration? _itemCalibration;
         private string _itemCalibrationReason = string.Empty;
         private DateTime _itemCalibrationStartedUtc = DateTime.MinValue;
         private int _consecutiveEmptyItemScans;
         private bool _itemCalibrationAttemptedForNpcTrigger;
+        private bool _itemValueDiscoveryPending;
 
         // ── Automatic-loot disable policy (profile/path) ──
         // One authoritative switch for every automatic loot operation. It is set by the
@@ -3105,6 +3109,8 @@ namespace DriverScanTester.Services
         //  Triggers:
         //   - immediate: the NPC MouseOver value was auto-calibrated in this game session
         //     (both values change together), unless the item value is already known,
+        //   - immediate: a previous discovery attempt ended without a confirmed value — the
+        //     request stays armed until a value is actually confirmed, no empty-scan wait,
         //   - otherwise: BotConstants.Loot.ItemCalibrationAfterEmptyScans consecutive
         //     complete loot scans that found no item.
         //  While the discovery is active the probes settle longer (slow scan); it is
@@ -3134,6 +3140,7 @@ namespace DriverScanTester.Services
                     _consecutiveEmptyItemScans,
                     MouseOverCalibrationSession.Current.NeedsItemValueDiscovery(CalibrationSessionIdentity),
                     _itemCalibrationAttemptedForNpcTrigger,
+                    _itemValueDiscoveryPending,
                     out string reason,
                     out bool consumeNpcTrigger))
             {
@@ -3142,6 +3149,10 @@ namespace DriverScanTester.Services
 
             if (consumeNpcTrigger)
                 _itemCalibrationAttemptedForNpcTrigger = true;
+
+            // From now on the active value is known to be unproven for this session: keep
+            // probing on every scan until one attempt actually confirms a value.
+            _itemValueDiscoveryPending = true;
 
             _itemCalibration = new ItemMouseOverCalibration(
                 BotConstants.Loot.ItemCalibrationRequiredDistinctItems,
@@ -3159,9 +3170,11 @@ namespace DriverScanTester.Services
         /// <summary>
         /// The trigger rule for the automatic item discovery (pure, unit-tested):
         ///   1. no configured item value at all → discover immediately,
-        ///   2. the NPC value was auto-calibrated in this game session and the item value is
+        ///   2. a previous attempt did not confirm a value → discover immediately again
+        ///      (no back-off; the value must be determined, not postponed),
+        ///   3. the NPC value was auto-calibrated in this game session and the item value is
         ///      not known yet → discover on the next scan (one attempt per NPC calibration),
-        ///   3. otherwise only after <see cref="BotConstants.Loot.ItemCalibrationAfterEmptyScans"/>
+        ///   4. otherwise only after <see cref="BotConstants.Loot.ItemCalibrationAfterEmptyScans"/>
         ///      consecutive complete scans that found no item.
         /// </summary>
         internal static bool TryGetItemCalibrationReason(
@@ -3169,6 +3182,7 @@ namespace DriverScanTester.Services
             int consecutiveEmptyScans,
             bool needsItemValueDiscovery,
             bool npcTriggerAttempted,
+            bool itemValueDiscoveryPending,
             out string reason,
             out bool consumeNpcTrigger)
         {
@@ -3177,6 +3191,12 @@ namespace DriverScanTester.Services
             if (activeItemValue == 0)
             {
                 reason = "no item MouseOver value is configured";
+                return true;
+            }
+
+            if (itemValueDiscoveryPending)
+            {
+                reason = "the previous discovery attempt did not confirm a value — retrying until one is confirmed";
                 return true;
             }
 
@@ -3222,14 +3242,16 @@ namespace DriverScanTester.Services
                 // The scan never reached a single probe (capture/camera failure). That is not a
                 // failed discovery: keep the trigger armed instead of consuming the attempt.
                 _itemCalibrationAttemptedForNpcTrigger = false;
+                _itemValueDiscoveryPending = true;
                 _log($"[Item Calibration] Discovery could not run (no item candidate was probed; reason={reason}, elapsed={elapsedMs}ms) — the request stays armed.");
                 return;
             }
 
             _consecutiveEmptyItemScans = 0;
+            _itemValueDiscoveryPending = true;
             _log($"[Item Calibration] Discovery attempt finished without a confirmed value " +
                  $"({calibration.DescribeObservations()}; reason={reason}, elapsed={elapsedMs}ms) — keeping the active value. " +
-                 $"The next attempt needs {BotConstants.Loot.ItemCalibrationAfterEmptyScans} more empty scans.");
+                 "Discovery stays armed: the next loot scan probes again (no empty-scan wait).");
         }
 
         /// <summary>
@@ -3243,6 +3265,8 @@ namespace DriverScanTester.Services
             if (result == LootScanPassResult.Collected)
             {
                 _consecutiveEmptyItemScans = 0;
+                // A collected item proves the active value works in this game session.
+                _itemValueDiscoveryPending = false;
                 MouseOverCalibrationSession.Current.MarkItemValueDiscovered(CalibrationSessionIdentity);
                 return;
             }
@@ -3321,6 +3345,7 @@ namespace DriverScanTester.Services
             BotConstants.GameMagicValues.LootMouseOverValue = confirmedValue;
             MouseOverCalibrationSession.Current.MarkItemValueDiscovered(CalibrationSessionIdentity);
             _consecutiveEmptyItemScans = 0;
+            _itemValueDiscoveryPending = false;
 
             long elapsedMs = _itemCalibrationStartedUtc == DateTime.MinValue
                 ? 0
@@ -3513,10 +3538,22 @@ namespace DriverScanTester.Services
         }
 
         // ── SOD/SOP hot-pink pixel classifier thresholds ──
-        // The SOD/SOP scroll is shaded and anti-aliased. Besides the usual bright
-        // pink shades, the live loot-camera frame rendered a darkened band around
-        // R 213..233, G 17..19, B 123..134. Keep the existing family limits for
-        // normal shades and admit this narrowly bounded low-green dark-render variant.
+        // The SOD/SOP drop is a shaded 3D ground marker, so its pink texture is
+        // modulated by scene light exactly like the aquamarine normal-loot cube:
+        // a live frame of a lit cube showed the painted #00FFAA top reduced to
+        // (0,133,95) and its side faces to (0,84,56), i.e. roughly 50% luminance.
+        // Applying the same factor to the painted SOD/SOP DeepPink (255,20,147)
+        // gives ~(128,10,74) / ~(112,8,64). The original limits (R>=200, B>=120,
+        // R+B>=380) demanded near full brightness and therefore matched nothing on
+        // standard camera views except a few HUD specks.
+        //
+        // Family = bright pink branch (unchanged, keeps every previously verified
+        // scroll shade) OR shaded branch (same hue dominance at ~half brightness:
+        // red clearly strongest, blue substantial versus red so the hue stays pink
+        // instead of red, green very low). Verified against a live 1024x768 frame:
+        // the widened family yields ZERO candidate blobs on ordinary terrain/UI
+        // (the minimap dots and red HUD stay out because their green channel is
+        // 21+ while the shaded cube keeps G<=20).
         private const int PinkMinR = 200;
         private const int PinkMinB = 120;
         private const int PinkMaxG = 150;
@@ -3526,12 +3563,22 @@ namespace DriverScanTester.Services
         private const int PinkDarkShadeMaxGreen = 25;
         private const int PinkDarkShadeMinRedPlusBlue = 330;
 
+        // Shaded / dark-rendered SOD/SOP branch.
+        private const int PinkShadedMinR = 105;
+        private const int PinkShadedMinB = 50;
+        private const int PinkShadedMaxG = 20;
+        private const int PinkShadedMinRedOverGreen = 60;
+        private const int PinkShadedMinBlueOverGreen = 25;
+        private const int PinkShadedMinBlueToRedPercent = 40;
+        private const int PinkShadedMinRedPlusBlue = 170;
+
         /// <summary>
-        /// True when a pixel belongs to the SOD/SOP hot-pink color family. The
-        /// custom scroll texture renders as a shaded gradient, so no exact RGB
-        /// match can work: a pixel qualifies when red is strong, blue is
-        /// significant, green is substantially weaker and the pixel has clear
-        /// magenta/pink dominance (channel-difference + channel-sum minima).
+        /// True when a pixel belongs to the SOD/SOP pink color family. The custom
+        /// scroll ground marker renders as a shaded 3D cube, so no exact RGB match
+        /// can work: a pixel qualifies when red is strong, blue is a substantial
+        /// fraction of red, green is substantially weaker and the pixel has clear
+        /// pink dominance (channel-difference + channel-sum minima). Both the bright
+        /// painted shades and the ~50%-lit shaded faces of the same cube qualify.
         /// Plain integer arithmetic on the RGB channels — no exact equality, no
         /// hue/HSL/HSV conversion and no allocation, because the scan loop
         /// examines hundreds of thousands of pixels.
@@ -3546,14 +3593,29 @@ namespace DriverScanTester.Services
         internal static bool IsSodSopPinkPixel(int r, int g, int b)
         {
             int redPlusBlue = r + b;
-            return r >= PinkMinR &&
-                   b >= PinkMinB &&
-                   g <= PinkMaxG &&
-                   r - g >= PinkMinRedOverGreen &&
-                   b - g >= PinkMinBlueOverGreen &&
-                   (redPlusBlue >= PinkMinRedPlusBlue ||
-                    (g <= PinkDarkShadeMaxGreen &&
-                     redPlusBlue >= PinkDarkShadeMinRedPlusBlue));
+
+            // Bright painted shades (verified scroll texture values).
+            bool bright = r >= PinkMinR &&
+                          b >= PinkMinB &&
+                          g <= PinkMaxG &&
+                          r - g >= PinkMinRedOverGreen &&
+                          b - g >= PinkMinBlueOverGreen &&
+                          (redPlusBlue >= PinkMinRedPlusBlue ||
+                           (g <= PinkDarkShadeMaxGreen &&
+                            redPlusBlue >= PinkDarkShadeMinRedPlusBlue));
+            if (bright)
+                return true;
+
+            // Shaded faces of the same cube (~45-60% scene light). Same hue structure,
+            // lower levels: this is what the SOD/SOP marker actually looks like on the
+            // live dark maps at the loot-scan camera distance.
+            return r >= PinkShadedMinR &&
+                   b >= PinkShadedMinB &&
+                   g <= PinkShadedMaxG &&
+                   r - g >= PinkShadedMinRedOverGreen &&
+                   b - g >= PinkShadedMinBlueOverGreen &&
+                   b * 100 >= r * PinkShadedMinBlueToRedPercent &&
+                   redPlusBlue >= PinkShadedMinRedPlusBlue;
         }
 
         /// <summary>
