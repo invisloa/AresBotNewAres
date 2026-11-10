@@ -141,6 +141,34 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void EveryMandatoryLootRequestContributesAtMostOneItemCalibrationVote()
+        {
+            // First attempt of a kill may be Incomplete and still counts as that kill's scan.
+            Assert.True(LootSystem.ShouldCountItemCalibrationVote(
+                validComplete: false, mandatoryRequestId: 2, lastVotedRequestId: 1));
+
+            // A retry of the SAME request must never count a second time, not even when it
+            // eventually completes.
+            Assert.False(LootSystem.ShouldCountItemCalibrationVote(
+                validComplete: false, mandatoryRequestId: 2, lastVotedRequestId: 2));
+            Assert.False(LootSystem.ShouldCountItemCalibrationVote(
+                validComplete: true, mandatoryRequestId: 2, lastVotedRequestId: 2));
+
+            // The next kill is a new scan and counts again.
+            Assert.True(LootSystem.ShouldCountItemCalibrationVote(
+                validComplete: false, mandatoryRequestId: 3, lastVotedRequestId: 2));
+        }
+
+        [Fact]
+        public void OutsideAMandatoryRequestOnlyACompletedScanVotes()
+        {
+            Assert.True(LootSystem.ShouldCountItemCalibrationVote(
+                validComplete: true, mandatoryRequestId: 0, lastVotedRequestId: 0));
+            Assert.False(LootSystem.ShouldCountItemCalibrationVote(
+                validComplete: false, mandatoryRequestId: 0, lastVotedRequestId: 0));
+        }
+
+        [Fact]
         public void KnownItemValueAndNoEmptyScansDoNotStartDiscovery()
         {
             bool start = LootSystem.TryGetItemCalibrationReason(

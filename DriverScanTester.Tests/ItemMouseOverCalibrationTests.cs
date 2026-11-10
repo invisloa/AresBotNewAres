@@ -148,6 +148,23 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void MostFrequentlyReadValueWinsInsideASingleItemBlob()
+        {
+            // The mouseover buffer can briefly return the previous object's value while the
+            // cursor settles; the item value is the one most probes actually read.
+            var calibration = new ItemMouseOverCalibration(requiredDistinctItems: 3);
+
+            calibration.RecordObservation(100, 100, 111);
+            calibration.RecordObservation(100, 100, 222);
+            calibration.RecordObservation(100, 100, 111);
+            calibration.RecordObservation(100, 100, 111);
+
+            Assert.True(calibration.TryGetDominantValue(out int value));
+            Assert.Equal(111, value);
+            Assert.Equal(3, calibration.ObservationCountFor(111));
+        }
+
+        [Fact]
         public void SingleItemScanStillProducesAVoteForTheCrossScanAgreement()
         {
             // One visible drop must not be wasted just because the scan contains only one item.
