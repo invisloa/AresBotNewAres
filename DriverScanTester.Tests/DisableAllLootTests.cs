@@ -459,7 +459,6 @@ namespace DriverScanTester.Tests
             Assert.False(loot.IsLootCycleActive);
             Assert.False(loot.IsCollecting);
             Assert.False(loot.IsPinkScanPendingOrActive);
-            Assert.False(loot.IsPinkRescanActive);
             Assert.DoesNotContain(log, line => line.Contains("[LootCapture]", StringComparison.Ordinal));
             Assert.DoesNotContain(log, line => line.Contains("[LootCamera]", StringComparison.Ordinal));
             Assert.DoesNotContain(log, line => line.Contains("[LootSS]", StringComparison.Ordinal));
@@ -477,16 +476,8 @@ namespace DriverScanTester.Tests
             Assert.False(loot.HasActiveMandatoryLootRequest);
 
             loot.RequestPinkScan();
-            loot.SchedulePinkRescanAfterKill();
 
             Assert.False(loot.IsPinkScanPendingOrActive);
-            Assert.False(loot.IsPinkRescanActive);
-            var scheduler = GetPrivateField(loot, "_pinkRescanScheduler")!;
-            var snapshot = (PinkRescanSnapshot)scheduler.GetType()
-                .GetProperty("Snapshot", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!
-                .GetValue(scheduler)!;
-            Assert.False(snapshot.Pending);
-            Assert.False(snapshot.Active);
         }
 
         [Fact]

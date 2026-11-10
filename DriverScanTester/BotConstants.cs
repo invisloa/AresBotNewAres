@@ -218,18 +218,12 @@ namespace DriverScanTester
             /// <summary>
             /// Sorcerer/Mage buff detection by RUN speed (the white potion raises run speed,
             /// not attack speed). BYTE at <see cref="MemoryOffsets.RunSpeed"/>
-            /// (<c>[Ares.exe + 0x489BC8] + 0xEFA</c>) while the white potion is NOT active —
-            /// verified live: 0x99 = 153 = run speed +0 (normal run).
-            /// The bot drinks the white potion exactly when the read equals this value.
+            /// (<c>[Ares.exe + 0x489BC8] + 0xEFA</c>).
+            /// The bot drinks the white potion ONLY when the read equals this value
+            /// (0xB3 = 179 = +0 run speed). Any other value means the buff is active and the
+            /// potion is not pressed again — the value after drinking is irrelevant.
             /// </summary>
-            public const byte RunSpeedNoPotionValue = 0x99; // 153 = +0 run speed (normal)
-
-            /// <summary>
-            /// Sorcerer/Mage buff detection: RUN speed value WITH the white potion active —
-            /// verified live: 0xB3 = 179 = +2 run speed. Documented for diagnostics only —
-            /// the decision compares against <see cref="RunSpeedNoPotionValue"/>.
-            /// </summary>
-            public const byte RunSpeedWhitePotValue = 0xB3; // 179 = +2 run speed (white pot)
+            public const byte RunSpeedNoPotionValue = 0xB3; // 179 = +0 run speed (normal)
 
             /// <summary>Interval in seconds between attack-speed checks.</summary>
             public const double CheckIntervalSeconds = 5.0;
@@ -1020,8 +1014,8 @@ namespace DriverScanTester
             public const ulong MaxWeight = 0xC74;
             // Run speed is a single BYTE (lock-tool name: A_RunSpeed, ValueType = Byte):
             //   [Ares.exe + 0x489BC8] + 0xEFA
-            // Verified live values: 0x99 (153) = +0 run speed, 0xB3 (179) = +2 run speed
-            // (white pot active). Use SpeedPotion.RunSpeedNoPotionValue / RunSpeedWhitePotValue.
+            // Verified live: 0xB3 (179) = +0 run speed. SpeedPotion.RunSpeedNoPotionValue is
+            // the only trigger value (the post-potion value is irrelevant).
             public const ulong RunSpeed = 0xEFA;
             public const ulong SkillSpeed = 0xACA;
             public const ulong Animation1 = 0x3ba;
@@ -2088,17 +2082,6 @@ namespace DriverScanTester
             /// <summary>How long a post-kill pink-scan request stays valid (ms). Requests older
             /// than this are dropped instead of starting a stale scan after a pause.</summary>
             public const int PinkScanRequestTtlMs = 5000;
-
-            /// <summary>Delay (ms) after a kill before the background SOD/SOP rescan runs.
-            /// Pending work is coalesced without postponing an earlier due time. The short scan
-            /// pass owns camera/cursor targeting only while active; existing held movement/skill
-            /// input is not restarted or reconfigured.</summary>
-            public const int PinkRescanDelayMs = 1000;
-
-            /// <summary>Legacy rescan age value retained for configuration/source compatibility.
-            /// Pending kill work is no longer dropped by age; focus loss, stop, city entry or a
-            /// mode change explicitly cancels incompatible work instead.</summary>
-            public const int PinkRescanExpireMs = 5000;
 
             /// <summary>Weight (lb) of one SOD/SOP scroll. When the player is at the weight
             /// limit a confirmed pink pickup would fail, so the pink scan drinks a potion

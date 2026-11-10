@@ -509,7 +509,6 @@ namespace DriverScanTester.Services
         /// <summary>When the current pink-scan hold started (UtcNow) — safety timeout.</summary>
         private DateTime _pinkScanHoldSince = DateTime.MinValue;
         /// <summary>True once the current pink-scan hold was force-released by the safety timeout.</summary>
-        private bool _pinkScanHoldTimedOut = false;
 
         /// <summary>
         /// Optional reference to the running LootSystem (set by the host — workflow
@@ -2339,7 +2338,6 @@ namespace DriverScanTester.Services
             _lootPriorityHoldTimedOut = false;
             _pinkScanHoldActive = false;
             _pinkScanHoldSince = DateTime.MinValue;
-            _pinkScanHoldTimedOut = false;
             _postPinkScanTargetCheckPending = false;
             if (resumePostKillSearchWithoutLoot)
             {
@@ -3675,7 +3673,7 @@ namespace DriverScanTester.Services
                 return false;
             }
 
-            if (loot.IsScanActive || loot.IsPinkRescanActive)
+            if (loot.IsScanActive)
             {
                 denialReason = "an active loot scan owns the camera";
                 return false;
@@ -4404,7 +4402,6 @@ namespace DriverScanTester.Services
                 _lootPriorityHoldTimedOut = false;
                 _pinkScanHoldActive = false;
                 _pinkScanHoldSince = DateTime.MinValue;
-                _pinkScanHoldTimedOut = false;
                 _postPinkScanTargetCheckPending = false;
                 if (LootSystemRef != null && (LootSystemRef.IsCollecting || LootSystemRef.IsLootingActive))
                 {
@@ -4476,7 +4473,6 @@ namespace DriverScanTester.Services
                 if (_pinkScanHoldActive)
                     _postPinkScanTargetCheckPending = true;
                 _pinkScanHoldSince = DateTime.MinValue;
-                _pinkScanHoldTimedOut = false;
                 _pinkScanHoldActive = false;
             }
 
@@ -4684,12 +4680,11 @@ namespace DriverScanTester.Services
                 // the log instead of silently disabling the buff forever.
                 int runSpeed = _combatHandler.LastRunSpeed;
                 bool unknownRunSpeed = runSpeed != 0 &&
-                    runSpeed != BotConstants.SpeedPotion.RunSpeedNoPotionValue &&
-                    runSpeed != BotConstants.SpeedPotion.RunSpeedWhitePotValue;
+                    runSpeed != BotConstants.SpeedPotion.RunSpeedNoPotionValue;
 
                 if (unknownRunSpeed && !_speedPotUnknownRunSpeedLogged)
                 {
-                    _log($"[SpeedPot] Mage run speed {runSpeed} (0x{runSpeed:X2}) is neither the no-potion value ({BotConstants.SpeedPotion.RunSpeedNoPotionValue} = 0x{BotConstants.SpeedPotion.RunSpeedNoPotionValue:X2}) nor the white-pot value ({BotConstants.SpeedPotion.RunSpeedWhitePotValue} = 0x{BotConstants.SpeedPotion.RunSpeedWhitePotValue:X2}) — buff treated as active, key 7 not pressed.");
+                    _log($"[SpeedPot] Mage run speed {runSpeed} (0x{runSpeed:X2}) differs from the trigger value ({BotConstants.SpeedPotion.RunSpeedNoPotionValue} = 0x{BotConstants.SpeedPotion.RunSpeedNoPotionValue:X2}) — buff treated as active, key 7 not pressed.");
                     _speedPotUnknownRunSpeedLogged = true;
                 }
                 else if (!unknownRunSpeed)
@@ -4935,12 +4930,10 @@ namespace DriverScanTester.Services
                 if (!canUseCombatRetargetSearch)
                     ClearCombatRetargetSearch();
 
-                // While the loot system owns the camera, preserve its scan view. An active
-                // retarget stage applies its own verified distance at the shared combat point.
                 bool lootScanning = !IsAutomaticLootDisabled &&
                                     canUseCombatRetargetSearch &&
                                     LootSystemRef != null &&
-                                    (LootSystemRef.IsLootCycleActive || LootSystemRef.IsPinkRescanActive);
+                                    LootSystemRef.IsLootCycleActive;
                 if (!lootScanning && _combatRetargetCameraStage == CombatRetargetCameraStage.None)
                     TryApplyMovementCameraDistance(currentWaypoint.CameraDistanceLock);
 
@@ -4976,20 +4969,6 @@ namespace DriverScanTester.Services
             // created or completed request is visible to retargeting on this same tick.
             RefreshLootBarrier();
 
-            // The delayed SOD/SOP sweep owns the zoomed camera and cursor. Let any
-            // current attack finish, but do not run target cycling while the camera is
-            // at loot distance; resume watchdog timing after the sweep is done.
-            if (!IsAutomaticLootDisabled && LootSystemRef?.IsPinkRescanActive == true)
-            {
-                // The loot rescan owns the camera/cursor — an active return must release its
-                // input instead of holding W across a tick this branch never reaches.
-                CancelCombatGateWaypointReturn("loot pink rescan owns the camera");
-                lock (_inputLock)
-                    CancelAttackKeyRetry("loot rescan owns input");
-                _combatHandler.SuspendForExternalMovement();
-                await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
-                return;
-            }
             _combatHandler.ResumeAfterExternalMovement();
 
             if (await HandlePostKillRetargetRequestAsync(token))
@@ -5217,7 +5196,6 @@ namespace DriverScanTester.Services
                         // First cycle TAB at the closest retarget camera. Keep fighting if
                         // that finds a nearby mob; only request the SOD/SOP scan when the
                         // close-range TAB finds none.
-                        LootSystemRef.SchedulePinkRescanAfterKill();
                         _postKillCloseTargetCheckPending = true;
                         _postKillTargetIdBeforeTab = targetId;
                         StartCombatRetargetSearch();
@@ -6909,7 +6887,6 @@ namespace DriverScanTester.Services
                     return false;
 
                 return loot.IsPinkScanPendingOrActive ||
-                       loot.IsPinkRescanActive ||
                        loot.IsLootCycleActive ||
                        loot.IsCollecting ||
                        loot.IsLootingActive;
@@ -9711,9 +9688,6 @@ namespace DriverScanTester.Services
                 ClearCombatRetargetSearch();
                 return false;
             }
-
-            if (!IsAutomaticLootDisabled && LootSystemRef?.IsPinkRescanActive == true)
-                return true;
 
             int selectedTargetId = _memoryService.GetSelectedTargetId();
             CombatTargetValidation validation = selectedTargetId > 0

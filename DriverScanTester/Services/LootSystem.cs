@@ -240,9 +240,9 @@ namespace DriverScanTester.Services
         private DateTime _lastItemCollectedAt = DateTime.MinValue;
 
         // ── SOD/SOP pink-scan request (MoveAndAttack post-kill) ──
-        // The movement system requests the immediate pink scan only after its close-camera
-        // TAB check finds no nearby mob. The independent generation scheduler still arms
-        // delayed background work for every kill, including kills followed by a close retarget.
+        // The movement system requests the pink scan only after its close-camera TAB check
+        // finds no nearby mob. There is exactly one post-kill pass: when that check finds a
+        // mob the bot keeps fighting and no scan is armed.
         private CancellationToken _scanToken;
 
         /// <summary>0 = idle, 1 = a manual diagnostic scan owns the capture and cursor.</summary>
@@ -277,12 +277,8 @@ namespace DriverScanTester.Services
         private bool _playerMarkerScanEnabled;
         private volatile bool _pinkScanRequested;
         private DateTime _pinkScanRequestedAt = DateTime.MinValue;
-        private readonly PinkRescanScheduler _pinkRescanScheduler = new();
         private bool _pinkScanOwnsCameraCursor;
         private short? _pinkScanRestoreDistance;
-
-        /// <summary>True while a background rescan pass owns the camera and cursor.</summary>
-        private volatile bool _pinkRescanActive;
         private volatile bool _pinkLootOnlyMode;
 
         // ── Automatic MouseOver ITEM value re-discovery (auto calibration) ──
@@ -857,32 +853,8 @@ namespace DriverScanTester.Services
 
                 _pinkScanRequestedAt = now;
                 _pinkScanRequested = true;
-                _pinkRescanScheduler.ScheduleKill(
-                    now, TimeSpan.FromMilliseconds(BotConstants.Loot.PinkRescanDelayMs));
             }
             _log("[Loot] SOD/SOP pink scan requested (no close mob found after kill).");
-        }
-
-        /// <summary>
-        /// Arms the delayed background SOD/SOP rescan for a kill without starting the
-        /// immediate scan. Movement first checks for a nearby mob and requests the
-        /// immediate scan only when that close-range TAB finds none.
-        /// </summary>
-        public void SchedulePinkRescanAfterKill()
-        {
-            DateTime now = DateTime.UtcNow;
-            lock (_cameraCursorOwnershipGate)
-            {
-                if (_automaticLootDisabled)
-                    return;
-
-                if (!_pinkLootOnlyMode)
-                    return;
-
-                _lastKillAt = now;
-                _pinkRescanScheduler.ScheduleKill(
-                    now, TimeSpan.FromMilliseconds(BotConstants.Loot.PinkRescanDelayMs));
-            }
         }
 
         /// <summary>
@@ -892,13 +864,6 @@ namespace DriverScanTester.Services
         /// </summary>
         public bool IsPinkScanPendingOrActive =>
             _pinkScanRequested || _lootState == LootMachineState.PinkScan;
-
-        /// <summary>
-        /// True while the background SOD/SOP rescan pass runs. Movement yields the camera
-        /// and cursor and suspends target-cycle evaluation for the pass, so TAB is never
-        /// sent while the scan zoom is active.
-        /// </summary>
-        public bool IsPinkRescanActive => _pinkRescanActive;
 
         /// <summary>
         /// Runs a movement camera write only when loot does not own the camera. The
@@ -939,7 +904,7 @@ namespace DriverScanTester.Services
             {
                 bool pinkOwnsTargeting = !_automaticLootDisabled &&
                                          (_pinkScanRequested || _pinkScanOwnsCameraCursor ||
-                                          _pinkRescanActive || _isCollecting ||
+                                          _isCollecting ||
                                           _lootState == LootMachineState.PinkScan);
                 bool mandatoryLootOwnsTargeting = !_automaticLootDisabled &&
                     _activeMandatoryLootRequest != null &&
@@ -954,19 +919,13 @@ namespace DriverScanTester.Services
 
         private bool LootOwnsCameraOrCursorLocked()
             => !_automaticLootDisabled &&
-               (_pinkScanRequested || _pinkScanOwnsCameraCursor || _pinkRescanActive ||
+               (_pinkScanRequested || _pinkScanOwnsCameraCursor ||
                 _lootScanCameraOwned || _isCollecting || IsLootCycleActive);
 
         private void CancelPinkModeWorkLocked()
         {
             _pinkScanRequested = false;
             _pinkScanRequestedAt = DateTime.MinValue;
-            _pinkRescanScheduler.Cancel();
-
-            // A currently executing rescan retains ownership until its finally block
-            // restores the camera. A queued/immediate pass can be safely released now.
-            if (_pinkRescanActive)
-                return;
 
             if (_pinkScanOwnsCameraCursor || _lootState == LootMachineState.PinkScan)
                 RestorePinkCameraLocked();
@@ -1319,7 +1278,7 @@ namespace DriverScanTester.Services
         /// <summary>
         /// Quiesces in-flight pixel scanning before recovery movement/camera takes
         /// exclusive ownership (ReverseDiagonal, waypoint special recovery, map-transition
-        /// hold). Any active scan pass, pink rescan or camera/cursor lock is released
+        /// hold). Any active scan pass or camera/cursor lock is released
         /// synchronously under the ownership gate. A pending mandatory post-kill
         /// obligation is only Deferred — it is never marked Completed or silently lost,
         /// and the ownership remains blocked until the recovery releases it.
@@ -1673,7 +1632,7 @@ namespace DriverScanTester.Services
             // ── Post-kill SOD/SOP pink-scan request (MoveAndAttack) ──
             // Keep a fresh request marked pending until it is atomically transferred to
             // the PinkScan state, so movement cannot steal camera/cursor ownership in
-            // the handoff. Delayed background work is independently generation-tracked.
+            // the handoff.
             bool pinkScanRequested = false;
             bool droppedPinkRequest = false;
             bool modeChangedPinkRequest = false;
@@ -1702,9 +1661,8 @@ namespace DriverScanTester.Services
                 _log("[Loot] Stale pink-scan request dropped (expired before it could start).");
 
             // Mob just died (was selected → no longer selected). Movement owns the
-            // close-camera TAB check in SOD/SOP mode, so the loot loop only arms the
-            // delayed background rescan here; it must not start the immediate pink scan
-            // before Movement has checked for nearby mobs. Loot-priority and normal loot
+            // close-camera TAB check in SOD/SOP mode: the immediate pink scan is only
+            // started when that check found no nearby mob. Loot-priority and normal loot
             // modes retain their existing behavior.
             if (_wasMobSelectedPrev && !isMobSelected)
             {
@@ -1712,7 +1670,6 @@ namespace DriverScanTester.Services
                 _lastKillAt = DateTime.UtcNow;
                 if (PinkLootOnlyMode)
                 {
-                    SchedulePinkRescanAfterKill();
                     _log("[Loot] Mob killed — immediate SOD/SOP scan deferred until the close-camera mob check finishes.");
                 }
                 else if (MoveAndAttackAndLootMode)
@@ -1745,7 +1702,7 @@ namespace DriverScanTester.Services
 
             // ── Start the post-kill SOD/SOP pink scan ──
             // Transfer request ownership atomically. Re-requests during an existing pass
-            // are coalesced; the scheduler retains any newer kill generation separately.
+            // are coalesced.
             bool pinkScanStarted = false;
             if (pinkScanRequested)
             {
@@ -1771,53 +1728,6 @@ namespace DriverScanTester.Services
             }
             if (pinkScanStarted)
                 _log($"[Loot] SOD/SOP pink scan starting after close-mob check (big region, pink pixels; waiting {BotConstants.Delays.LootPostKillDelayMs}ms for drops).");
-
-            // ── Background SOD/SOP rescan (MoveAndAttack) ──
-            // Work is coalesced by earliest due time and generation. A target may remain
-            // selected; that never cancels a due background scan. Immediate and background
-            // passes share one ownership gate, so their captures/cursor probes cannot overlap.
-            PinkRescanSnapshot schedulerSnapshot = _pinkRescanScheduler.Snapshot;
-            PinkRescanAction rescan = DecidePinkRescan(
-                PinkLootOnlyMode,
-                _lootState == LootMachineState.PinkScan || _pinkScanRequested,
-                schedulerSnapshot.DueAtUtc,
-                DateTime.UtcNow,
-                TimeSpan.FromMilliseconds(BotConstants.Loot.PinkRescanExpireMs));
-            if (rescan == PinkRescanAction.Expire)
-            {
-                _pinkRescanScheduler.Cancel();
-            }
-            else if (rescan == PinkRescanAction.Run)
-            {
-                PinkRescanTicket ticket = default;
-                bool began;
-                lock (_cameraCursorOwnershipGate)
-                {
-                    began = _pinkLootOnlyMode && !_pinkScanRequested &&
-                            _lootState != LootMachineState.PinkScan && !_pinkRescanActive &&
-                            _pinkRescanScheduler.TryBegin(
-                                DateTime.UtcNow, _pinkLootOnlyMode,
-                                _lootState == LootMachineState.PinkScan || _pinkScanRequested,
-                                out ticket);
-                    if (began)
-                        _pinkRescanActive = true;
-                }
-
-                if (began)
-                {
-                    PinkRescanPassOutcome outcome = RunPinkRescan(ticket);
-                    _pinkRescanScheduler.Complete(
-                        ticket,
-                        DateTime.UtcNow,
-                        outcome,
-                        TimeSpan.FromMilliseconds(50),
-                        TimeSpan.FromMilliseconds(Math.Max(
-                            BotConstants.Delays.LootUpdateMs,
-                            BotConstants.Delays.SodSopCameraSettleMs)));
-                    await Task.Delay(BotConstants.Delays.LootUpdateMs, token);
-                    return;
-                }
-            }
 
             // ── Mandatory post-kill / travel-candidate obligation ──
             // The request is serviced only after the combat pause and pink-scan
@@ -2186,8 +2096,8 @@ namespace DriverScanTester.Services
                         else
                         {
                             _log($"[Loot] Immediate pink scan released after {MaxImmediatePinkCaptureFailures} capture failures; " +
-                                 "no empty result was recorded and the delayed scheduler remains pending.");
-                            CompleteImmediatePinkScan("[Loot] Immediate pink scan ended as unavailable; background retry remains queued.");
+                                 "no empty result was recorded.");
+                            CompleteImmediatePinkScan("[Loot] Immediate pink scan ended as unavailable; no empty result was recorded.");
                         }
                     }
                     else
@@ -3453,90 +3363,6 @@ namespace DriverScanTester.Services
             }
         }
 
-        /// <summary>What the loot loop should do with a pending background rescan this tick.</summary>
-        internal enum PinkRescanAction { None, Wait, Run, Expire }
-
-        /// <summary>
-        /// Pure decision for a coalesced background scan. A late pass is never expired:
-        /// pending kill work remains actionable until completed or explicitly cancelled.
-        /// </summary>
-        internal static PinkRescanAction DecidePinkRescan(
-            bool pinkLootOnly, bool pinkPassActive, DateTime dueAt, DateTime now, TimeSpan expireAfter)
-        {
-            if (dueAt == DateTime.MinValue)
-                return PinkRescanAction.None;
-            if (!pinkLootOnly)
-                return PinkRescanAction.Expire;
-            if (pinkPassActive || now < dueAt)
-                return PinkRescanAction.Wait;
-            return PinkRescanAction.Run;
-        }
-
-        /// <summary>
-        /// Runs exactly one background SOD/SOP pass. The scheduler ticket identifies
-        /// which kill generation the capture can cover; later kills stay pending.
-        /// Camera restoration and cursor ownership are released in every exit path.
-        /// </summary>
-        private PinkRescanPassOutcome RunPinkRescan(PinkRescanTicket ticket)
-        {
-            if (_automaticLootDisabled)
-                return PinkRescanPassOutcome.Cancelled;
-
-            short previousCameraDistance = 0;
-            bool havePreviousCameraDistance = false;
-            _log($"[Loot] SOD/SOP background rescan starting for kill generation {ticket.Generation}; later kills remain queued.");
-            try
-            {
-                lock (_cameraCursorOwnershipGate)
-                {
-                    if (_automaticLootDisabled)
-                        return PinkRescanPassOutcome.Cancelled;
-
-                    _pinkRescanActive = true;
-                    havePreviousCameraDistance = _memoryService.TryGetCameraDistance(out previousCameraDistance);
-                    if (!havePreviousCameraDistance)
-                    {
-                        previousCameraDistance = BotConstants.Camera.DefaultDistanceLock;
-                        havePreviousCameraDistance = true;
-                        _log("[LootCamera] Previous camera distance unreadable; will restore the default lock after the rescan.");
-                    }
-                    _memoryService.SetCameraDistance(BotConstants.Camera.SodSopLootScanDistance);
-                }
-
-                if (_scanToken.IsCancellationRequested || _automaticLootDisabled || !PinkLootOnlyMode)
-                    return PinkRescanPassOutcome.Cancelled;
-                if (_scanToken.WaitHandle.WaitOne(BotConstants.Delays.SodSopCameraSettleMs))
-                    return PinkRescanPassOutcome.Cancelled;
-
-                LootScanPassResult result = PinkPixelScan("background");
-                return result switch
-                {
-                    LootScanPassResult.Collected => PinkRescanPassOutcome.ItemCollected,
-                    LootScanPassResult.NoItem => PinkRescanPassOutcome.NoItem,
-                    LootScanPassResult.CaptureFailed => PinkRescanPassOutcome.CaptureFailed,
-                    _ => PinkRescanPassOutcome.Cancelled
-                };
-            }
-            catch (Exception ex)
-            {
-                _log($"[Loot] SOD/SOP background scan failed: {ex.Message}");
-                return PinkRescanPassOutcome.CaptureFailed;
-            }
-            finally
-            {
-                lock (_cameraCursorOwnershipGate)
-                {
-                    if (havePreviousCameraDistance &&
-                        (!_memoryService.TryGetCameraDistance(out short currentDistance) ||
-                         currentDistance == BotConstants.Camera.SodSopLootScanDistance))
-                    {
-                        RestoreCameraDistance(previousCameraDistance);
-                    }
-                    _pinkRescanActive = false;
-                }
-            }
-        }
-
         // ── SOD/SOP hot-pink pixel classifier thresholds ──
         // The SOD/SOP drop is a shaded 3D ground marker, so its pink texture is
         // modulated by scene light exactly like the aquamarine normal-loot cube:
@@ -4550,11 +4376,9 @@ namespace DriverScanTester.Services
             bool hadWork;
             lock (_cameraCursorOwnershipGate)
             {
-                PinkRescanSnapshot pendingRescan = _pinkRescanScheduler.Snapshot;
                 MandatoryLootRequest? mandatoryRequest = _activeMandatoryLootRequest;
-                hadWork = _pinkScanRequested || _pinkScanOwnsCameraCursor || _pinkRescanActive ||
+                hadWork = _pinkScanRequested || _pinkScanOwnsCameraCursor ||
                           _lootState != LootMachineState.Idle || IsLootingActive ||
-                          pendingRescan.Pending || pendingRescan.Active ||
                           (mandatoryRequest != null && IsMandatoryRequestActiveLocked(mandatoryRequest));
 
                 if (mandatoryRequest != null && IsMandatoryRequestActiveLocked(mandatoryRequest))
@@ -4581,7 +4405,6 @@ namespace DriverScanTester.Services
 
                 _pinkScanRequested = false;
                 _pinkScanRequestedAt = DateTime.MinValue;
-                _pinkRescanScheduler.Cancel();
                 RestorePinkCameraLocked();
                 _pinkScanOwnsCameraCursor = false;
                 _lootState = LootMachineState.Idle;
@@ -4604,7 +4427,6 @@ namespace DriverScanTester.Services
             {
                 _pinkScanRequested = false;
                 _pinkScanRequestedAt = DateTime.MinValue;
-                _pinkRescanScheduler.Cancel();
                 RestorePinkCameraLocked();
                 _pinkScanOwnsCameraCursor = false;
                 if (_lootState == LootMachineState.PinkScan)

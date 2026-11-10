@@ -124,13 +124,14 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void MageTrigger_DoesNotDrinkWhileTheWhitePotIsActive()
+        public void MageTrigger_DoesNotDrinkWhenRunSpeedDiffersFrom179()
         {
-            var memory = new SpeedMemory { RunSpeed = BotConstants.SpeedPotion.RunSpeedWhitePotValue };
+            // The post-potion value is irrelevant: ONLY 179 asks for the white potion.
+            var memory = new SpeedMemory { RunSpeed = 0xCD };
             var combat = new CombatHandler(_ => { });
 
             Assert.False(combat.CheckRunSpeed(memory.Create()));
-            Assert.Equal(BotConstants.SpeedPotion.RunSpeedWhitePotValue, combat.LastRunSpeed);
+            Assert.Equal(0xCD, combat.LastRunSpeed);
         }
 
         [Fact]
@@ -152,8 +153,7 @@ namespace DriverScanTester.Tests
             Assert.True(combat.CheckRunSpeed(memory.Create()));
 
             // Immediately after a check the trigger must stay silent even though the next
-            // sample (if it were read) would ask for another potion.
-            memory.RunSpeed = BotConstants.SpeedPotion.RunSpeedWhitePotValue;
+            // sample (179, if it were read) would ask for another potion.
             Assert.False(combat.CheckRunSpeed(memory.Create()));
             Assert.False(combat.CheckRunSpeed(memory.Create()));
         }
@@ -161,8 +161,8 @@ namespace DriverScanTester.Tests
         [Fact]
         public void MageTrigger_UnknownRunSpeedValueIsTreatedAsBuffActive()
         {
-            // Only the verified +0 value (153) means "drink". Anything else — including the
-            // legacy 128 value or a value produced by run-speed gear — must not fire the key.
+            // Only 179 means "drink". Anything else — including the legacy 128/153 values
+            // or a value produced by run-speed gear — must not fire the key.
             var memory = new SpeedMemory { RunSpeed = 128 };
             var combat = new CombatHandler(_ => { });
 
@@ -174,19 +174,19 @@ namespace DriverScanTester.Tests
         public void RunSpeedConstants_MatchTheVerifiedLiveAddressAndValues()
         {
             Assert.Equal(0xEFAUL, BotConstants.MemoryOffsets.RunSpeed);
-            Assert.Equal(0x99, BotConstants.SpeedPotion.RunSpeedNoPotionValue); // 153 = +0 run speed
-            Assert.Equal(0xB3, BotConstants.SpeedPotion.RunSpeedWhitePotValue); // 179 = +2 run speed
+            Assert.Equal(0xB3, BotConstants.SpeedPotion.RunSpeedNoPotionValue); // 179 = +0 run speed
         }
 
         [Fact]
         public void GetRunSpeed_ReadsTheByteAtTheRunSpeedOffset()
         {
-            var memory = new SpeedMemory { RunSpeed = BotConstants.SpeedPotion.RunSpeedWhitePotValue };
+            const byte runSpeedValue = 0xB3;
+            var memory = new SpeedMemory { RunSpeed = runSpeedValue };
             GameMemoryService service = memory.Create();
 
-            Assert.Equal(BotConstants.SpeedPotion.RunSpeedWhitePotValue, service.GetRunSpeed());
+            Assert.Equal(runSpeedValue, service.GetRunSpeed());
             Assert.True(service.TryGetRunSpeed(out int runSpeed));
-            Assert.Equal(BotConstants.SpeedPotion.RunSpeedWhitePotValue, runSpeed);
+            Assert.Equal(runSpeedValue, runSpeed);
             Assert.Contains((PlayerBase + BotConstants.MemoryOffsets.RunSpeed, sizeof(byte)), memory.ReadRequests);
         }
 
