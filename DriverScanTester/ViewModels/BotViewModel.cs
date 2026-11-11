@@ -14,15 +14,24 @@ namespace DriverScanTester.ViewModels
 {
     public sealed class BotViewModel : BaseViewModel, IDisposable
     {
-        private const string GameClientShortcutPath = @"C:\Users\Public\Desktop\Play Legend of Ares.lnk";
         private const int LauncherDetectionTimeoutMs = 15_000;
-        private const int LauncherInitializationDelayMs = 30_000;
+        private const int LauncherInitializationDelayMs = 10_000;
         private const int GameStartupCheckIntervalMs = 500;
         private const int GameWindowStartupGraceMs = 30_000;
         private const int GameStartupWaitAfterClickMs = 20_000;
         private const int PlayClickRetryDelayMs = 2_000;
         private const int MaxPlayClickAttempts = 3;
         private const int OverallGameStartupTimeoutMs = 150_000;
+        private const int GameLoginDelayMs = 15_000;
+        private const int PhoenixSelectionDelayMs = 5_000;
+        private const int FollowupMouseDoubleClickDelayMs = 10_000;
+        private const int PhoenixReferenceClientWidth = 1024;
+        private const int PhoenixReferenceClientHeight = 768;
+        private const int PhoenixSelectionOffsetX = 509;
+        private const int PhoenixSelectionOffsetY = 193;
+        private const string KnightLoginUsername = "superknaj87";
+        private const string MageLoginUsername = "supermage";
+        private const string GameLoginPassword = "Jankoza8712";
 
         private readonly MainViewModel _main;
         private readonly AresLauncherWindowService _aresLauncherWindowService = new();
@@ -1159,10 +1168,10 @@ namespace DriverScanTester.ViewModels
             CommandManager.InvalidateRequerySuggested();
             var startupCts = new CancellationTokenSource();
             _gameStartupCts = startupCts;
-            _ = StartGameClientAsync(startupCts);
+            _ = StartGameClientAsync(startupCts, _main.IsMageLoginSelected);
         }
 
-        private async Task StartGameClientAsync(CancellationTokenSource startupCts)
+        private async Task StartGameClientAsync(CancellationTokenSource startupCts, bool useMageLogin)
         {
             CancellationToken token = startupCts.Token;
             var overallTimer = Stopwatch.StartNew();
@@ -1197,17 +1206,22 @@ namespace DriverScanTester.ViewModels
                 }
                 else
                 {
-                    if (!File.Exists(GameClientShortcutPath))
+                    string? gameClientShortcutPath = GameClientShortcutResolver.Find();
+                    if (gameClientShortcutPath == null)
                     {
-                        AppendGameStartupFailure($"Game client shortcut not found: {GameClientShortcutPath}");
+                        AppendGameStartupFailure(GameClientShortcutResolver.GetNotFoundMessage());
                         return;
                     }
 
-                    using (Process? shortcutProcess = Process.Start(new ProcessStartInfo
+                    var launchInfo = new ProcessStartInfo
                     {
-                        FileName = GameClientShortcutPath,
+                        FileName = gameClientShortcutPath,
                         UseShellExecute = true
-                    }))
+                    };
+                    if (string.Equals(Path.GetExtension(gameClientShortcutPath), ".exe", StringComparison.OrdinalIgnoreCase))
+                        launchInfo.WorkingDirectory = Path.GetDirectoryName(gameClientShortcutPath) ?? string.Empty;
+
+                    using (Process? shortcutProcess = Process.Start(launchInfo))
                     {
                         if (shortcutProcess != null)
                         {
@@ -1224,7 +1238,7 @@ namespace DriverScanTester.ViewModels
                     }
 
                     AppendBotLog(
-                        $"[Startup] Launched the game client shortcut '{GameClientShortcutPath}'" +
+                        $"[Startup] Launched the game launcher entry point '{gameClientShortcutPath}'" +
                         (shortcutProcessId > 0 ? $" (PID={shortcutProcessId}, process={shortcutProcessName})." : "."));
                 }
 
@@ -1287,7 +1301,7 @@ namespace DriverScanTester.ViewModels
                     token);
                 if (startupObservation == GameStartupObservation.WindowDetected)
                 {
-                    LogGameStartupSuccess();
+                    await CompleteGameStartupLoginAsync(gameProcessIdsBeforeLaunch, useMageLogin, token);
                     return;
                 }
                 if (startupObservation == GameStartupObservation.ProcessStartedWithoutWindow)
@@ -1349,7 +1363,7 @@ namespace DriverScanTester.ViewModels
                             token);
                         if (beforeClickObservation == GameStartupObservation.WindowDetected)
                         {
-                            LogGameStartupSuccess();
+                            await CompleteGameStartupLoginAsync(gameProcessIdsBeforeLaunch, useMageLogin, token);
                             return;
                         }
                         if (beforeClickObservation == GameStartupObservation.ProcessStartedWithoutWindow)
@@ -1384,7 +1398,7 @@ namespace DriverScanTester.ViewModels
                         token);
                     if (startupObservation == GameStartupObservation.WindowDetected)
                     {
-                        LogGameStartupSuccess();
+                        await CompleteGameStartupLoginAsync(gameProcessIdsBeforeLaunch, useMageLogin, token);
                         return;
                     }
                     if (startupObservation == GameStartupObservation.ProcessStartedWithoutWindow)
@@ -1525,8 +1539,216 @@ namespace DriverScanTester.ViewModels
                 $"window bounds={window.WindowScreenBounds}.");
         }
 
-        private void LogGameStartupSuccess() =>
-            AppendBotLog("[Launcher] Game detected. Startup successful; continue with the existing attach workflow.");
+        private async Task CompleteGameStartupLoginAsync(
+            HashSet<int> gameProcessIdsBeforeLaunch,
+            bool useMageLogin,
+            CancellationToken token)
+        {
+            string characterName = useMageLogin ? "Mage" : "Knight";
+            string username = useMageLogin ? MageLoginUsername : KnightLoginUsername;
+            AppendBotLog($"[Login] Step 1/8: selected {characterName}; username configured (password will not be logged).");
+            AppendBotLog("[Login] Step 2/8: waiting 15 seconds for the login screen.");
+            await Task.Delay(GameLoginDelayMs, token);
+            AppendBotLog("[Login] Step 2/8 complete.");
+
+            AppendBotLog("[Login] Step 3/8: locating the new Ares game window.");
+            if (!_aresLauncherWindowService.TryFindNewVisibleGameWindow(
+                    gameProcessIdsBeforeLaunch,
+                    out bool gameWindowFound,
+                    out AresLauncherWindowInfo gameWindow,
+                    out string findReason))
+            {
+                AppendBotLog($"[Login] Could not inspect the Ares game window; automatic login skipped. {findReason}");
+                return;
+            }
+
+            if (!gameWindowFound)
+            {
+                AppendBotLog("[Login] The Ares game window was no longer visible; automatic login skipped.");
+                return;
+            }
+
+            AppendBotLog(
+                $"[Login] Step 3/8 complete: HWND=0x{gameWindow.Handle.ToInt64():X}, PID={gameWindow.ProcessId}, " +
+                $"title='{gameWindow.Title}', client origin=({gameWindow.ClientScreenBounds.X},{gameWindow.ClientScreenBounds.Y}), " +
+                $"size={gameWindow.ClientScreenBounds.Width}x{gameWindow.ClientScreenBounds.Height}.");
+
+            AppendBotLog("[Login] Step 4/8: waiting 500 ms, then focusing the game window.");
+            await Task.Delay(500, token);
+            if (!_aresLauncherWindowService.TryFocusGameWindow(gameWindow, out string focusReason))
+            {
+                AppendBotLog($"[Login] Could not focus the Ares game window; automatic login skipped. {focusReason}");
+                return;
+            }
+            AppendBotLog("[Login] Step 4/8 complete: game window is foreground.");
+
+            AppendBotLog("[Login] Step 5/8: typing the selected username.");
+            await Task.Run(() => GameInput.TypeText(username), token);
+            AppendBotLog("[Login] Step 5/8 complete: username typed.");
+
+            AppendBotLog("[Login] Step 6/8: pressing Tab.");
+            await Task.Run(() => GameInput.PressKey(GameInput.VK_TAB, GameInput.SCAN_TAB), token);
+            AppendBotLog("[Login] Step 6/8 complete: Tab pressed.");
+
+            AppendBotLog("[Login] Step 7/8: typing the password (value hidden).");
+            await Task.Run(() => GameInput.TypeText(GameLoginPassword), token);
+            AppendBotLog("[Login] Step 7/8 complete: password typed.");
+
+            AppendBotLog("[Login] Step 8/8: pressing Enter.");
+            await Task.Run(() => GameInput.PressKey(GameInput.VK_ENTER, GameInput.SCAN_ENTER), token);
+            AppendBotLog("[Login] Step 8/8 complete: Enter pressed.");
+
+            await ClickPhoenixSelectionAsync(gameProcessIdsBeforeLaunch, token);
+        }
+
+        private async Task ClickPhoenixSelectionAsync(
+            HashSet<int> gameProcessIdsBeforeLaunch,
+            CancellationToken token)
+        {
+            AppendBotLog("[Login][Phoenix] Step 1/5: waiting 5 seconds for the selection screen.");
+            await Task.Delay(PhoenixSelectionDelayMs, token);
+            AppendBotLog("[Login][Phoenix] Step 1/5 complete.");
+
+            AppendBotLog("[Login][Phoenix] Step 2/5: locating the Ares game window.");
+            if (!_aresLauncherWindowService.TryFindNewVisibleGameWindow(
+                    gameProcessIdsBeforeLaunch,
+                    out bool gameWindowFound,
+                    out AresLauncherWindowInfo gameWindow,
+                    out string findReason))
+            {
+                AppendBotLog($"[Login] Could not inspect the Ares window for Phoenix selection. {findReason}");
+                return;
+            }
+
+            if (!gameWindowFound)
+            {
+                AppendBotLog("[Login] The Ares window was not visible for Phoenix selection; double-click skipped.");
+                return;
+            }
+
+            AppendBotLog(
+                $"[Login][Phoenix] Step 2/5 complete: HWND=0x{gameWindow.Handle.ToInt64():X}, PID={gameWindow.ProcessId}, " +
+                $"title='{gameWindow.Title}', client origin=({gameWindow.ClientScreenBounds.X},{gameWindow.ClientScreenBounds.Y}), " +
+                $"size={gameWindow.ClientScreenBounds.Width}x{gameWindow.ClientScreenBounds.Height}.");
+
+            AppendBotLog("[Login][Phoenix] Step 3/5: activating the game window.");
+            if (!_aresLauncherWindowService.TryFocusGameWindow(gameWindow, out string focusReason))
+            {
+                AppendBotLog($"[Login] Could not focus the Ares window for Phoenix selection; double-click skipped. {focusReason}");
+                return;
+            }
+            AppendBotLog("[Login][Phoenix] Step 3/5 complete: game window is foreground.");
+
+            System.Drawing.Rectangle client = gameWindow.ClientScreenBounds;
+            int relativeX = (int)Math.Round(PhoenixSelectionOffsetX * (double)client.Width / PhoenixReferenceClientWidth);
+            int relativeY = (int)Math.Round(PhoenixSelectionOffsetY * (double)client.Height / PhoenixReferenceClientHeight);
+            int screenX = client.Left + relativeX;
+            int screenY = client.Top + relativeY;
+            AppendBotLog(
+                $"[Login][Phoenix] Step 4/5: offset=({relativeX},{relativeY}) scaled from " +
+                $"{PhoenixReferenceClientWidth}x{PhoenixReferenceClientHeight}; current client origin=({client.Left},{client.Top}), " +
+                $"size={client.Width}x{client.Height}; desktop target=({screenX},{screenY}).");
+
+            if (!await TryStartupDoubleClickAsync(screenX, screenY, "Phoenix", token))
+                return;
+
+            AppendBotLog("[Login][Phoenix] Step 4/5 complete: both click inputs were dispatched; game response is not directly observable.");
+            AppendBotLog("[Login][Phoenix] Step 5/5: continuing to the 10-second follow-up wait.");
+            await DoubleClickCurrentMousePointAsync(gameProcessIdsBeforeLaunch, token);
+        }
+
+        private async Task DoubleClickCurrentMousePointAsync(
+            HashSet<int> gameProcessIdsBeforeLaunch,
+            CancellationToken token)
+        {
+            AppendBotLog("[Login][Follow-up] Step 1/5: waiting 10 seconds before reading the cursor position.");
+            await Task.Delay(FollowupMouseDoubleClickDelayMs, token);
+            AppendBotLog("[Login][Follow-up] Step 1/5 complete.");
+
+            AppendBotLog("[Login][Follow-up] Step 2/5: locating the Ares game window.");
+            if (!_aresLauncherWindowService.TryFindNewVisibleGameWindow(
+                    gameProcessIdsBeforeLaunch,
+                    out bool gameWindowFound,
+                    out AresLauncherWindowInfo gameWindow,
+                    out string findReason))
+            {
+                AppendBotLog($"[Login] Could not inspect the Ares window for the follow-up click. {findReason}");
+                return;
+            }
+
+            if (!gameWindowFound)
+            {
+                AppendBotLog("[Login] The Ares window was not visible for the follow-up click; double-click skipped.");
+                return;
+            }
+
+            AppendBotLog(
+                $"[Login][Follow-up] Step 2/5 complete: HWND=0x{gameWindow.Handle.ToInt64():X}, PID={gameWindow.ProcessId}, " +
+                $"client origin=({gameWindow.ClientScreenBounds.X},{gameWindow.ClientScreenBounds.Y}), " +
+                $"size={gameWindow.ClientScreenBounds.Width}x{gameWindow.ClientScreenBounds.Height}.");
+
+            AppendBotLog("[Login][Follow-up] Step 3/5: activating the game window.");
+            if (!_aresLauncherWindowService.TryFocusGameWindow(gameWindow, out string focusReason))
+            {
+                AppendBotLog($"[Login] Could not focus the Ares window for the follow-up click; double-click skipped. {focusReason}");
+                return;
+            }
+            AppendBotLog("[Login][Follow-up] Step 3/5 complete: game window is foreground.");
+
+            if (!MouseOperations.TryGetCursorPosition(out int screenX, out int screenY))
+            {
+                AppendBotLog("[Login] Could not read the current cursor position; follow-up double-click skipped.");
+                return;
+            }
+
+            AppendBotLog($"[Login][Follow-up] Step 4/5: current cursor position=({screenX},{screenY}).");
+            if (!gameWindow.ClientScreenBounds.Contains(screenX, screenY))
+            {
+                AppendBotLog("[Login] The current cursor is outside the Ares client area; follow-up double-click skipped.");
+                return;
+            }
+
+            if (await TryStartupDoubleClickAsync(screenX, screenY, "Follow-up", token))
+                AppendBotLog("[Login][Follow-up] Step 5/5 complete: both click inputs were dispatched.");
+        }
+
+        private async Task<bool> TryStartupDoubleClickAsync(
+            int screenX,
+            int screenY,
+            string stepName,
+            CancellationToken token)
+        {
+            AppendBotLog($"[Login][{stepName}] Sending click 1/2 at desktop position ({screenX},{screenY}) using DPI-aware input.");
+            (bool Succeeded, string FailureReason) firstClick = await Task.Run(() =>
+            {
+                bool succeeded = _aresLauncherWindowService.TryLeftClick(screenX, screenY, 0, out string failureReason);
+                return (succeeded, failureReason);
+            }, token);
+            if (!firstClick.Succeeded)
+            {
+                AppendBotLog($"[Login][{stepName}] Click 1/2 failed: {firstClick.FailureReason}");
+                return false;
+            }
+            AppendBotLog($"[Login][{stepName}] Click 1/2 dispatched; cursor position verified.");
+
+            AppendBotLog($"[Login][{stepName}] Waiting 250 ms between clicks.");
+            await Task.Delay(250, token);
+
+            AppendBotLog($"[Login][{stepName}] Sending click 2/2 at desktop position ({screenX},{screenY}) using DPI-aware input.");
+            (bool Succeeded, string FailureReason) secondClick = await Task.Run(() =>
+            {
+                bool succeeded = _aresLauncherWindowService.TryLeftClick(screenX, screenY, 0, out string failureReason);
+                return (succeeded, failureReason);
+            }, token);
+            if (!secondClick.Succeeded)
+            {
+                AppendBotLog($"[Login][{stepName}] Click 2/2 failed: {secondClick.FailureReason}");
+                return false;
+            }
+
+            AppendBotLog($"[Login][{stepName}] Click 2/2 dispatched; cursor position verified.");
+            return true;
+        }
 
         private void AppendGameStartupFailure(string reason)
         {

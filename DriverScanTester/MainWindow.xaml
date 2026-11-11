@@ -110,6 +110,14 @@
 
             <GroupBox Header="Bot" Grid.Column="1" Margin="5,0,0,0" MinWidth="265">
                 <StackPanel VerticalAlignment="Center">
+                    <GroupBox Header="Login character" Margin="4,0,4,5">
+                        <StackPanel Orientation="Horizontal" Margin="4,2">
+                            <RadioButton Content="Knight" IsChecked="{Binding IsKnightLoginSelected, Mode=TwoWay}"
+                                         GroupName="LoginCharacter" Margin="4,0,12,0"/>
+                            <RadioButton Content="Mage" IsChecked="{Binding IsMageLoginSelected, Mode=TwoWay}"
+                                         GroupName="LoginCharacter" Margin="4,0"/>
+                        </StackPanel>
+                    </GroupBox>
                     <StackPanel Orientation="Horizontal">
                         <Button Content="Bot Control Panel" Command="{Binding OpenBotWindowCommand}"
                                 Style="{StaticResource PrimaryActionButtonStyle}"

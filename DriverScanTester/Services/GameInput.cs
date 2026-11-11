@@ -12,6 +12,9 @@ namespace DriverScanTester.Services
         [DllImport("user32.dll")]
         internal static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
 
+        [DllImport("user32.dll")]
+        private static extern short GetKeyState(int virtualKey);
+
         internal const int KEYEVENTF_KEYUP = BotConstants.Keyboard.KeyEventKeyUp;
 
         // Virtual-key and scan codes
@@ -63,6 +66,7 @@ namespace DriverScanTester.Services
         /// </summary>
         internal static void TypeText(string text, Action<string>? log = null)
         {
+            bool capsLockOn = (GetKeyState(0x14) & 1) != 0;
             foreach (char c in text)
             {
                 byte vk = CharToVk(c);
@@ -71,14 +75,24 @@ namespace DriverScanTester.Services
                     log?.Invoke($"[TypeText] Skipping unsupported character '{c}'.");
                     continue;
                 }
+
+                bool isAsciiLetter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+                bool wantsUppercase = c >= 'A' && c <= 'Z';
+                bool holdShift = isAsciiLetter && (wantsUppercase ^ capsLockOn);
+                if (holdShift)
+                    keybd_event(0x10, 0x2A, 0, 0); // VK_SHIFT down
+
                 PressKey(vk, 0);
+
+                if (holdShift)
+                    keybd_event(0x10, 0x2A, (uint)KEYEVENTF_KEYUP, 0); // VK_SHIFT up
+
                 Thread.Sleep(BotConstants.Keyboard.PressKeyGapMs);
             }
         }
 
         /// <summary>
-        /// Maps a character to its virtual-key code for keybd_event. Letters are
-        /// sent unshifted (uppercase VK codes produce lowercase text in most games).
+        /// Maps supported plain-text characters to their virtual-key codes.
         /// </summary>
         private static byte CharToVk(char c)
         {

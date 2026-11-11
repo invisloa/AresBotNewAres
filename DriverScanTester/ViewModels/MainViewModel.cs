@@ -46,6 +46,31 @@ namespace DriverScanTester.ViewModels
         private MovementPrecision _selectedPrecision = MovementPrecision.Medium;
         private BotMode _selectedBotMode = BotMode.OnlyMove;
         private bool _stopOnOtherPlayerDetected = true;
+        private bool _isMageLoginSelected;
+
+        public bool IsKnightLoginSelected
+        {
+            get => !_isMageLoginSelected;
+            set
+            {
+                if (!value || !_isMageLoginSelected)
+                    return;
+
+                _isMageLoginSelected = false;
+                OnPropertyChanged(nameof(IsMageLoginSelected));
+                OnPropertyChanged();
+            }
+        }
+
+        public bool IsMageLoginSelected
+        {
+            get => _isMageLoginSelected;
+            set
+            {
+                if (SetProperty(ref _isMageLoginSelected, value))
+                    OnPropertyChanged(nameof(IsKnightLoginSelected));
+            }
+        }
 
         public MovementPrecision SelectedPrecision
         {

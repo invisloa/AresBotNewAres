@@ -116,16 +116,33 @@ namespace DriverScanTester.Utils
         /// position, and the button is released in a finally block after every down event.
         /// </summary>
         public static bool TryMoveAndLeftClickAbsolute(int screenX, int screenY, int delay = 100)
+            => TryMoveAndLeftClickAbsolute(screenX, screenY, delay, out _);
+
+        public static bool TryMoveAndLeftClickAbsolute(
+            int screenX,
+            int screenY,
+            int delay,
+            out string failureReason)
         {
+            failureReason = string.Empty;
             Log?.Invoke($"[Mouse] TryMoveAndLeftClickAbsolute -> screen ({screenX},{screenY}) [no offset applied]");
             if (!SetCursorPos(screenX, screenY))
             {
+                failureReason = $"SetCursorPos failed (Win32Error={Marshal.GetLastWin32Error()}).";
                 Log?.Invoke($"[Mouse] SetCursorPos failed for ({screenX},{screenY}); click skipped (Win32Error={Marshal.GetLastWin32Error()}).");
                 return false;
             }
 
-            if (!GetCursorPos(out POINT cursor) || cursor.X != screenX || cursor.Y != screenY)
+            if (!GetCursorPos(out POINT cursor))
             {
+                failureReason = $"GetCursorPos failed after moving the cursor (Win32Error={Marshal.GetLastWin32Error()}).";
+                Log?.Invoke($"[Mouse] Could not verify cursor position ({screenX},{screenY}); click skipped.");
+                return false;
+            }
+
+            if (cursor.X != screenX || cursor.Y != screenY)
+            {
+                failureReason = $"Cursor reached ({cursor.X},{cursor.Y}) instead of ({screenX},{screenY}); click skipped.";
                 Log?.Invoke($"[Mouse] Cursor did not reach ({screenX},{screenY}); click skipped.");
                 return false;
             }

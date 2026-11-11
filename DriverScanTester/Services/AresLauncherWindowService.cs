@@ -299,6 +299,59 @@ namespace DriverScanTester.Services
             }
         }
 
+        public bool TryFocusGameWindow(AresLauncherWindowInfo window, out string reason)
+        {
+            reason = string.Empty;
+            if (!DpiAwarenessScope.TryEnter(out DpiAwarenessScope? dpiScope))
+            {
+                reason = $"Could not set per-monitor DPI awareness (Win32Error={Marshal.GetLastWin32Error()}).";
+                return false;
+            }
+
+            using (dpiScope)
+            {
+                if (!IsWindow(window.Handle) || !IsWindowVisible(window.Handle))
+                {
+                    reason = "The Ares game window was closed or hidden before login input.";
+                    return false;
+                }
+
+                ShowWindow(window.Handle, SwRestore);
+                BringWindowToTop(window.Handle);
+                SetForegroundWindow(window.Handle);
+                nint foreground = GetForegroundWindow();
+                if (foreground != window.Handle && GetAncestor(foreground, GaRoot) != window.Handle)
+                {
+                    reason = "Windows did not bring the Ares game window to the foreground.";
+                    return false;
+                }
+
+                if (!TryReadWindow(window.Handle, out AresLauncherWindowInfo current) ||
+                    current.ProcessId != window.ProcessId)
+                {
+                    reason = "The game window changed before login input.";
+                    return false;
+                }
+
+                try
+                {
+                    using Process process = Process.GetProcessById((int)current.ProcessId);
+                    if (!string.Equals(process.ProcessName, GameProcessName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        reason = "The selected foreground window no longer belongs to Ares.exe.";
+                        return false;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    reason = $"Could not verify the Ares game process before login input: {ex.Message}";
+                    return false;
+                }
+
+                return true;
+            }
+        }
+
         public bool TryRefreshLauncherWindow(
             AresLauncherWindowInfo previous,
             out AresLauncherWindowInfo current,
@@ -370,13 +423,19 @@ namespace DriverScanTester.Services
             }
         }
 
-        public bool TryLeftClick(int screenX, int screenY)
+        public bool TryLeftClick(int screenX, int screenY, int delayMs = 100)
+            => TryLeftClick(screenX, screenY, delayMs, out _);
+
+        public bool TryLeftClick(int screenX, int screenY, int delayMs, out string failureReason)
         {
             if (!DpiAwarenessScope.TryEnter(out DpiAwarenessScope? dpiScope))
+            {
+                failureReason = $"Could not set per-monitor DPI awareness (Win32Error={Marshal.GetLastWin32Error()}).";
                 return false;
+            }
 
             using (dpiScope)
-                return MouseOperations.TryMoveAndLeftClickAbsolute(screenX, screenY, 100);
+                return MouseOperations.TryMoveAndLeftClickAbsolute(screenX, screenY, delayMs, out failureReason);
         }
 
         public HashSet<int> CaptureGameProcessIds() =>
@@ -426,8 +485,16 @@ namespace DriverScanTester.Services
             HashSet<int> processIdsBeforeClick,
             out bool found,
             out string reason)
+            => TryFindNewVisibleGameWindow(processIdsBeforeClick, out found, out _, out reason);
+
+        public bool TryFindNewVisibleGameWindow(
+            HashSet<int> processIdsBeforeLaunch,
+            out bool found,
+            out AresLauncherWindowInfo foundWindow,
+            out string reason)
         {
             found = false;
+            foundWindow = default;
             reason = string.Empty;
             if (!DpiAwarenessScope.TryEnter(out DpiAwarenessScope? dpiScope))
             {
@@ -438,23 +505,26 @@ namespace DriverScanTester.Services
             using (dpiScope)
             {
                 bool windowFound = false;
+                AresLauncherWindowInfo windowFoundInfo = default;
                 bool enumSucceeded = EnumWindows(
                     (hwnd, _) =>
                     {
                         if (!IsWindowVisible(hwnd) || !TryReadWindow(hwnd, out AresLauncherWindowInfo window))
                             return true;
 
-                        if (processIdsBeforeClick.Contains((int)window.ProcessId))
+                        if (processIdsBeforeLaunch.Contains((int)window.ProcessId))
                             return true;
 
                         try
                         {
                             using Process process = Process.GetProcessById((int)window.ProcessId);
-                            if (string.Equals(process.ProcessName, GameProcessName, StringComparison.OrdinalIgnoreCase) &&
+                            if (!windowFound &&
+                                string.Equals(process.ProcessName, GameProcessName, StringComparison.OrdinalIgnoreCase) &&
                                 window.ClientScreenBounds.Width >= 320 &&
                                 window.ClientScreenBounds.Height >= 200)
                             {
                                 windowFound = true;
+                                windowFoundInfo = window;
                             }
                         }
                         catch
@@ -466,6 +536,7 @@ namespace DriverScanTester.Services
                     },
                     nint.Zero);
                 found = windowFound;
+                foundWindow = windowFoundInfo;
                 if (!enumSucceeded)
                     reason = $"EnumWindows failed while verifying Ares startup (Win32Error={Marshal.GetLastWin32Error()}).";
                 return enumSucceeded;
