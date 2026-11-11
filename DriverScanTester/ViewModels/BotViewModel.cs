@@ -24,11 +24,16 @@ namespace DriverScanTester.ViewModels
         private const int OverallGameStartupTimeoutMs = 150_000;
         private const int GameLoginDelayMs = 15_000;
         private const int PhoenixSelectionDelayMs = 5_000;
-        private const int FollowupMouseDoubleClickDelayMs = 10_000;
-        private const int PhoenixReferenceClientWidth = 1024;
-        private const int PhoenixReferenceClientHeight = 768;
+        private const int CharacterSelectionDelayMs = 10_000;
+        private const int StartupClickCount = 5;
+        private const int StartupClickIntervalMs = 250;
+        private const int LoginReferenceClientWidth = 1024;
+        private const int LoginReferenceClientHeight = 768;
         private const int PhoenixSelectionOffsetX = 509;
         private const int PhoenixSelectionOffsetY = 193;
+        // Calibrated from the character-selection point in the 1024x768 game client.
+        private const int CharacterSelectionOffsetX = 179;
+        private const int CharacterSelectionOffsetY = 437;
         private const string KnightLoginUsername = "superknaj87";
         private const string MageLoginUsername = "supermage";
         private const string GameLoginPassword = "Jankoza8712";
@@ -1162,6 +1167,8 @@ namespace DriverScanTester.ViewModels
             if (Interlocked.CompareExchange(ref _gameStartupGuard, 1, 0) != 0)
                 return;
 
+            string characterName = _main.IsMageLoginSelected ? "Mage" : "Knight";
+            AppendBotLog($"[Startup] Automatic game startup requested; selected login character={characterName}. Credentials are kept out of the log.");
             _isGameStartupRunning = true;
             _lastDetectedLauncherWindow = null;
             _launcherFailureScreenshotAttempted = false;
@@ -1622,7 +1629,7 @@ namespace DriverScanTester.ViewModels
 
             if (!gameWindowFound)
             {
-                AppendBotLog("[Login] The Ares window was not visible for Phoenix selection; double-click skipped.");
+                AppendBotLog("[Login] The Ares window was not visible for Phoenix selection; five-click sequence skipped.");
                 return;
             }
 
@@ -1634,120 +1641,160 @@ namespace DriverScanTester.ViewModels
             AppendBotLog("[Login][Phoenix] Step 3/5: activating the game window.");
             if (!_aresLauncherWindowService.TryFocusGameWindow(gameWindow, out string focusReason))
             {
-                AppendBotLog($"[Login] Could not focus the Ares window for Phoenix selection; double-click skipped. {focusReason}");
+                AppendBotLog($"[Login] Could not focus the Ares window for Phoenix selection; five-click sequence skipped. {focusReason}");
                 return;
             }
             AppendBotLog("[Login][Phoenix] Step 3/5 complete: game window is foreground.");
 
             System.Drawing.Rectangle client = gameWindow.ClientScreenBounds;
-            int relativeX = (int)Math.Round(PhoenixSelectionOffsetX * (double)client.Width / PhoenixReferenceClientWidth);
-            int relativeY = (int)Math.Round(PhoenixSelectionOffsetY * (double)client.Height / PhoenixReferenceClientHeight);
+            int relativeX = (int)Math.Round(PhoenixSelectionOffsetX * (double)client.Width / LoginReferenceClientWidth);
+            int relativeY = (int)Math.Round(PhoenixSelectionOffsetY * (double)client.Height / LoginReferenceClientHeight);
             int screenX = client.Left + relativeX;
             int screenY = client.Top + relativeY;
             AppendBotLog(
                 $"[Login][Phoenix] Step 4/5: offset=({relativeX},{relativeY}) scaled from " +
-                $"{PhoenixReferenceClientWidth}x{PhoenixReferenceClientHeight}; current client origin=({client.Left},{client.Top}), " +
+                $"{LoginReferenceClientWidth}x{LoginReferenceClientHeight}; current client origin=({client.Left},{client.Top}), " +
                 $"size={client.Width}x{client.Height}; desktop target=({screenX},{screenY}).");
 
-            if (!await TryStartupDoubleClickAsync(screenX, screenY, "Phoenix", token))
+            if (!await TryStartupClickSequenceAsync(screenX, screenY, "Phoenix", token))
                 return;
 
-            AppendBotLog("[Login][Phoenix] Step 4/5 complete: both click inputs were dispatched; game response is not directly observable.");
-            AppendBotLog("[Login][Phoenix] Step 5/5: continuing to the 10-second follow-up wait.");
-            await DoubleClickCurrentMousePointAsync(gameProcessIdsBeforeLaunch, token);
+            AppendBotLog($"[Login][Phoenix] Step 4/5 complete: all {StartupClickCount} click inputs were dispatched; game response is not directly observable.");
+            AppendBotLog("[Login][Phoenix] Step 5/5: continuing to the character selection screen.");
+            await DoubleClickCharacterSelectionPointAsync(gameProcessIdsBeforeLaunch, token);
         }
 
-        private async Task DoubleClickCurrentMousePointAsync(
+        private async Task DoubleClickCharacterSelectionPointAsync(
             HashSet<int> gameProcessIdsBeforeLaunch,
             CancellationToken token)
         {
-            AppendBotLog("[Login][Follow-up] Step 1/5: waiting 10 seconds before reading the cursor position.");
-            await Task.Delay(FollowupMouseDoubleClickDelayMs, token);
-            AppendBotLog("[Login][Follow-up] Step 1/5 complete.");
+            AppendBotLog("[Login][Character] Step 1/5: waiting 10 seconds for the character selection screen.");
+            await Task.Delay(CharacterSelectionDelayMs, token);
+            AppendBotLog("[Login][Character] Step 1/5 complete.");
 
-            AppendBotLog("[Login][Follow-up] Step 2/5: locating the Ares game window.");
+            AppendBotLog("[Login][Character] Step 2/5: locating the Ares game window.");
             if (!_aresLauncherWindowService.TryFindNewVisibleGameWindow(
                     gameProcessIdsBeforeLaunch,
                     out bool gameWindowFound,
                     out AresLauncherWindowInfo gameWindow,
                     out string findReason))
             {
-                AppendBotLog($"[Login] Could not inspect the Ares window for the follow-up click. {findReason}");
+                AppendBotLog($"[Login] Could not inspect the Ares window for character selection. {findReason}");
                 return;
             }
 
             if (!gameWindowFound)
             {
-                AppendBotLog("[Login] The Ares window was not visible for the follow-up click; double-click skipped.");
+                AppendBotLog("[Login] The Ares window was not visible for character selection; five-click sequence skipped.");
                 return;
             }
 
             AppendBotLog(
-                $"[Login][Follow-up] Step 2/5 complete: HWND=0x{gameWindow.Handle.ToInt64():X}, PID={gameWindow.ProcessId}, " +
+                $"[Login][Character] Step 2/5 complete: HWND=0x{gameWindow.Handle.ToInt64():X}, PID={gameWindow.ProcessId}, " +
                 $"client origin=({gameWindow.ClientScreenBounds.X},{gameWindow.ClientScreenBounds.Y}), " +
                 $"size={gameWindow.ClientScreenBounds.Width}x{gameWindow.ClientScreenBounds.Height}.");
 
-            AppendBotLog("[Login][Follow-up] Step 3/5: activating the game window.");
+            AppendBotLog("[Login][Character] Step 3/5: activating the game window.");
             if (!_aresLauncherWindowService.TryFocusGameWindow(gameWindow, out string focusReason))
             {
-                AppendBotLog($"[Login] Could not focus the Ares window for the follow-up click; double-click skipped. {focusReason}");
+                AppendBotLog($"[Login] Could not focus the Ares window for character selection; five-click sequence skipped. {focusReason}");
                 return;
             }
-            AppendBotLog("[Login][Follow-up] Step 3/5 complete: game window is foreground.");
+            AppendBotLog("[Login][Character] Step 3/5 complete: game window is foreground.");
 
-            if (!MouseOperations.TryGetCursorPosition(out int screenX, out int screenY))
+            SaveLoginStageScreenshot(gameWindow, "Character selection screen");
+
+            System.Drawing.Rectangle client = gameWindow.ClientScreenBounds;
+            if (client.Width <= 0 || client.Height <= 0)
             {
-                AppendBotLog("[Login] Could not read the current cursor position; follow-up double-click skipped.");
+                AppendBotLog("[Login] Character selection skipped because the game client has an empty size.");
                 return;
             }
 
-            AppendBotLog($"[Login][Follow-up] Step 4/5: current cursor position=({screenX},{screenY}).");
-            if (!gameWindow.ClientScreenBounds.Contains(screenX, screenY))
+            int relativeX = (int)Math.Round(CharacterSelectionOffsetX * (double)client.Width / LoginReferenceClientWidth);
+            int relativeY = (int)Math.Round(CharacterSelectionOffsetY * (double)client.Height / LoginReferenceClientHeight);
+            if (relativeX < 0 || relativeX >= client.Width || relativeY < 0 || relativeY >= client.Height)
             {
-                AppendBotLog("[Login] The current cursor is outside the Ares client area; follow-up double-click skipped.");
+                AppendBotLog(
+                    $"[Login] Character selection offset ({relativeX},{relativeY}) is outside the game client " +
+                    $"({client.Width}x{client.Height}); five-click sequence skipped.");
                 return;
             }
 
-            if (await TryStartupDoubleClickAsync(screenX, screenY, "Follow-up", token))
-                AppendBotLog("[Login][Follow-up] Step 5/5 complete: both click inputs were dispatched.");
+            int screenX = client.Left + relativeX;
+            int screenY = client.Top + relativeY;
+            AppendBotLog(
+                $"[Login][Character] Step 4/5: calibrated offset=({relativeX},{relativeY}) scaled from " +
+                $"({CharacterSelectionOffsetX},{CharacterSelectionOffsetY}) at {LoginReferenceClientWidth}x{LoginReferenceClientHeight}; " +
+                $"current client origin=({client.Left},{client.Top}), size={client.Width}x{client.Height}; " +
+                $"desktop target=({screenX},{screenY}).");
+
+            if (await TryStartupClickSequenceAsync(screenX, screenY, "Character", token))
+            {
+                AppendBotLog($"[Login][Character] Step 5/5 complete: all {StartupClickCount} click inputs were dispatched.");
+                AppendBotLog("[Login][Character] Waiting 1 second for the game screen to respond before saving a result screenshot.");
+                await Task.Delay(1_000, token);
+                SaveLoginStageScreenshot(gameWindow, "After character selection click");
+                AppendBotLog("[Login] Startup input sequence complete. The game does not expose a reliable confirmation that a character entered the world.");
+            }
         }
 
-        private async Task<bool> TryStartupDoubleClickAsync(
+        private void SaveLoginStageScreenshot(AresLauncherWindowInfo gameWindow, string stage)
+        {
+            try
+            {
+                System.Drawing.Bitmap? frame = _aresLauncherWindowService.CaptureClientArea(
+                    gameWindow,
+                    out _,
+                    out string captureReason);
+                if (frame == null)
+                {
+                    AppendBotLog($"[Login] Could not capture the {stage} for diagnosis: {captureReason}");
+                    return;
+                }
+
+                using (frame)
+                    ScreenshotService.SaveLoginDiagnosticScreenshot(frame, stage, AppendBotLog);
+            }
+            catch (Exception ex)
+            {
+                AppendBotLog($"[Login] {stage} screenshot failed: {ex.Message}");
+            }
+        }
+
+        private async Task<bool> TryStartupClickSequenceAsync(
             int screenX,
             int screenY,
             string stepName,
             CancellationToken token)
         {
-            AppendBotLog($"[Login][{stepName}] Sending click 1/2 at desktop position ({screenX},{screenY}) using DPI-aware input.");
-            (bool Succeeded, string FailureReason) firstClick = await Task.Run(() =>
+            AppendBotLog($"[Login][{stepName}] Sending {StartupClickCount} consecutive clicks at desktop position ({screenX},{screenY}) using DPI-aware input.");
+            bool allClicksSucceeded = true;
+            for (int clickNumber = 1; clickNumber <= StartupClickCount; clickNumber++)
             {
-                bool succeeded = _aresLauncherWindowService.TryLeftClick(screenX, screenY, 0, out string failureReason);
-                return (succeeded, failureReason);
-            }, token);
-            if (!firstClick.Succeeded)
-            {
-                AppendBotLog($"[Login][{stepName}] Click 1/2 failed: {firstClick.FailureReason}");
-                return false;
-            }
-            AppendBotLog($"[Login][{stepName}] Click 1/2 dispatched; cursor position verified.");
+                if (clickNumber > 1)
+                {
+                    AppendBotLog($"[Login][{stepName}] Waiting {StartupClickIntervalMs} ms before click {clickNumber}/{StartupClickCount}.");
+                    await Task.Delay(StartupClickIntervalMs, token);
+                }
 
-            AppendBotLog($"[Login][{stepName}] Waiting 250 ms between clicks.");
-            await Task.Delay(250, token);
+                AppendBotLog($"[Login][{stepName}] Sending click {clickNumber}/{StartupClickCount} at desktop position ({screenX},{screenY}) using DPI-aware input.");
+                (bool Succeeded, string FailureReason) click = await Task.Run(() =>
+                {
+                    bool succeeded = _aresLauncherWindowService.TryLeftClick(screenX, screenY, 0, out string failureReason);
+                    return (succeeded, failureReason);
+                }, token);
+                if (!click.Succeeded)
+                {
+                    AppendBotLog($"[Login][{stepName}] Click {clickNumber}/{StartupClickCount} failed: {click.FailureReason}");
+                    allClicksSucceeded = false;
+                    continue;
+                }
 
-            AppendBotLog($"[Login][{stepName}] Sending click 2/2 at desktop position ({screenX},{screenY}) using DPI-aware input.");
-            (bool Succeeded, string FailureReason) secondClick = await Task.Run(() =>
-            {
-                bool succeeded = _aresLauncherWindowService.TryLeftClick(screenX, screenY, 0, out string failureReason);
-                return (succeeded, failureReason);
-            }, token);
-            if (!secondClick.Succeeded)
-            {
-                AppendBotLog($"[Login][{stepName}] Click 2/2 failed: {secondClick.FailureReason}");
-                return false;
+                AppendBotLog($"[Login][{stepName}] Click {clickNumber}/{StartupClickCount} dispatched; cursor position verified.");
             }
 
-            AppendBotLog($"[Login][{stepName}] Click 2/2 dispatched; cursor position verified.");
-            return true;
+            return allClicksSucceeded;
         }
 
         private void AppendGameStartupFailure(string reason)
@@ -2100,7 +2147,9 @@ namespace DriverScanTester.ViewModels
         /// </summary>
         public void AppendBotLog(string line)
         {
-            BotLogService.Instance.Append(line);
+            // MainViewModel publishes to both the shared Bot Control Panel log and the
+            // main DriverScanTester log, keeping startup actions visible in either view.
+            _main.AppendBotLog(line);
         }
 
         public void Dispose()

@@ -546,6 +546,34 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// Saves a game-client screenshot from the login flow so server/character
+        /// selection failures can be diagnosed without capturing the rest of the desktop.
+        /// </summary>
+        internal static string? SaveLoginDiagnosticScreenshot(
+            Bitmap frame,
+            string stage,
+            Action<string> log)
+        {
+            try
+            {
+                string screenshotsDir = ResolveScreenshotsDir("Login");
+                Directory.CreateDirectory(screenshotsDir);
+
+                string fileName =
+                    $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss-fff}_{SanitizeFileNameSegment(stage)}.png";
+                string filePath = EnsureUniqueFilePath(Path.Combine(screenshotsDir, fileName));
+                frame.Save(filePath, ImageFormat.Png);
+                log($"[Login] {stage} screenshot saved: {filePath}");
+                return filePath;
+            }
+            catch (Exception ex)
+            {
+                log($"[Login] Could not save the {stage} screenshot: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
         /// Saves an annotated game-client frame when another player's faction marker is
         /// confirmed. The candidate, local-character exclusion, and ignored HUD regions
         /// are outlined so false positives can be diagnosed from the saved image.

@@ -201,7 +201,7 @@
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center" Margin="8,0,0,0">
                     <Button Content="Start Client" Command="{Binding StartGameClientCommand}"
                             Style="{StaticResource StartActionButtonStyle}" Margin="0,0,8,0"
-                            ToolTip="Launch Legend of Ares, click PLAY, enter the login details, double-click Phoenix, then double-click the current cursor position after 10 seconds."/>
+                            ToolTip="Launch Legend of Ares, click PLAY, enter the login details, click Phoenix five times, then click the calibrated character-selection position five times relative to the game window after 10 seconds."/>
                     <TextBlock Text="PID:" VerticalAlignment="Center" Margin="0,0,4,0" Foreground="#FF6C5416" FontWeight="SemiBold"/>
                     <TextBox Text="{Binding PidText, UpdateSourceTrigger=PropertyChanged}" Width="70" VerticalAlignment="Center"/>
                     <Button Content="Attach" Command="{Binding AttachCommand}" Style="{StaticResource SecondaryActionButtonStyle}" Margin="6,0,0,0"
