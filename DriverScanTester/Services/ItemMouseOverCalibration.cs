@@ -132,10 +132,14 @@ namespace DriverScanTester.Services
             => _observationCountsByValue.TryGetValue(value, out int count) ? count : 0;
 
         /// <summary>
-        /// The single value that best represents THIS scan: the value seen on the most
-        /// distinct item candidates (ties broken by the most probes). Returns false when no
+        /// The single value that best represents THIS scan: the value read by the most probes
+        /// (ties broken by the number of distinct item candidates). Returns false when no
         /// non-zero value was observed or when two values are equally strong — an ambiguous
         /// scan must not cast a cross-scan vote.
+        ///
+        /// Frequency is the primary evidence because the mouseover buffer can briefly return
+        /// the previous object's value while the cursor settles on a candidate: the real item
+        /// value is then still the one seen by most probes of the scan.
         ///
         /// This is what allows one-item scans to participate in the cross-scan agreement
         /// (<see cref="ItemMouseOverScanAgreement"/>) instead of requiring three different
@@ -144,24 +148,24 @@ namespace DriverScanTester.Services
         public bool TryGetDominantValue(out int value)
         {
             value = 0;
-            int bestItemCount = 0;
             int bestObservationCount = 0;
+            int bestItemCount = 0;
             bool ambiguous = false;
 
             foreach (int candidate in _valueOrder)
             {
-                int itemCount = DistinctItemCountFor(candidate);
                 int observationCount = ObservationCountFor(candidate);
+                int itemCount = DistinctItemCountFor(candidate);
 
-                if (itemCount > bestItemCount ||
-                    (itemCount == bestItemCount && observationCount > bestObservationCount))
+                if (observationCount > bestObservationCount ||
+                    (observationCount == bestObservationCount && itemCount > bestItemCount))
                 {
                     value = candidate;
-                    bestItemCount = itemCount;
                     bestObservationCount = observationCount;
+                    bestItemCount = itemCount;
                     ambiguous = false;
                 }
-                else if (itemCount == bestItemCount && observationCount == bestObservationCount)
+                else if (observationCount == bestObservationCount && itemCount == bestItemCount)
                 {
                     ambiguous = true;
                 }

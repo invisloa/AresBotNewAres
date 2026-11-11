@@ -314,6 +314,20 @@ namespace DriverScanTester.Services
         private bool _itemCalibrationAttemptedForNpcTrigger;
         private bool _itemValueDiscoveryPending;
 
+        /// <summary>
+        /// True when a confirmed value was applied during the current loot pass. The pass is
+        /// then re-run with the new value so the items that were just used for calibration are
+        /// collected immediately instead of being reported as an empty scan.
+        /// </summary>
+        private bool _itemCalibrationAppliedThisScan;
+
+        /// <summary>
+        /// Mandatory loot request that already cast an item-calibration vote. A retry of the
+        /// SAME request (Incomplete / Cancelled) is not a new "scan after a kill" and must not
+        /// advance the 3-scan agreement a second time.
+        /// </summary>
+        private long _lastItemCalibrationVotedRequestId;
+
         /// <summary>Cross-scan agreement values restored from the previous run.</summary>
         private ItemMouseOverScanAgreement? _itemScanAgreement;
         private (uint ProcessId, ulong ModuleBase) _itemScanAgreementIdentity;
@@ -2129,7 +2143,7 @@ namespace DriverScanTester.Services
                     try
                     {
                         _log($"[Loot] PixelScan starting (request={(mandatoryRequestId > 0 ? mandatoryRequestId.ToString() : "none")}).");
-                        outcome = PixelScan();
+                        outcome = PixelScan(mandatoryRequestId);
                     }
                     finally
                     {
@@ -3258,7 +3272,10 @@ namespace DriverScanTester.Services
             {
                 ApplyCalibratedItemMouseOverValue(
                     agreement.ConfirmedValue!.Value,
-                    $"already confirmed by {agreement.RequiredScans} separate loot scans");
+                    $"already confirmed by {agreement.RequiredScans} separate loot scans",
+                    DateTime.MinValue);
+                // Recovered before this pass started; the scan below already uses the value.
+                _itemCalibrationAppliedThisScan = false;
                 return;
             }
 
@@ -3347,6 +3364,12 @@ namespace DriverScanTester.Services
         /// </summary>
         private void PersistItemScanAgreement(ItemMouseOverScanAgreement agreement)
         {
+            // Another component (manual capture / NPC calibration) may have re-calibrated the
+            // active value while this scan was running. Progress for the previous value is
+            // meaningless then; do not write it back over the newer calibration state.
+            if (BotConstants.GameMagicValues.LootMouseOverValue != _itemScanAgreementActiveValue)
+                return;
+
             (uint ProcessId, ulong ModuleBase) identity = _itemScanAgreementIdentity;
             if (MouseCalibrationStore.SaveItemScanProgress(
                     identity.ProcessId, identity.ModuleBase, _itemScanAgreementActiveValue, agreement.Snapshot()))
@@ -3361,6 +3384,21 @@ namespace DriverScanTester.Services
             _log($"[Item Calibration] WARNING: could not save item MouseOver discovery progress to " +
                  $"{MouseCalibrationStore.FilePath} — the current run still continues, but a bot restart would lose it.");
         }
+
+        /// <summary>
+        /// The vote rule for the cross-scan item agreement (pure, unit-tested):
+        ///   - a mandatory loot request (one kill) contributes at most ONE vote, and its first
+        ///     attempt counts even when it ends Incomplete (the scan is still from a new kill),
+        ///   - outside a mandatory request (requestId 0) only a fully completed normal scan
+        ///     counts.
+        /// </summary>
+        internal static bool ShouldCountItemCalibrationVote(
+            bool validComplete,
+            long mandatoryRequestId,
+            long lastVotedRequestId)
+            => mandatoryRequestId > 0
+                ? mandatoryRequestId != lastVotedRequestId
+                : validComplete;
 
         /// <summary>
         /// The trigger rule for the automatic item discovery (pure, unit-tested):
@@ -3413,13 +3451,15 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Ends a per-scan discovery attempt. The dominant value of the scan becomes ONE
-        /// observation in the cross-scan agreement; the observation is persisted immediately,
-        /// so the next loot scan (or the next bot run) compares against it instead of starting
-        /// over. The active value is only replaced once the required number of separate scans
+        /// Ends a per-scan discovery attempt. One loot request (one kill) may cast at most ONE
+        /// cross-scan vote: the first attempt that actually reads item candidates counts, even
+        /// when that attempt ends Incomplete; retries of the same request never count again.
+        /// The dominant value of the scan becomes one persisted observation, so the next loot
+        /// request (or the next bot run) compares against it instead of starting over. The
+        /// active value is only replaced once the required number of separate requests/scans
         /// published the same value.
         /// </summary>
-        private void EndItemCalibration()
+        private void EndItemCalibration(bool validComplete, LootScanPassResult result, long mandatoryRequestId)
         {
             ItemMouseOverCalibration? calibration = _itemCalibration;
             string reason = _itemCalibrationReason;
@@ -3444,7 +3484,7 @@ namespace DriverScanTester.Services
                 // failed discovery: keep the trigger armed instead of consuming the attempt.
                 _itemCalibrationAttemptedForNpcTrigger = false;
                 _itemValueDiscoveryPending = true;
-                _log($"[Item Calibration] Discovery could not run (no item candidate was probed; reason={reason}, elapsed={elapsedMs}ms) — the request stays armed.");
+                _log($"[Item Calibration] Discovery could not run (no item candidate was probed; status={result}; reason={reason}, elapsed={elapsedMs}ms) — the request stays armed.");
                 return;
             }
 
@@ -3453,32 +3493,54 @@ namespace DriverScanTester.Services
             if (!_itemValueDiscoveryPending)
                 return; // an item was collected; the active value is proven, no vote needed
 
+            // Only a completed normal loot pass, or the FIRST payload-bearing attempt of a
+            // loot request (one kill), is one of the "3 different scans after 3 kills". Once a
+            // request contributed its observation, a retry of the SAME request (Incomplete /
+            // Cancelled) can never count again.
+            if (!ShouldCountItemCalibrationVote(
+                    validComplete, mandatoryRequestId, _lastItemCalibrationVotedRequestId))
+            {
+                _itemValueDiscoveryPending = true;
+                _log($"[Item Calibration] Scan status={result} for request={mandatoryRequestId} is a retry/incomplete pass — " +
+                     $"its value was NOT counted ({calibration.DescribeObservations()}; reason={reason}, elapsed={elapsedMs}ms). " +
+                     "Discovery stays armed.");
+                return;
+            }
+
             if (calibration.TryGetDominantValue(out int scanValue))
             {
                 ItemMouseOverScanAgreement agreement = GetOrCreateItemScanAgreement();
                 bool confirmed = agreement.RecordScan(scanValue);
+
+                // This kill/request already contributed its observation; a retry of the same
+                // request cannot add another vote later.
+                if (mandatoryRequestId > 0)
+                    _lastItemCalibrationVotedRequestId = mandatoryRequestId;
+
                 PersistItemScanAgreement(agreement);
 
                 if (confirmed)
                 {
                     ApplyCalibratedItemMouseOverValue(
                         scanValue,
-                        $"the same value was read in {agreement.RequiredScans} separate loot scans");
+                        $"the same value was read in {agreement.RequiredScans} completed separate loot scans",
+                        startedUtc);
                     return;
                 }
 
                 _itemValueDiscoveryPending = true;
-                _log($"[Item Calibration] Loot scan recorded {MouseOverValueDiscovery.Describe(scanValue)} " +
+                _log($"[Item Calibration] Loot scan (request={mandatoryRequestId}, status={result}) recorded " +
+                     $"{MouseOverValueDiscovery.Describe(scanValue)} " +
                      $"({agreement.ScanCountFor(scanValue)}/{agreement.RequiredScans} separate scans with this value; " +
                      $"saved for the next loot scan/bot run, reason={reason}, elapsed={elapsedMs}ms). " +
-                     "The active value is kept for now and the next scan compares its value.");
+                     "The active value is kept for now and the next loot request compares its value.");
                 return;
             }
 
             _itemValueDiscoveryPending = true;
-            _log($"[Item Calibration] Discovery attempt finished without a usable value " +
+            _log($"[Item Calibration] Loot scan (request={mandatoryRequestId}, status={result}) had no clear dominant value " +
                  $"({calibration.DescribeObservations()}; reason={reason}, elapsed={elapsedMs}ms) — keeping the active value. " +
-                 "Discovery stays armed: the next loot scan probes again.");
+                 "Discovery stays armed: the next loot request probes again.");
         }
 
         /// <summary>
@@ -3547,27 +3609,31 @@ namespace DriverScanTester.Services
                 return;
             }
 
-            bool firstObservationOfValue = calibration.DistinctItemCountFor(hoveredValue) == 0;
+            int itemsBefore = calibration.DistinctItemCountFor(hoveredValue);
             bool confirmed = calibration.RecordObservation(anchorX, anchorY, hoveredValue);
 
             if (confirmed)
             {
                 ApplyCalibratedItemMouseOverValue(
                     calibration.ConfirmedValue!.Value,
-                    $"confirmed on {calibration.DistinctItemCountFor(hoveredValue)} different item candidates in one scan");
+                    $"confirmed on {calibration.DistinctItemCountFor(hoveredValue)} different item candidates in one scan",
+                    _itemCalibrationStartedUtc);
                 return;
             }
 
-            if (firstObservationOfValue)
+            int itemsAfter = calibration.DistinctItemCountFor(hoveredValue);
+            if (itemsBefore == 0)
             {
                 _log($"[Item Calibration] Candidate item value detected: {MouseOverValueDiscovery.Describe(hoveredValue)} " +
                      $"at bitmap-local ({anchorX},{anchorY}) — the scan will record it as one observation " +
                      $"(probe {calibration.Observations}/{BotConstants.Loot.ItemCalibrationMaxProbes}).");
             }
-            else if (calibration.DistinctItemCountFor(hoveredValue) == calibration.RequiredDistinctItems - 1)
+            else if (itemsAfter > itemsBefore && itemsAfter == calibration.RequiredDistinctItems - 1)
             {
+                // Log only when the distinct-candidate count actually grows; repeated probes of
+                // the same blob must not flood the log with the same line.
                 _log($"[Item Calibration] Value {MouseOverValueDiscovery.Describe(hoveredValue)} seen on " +
-                     $"{calibration.DistinctItemCountFor(hoveredValue)}/{calibration.RequiredDistinctItems} different item candidates in this scan.");
+                     $"{itemsAfter}/{calibration.RequiredDistinctItems} different item candidates in this scan.");
             }
         }
 
@@ -3578,7 +3644,7 @@ namespace DriverScanTester.Services
         /// value. The next bot run / app start therefore reuses the new value instead of the
         /// stale in-memory one, and no further slow scans are needed.
         /// </summary>
-        private void ApplyCalibratedItemMouseOverValue(int confirmedValue, string evidence)
+        private void ApplyCalibratedItemMouseOverValue(int confirmedValue, string evidence, DateTime startedUtc)
         {
             int previousValue = BotConstants.GameMagicValues.LootMouseOverValue;
 
@@ -3586,6 +3652,7 @@ namespace DriverScanTester.Services
             MouseOverCalibrationSession.Current.MarkItemValueDiscovered(CalibrationSessionIdentity);
             _consecutiveEmptyItemScans = 0;
             _itemValueDiscoveryPending = false;
+            _itemCalibrationAppliedThisScan = true;
 
             // The agreement belongs to the active value; the confirmed value becomes active and
             // its pending observations are no longer needed.
@@ -3596,9 +3663,9 @@ namespace DriverScanTester.Services
                 ItemSellerService.SellerPointedValue,
                 BotConstants.GameMagicValues.LootMouseOverValue);
 
-            long elapsedMs = _itemCalibrationStartedUtc == DateTime.MinValue
+            long elapsedMs = startedUtc == DateTime.MinValue
                 ? 0
-                : (long)(DateTime.UtcNow - _itemCalibrationStartedUtc).TotalMilliseconds;
+                : (long)(DateTime.UtcNow - startedUtc).TotalMilliseconds;
 
             _log($"[Item Calibration] Active item MouseOver value updated: " +
                  $"{MouseOverValueDiscovery.Describe(previousValue)} -> {MouseOverValueDiscovery.Describe(confirmedValue)} " +
@@ -3623,19 +3690,68 @@ namespace DriverScanTester.Services
         /// discovery request itself is decided before the scan; the result feeds the
         /// empty-scan streak afterwards.
         /// </summary>
-        private LootScanPassOutcome PixelScan()
+        private LootScanPassOutcome PixelScan(long mandatoryRequestId)
         {
+            _itemCalibrationAppliedThisScan = false;
             BeginItemCalibrationIfNeeded();
+
+            LootScanPassOutcome outcome = default;
+            bool hasOutcome = false;
             try
             {
-                LootScanPassOutcome outcome = PixelScanCore();
+                outcome = PixelScanCore();
+                hasOutcome = true;
                 NoteItemScanResult(outcome.Result, outcome.IsValidComplete);
-                return outcome;
             }
             finally
             {
-                EndItemCalibration();
+                EndItemCalibration(
+                    hasOutcome && outcome.IsValidComplete,
+                    hasOutcome ? outcome.Result : LootScanPassResult.Cancelled,
+                    mandatoryRequestId);
             }
+
+            // The item value was confirmed by this pass. Re-run the same loot scan with the
+            // new value instead of reporting an empty pass and walking away from the items
+            // that were just used as evidence — otherwise the very first proof that the
+            // calibration works would only appear after the next kill.
+            if (_itemCalibrationAppliedThisScan &&
+                outcome.Result is LootScanPassResult.NoItem or LootScanPassResult.Incomplete)
+            {
+                _itemCalibrationAppliedThisScan = false;
+                _log($"[Item Calibration] Re-running the loot scan with the confirmed value " +
+                     $"{MouseOverValueDiscovery.Describe(BotConstants.GameMagicValues.LootMouseOverValue)} so the visible items are collected now.");
+                ClearLootProbeProgress();
+                BeginItemCalibrationIfNeeded();
+
+                hasOutcome = false;
+                try
+                {
+                    outcome = PixelScanCore();
+                    hasOutcome = true;
+                    NoteItemScanResult(outcome.Result, outcome.IsValidComplete);
+                }
+                finally
+                {
+                    EndItemCalibration(
+                        hasOutcome && outcome.IsValidComplete,
+                        hasOutcome ? outcome.Result : LootScanPassResult.Cancelled,
+                        mandatoryRequestId);
+                }
+
+                if (outcome.Result == LootScanPassResult.Collected)
+                {
+                    _log("[Item Calibration] Confirmed value verified — the item was collected with it.");
+                }
+                else
+                {
+                    _log($"[Item Calibration] WARNING: the verification pass did not collect an item (status={outcome.Result}). " +
+                         "The value stays active; if loot still fails, the empty-scan trigger starts the discovery again.");
+                }
+            }
+
+            _itemCalibrationAppliedThisScan = false;
+            return outcome;
         }
 
         private LootScanPassOutcome PixelScanCore()
@@ -3694,22 +3810,16 @@ namespace DriverScanTester.Services
         {
             // The manual diagnostic scan must never change the bot's calibration state.
             bool botScan = _diagnosticScanActive == 0;
-            if (botScan)
-                BeginItemCalibrationIfNeeded();
 
-            try
-            {
-                LootScanPassResult result = ScanRegion(
-                    bigX, bigY, "BigScan-Pink", scanMode: LootScanMode.PinkOnly, scanReason: scanReason);
-                if (botScan)
-                    NoteItemScanResult(result, validComplete: result == LootScanPassResult.NoItem);
-                return result;
-            }
-            finally
-            {
-                if (botScan)
-                    EndItemCalibration();
-            }
+            // SOD/SOP scans do NOT participate in the normal item-value calibration: their
+            // hovered values are a different object family, and mixing them into the
+            // normal-item agreement would poison the confirmed value. Normal PixelScan passes
+            // are the only calibration observations.
+            LootScanPassResult result = ScanRegion(
+                bigX, bigY, "BigScan-Pink", scanMode: LootScanMode.PinkOnly, scanReason: scanReason);
+            if (botScan)
+                NoteItemScanResult(result, validComplete: result == LootScanPassResult.NoItem);
+            return result;
         }
 
         // ── SOD/SOP hot-pink pixel classifier thresholds ──
