@@ -31,7 +31,7 @@ namespace DriverScanTester.Tests
         // ── 1. the happy path ─────────────────────────────────────────────────
 
         [Fact]
-        public async Task ManaRegen_LowMana_NoEnemyAfterCompletedTargetCheck_PressesKey6Once()
+        public async Task ManaRegen_LowMana_NoEnemyAfterCompletedTargetCheck_PressesKey6FourTimes()
         {
             var memory = new Memory { Mana = 40, MaxMana = 100 };
             var rig = new Rig(memory.Create());
@@ -40,11 +40,11 @@ namespace DriverScanTester.Tests
             bool consumed = await rig.TryCastManaRegenAsync(CancellationToken.None);
 
             Assert.True(consumed);
-            Assert.Equal(1, rig.KeyPressCount);
+            Assert.Equal(4, rig.KeyPressCount);
         }
 
         [Fact]
-        public async Task ManaRegen_FinalWaypointStandby_LowMana_PressesKey6Once()
+        public async Task ManaRegen_FinalWaypointStandby_LowMana_PressesKey6FourTimes()
         {
             var memory = new Memory { Mana = 40, MaxMana = 100 };
             var rig = new Rig(memory.Create(), BotMode.MoveAndAttackAndLoot);
@@ -57,7 +57,7 @@ namespace DriverScanTester.Tests
             bool consumed = await rig.TryCastManaRegenAsync(CancellationToken.None);
 
             Assert.True(consumed);
-            Assert.Equal(1, rig.KeyPressCount);
+            Assert.Equal(4, rig.KeyPressCount);
         }
 
         // ── 2. mana threshold ─────────────────────────────────────────────────
@@ -78,10 +78,10 @@ namespace DriverScanTester.Tests
 
         [Theory]
         [InlineData(49, 100, true)]   // 49% → cast
-        [InlineData(50, 100, false)]  // exactly 50% → no cast
+        [InlineData(50, 100, true)]  // exactly 50% → no cast
         [InlineData(51, 100, false)]  // 51% → no cast
         [InlineData(99, 200, true)]   // 49.5% → cast
-        [InlineData(100, 200, false)] // exactly 50% → no cast
+        [InlineData(100, 200, true)] // exactly 50% → no cast
         public void ManaThreshold_IsHalfOfMaxMana(int currentMana, int maxMana, bool expected)
         {
             Assert.Equal(expected, MovementSystem.IsManaRegenCastEligible(
@@ -356,12 +356,12 @@ namespace DriverScanTester.Tests
 
             rig.ArmManaRegenCastOpportunity("first TAB target cycle");
             Assert.True(await rig.TryCastManaRegenAsync(CancellationToken.None));
-            Assert.Equal(1, rig.KeyPressCount);
+            Assert.Equal(4, rig.KeyPressCount);
 
             // The very next eligible no-enemy opportunity is inside the 5 s cooldown.
             rig.ArmManaRegenCastOpportunity("second TAB target cycle");
             Assert.False(await rig.TryCastManaRegenAsync(CancellationToken.None));
-            Assert.Equal(1, rig.KeyPressCount);
+            Assert.Equal(4, rig.KeyPressCount);
         }
 
         [Fact]
@@ -473,13 +473,13 @@ namespace DriverScanTester.Tests
             // The opportunity is consumed: the next tick without a new enemy check does not
             // press 6 again (and no cooldown-less repeat can happen).
             Assert.False(await rig.TryCastManaRegenAsync(CancellationToken.None));
-            Assert.Equal(1, rig.KeyPressCount);
+            Assert.Equal(4, rig.KeyPressCount);
 
             // Mana recovered above the threshold → the next opportunity is a no-op.
             memory.Mana = 90;
             rig.ArmManaRegenCastOpportunity("TAB target cycle after mana recovery");
             Assert.False(await rig.TryCastManaRegenAsync(CancellationToken.None));
-            Assert.Equal(1, rig.KeyPressCount);
+            Assert.Equal(4, rig.KeyPressCount);
         }
 
         // ── test rig ─────────────────────────────────────────────────────────

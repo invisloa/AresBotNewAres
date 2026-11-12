@@ -297,7 +297,7 @@ namespace DriverScanTester
         {
             /// <summary>
             /// Fraction of maximum mana below which the skill is cast. The condition is
-            /// <c>currentMana &lt; maxMana * 0.5</c>; a tolerance of about ±10 mana points
+            /// <c>currentMana &lt;= maxMana * 0.5</c>; a tolerance of about ±10 mana points
             /// around the 50% boundary is acceptable, so the exact boundary is never
             /// load-bearing.
             /// </summary>
@@ -310,9 +310,8 @@ namespace DriverScanTester
             public const int ManaThresholdTolerance = 10;
 
             /// <summary>
-            /// Minimum time (ms) between two cast ATTEMPTS (5 s). After a cast the bot returns
-            /// to normal EXP processing and only re-reads mana at the next eligible no-enemy
-            /// opportunity.
+            /// Minimum time (ms) between two four-press cast attempts while the bot
+            /// remains stopped and checks for enemies and recovered mana.
             /// </summary>
             public const int CooldownMs = 5_000;
 

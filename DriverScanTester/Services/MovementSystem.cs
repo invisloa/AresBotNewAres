@@ -1797,6 +1797,7 @@ namespace DriverScanTester.Services
         // is only observable on the following tick.
         private ManaRegenCastOpportunity? _manaRegenCastOpportunity;
         private DateTime _lastManaRegenCastAt = DateTime.MinValue;
+        private bool _manaRegenActive;
 
         public MovementSystem(
             GameMemoryService memoryService,
@@ -1977,7 +1978,7 @@ namespace DriverScanTester.Services
             if (!isAlive || !manaReadSucceeded || !maxManaReadSucceeded || maxMana <= 0)
                 return false;
 
-            return currentMana < maxMana * BotConstants.ManaRegen.ManaThresholdFraction;
+            return currentMana <= maxMana * BotConstants.ManaRegen.ManaThresholdFraction;
         }
 
         /// <summary>
@@ -2278,14 +2279,23 @@ namespace DriverScanTester.Services
                 return false;
             }
 
+            _manaRegenActive = true;
             _lastManaRegenCastAt = DateTime.UtcNow;
-            _log($"[Tick {_tickCount}] [ManaRegen] Empty enemy check and low mana ({recheckEligibility}) — movement stopped, pressing key 6 once.");
-            _log("[Key] 6 (mana regen)");
-            SendManaRegenKey();
+            _log($"[Tick {_tickCount}] [ManaRegen] Empty enemy check and low mana ({recheckEligibility}) — movement stopped, pressing key 6 four times.");
+            for (int press = 0; press < 4; press++)
+            {
+                if (_memoryService.GetSelectedTargetId() > 0)
+                {
+                    _manaRegenActive = false;
+                    return true;
+                }
+                _log("[Key] 6 (mana regen)");
+                SendManaRegenKey();
+                await Task.Delay(BotConstants.ManaRegen.PostCastSettleMs, token);
+            }
 
             // Keep movement stopped for one more short window so the cast can start before
             // the next movement tick presses W again.
-            await Task.Delay(BotConstants.ManaRegen.PostCastSettleMs, token);
             return true;
         }
 
@@ -4849,6 +4859,14 @@ namespace DriverScanTester.Services
                 ? _targetSafety.Validate()
                 : default;
             bool confirmedMonsterTarget = targetValidation.IsConfirmedMonster;
+            if (_manaRegenActive)
+            {
+                if (confirmedMonsterTarget || !ExpHuntLoopMode ||
+                    (currentMode != BotMode.MoveAndAttack && currentMode != BotMode.MoveAndAttackAndLoot))
+                    _manaRegenActive = false;
+                else
+                    StopMoving();
+            }
             UpdateCombatGateTargetSuppression();
 
             // Combat always wins over the mana regen skill: a confirmed monster invalidates
@@ -5530,6 +5548,25 @@ namespace DriverScanTester.Services
             // combat flow AND in final-waypoint combat standby (both fall through here).
             if (await TryCastManaRegenAsync(token))
                 return;
+
+            // Once regeneration starts, waypoint navigation stays parked until mana
+            // recovers. The normal combat/TAB and loot flow above still runs each tick.
+            if (_manaRegenActive)
+            {
+                bool manaRecovered = _memoryService.TryGetMana(out short currentMana) &&
+                    _memoryService.GetMaxHpMana() is var maxStats &&
+                    maxStats.MaxManaReadSucceeded && maxStats.MaxMana > 0 &&
+                    currentMana > maxStats.MaxMana * BotConstants.ManaRegen.ManaThresholdFraction;
+                if (_memoryService.GetSelectedTargetId() > 0 || manaRecovered)
+                {
+                    _manaRegenActive = false;
+                }
+                else
+                {
+                    StopMoving();
+                    return;
+                }
+            }
 
             // If in standby mode, don't fall through to waypoint queue logic.
             if (_finalStandbyActive)
