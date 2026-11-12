@@ -1,6 +1,5 @@
 {
   "Name": "MainCOT",
-  "EnableManaRegen": false,
   "FlowSteps": [
     {
       "Type": 1,
@@ -135,7 +134,7 @@
   "MaxWeightRatio": 0.9,
   "MinHp": 999,
   "MinMana": 100,
-  "HpBuyTarget": 45,
+  "HpBuyTarget": 66,
   "ManaBuyTarget": 35,
   "RedBuyTarget": 4,
   "WhiteBuyTarget": 4,
@@ -147,6 +146,7 @@
   "StartPositionTolerance": 5,
   "LootPriority": true,
   "DisableAllLoot": false,
+  "EnableManaRegen": false,
   "IgnoreAlliancePlayers": false,
   "IgnoreEmpirePlayers": false,
   "TeleportKey": 56,
