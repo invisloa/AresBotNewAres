@@ -1399,6 +1399,45 @@ namespace DriverScanTester
             /// player pointer or the value behind it can no longer be read. 15 seconds is longer
             /// than a normal map-transition settle, so a loading screen is not mistaken for a crash.</summary>
             public const int AttackReadFailureTimeoutMs = 15_000;
+
+            // ── Automatic crash/disconnect recovery ──
+            /// <summary>How long to wait for the game client process to disappear after a
+            /// recovery kill before the recovery is abandoned.</summary>
+            public const int RecoveryProcessStopTimeoutMs = 15_000;
+
+            /// <summary>Retry interval while the computer has no internet connection. The
+            /// recovery keeps re-checking until a connection is available or the user stops it.</summary>
+            public const int RecoveryInternetRetryDelayMs = 300_000;
+
+            /// <summary>Delay after the character-selection clicks before the bot attaches to
+            /// the new client and starts waiting for the world map.</summary>
+            public const int RecoveryPostCharacterSelectionDelayMs = 5_000;
+
+            /// <summary>Maximum time to wait for the freshly logged-in character's map and
+            /// position to become readable before the recovery is abandoned.</summary>
+            public const int RecoveryMapLoadTimeoutMs = 180_000;
+
+            /// <summary>Maximum time to wait for the town teleport to take effect.</summary>
+            public const int RecoveryTeleportTimeoutMs = 20_000;
+
+            /// <summary>Maximum time to wait for the map to settle after the town teleport,
+            /// before the main profile is started.</summary>
+            public const int RecoveryPostTeleportMapLoadTimeoutMs = 60_000;
+
+            /// <summary>Number of consecutive successful player/map reads required before the
+            /// recovery treats the loaded world as stable enough to receive inputs.</summary>
+            public const int RecoveryMapStableReads = 3;
+
+            /// <summary>Poll interval used while waiting for the game world/map to load.</summary>
+            public const int RecoveryReadinessPollMs = 1_000;
+
+            /// <summary>Maximum time to wait for the stopped workflow to finish its cleanup
+            /// before the recovered main profile is started.</summary>
+            public const int RecoveryWorkflowStopTimeoutMs = 30_000;
+
+            /// <summary>Profile that is started automatically after a successful crash
+            /// recovery. When it cannot be loaded the previously active profile is used.</summary>
+            public const string RecoveryMainProfileName = "MainCOT";
         }
 
         // ════════════════════════════════════════════════════════════════

@@ -339,6 +339,8 @@ namespace DriverScanTester.ViewModels
                 focusGame: FocusGameWindow,
                 getConflictReason: GetMovementDiagnosticConflictReason);
 
+            _recoveryGameClientStartupService = new GameClientStartupService(AppendBotLog);
+
             AttachCommand = new RelayCommand(_ => Attach(), _ => true);
 
             // IMPORTANT: this command now does a compare vs ORIGINAL, then returns to "last-scan" mode.
@@ -1327,76 +1329,102 @@ namespace DriverScanTester.ViewModels
         {
             try
             {
-                _hDevice?.Dispose();
-                _hDevice = null;
-                if (_hProcess != nint.Zero) { PsApi.CloseHandle(_hProcess); _hProcess = nint.Zero; }
-                _isAttached = false;
-                OnPropertyChanged(nameof(IsAttached));
-                OnPropertyChanged(nameof(HpPotionUseThresholdText));
-                OnPropertyChanged(nameof(ManaPotionUseThresholdText));
-                AttachmentChanged?.Invoke(false);
-                DisposePointerScanner();
-                InvalidateCommands();
+                // Keep the original button behaviour: a failed PID parse still detaches
+                // the previous session so stale handles cannot be reused.
+                DetachCurrentGameProcess();
 
-                _userSnapshot.Clear();
-                _candidates.Clear();
-                _managedBaseline.Clear();
-                _driverSupportsCLong = true;
-                _loggedClongFallback = false;
-
-                if (!TryParsePid(out uint pid)) return;
-
-                _hDevice = CreateFile(DEVICE_PATH,
-                    Native.GENERIC_READ | Native.GENERIC_WRITE,
-                    Native.FILE_SHARE_READ | Native.FILE_SHARE_WRITE,
-                    nint.Zero,
-                    Native.OPEN_EXISTING,
-                    Native.FILE_ATTRIBUTE_NORMAL,
-                    nint.Zero);
-
-                if (_hDevice.IsInvalid)
-                {
-                    int err = Marshal.GetLastWin32Error();
-                    AppendLog($"CreateFile failed: {err}");
-                    _hDevice.Dispose();
-                    _hDevice = null;
+                if (!TryParsePid(out uint pid))
                     return;
-                }
 
-                _hProcess = PsApi.OpenProcess(PsApi.PROCESS_QUERY_INFORMATION | PsApi.PROCESS_VM_READ, false, pid);
-                if (_hProcess == nint.Zero)
-                {
-                    _hProcess = PsApi.OpenProcess(PsApi.PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
-                }
-
-                if (_hProcess == nint.Zero)
-                {
-                    int err = Marshal.GetLastWin32Error();
-                    AppendLog($"OpenProcess failed: {err}");
-                    _hDevice?.Dispose();
-                    _hDevice = null;
-                    return;
-                }
-
-                _attachedPid = pid;
-                _isAttached = true;
-                OnPropertyChanged(nameof(IsAttached));
-                OnPropertyChanged(nameof(HpPotionUseThresholdText));
-                OnPropertyChanged(nameof(ManaPotionUseThresholdText));
-                AttachmentChanged?.Invoke(true);
-                AppendLog($"Attached to device. PID={_attachedPid}");
-                InitializePointerScanner();
-                InvalidateCommands();
-
-                HealManaThresholdInitializationResult initialization =
-                    await InitializeHealManaThresholdsFromPlayer();
-                foreach (string line in initialization.LogLines)
-                    AppendLog(line);
+                await AttachToProcessCoreAsync(pid);
             }
             catch (Exception ex)
             {
                 AppendLog("Attach exception: " + ex.Message);
             }
+        }
+
+        /// <summary>
+        /// Core attach used by the Attach button and by the automatic crash recovery.
+        /// Always detaches the previous client first (from the UI thread) so the driver
+        /// handles and the pointer scanner can never point at the crashed process.
+        /// </summary>
+        private async Task<bool> AttachToProcessCoreAsync(uint pid)
+        {
+            DetachCurrentGameProcess();
+
+            _userSnapshot.Clear();
+            _candidates.Clear();
+            _managedBaseline.Clear();
+            _driverSupportsCLong = true;
+            _loggedClongFallback = false;
+
+            _hDevice = CreateFile(DEVICE_PATH,
+                Native.GENERIC_READ | Native.GENERIC_WRITE,
+                Native.FILE_SHARE_READ | Native.FILE_SHARE_WRITE,
+                nint.Zero,
+                Native.OPEN_EXISTING,
+                Native.FILE_ATTRIBUTE_NORMAL,
+                nint.Zero);
+
+            if (_hDevice.IsInvalid)
+            {
+                int err = Marshal.GetLastWin32Error();
+                AppendLog($"CreateFile failed: {err}");
+                _hDevice.Dispose();
+                _hDevice = null;
+                return false;
+            }
+
+            _hProcess = PsApi.OpenProcess(PsApi.PROCESS_QUERY_INFORMATION | PsApi.PROCESS_VM_READ, false, pid);
+            if (_hProcess == nint.Zero)
+            {
+                _hProcess = PsApi.OpenProcess(PsApi.PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+            }
+
+            if (_hProcess == nint.Zero)
+            {
+                int err = Marshal.GetLastWin32Error();
+                AppendLog($"OpenProcess failed: {err}");
+                _hDevice?.Dispose();
+                _hDevice = null;
+                return false;
+            }
+
+            _attachedPid = pid;
+            _isAttached = true;
+            OnPropertyChanged(nameof(IsAttached));
+            OnPropertyChanged(nameof(HpPotionUseThresholdText));
+            OnPropertyChanged(nameof(ManaPotionUseThresholdText));
+            AttachmentChanged?.Invoke(true);
+            AppendLog($"Attached to device. PID={_attachedPid}");
+            InitializePointerScanner();
+            InvalidateCommands();
+
+            HealManaThresholdInitializationResult initialization =
+                await InitializeHealManaThresholdsFromPlayer();
+            foreach (string line in initialization.LogLines)
+                AppendLog(line);
+            return true;
+        }
+
+        /// <summary>
+        /// Closes the driver/process handles of the current game session and clears the
+        /// attachment state. Safe to call when already detached.
+        /// </summary>
+        private void DetachCurrentGameProcess()
+        {
+            _hDevice?.Dispose();
+            _hDevice = null;
+            if (_hProcess != nint.Zero) { PsApi.CloseHandle(_hProcess); _hProcess = nint.Zero; }
+            _isAttached = false;
+            _attachedPid = 0;
+            OnPropertyChanged(nameof(IsAttached));
+            OnPropertyChanged(nameof(HpPotionUseThresholdText));
+            OnPropertyChanged(nameof(ManaPotionUseThresholdText));
+            AttachmentChanged?.Invoke(false);
+            DisposePointerScanner();
+            InvalidateCommands();
         }
 
         private void InitializePointerScanner()
@@ -3223,6 +3251,13 @@ namespace DriverScanTester.ViewModels
         // running bot loops, scans and awaits never hold it.
         private readonly object _cameraRuntimeStartupGate = new();
 
+        // Automatic crash/disconnect recovery. The latches ensure only one recovery runs
+        // and that a manual Stop All or a second failure cannot start a competing one.
+        private readonly InternetConnectionProbe _internetConnectionProbe = new();
+        private readonly GameClientStartupService _recoveryGameClientStartupService;
+        private CancellationTokenSource? _gameRecoveryCts;
+        private int _gameRecoveryActive;
+
         // Deterministic test seam: invoked while the startup gate is held, after the
         // standalone-loot runtime has been registered and before the gate is released.
         // Null in production.
@@ -3449,8 +3484,17 @@ namespace DriverScanTester.ViewModels
         /// Stage 3 EXP Path) for the given profile. Requires a non-null valid profile;
         /// there is no no-profile fallback mode.
         /// </summary>
-        public void StartWorkflow(BotProfile profile)
+        public void StartWorkflow(BotProfile profile) =>
+            StartWorkflowCore(profile, fromCrashRecovery: false);
+
+        private void StartWorkflowCore(BotProfile profile, bool fromCrashRecovery)
         {
+            // A manual workflow start is authoritative: it must abort an automatic
+            // recovery that is still waiting for internet / logging in. The recovery's
+            // own final step passes fromCrashRecovery=true so it does not cancel itself.
+            if (!fromCrashRecovery)
+                CancelGameRecovery("manual workflow start");
+
             if (!_isAttached) { AppendLog("Attach first."); return; }
             if (_workflowCoordinator?.IsRunning == true) { AppendLog("Workflow already running."); return; }
             if (BlockNormalActionForMovementDiagnostic("Start Workflow"))
@@ -3840,8 +3884,9 @@ namespace DriverScanTester.ViewModels
         }
 
         /// <summary>
-        /// Latches a suspected game disconnect/dead state into a stop of every bot task.
-        /// The game/client is intentionally left untouched so it can be relaunched/logged in manually.
+        /// Latches a suspected game crash/disconnect, stops every bot task and starts the
+        /// automatic recovery (kill the old client if needed → wait for internet →
+        /// relaunch/login → teleport to city → start the main COT profile).
         ///
         /// A CONFIRMED character death is NOT a connection failure and never reaches this method:
         /// the workflow coordinator owns death recovery (wait → town teleport → profile restart).
@@ -3860,12 +3905,343 @@ namespace DriverScanTester.ViewModels
             if (Interlocked.Exchange(ref _gameFailureStopHandled, 1) != 0)
                 return;
 
-            AppendBotLog($"[ConnectionWatchdog] {reason} Bot inputs are being released and all bot tasks are stopping. Restart/relog the game, then manually start the bot again.");
+            // Capture the profile BEFORE stopping the workflow: the recovery restarts
+            // the main COT profile (falling back to this active profile when MainCOT
+            // cannot be loaded).
+            BotProfile? activeProfile = _workflowCoordinator?.ActiveProfile;
+
+            AppendBotLog(
+                $"[ConnectionWatchdog] {reason} The game client has crashed or lost its connection. " +
+                "Bot inputs are being released and automatic recovery is starting " +
+                "(kill the old client if needed -> wait for internet -> relaunch/login -> teleport to city -> start MainCOT).");
             StopAllActions(reason);
             ScreenshotService.CaptureFullScreen(
                 ScreenshotService.ConnectionStatesFolder,
                 AppendBotLog,
                 "[ConnectionWatchdog]");
+
+            StartGameCrashRecovery(activeProfile);
+        }
+
+        /// <summary>
+        /// Starts the automatic crash/disconnect recovery in the background. Only one
+        /// recovery may run at a time; the connection-failure latch already guarantees one
+        /// trigger per failure episode, and the recovery uses its own cancellation source so
+        /// a manual Stop All can abort the five-minute internet wait.
+        /// </summary>
+        private void StartGameCrashRecovery(BotProfile? activeProfile)
+        {
+            if (Interlocked.CompareExchange(ref _gameRecoveryActive, 1, 0) != 0)
+                return;
+
+            var recoveryCts = new CancellationTokenSource();
+            _gameRecoveryCts = recoveryCts;
+            _ = Task.Run(() => RunGameCrashRecoveryAsync(activeProfile, recoveryCts));
+        }
+
+        /// <summary>Cancels a recovery that is waiting for internet or logging back in.</summary>
+        private void CancelGameRecovery(string reason)
+        {
+            CancellationTokenSource? recoveryCts = Interlocked.Exchange(ref _gameRecoveryCts, null);
+            if (recoveryCts == null)
+                return;
+
+            try { recoveryCts.Cancel(); } catch (ObjectDisposedException) { }
+            AppendBotLog($"[GameRecovery] Automatic game recovery cancelled ({reason}).");
+        }
+
+        private async Task RunGameCrashRecoveryAsync(
+            BotProfile? activeProfile,
+            CancellationTokenSource recoveryCts)
+        {
+            CancellationToken token = recoveryCts.Token;
+            try
+            {
+                BotProfile? profile = ResolveCrashRecoveryProfile(activeProfile);
+                if (profile == null)
+                    return;
+
+                uint crashedGameProcessId = _attachedPid;
+                if (crashedGameProcessId != 0)
+                    AppendBotLog($"[GameRecovery] Old game process PID={crashedGameProcessId} will be checked before relaunch.");
+
+                // The old driver handles/scanner must be released before the new client is
+                // opened. Detach does not touch the (possibly hung) process itself.
+                await RunOnUiThreadAsync(DetachCurrentGameProcess);
+
+                var recovery = new GameCrashRecoveryService(
+                    AppendBotLog,
+                    _internetConnectionProbe.IsInternetAvailableAsync,
+                    (useMageLogin, ct) => _recoveryGameClientStartupService.StartAsync(useMageLogin, ct),
+                    AttachToGameForRecoveryAsync,
+                    WaitForGameMapLoadedForRecoveryAsync,
+                    TeleportToCityForRecoveryAsync,
+                    StartMainProfileForRecoveryAsync);
+
+                GameCrashRecoveryOutcome outcome = await recovery.RecoverAsync(
+                    crashedGameProcessId,
+                    profile,
+                    IsMageLoginSelected,
+                    token);
+
+                if (outcome == GameCrashRecoveryOutcome.Failed)
+                {
+                    AppendBotLog(
+                        "[GameRecovery] Automatic recovery could not finish. The bot stays stopped; " +
+                        "relog the game and start the workflow manually.");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                AppendBotLog("[GameRecovery] Automatic recovery cancelled.");
+            }
+            catch (Exception ex)
+            {
+                AppendBotLog($"[GameRecovery] Automatic recovery error: {ex.Message}. Manual restart is required.");
+            }
+            finally
+            {
+                if (ReferenceEquals(_gameRecoveryCts, recoveryCts))
+                    _gameRecoveryCts = null;
+                recoveryCts.Dispose();
+                Interlocked.Exchange(ref _gameRecoveryActive, 0);
+            }
+        }
+
+        private BotProfile? ResolveCrashRecoveryProfile(BotProfile? activeProfile)
+        {
+            BotProfile? mainCot = LoadProfile(BotConstants.Connection.RecoveryMainProfileName);
+            if (mainCot != null)
+            {
+                AppendBotLog(
+                    $"[GameRecovery] Main profile resolved: '{mainCot.Name}' " +
+                    $"(configured recovery profile '{BotConstants.Connection.RecoveryMainProfileName}').");
+                return mainCot;
+            }
+
+            if (activeProfile != null)
+            {
+                AppendBotLog(
+                    $"[GameRecovery] The configured recovery profile '{BotConstants.Connection.RecoveryMainProfileName}' could not be loaded; " +
+                    $"falling back to the previously active profile '{activeProfile.Name}'.");
+                return activeProfile;
+            }
+
+            AppendBotLog(
+                $"[GameRecovery] No recovery profile is available: '{BotConstants.Connection.RecoveryMainProfileName}' could not be loaded " +
+                "and no workflow profile was active. Manual restart is required.");
+            return null;
+        }
+
+        /// <summary>Runs an action on the WPF UI thread (the VM mutates UI-bound state).</summary>
+        private static Task RunOnUiThreadAsync(Action action)
+        {
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher == null || dispatcher.CheckAccess())
+            {
+                action();
+                return Task.CompletedTask;
+            }
+
+            return dispatcher.InvokeAsync(action).Task;
+        }
+
+        private static Task<T> RunOnUiThreadAsync<T>(Func<Task<T>> action)
+        {
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher == null || dispatcher.CheckAccess())
+                return action();
+
+            return dispatcher.InvokeAsync(action).Task.Unwrap();
+        }
+
+        /// <summary>Attaches the recovery to the freshly launched Ares process.</summary>
+        private Task<bool> AttachToGameForRecoveryAsync(int gameProcessId, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            return RunOnUiThreadAsync(async () =>
+            {
+                token.ThrowIfCancellationRequested();
+                PidText = gameProcessId.ToString();
+                return await AttachToProcessCoreAsync((uint)gameProcessId);
+            });
+        }
+
+        /// <summary>
+        /// Waits until the player pointer, map and position can be read coherently several
+        /// times in a row. This is the "map has loaded" gate used before the town teleport
+        /// and again before the main profile starts.
+        /// </summary>
+        private async Task<bool> WaitForGameMapLoadedForRecoveryAsync(
+            int timeoutMs,
+            CancellationToken token)
+        {
+            if (!_isAttached || _attachedPid == 0)
+            {
+                AppendBotLog("[GameRecovery] Map-load check skipped: the bot is not attached.");
+                return false;
+            }
+
+            GameMemoryService? memory = TryCreateRecoveryMemoryService(out string failureReason);
+            if (memory == null)
+            {
+                AppendBotLog($"[GameRecovery] Map-load check failed: {failureReason}");
+                return false;
+            }
+
+            var timer = Stopwatch.StartNew();
+            int stableReads = 0;
+            while (timer.ElapsedMilliseconds < timeoutMs)
+            {
+                token.ThrowIfCancellationRequested();
+
+                PlayerStateSnapshot snapshot = memory.GetPlayerStateSnapshot();
+                bool attackReadable = memory.TryGetAttackSpeed(out _);
+                if (snapshot.HasCoherentState && attackReadable)
+                {
+                    stableReads++;
+                    if (stableReads >= BotConstants.Connection.RecoveryMapStableReads)
+                    {
+                        AppendBotLog(
+                            $"[GameRecovery] Game world is loaded: Map={snapshot.Map} " +
+                            $"Position=({snapshot.X},{snapshot.Y}) after {timer.ElapsedMilliseconds / 1000.0:F1} s " +
+                            $"({stableReads} stable reads).");
+                        return true;
+                    }
+                }
+                else
+                {
+                    stableReads = 0;
+                }
+
+                await Task.Delay(BotConstants.Connection.RecoveryReadinessPollMs, token);
+            }
+
+            AppendBotLog(
+                $"[GameRecovery] The game world did not become readable within {timeoutMs / 1000.0:F0} seconds.");
+            return false;
+        }
+
+        /// <summary>
+        /// Presses the profile's town-teleport key and waits for the in-city flag. The
+        /// subsequent map-stable check gives the client time to finish the loading screen
+        /// before the main profile is started.
+        /// </summary>
+        private async Task<bool> TeleportToCityForRecoveryAsync(
+            BotProfile profile,
+            CancellationToken token)
+        {
+            if (!_isAttached || _attachedPid == 0)
+            {
+                AppendBotLog("[GameRecovery] Town teleport skipped: the bot is not attached.");
+                return false;
+            }
+
+            FocusGameWindow();
+            AppendBotLog(
+                $"[GameRecovery] Pressing the town-teleport key (vk={(byte)profile.TeleportKey}).");
+            GameInput.PressKey((byte)profile.TeleportKey, (byte)profile.TeleportScanCode);
+            ScreenshotService.CaptureFullScreen(
+                ScreenshotService.TownPortalsFolder,
+                AppendBotLog,
+                "[GameRecovery]");
+
+            GameMemoryService? memory = TryCreateRecoveryMemoryService(out string failureReason);
+            if (memory == null)
+            {
+                AppendBotLog($"[GameRecovery] Town teleport could not be verified: {failureReason}");
+                return false;
+            }
+
+            var timer = Stopwatch.StartNew();
+            while (timer.ElapsedMilliseconds < BotConstants.Connection.RecoveryTeleportTimeoutMs)
+            {
+                token.ThrowIfCancellationRequested();
+                if (memory.TryGetIsInCity(out bool isInCity) && isInCity)
+                {
+                    AppendBotLog(
+                        $"[GameRecovery] Arrived in the city after {timer.ElapsedMilliseconds / 1000.0:F1} s; " +
+                        $"waiting {BotConstants.Delays.PostTeleportUiLoadMs / 1000.0:F0} seconds for the town UI to load.");
+                    await Task.Delay(BotConstants.Delays.PostTeleportUiLoadMs, token);
+                    return true;
+                }
+
+                await Task.Delay(500, token);
+            }
+
+            AppendBotLog(
+                $"[GameRecovery] The in-city flag was not observed within " +
+                $"{BotConstants.Connection.RecoveryTeleportTimeoutMs / 1000.0:F0} seconds after the teleport key. " +
+                "The map stability check still runs before the main profile starts.");
+            return false;
+        }
+
+        /// <summary>Starts the resolved main profile once the world/town is ready.</summary>
+        private async Task<bool> StartMainProfileForRecoveryAsync(
+            BotProfile profile,
+            CancellationToken token)
+        {
+            var stopTimer = Stopwatch.StartNew();
+            while ((_workflowCoordinator?.IsRunning == true || IsTaskActive(_workflowTask)) &&
+                   stopTimer.ElapsedMilliseconds < BotConstants.Connection.RecoveryWorkflowStopTimeoutMs)
+            {
+                token.ThrowIfCancellationRequested();
+                await Task.Delay(500, token);
+            }
+
+            if (_workflowCoordinator?.IsRunning == true || IsTaskActive(_workflowTask))
+            {
+                AppendBotLog(
+                    "[GameRecovery] The previous workflow is still stopping; the main profile was not started. " +
+                    "Manual restart is required.");
+                return false;
+            }
+
+            if (!_isAttached)
+            {
+                AppendBotLog("[GameRecovery] The main profile was not started because the bot is not attached.");
+                return false;
+            }
+
+            return await RunOnUiThreadAsync(() =>
+            {
+                if (!_isAttached)
+                    return Task.FromResult(false);
+
+                AppendBotLog($"[GameRecovery] Starting workflow with profile '{profile.Name}' after recovery.");
+                StartWorkflowCore(profile, fromCrashRecovery: true);
+                bool started = _workflowCoordinator?.ActiveProfile?.Name == profile.Name &&
+                               IsTaskActive(_workflowTask);
+                return Task.FromResult(started);
+            });
+        }
+
+        /// <summary>Creates a read-only memory service for the recovery readiness checks.</summary>
+        private GameMemoryService? TryCreateRecoveryMemoryService(out string failureReason)
+        {
+            failureReason = string.Empty;
+            ulong baseAddr = ResolveAresModuleBase();
+            if (baseAddr == 0)
+            {
+                failureReason = "the Ares.exe module base could not be resolved.";
+                return null;
+            }
+
+            try
+            {
+                return new GameMemoryService(
+                    _attachedPid,
+                    DriverRead,
+                    DriverWrite,
+                    baseAddr,
+                    GetPointerSize(),
+                    AppendBotLog);
+            }
+            catch (Exception ex)
+            {
+                failureReason = ex.Message;
+                return null;
+            }
         }
 
         /// <summary>
@@ -3903,6 +4279,10 @@ namespace DriverScanTester.ViewModels
         /// </summary>
         public void StopAllActions(string reason)
         {
+            // A manual Stop All must also abort an automatic recovery that is currently
+            // waiting for internet or logging the client back in.
+            CancelGameRecovery(reason);
+
             try
             {
                 MovementDiagnostic.StopForGlobalStop(reason);
