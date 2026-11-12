@@ -1,5 +1,6 @@
 {
   "Name": "EtanaCOT2",
+  "EnableManaRegen": false,
   "FlowSteps": [
     {
       "Type": 1,

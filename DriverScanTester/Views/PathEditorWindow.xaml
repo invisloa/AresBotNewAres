@@ -683,6 +683,9 @@
                                         <CheckBox Content="Disable All Loot (including SOD/SOP)"
                                                   IsChecked="{Binding DisableAllLoot}" Margin="2" VerticalAlignment="Center"
                                                   ToolTip="Completely disables automatic loot scans, item collection and loot-related camera/screenshot operations for this profile. Movement and combat continue normally."/>
+                                        <CheckBox Content="Mage mana regeneration spell"
+                                                  IsChecked="{Binding EnableManaRegen}" Margin="2" VerticalAlignment="Center"
+                                                  ToolTip="Use the mana regeneration spell during EXP hunting when playing Mage. Disabled by default."/>
                                         <CheckBox Content="Ignore Alliance players (green)"
                                                   IsChecked="{Binding IgnoreAlliancePlayers}" Margin="2" VerticalAlignment="Center"
                                                   ToolTip="Profile-level: an Alliance (green) player marker no longer stops the bot, returns it to the city or blocks an attack on every route of this profile. The path-level option works independently. Direct player targets stay blocked."/>

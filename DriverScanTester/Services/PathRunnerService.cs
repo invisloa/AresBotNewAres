@@ -91,9 +91,11 @@ namespace DriverScanTester.Services
         /// per-waypoint path-level flag.</param>
         /// <param name="expHuntLoop">Explicit EXP-loop flag. True only when the active workflow
         /// step is <c>ExpLoop</c> (BotWorkflowCoordinator.ExecuteExpLoopStepAsync). It is passed
-        /// to <see cref="MovementSystem.ExpHuntLoopMode"/> and is the only switch that can
+        /// to <see cref="MovementSystem.ExpHuntLoopMode"/> and requires the profile switch to
         /// enable the mana regen skill (key 6) — a looped travel route is never
         /// EXP hunting, so this is never inferred from <c>loop</c>.</param>
+        /// <param name="enableManaRegen">Profile switch for Mage mana regeneration;
+        /// false for old profiles and all non-EXP routes.</param>
         /// <returns>True if the path completed normally (non-loop); false if cancelled.</returns>
         public async Task<bool> RunPathAsync(
             List<Waypoint> waypoints,
@@ -104,7 +106,8 @@ namespace DriverScanTester.Services
             bool disableAllLoot = false,
             bool ignoreAlliancePlayers = false,
             bool ignoreEmpirePlayers = false,
-            bool expHuntLoop = false)
+            bool expHuntLoop = false,
+            bool enableManaRegen = false)
         {
             LastStopReason = PathRunStopReason.None;
             if (waypoints == null || waypoints.Count == 0)
@@ -151,7 +154,8 @@ namespace DriverScanTester.Services
                     IgnoreEmpirePlayersOverride = ignoreEmpirePlayers,
                     // Explicit EXP-loop flag: enables the mana regen skill only
                     // for the workflow ExpLoop step with a combat waypoint mode.
-                    ExpHuntLoopMode = expHuntLoop
+                    ExpHuntLoopMode = expHuntLoop,
+                    EnableManaRegen = enableManaRegen
                 };
             }
             catch

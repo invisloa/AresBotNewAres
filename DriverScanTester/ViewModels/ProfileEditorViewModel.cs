@@ -154,6 +154,7 @@ namespace DriverScanTester.ViewModels
                     OnPropertyChanged(nameof(DryRunRepot));
                     OnPropertyChanged(nameof(LootPriority));
                     OnPropertyChanged(nameof(DisableAllLoot));
+                    OnPropertyChanged(nameof(EnableManaRegen));
                     OnPropertyChanged(nameof(IgnoreAlliancePlayers));
                     OnPropertyChanged(nameof(IgnoreEmpirePlayers));
                     OnPropertyChanged(nameof(LootPriorityEditable));
@@ -277,6 +278,18 @@ namespace DriverScanTester.ViewModels
                 CurrentProfile.DisableAllLoot = value;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(LootPriorityEditable));
+            }
+        }
+
+        public bool EnableManaRegen
+        {
+            get => CurrentProfile?.EnableManaRegen ?? false;
+            set
+            {
+                if (CurrentProfile == null || CurrentProfile.EnableManaRegen == value)
+                    return;
+                CurrentProfile.EnableManaRegen = value;
+                OnPropertyChanged();
             }
         }
 
@@ -532,6 +545,7 @@ namespace DriverScanTester.ViewModels
                 DryRunRepot = false,
                 LootPriority = false,
                 DisableAllLoot = false,
+                EnableManaRegen = false,
                 IgnoreAlliancePlayers = false,
                 IgnoreEmpirePlayers = false,
                 TeleportKey = BotConstants.Workflow.DefaultTeleportKey,

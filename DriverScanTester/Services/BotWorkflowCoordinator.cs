@@ -1586,8 +1586,9 @@ namespace DriverScanTester.Services
                 disableAllLoot: _profile.DisableAllLoot,
                 ignoreAlliancePlayers: _profile.IgnoreAlliancePlayers,
                 ignoreEmpirePlayers: _profile.IgnoreEmpirePlayers,
-                // Explicit EXP-loop flag: this is the only call site that enables the
-                // Mana regen (key 6). Travel, repot, city and recovery
+                enableManaRegen: _profile.EnableManaRegen,
+                // EXP-loop context and the profile switch are both required for
+                // mana regen (key 6). Travel, repot, city and recovery
                 // routes never pass it, regardless of their loop flag.
                 expHuntLoop: true);
 

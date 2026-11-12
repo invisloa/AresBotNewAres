@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using DriverScanTester.Models;
@@ -27,6 +28,23 @@ namespace DriverScanTester.Tests
         private const ulong ModuleBase = 0;
         private const ulong PlayerBase = 0x100000;
         private const int MonsterTargetId = 700;
+
+        [Fact]
+        public async Task ManaRegen_IsDisabledByDefaultForNewAndLegacyProfiles()
+        {
+            Assert.False(new BotProfile().EnableManaRegen);
+            var legacy = JsonSerializer.Deserialize<BotProfile>("{\"Name\":\"Legacy\"}");
+            Assert.NotNull(legacy);
+            Assert.False(legacy!.EnableManaRegen);
+
+            var rig = new Rig(new Memory { Mana = 40, MaxMana = 100 }.Create())
+            {
+                EnableManaRegen = false
+            };
+            rig.ArmManaRegenCastOpportunity("TAB target cycle");
+            Assert.False(await rig.TryCastManaRegenAsync(CancellationToken.None));
+            Assert.Equal(0, rig.KeyPressCount);
+        }
 
         // ── 1. the happy path ─────────────────────────────────────────────────
 
@@ -503,6 +521,7 @@ namespace DriverScanTester.Tests
                         () => 0, new StubCombatPlayerPresenceScanner()))
             {
                 ExpHuntLoopMode = expHuntLoop;
+                EnableManaRegen = true;
             }
 
             public int KeyPressCount { get; private set; }

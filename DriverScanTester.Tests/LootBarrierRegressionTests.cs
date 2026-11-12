@@ -1038,6 +1038,140 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void EachKillSupersedesDeferredLootAndStartsWithFreshScanEvidence()
+        {
+            using var loot = CreateLoot(_ => { });
+            loot.MoveAndAttackAndLootMode = true;
+            loot.ShouldWithholdPostKillNormalLoot = () => true;
+
+            long oldId = loot.BeginMandatoryLootRequest(LootBarrierReason.PostKill, freshPostKill: true);
+            loot.NotifyNavigationHeld(oldId);
+            RunMandatoryService(loot);
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(oldId, out LootRequestStatus oldDeferred));
+            Assert.Equal(LootRequestState.Deferred, oldDeferred.State);
+
+            long newId = loot.BeginMandatoryLootRequest(LootBarrierReason.PostKill, freshPostKill: true);
+            Assert.NotEqual(oldId, newId);
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(oldId, out LootRequestStatus superseded));
+            Assert.Equal(LootRequestState.Cancelled, superseded.State);
+            loot.NotifyNavigationHeld(newId);
+            RunMandatoryService(loot);
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(newId, out LootRequestStatus fresh));
+            Assert.Equal(LootRequestState.Deferred, fresh.State);
+            Assert.Equal(0, fresh.ItemsCollected);
+        }
+
+        [Fact]
+        public void DeathHandoffCannotServiceOldTravelLootBeforeFreshPostKillRequest()
+        {
+            using var loot = CreateLoot(_ => { });
+            loot.MoveAndAttackAndLootMode = true;
+            long travelId = loot.BeginMandatoryLootRequest(LootBarrierReason.TravelCandidateVerification);
+            loot.NotifyNavigationHeld(travelId);
+            SetPrivateField(loot, "_mobSelectionGeneration", 1L);
+            InvokePrivate(loot, "MarkPostKillHandoffIfNeeded");
+            Assert.True(loot.IsPostKillHandoffPending);
+
+            RunMandatoryService(loot);
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(travelId, out LootRequestStatus travel));
+            Assert.Equal(LootRequestState.Pending, travel.State);
+
+            long postKillId = loot.BeginMandatoryLootRequest(
+                LootBarrierReason.PostKill, freshPostKill: true);
+            Assert.False(loot.IsPostKillHandoffPending);
+            Assert.NotEqual(travelId, postKillId);
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(travelId, out LootRequestStatus old));
+            Assert.Equal(LootRequestState.Cancelled, old.State);
+        }
+
+        [Fact]
+        public void DeathObservedAfterFreshRequestDoesNotReopenHandoffWait()
+        {
+            using var loot = CreateLoot(_ => { });
+            loot.MoveAndAttackAndLootMode = true;
+            loot.ShouldWithholdPostKillNormalLoot = () => true;
+            SetPrivateField(loot, "_mobSelectionGeneration", 1L);
+
+            long postKillId = loot.BeginMandatoryLootRequest(
+                LootBarrierReason.PostKill, freshPostKill: true);
+            InvokePrivate(loot, "MarkPostKillHandoffIfNeeded");
+            Assert.False(loot.IsPostKillHandoffPending);
+
+            loot.NotifyNavigationHeld(postKillId);
+            RunMandatoryService(loot);
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(postKillId, out LootRequestStatus status));
+            Assert.Equal(LootRequestState.Deferred, status.State);
+        }
+
+        [Fact]
+        public void FindingAnotherMobKeepsNormalLootWithheldUntilAnEmptyTargetLadder()
+        {
+            using var scenario = CreateRetargetScenario();
+            SetPrivateField(scenario.Movement, "_postKillCloseMobCheckActive", true);
+            SetPrivateField(scenario.Movement, "_postKillNormalLootWithheld", true);
+            long requestId = scenario.Loot.BeginMandatoryLootRequest(
+                LootBarrierReason.PostKill, freshPostKill: true);
+            scenario.Loot.NotifyNavigationHeld(requestId);
+
+            InvokePrivate(scenario.Movement, "EndPostKillCloseMobCheck", false, "monster found");
+            RunMandatoryService(scenario.Loot);
+            Assert.True(scenario.Loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus withheld));
+            Assert.Equal(LootRequestState.Deferred, withheld.State);
+
+            SetPrivateField(scenario.Movement, "_postKillCloseMobCheckActive", true);
+            InvokePrivate(scenario.Movement, "EndPostKillCloseMobCheck", true, "empty target ladder");
+            RunMandatoryService(scenario.Loot);
+            Assert.True(scenario.Loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus released));
+            Assert.Equal(LootRequestState.Running, released.State);
+        }
+
+        [Fact]
+        public async Task MonsterFoundAfterPinkScanCannotStartOldLootBeforeNextKillResetsRequest()
+        {
+            bool groupingWasEnabled = MobGroupingRuntimeSettings.Enabled;
+            try
+            {
+                MobGroupingRuntimeSettings.Enabled = false;
+                using var scenario = CreateRetargetScenario();
+                object handler = typeof(MovementSystem).GetField("_combatHandler", PrivateInstance)!
+                    .GetValue(scenario.Movement)!;
+                SetPrivateField(handler, "_wasAttacking", true);
+
+                await scenario.Movement.Update(CancellationToken.None);
+                long firstId = scenario.Movement.LootBarrier.RequestId;
+                RunMandatoryService(scenario.Loot);
+                FinishPostKillSodSopPassWithNoDrop(scenario.Loot);
+                await scenario.Movement.Update(CancellationToken.None);
+                scenario.Movement.OnTargetCycle = () => scenario.Memory.TargetId = 16386;
+                await InvokePrivateBoolAsync(scenario.Movement,
+                    "HandleCombatRetargetCameraStageAsync",
+                    BotMode.MoveAndAttackAndLoot, (short)17020, CancellationToken.None);
+                await InvokePrivateBoolAsync(scenario.Movement,
+                    "HandleCombatRetargetCameraStageAsync",
+                    BotMode.MoveAndAttackAndLoot, (short)17020, CancellationToken.None);
+
+                RunMandatoryService(scenario.Loot, mobSelected: true);
+                scenario.Memory.TargetId = 0;
+                RunMandatoryService(scenario.Loot);
+                Assert.True(scenario.Loot.TryGetMandatoryLootRequestStatus(firstId, out LootRequestStatus withheld));
+                Assert.Equal(LootRequestState.Deferred, withheld.State);
+
+                SetPrivateField(handler, "_wasAttacking", true);
+                await scenario.Movement.Update(CancellationToken.None);
+                long secondId = scenario.Movement.LootBarrier.RequestId;
+                Assert.True(firstId != secondId, string.Join("\n", scenario.Log));
+                Assert.True(scenario.Loot.TryGetMandatoryLootRequestStatus(firstId, out LootRequestStatus old));
+                Assert.Equal(LootRequestState.Cancelled, old.State);
+                Assert.True(scenario.Movement.IsPostKillCloseMobCheckPending);
+                Assert.True(scenario.Loot.IsPinkScanPendingOrActive);
+            }
+            finally
+            {
+                MobGroupingRuntimeSettings.Enabled = groupingWasEnabled;
+            }
+        }
+
+        [Fact]
         public async Task PostKillCloseMobCheckIsSkippedWhenTheWaypointAttackIsDisengaged()
         {
             bool groupingWasEnabled = MobGroupingRuntimeSettings.Enabled;
@@ -1738,6 +1872,35 @@ namespace DriverScanTester.Tests
             Assert.True((bool)typeof(MovementSystem)
                 .GetField("_combatRetargetFailed", PrivateInstance)!.GetValue(scenario.Movement)!);
             Assert.Contains(scenario.Log, line => line.Contains("no blind TAB sent", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public async Task UnverifiedPostKillTargetLadderCannotReleaseNormalLoot()
+        {
+            using var scenario = CreateRetargetScenario();
+            SetPrivateField(scenario.Movement, "_postKillCloseMobCheckActive", true);
+            SetPrivateField(scenario.Movement, "_postKillNormalLootWithheld", true);
+            long requestId = scenario.Loot.BeginMandatoryLootRequest(
+                LootBarrierReason.PostKill, freshPostKill: true);
+            scenario.Loot.NotifyNavigationHeld(requestId);
+            RunMandatoryService(scenario.Loot);
+            scenario.Memory.IgnoreCameraWrites = true;
+            InvokePrivate(scenario.Movement, "StartCombatRetargetSearch");
+
+            for (int attempt = 0; attempt < 3; attempt++)
+                await InvokePrivateBoolAsync(scenario.Movement,
+                    "HandleCombatRetargetCameraStageAsync",
+                    BotMode.MoveAndAttackAndLoot, (short)17020, CancellationToken.None);
+
+            Assert.True(scenario.Movement.IsPostKillCloseMobCheckPending);
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+            RunMandatoryService(scenario.Loot);
+            Assert.True(scenario.Loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus withheld));
+            Assert.Equal(LootRequestState.Deferred, withheld.State);
+            Assert.True(await InvokePrivateBoolAsync(scenario.Movement,
+                "TickPostKillCloseMobCheckAsync", BotMode.MoveAndAttackAndLoot, CancellationToken.None));
+            Assert.Equal("VeryLowSearch", ReadPrivateField<object>(
+                scenario.Movement, "_combatRetargetCameraStage").ToString());
         }
 
         [Fact]

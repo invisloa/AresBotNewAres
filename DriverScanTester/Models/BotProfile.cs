@@ -101,6 +101,9 @@ namespace DriverScanTester.Models
         /// </summary>
         public bool DisableAllLoot { get; set; } = false;
 
+        /// <summary>Allow the Mage mana regeneration spell during this profile's EXP loop.</summary>
+        public bool EnableManaRegen { get; set; } = false;
+
         /// <summary>
         /// When true, an Alliance (green) faction marker seen while this profile runs no
         /// longer stops the bot, returns it to the city or blocks an attack. Applies to every

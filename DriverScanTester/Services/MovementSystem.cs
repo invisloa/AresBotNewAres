@@ -316,10 +316,11 @@ namespace DriverScanTester.Services
         /// ExpLoop step). Set explicitly by <see cref="PathRunnerService"/> — the Sorcerer
         /// automatic mana skill is NEVER inferred from <see cref="LoopPath"/>, because a
         /// looped travel route is not EXP hunting. Combined with the effective waypoint mode
-        /// (MoveAndAttack / MoveAndAttackAndLoot) and the Mage class it is the only thing
-        /// that enables the key-6 mana skill.
+        /// (MoveAndAttack / MoveAndAttackAndLoot), the Mage class and the profile's
+        /// <see cref="EnableManaRegen"/> setting it permits the key-6 mana skill.
         /// </summary>
         public bool ExpHuntLoopMode { get; set; }
+        public bool EnableManaRegen { get; set; } = false;
 
         private bool _isWaypointSpecialRecoveryActive;
         private bool _waypointRepotRequested;
@@ -517,9 +518,10 @@ namespace DriverScanTester.Services
         // even while mobs are around. Only then does the close-camera TAB search look for
         // a nearby mob. A found mob is fought first; the normal item cycle stays withheld
         // (mandatory obligation Deferred) until a search ends without a mob, and only then
-        // are the normal items found earlier looted.
+        // does a fresh normal item scan and collection run.
         /// <summary>True while the post-kill SOD/SOP + close-mob phase owns the sequence.</summary>
         private volatile bool _postKillCloseMobCheckActive;
+        private volatile bool _postKillNormalLootWithheld;
         /// <summary>When the current post-kill phase started (UtcNow) — pink-request TTL guard.</summary>
         private DateTime _postKillCloseMobCheckSince = DateTime.MinValue;
         /// <summary>Log throttle for the SOD/SOP hold inside the post-kill phase.</summary>
@@ -546,7 +548,8 @@ namespace DriverScanTester.Services
             {
                 _lootSystemRef = value;
                 if (value != null)
-                    value.ShouldWithholdPostKillNormalLoot = () => IsPostKillCloseMobCheckPending;
+                    value.ShouldWithholdPostKillNormalLoot = () =>
+                        IsPostKillCloseMobCheckPending || _postKillNormalLootWithheld;
             }
         }
 
@@ -2085,7 +2088,7 @@ namespace DriverScanTester.Services
         /// </summary>
         internal void ArmManaRegenCastOpportunity(string reason)
         {
-            if (!ExpHuntLoopMode)
+            if (!ExpHuntLoopMode || !EnableManaRegen)
                 return;
 
             float waypointX = 0f;
@@ -2159,7 +2162,7 @@ namespace DriverScanTester.Services
             bool manaReadSucceeded = _memoryService.TryGetMana(out short currentMana);
             MaxHpManaReadResult maxStats = _memoryService.GetMaxHpMana();
 
-            bool eligible = IsManaRegenCastEligible(
+            bool eligible = EnableManaRegen && IsManaRegenCastEligible(
                 ExpHuntLoopMode,
                 CurrentMode,
                 playerClass,
@@ -2192,6 +2195,12 @@ namespace DriverScanTester.Services
         /// <returns>True when this tick was consumed by the cast attempt.</returns>
         internal async Task<bool> TryCastManaRegenAsync(CancellationToken token)
         {
+            if (!EnableManaRegen)
+            {
+                _manaRegenActive = false;
+                ClearManaRegenCastOpportunity("disabled by profile", log: false);
+                return false;
+            }
             if (!_manaRegenCastOpportunity.HasValue)
                 return false;
 
@@ -2436,6 +2445,7 @@ namespace DriverScanTester.Services
         private void ReleaseLootBarrierForDisabledPolicy(string reason)
         {
             EndPostKillCloseMobCheck(releaseNormalLoot: false, reason);
+            _postKillNormalLootWithheld = false;
 
             bool hadOwnership = _lootNavigationBarrierHoldsInput ||
                                 _lootBarrier.IsActive ||
@@ -2455,10 +2465,13 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Arms the explicit navigation barrier and creates/coalesces the authoritative
-        /// LootSystem request. StopMoving releases W/A/D before any loot work starts.
+        /// Arms the explicit navigation barrier. A real kill uses a fresh request;
+        /// other callers may coalesce. StopMoving releases W/A/D before loot starts.
         /// </summary>
         private void ArmMandatoryLootBarrier(LootBarrierReason reason)
+            => ArmMandatoryLootBarrierCore(reason, freshPostKill: false);
+
+        private void ArmMandatoryLootBarrierCore(LootBarrierReason reason, bool freshPostKill)
         {
             if (IsAutomaticLootDisabled)
             {
@@ -2485,7 +2498,7 @@ namespace DriverScanTester.Services
             }
 
             bool barrierWasActive = _lootBarrier.IsActive;
-            long requestId = loot.BeginMandatoryLootRequest(reason);
+            long requestId = loot.BeginMandatoryLootRequest(reason, freshPostKill);
             if (requestId <= 0)
             {
                 SetLootNavigationBarrierHoldsInput(true);
@@ -2563,6 +2576,7 @@ namespace DriverScanTester.Services
             if (!RequiresMandatoryLootBarrier(CurrentMode))
             {
                 EndPostKillCloseMobCheck(releaseNormalLoot: false, $"mode changed to {CurrentMode}");
+                _postKillNormalLootWithheld = false;
 
                 if (_lootBarrier.IsActive || _lootBarrier.HasTerminalFailure)
                 {
@@ -4861,8 +4875,7 @@ namespace DriverScanTester.Services
             bool confirmedMonsterTarget = targetValidation.IsConfirmedMonster;
             if (_manaRegenActive)
             {
-                if (confirmedMonsterTarget || !ExpHuntLoopMode ||
-                    (currentMode != BotMode.MoveAndAttack && currentMode != BotMode.MoveAndAttackAndLoot))
+                if (confirmedMonsterTarget || !ExpHuntLoopMode)
                     _manaRegenActive = false;
                 else
                     StopMoving();
@@ -4898,7 +4911,7 @@ namespace DriverScanTester.Services
 
             if (_finalStandbyActive && _lootBarrier.IsBlockingNavigation &&
                 !confirmedMonsterTarget && !_combatGateReturnActive &&
-                !IsPostKillCloseMobCheckPending)
+                !IsPostKillCloseMobCheckPending && !_postKillNormalLootWithheld)
             {
                 if (await HoldNavigationForMandatoryLootAsync(token))
                     return;
@@ -5238,9 +5251,12 @@ namespace DriverScanTester.Services
             {
                 case CombatAction.TabAfterKill:
                     _resumeCombatSkillAfterGrouping = false;
-                    // Explicit kill signal — arm/refresh the mandatory obligation before
-                    // any retarget TAB. Consecutive kills coalesce into the same request.
-                    ArmMandatoryLootBarrier(LootBarrierReason.PostKill);
+                    // A kill starts a fresh SOD/SOP, target and normal-loot generation.
+                    _postKillNormalLootWithheld = CurrentMode == BotMode.MoveAndAttackAndLoot &&
+                        !IsAutomaticLootDisabled;
+                    _manaRegenActive = false;
+                    ClearManaRegenCastOpportunity("new kill", log: false);
+                    ArmMandatoryLootBarrierCore(LootBarrierReason.PostKill, freshPostKill: true);
                     if (CurrentMode == BotMode.MoveAndAttackAndLoot)
                     {
                         _postKillCloseTargetCheckPending = true;
@@ -9876,12 +9892,13 @@ namespace DriverScanTester.Services
             _postKillCloseMobCheckSince = DateTime.MinValue;
             _postKillCloseMobHoldLogged = false;
             _postKillCloseMobLadderStartLogged = false;
+            // The target ladder has ended. Keep the normal-loot request deferred when
+            // it found a mob, but let combat observe that mob's eventual death.
+            _postKillRetargetRequestId = 0;
 
             if (releaseNormalLoot)
             {
-                // The mob search is finished: the completed normal-loot obligation must not
-                // start a second retarget search afterwards.
-                _postKillRetargetRequestId = 0;
+                _postKillNormalLootWithheld = false;
                 _log($"[PostKillLoot] Close-mob check finished ({reason}) — normal item loot runs as soon as no mob is selected.");
             }
             else
@@ -10005,7 +10022,7 @@ namespace DriverScanTester.Services
                 _log($"[CombatRetarget] Monster selected targetId={selectedTargetId} stage={GetCombatRetargetStageName(stage)}");
                 ClearCombatRetargetSearch();
                 // Post-kill order: a nearby mob beats the withheld normal item loot.
-                EndPostKillCloseMobCheck(releaseNormalLoot: true, "a nearby mob is selected — combat takes over");
+                EndPostKillCloseMobCheck(releaseNormalLoot: false, "a nearby mob is selected — combat takes over; normal items remain withheld");
                 return false;
             }
 
@@ -10122,10 +10139,10 @@ namespace DriverScanTester.Services
             TryApplyMovementCameraDistance(restoreCameraDistance);
             ClearCombatRetargetSearch();
             _combatRetargetFailed = true;
-            // The search ended without acquiring a monster (camera verification failed), so normal
-            // items may be looted and the mana regen may be considered on the following tick.
-            EndPostKillCloseMobCheck(releaseNormalLoot: true, "retarget camera verification failed without a mob");
-            ArmManaRegenCastOpportunity("retarget search aborted without a monster");
+            // A failed camera check is not evidence that no mob is nearby. Keep the
+            // post-kill normal-loot gate closed; its owner retries the ladder next tick.
+            if (_postKillCloseMobCheckActive)
+                _log("[PostKillLoot] Target ladder unverified; retrying before normal loot or mana regen.");
         }
 
         private bool IsCurrentCombatRetargetMonsterSelected()

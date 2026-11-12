@@ -347,6 +347,19 @@ namespace DriverScanTester.Services
         // authoritative lifecycle. Only a verified complete empty scan transitions a
         // request to Completed. "Loot cycle inactive" is never treated as success.
         private long _nextMandatoryLootRequestId;
+        private volatile bool _awaitingPostKillHandoff;
+        private long _mobSelectionGeneration;
+        private long _freshPostKillRequestSelectionGeneration = -1;
+        internal bool IsPostKillHandoffPending => _awaitingPostKillHandoff;
+
+        private void MarkPostKillHandoffIfNeeded()
+        {
+            // MovementSystem and LootSystem run on separate ticks. Their death
+            // observations may arrive in either order.
+            _awaitingPostKillHandoff =
+                System.Threading.Interlocked.Read(ref _freshPostKillRequestSelectionGeneration) !=
+                System.Threading.Interlocked.Read(ref _mobSelectionGeneration);
+        }
         private MandatoryLootRequest? _activeMandatoryLootRequest;
         private MandatoryLootRequest? _lastMandatoryLootRequest;
         private readonly Dictionary<long, MandatoryLootRequest> _mandatoryLootRequestHistory = new();
@@ -506,6 +519,8 @@ namespace DriverScanTester.Services
                 {
                     bool changed = _moveAndAttackAndLootMode != value;
                     _moveAndAttackAndLootMode = value;
+                    if (!value)
+                        _awaitingPostKillHandoff = false;
                     if (!value && !_pinkLootOnlyMode &&
                         (changed || _pinkScanRequested || _pinkScanOwnsCameraCursor ||
                          _lootState == LootMachineState.PinkScan))
@@ -554,6 +569,7 @@ namespace DriverScanTester.Services
 
                 if (value)
                 {
+                    _awaitingPostKillHandoff = false;
                     StopScanSpacebarSpam();
                     ResetPlayerMarkerConfirmation();
                     CancelAllLootWork("automatic loot disabled by profile/path policy");
@@ -628,18 +644,43 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Creates (or coalesces into) a mandatory loot request. Consecutive kills while
-        /// the request is still pending/running/deferred reuse the same generation so the
-        /// obligation cannot be lost; a request resolved as Completed/Failed/Cancelled/
-        /// Unavailable yields a new id. A post-kill reason always wins over a travel
-        /// candidate so a kill can never be downgraded to a lighter obligation.
+        /// Creates or coalesces a mandatory loot request. With freshPostKill, each new
+        /// kill supersedes any older pending/running/deferred request and starts a new
+        /// generation. Other callers still coalesce active requests. A post-kill reason
+        /// always wins over a travel candidate.
         /// </summary>
-        public long BeginMandatoryLootRequest(LootBarrierReason reason)
+        public long BeginMandatoryLootRequest(LootBarrierReason reason, bool freshPostKill = false)
         {
             lock (_cameraCursorOwnershipGate)
             {
                 if (_automaticLootDisabled)
                     return 0;
+
+                // A kill starts a new loot generation at the player's current position.
+                // A deferred request from an earlier kill (or a travel candidate) must
+                // never start collecting after this kill's target check is finished.
+                if (freshPostKill && reason == LootBarrierReason.PostKill &&
+                    _activeMandatoryLootRequest != null &&
+                    IsMandatoryRequestActiveLocked(_activeMandatoryLootRequest))
+                {
+                    MandatoryLootRequest previous = _activeMandatoryLootRequest;
+                    previous.State = LootRequestState.Cancelled;
+                    previous.Detail = "superseded by a new kill";
+                    previous.UpdatedAtUtc = DateTime.UtcNow;
+                    _activeMandatoryLootRequest = null;
+                    _activeTravelCandidate = null;
+                    _combatRecoveryMovementRequestId = 0;
+                    _candidateSuppression.Clear();
+                    ClearLootProbeProgress();
+                    _log($"[LootBarrier] Superseded request={previous.Id} after a new kill; previous scan results discarded.");
+                }
+                if (freshPostKill && reason == LootBarrierReason.PostKill)
+                {
+                    System.Threading.Interlocked.Exchange(
+                        ref _freshPostKillRequestSelectionGeneration,
+                        System.Threading.Interlocked.Read(ref _mobSelectionGeneration));
+                    _awaitingPostKillHandoff = false;
+                }
 
                 if (_activeMandatoryLootRequest != null &&
                     IsMandatoryRequestActiveLocked(_activeMandatoryLootRequest))
@@ -1870,6 +1911,12 @@ namespace DriverScanTester.Services
                 }
                 else if (MoveAndAttackAndLootMode)
                 {
+                    // Loot.Update can observe the death one tick before MovementSystem
+                    // opens the fresh post-kill request. Do not start a travel scan or
+                    // service an old request in that handoff window.
+                    // Movement may already have opened this kill's fresh request.
+                    // Only wait when the latest request predates the mob we just saw.
+                    MarkPostKillHandoffIfNeeded();
                     // The mandatory post-kill request belongs to MovementSystem.
                     // Never start the legacy timer-driven collector here: that was the
                     // source of repeated stationary scans during ordinary travel.
@@ -1943,6 +1990,7 @@ namespace DriverScanTester.Services
             // full cycle by itself: a PotentialCandidate creates a travel-verification
             // request that MovementSystem turns into a navigation hold.
             if (MoveAndAttackAndLootMode &&
+                !_awaitingPostKillHandoff &&
                 !isMobSelected &&
                 !PinkLootOnlyMode &&
                 !HasActiveMandatoryLootRequest &&
@@ -1959,6 +2007,8 @@ namespace DriverScanTester.Services
             // cancelled — it belongs to the mob that just died and must finish.
             if (isMobSelected)
             {
+                if (!_wasMobSelectedPrev)
+                    System.Threading.Interlocked.Increment(ref _mobSelectionGeneration);
                 // Remember the selection for mob-death detection.
                 _wasMobSelectedPrev = true;
 
@@ -2687,6 +2737,8 @@ namespace DriverScanTester.Services
         /// </summary>
         private void ServiceMandatoryLootRequest(bool isMobSelected)
         {
+            if (_awaitingPostKillHandoff)
+                return;
             if (_automaticLootDisabled)
             {
                 lock (_cameraCursorOwnershipGate)

@@ -1,5 +1,6 @@
 {
   "Name": "MainCOT",
+  "EnableManaRegen": false,
   "FlowSteps": [
     {
       "Type": 1,
@@ -134,8 +135,8 @@
   "MaxWeightRatio": 0.9,
   "MinHp": 999,
   "MinMana": 100,
-  "HpBuyTarget": 66,
-  "ManaBuyTarget": 66,
+  "HpBuyTarget": 45,
+  "ManaBuyTarget": 35,
   "RedBuyTarget": 4,
   "WhiteBuyTarget": 4,
   "DryRunRepot": false,
