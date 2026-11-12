@@ -1004,7 +1004,7 @@ namespace DriverScanTester.Services
         {
             ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
             if (playerBase == 0) return false;
-            return ReadInt(playerBase + IsInCityOffset) == 1;
+            return (ReadInt(playerBase + IsInCityOffset) & 1) != 0;
         }
 
         /// <summary>
@@ -1022,7 +1022,7 @@ namespace DriverScanTester.Services
             if (!TryReadInt(playerBase + IsInCityOffset, out int value))
                 return false;
 
-            isInCity = value == 1;
+            isInCity = (value & 1) != 0;
             return true;
         }
 
