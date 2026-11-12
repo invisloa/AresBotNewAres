@@ -1155,6 +1155,7 @@ namespace DriverScanTester.ViewModels
 
         private async Task StartGameClientAsync(CancellationTokenSource startupCts, bool useMageLogin)
         {
+            GameClientStartupResult? startedResult = null;
             try
             {
                 GameClientStartupResult result = await _gameClientStartupService.StartAsync(useMageLogin, startupCts.Token);
@@ -1162,7 +1163,8 @@ namespace DriverScanTester.ViewModels
                 {
                     AppendBotLog(
                         $"[Startup] Automatic game startup completed; game PID={result.GameProcessId}. " +
-                        "The workflow can be started after the character is in the world.");
+                        "The workflow will be started automatically once the character is in the world.");
+                    startedResult = result;
                 }
                 else if (result.Status == GameClientStartupStatus.AlreadyRunning)
                 {
@@ -1183,8 +1185,115 @@ namespace DriverScanTester.ViewModels
             }
             finally
             {
+                // The automatic attach/world-ready wait/profile start belongs to the same
+                // run: keep the startup token alive and Stop All usable until it finishes.
+                if (startedResult != null)
+                {
+                    _isGameStartupRunning = true;
+                    CommandManager.InvalidateRequerySuggested();
+                    try
+                    {
+                        await AutoStartWorkflowAfterStartupAsync(startedResult, startupCts.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        AppendBotLog("[Startup] Automatic profile start cancelled by Stop All.");
+                    }
+                    catch (Exception ex)
+                    {
+                        AppendBotLog($"[Startup] Automatic profile start failed: {ex.Message}");
+                    }
+                }
+
                 FinishGameStartup(startupCts);
             }
+        }
+
+        /// <summary>
+        /// After the login/character-selection sequence the bot attaches to the new client by
+        /// itself and starts the profile selected in this window. When nothing is selected the
+        /// default profile (MainCOT) is started instead.
+        /// </summary>
+        private async Task AutoStartWorkflowAfterStartupAsync(
+            GameClientStartupResult startedResult,
+            CancellationToken token)
+        {
+            string profileName = ResolveStartupProfileName(out bool isDefaultProfile);
+            if (string.IsNullOrEmpty(profileName))
+                return;
+
+            var profile = _main.LoadProfile(profileName);
+            if (profile == null)
+            {
+                AppendBotLog(
+                    $"[Startup] Profile '{profileName}' could not be loaded; the workflow was not started automatically.");
+                return;
+            }
+
+            var errors = _main.ValidateProfile(profile);
+            if (errors.Count > 0)
+            {
+                AppendBotLog($"[Startup] Profile '{profile.Name}' validation failed; the workflow was not started automatically.");
+                foreach (string error in errors)
+                    AppendBotLog(" - " + error);
+                return;
+            }
+
+            // Mirror the automatic choice in the window so the user sees which profile runs.
+            SelectedProfileName = profileName;
+
+            string source = isDefaultProfile
+                ? $"no profile was selected, using the default '{profileName}'"
+                : $"selected in this window";
+            AppendBotLog($"[Startup] Starting profile '{profile.Name}' ({source}) after the automatic login.");
+
+            bool started = await _main.AutoStartWorkflowAfterStartupAsync(
+                startedResult.GameProcessId,
+                profile,
+                token);
+            if (!started)
+            {
+                AppendBotLog("[Startup] The workflow was not started automatically; start it manually once the character is in the world.");
+                return;
+            }
+
+            AppendBotLog($"[Startup] Workflow running with profile '{profile.Name}'.");
+            double runMinutes = ParseRunDurationMinutes();
+            if (runMinutes > 0 && _main.IsAttached)
+                _main.StartAutoStopTimer(runMinutes, "Workflow");
+        }
+
+        /// <summary>
+        /// Returns the profile that the automatic start should use: the profile selected in
+        /// this window when it can be loaded, otherwise the configured default (MainCOT).
+        /// Returns an empty string when neither is available.
+        /// </summary>
+        private string ResolveStartupProfileName(out bool isDefaultProfile)
+        {
+            isDefaultProfile = false;
+
+            string? selected = SelectedProfileName?.Trim();
+            if (!string.IsNullOrEmpty(selected))
+            {
+                if (_main.LoadProfile(selected) != null)
+                    return selected;
+
+                AppendBotLog(
+                    $"[Startup] Selected profile '{selected}' could not be loaded; " +
+                    $"falling back to the default '{BotConstants.Connection.StartupDefaultProfileName}'.");
+            }
+
+            string defaultName = BotConstants.Connection.StartupDefaultProfileName;
+            if (_main.LoadProfile(defaultName) != null)
+            {
+                isDefaultProfile = true;
+                return defaultName;
+            }
+
+            AppendBotLog(
+                $"[Startup] No profile can be started automatically: nothing is selected in this window and " +
+                $"the default profile '{defaultName}' could not be loaded.");
+            return string.Empty;
         }
 
 

@@ -4072,20 +4072,31 @@ namespace DriverScanTester.ViewModels
         /// times in a row. This is the "map has loaded" gate used before the town teleport
         /// and again before the main profile starts.
         /// </summary>
-        private async Task<bool> WaitForGameMapLoadedForRecoveryAsync(
+        private Task<bool> WaitForGameMapLoadedForRecoveryAsync(
+            int timeoutMs,
+            CancellationToken token)
+            => WaitForGameWorldReadyAsync("[GameRecovery]", timeoutMs, token);
+
+        /// <summary>
+        /// Waits until the player pointer, map and position can be read coherently several
+        /// times in a row. The log prefix identifies the caller (crash recovery or the
+        /// automatic start after the "Start Client" sequence).
+        /// </summary>
+        private async Task<bool> WaitForGameWorldReadyAsync(
+            string logPrefix,
             int timeoutMs,
             CancellationToken token)
         {
             if (!_isAttached || _attachedPid == 0)
             {
-                AppendBotLog("[GameRecovery] Map-load check skipped: the bot is not attached.");
+                AppendBotLog($"{logPrefix} Map-load check skipped: the bot is not attached.");
                 return false;
             }
 
             GameMemoryService? memory = TryCreateRecoveryMemoryService(out string failureReason);
             if (memory == null)
             {
-                AppendBotLog($"[GameRecovery] Map-load check failed: {failureReason}");
+                AppendBotLog($"{logPrefix} Map-load check failed: {failureReason}");
                 return false;
             }
 
@@ -4103,7 +4114,7 @@ namespace DriverScanTester.ViewModels
                     if (stableReads >= BotConstants.Connection.RecoveryMapStableReads)
                     {
                         AppendBotLog(
-                            $"[GameRecovery] Game world is loaded: Map={snapshot.Map} " +
+                            $"{logPrefix} Game world is loaded: Map={snapshot.Map} " +
                             $"Position=({snapshot.X},{snapshot.Y}) after {timer.ElapsedMilliseconds / 1000.0:F1} s " +
                             $"({stableReads} stable reads).");
                         return true;
@@ -4118,8 +4129,102 @@ namespace DriverScanTester.ViewModels
             }
 
             AppendBotLog(
-                $"[GameRecovery] The game world did not become readable within {timeoutMs / 1000.0:F0} seconds.");
+                $"{logPrefix} The game world did not become readable within {timeoutMs / 1000.0:F0} seconds.");
             return false;
+        }
+
+        /// <summary>
+        /// Attaches to the freshly started game client (Bot Window "Start Client") and starts the
+        /// given workflow profile once the character's map and position are readable, so the
+        /// workflow begins without the user attaching and pressing Start Workflow by hand.
+        /// </summary>
+        public async Task<bool> AutoStartWorkflowAfterStartupAsync(
+            int gameProcessId,
+            BotProfile profile,
+            CancellationToken token)
+        {
+            if (profile == null)
+                throw new ArgumentNullException(nameof(profile));
+
+            if (gameProcessId <= 0)
+            {
+                AppendBotLog("[Startup] Automatic workflow start skipped: the started game process id is unknown.");
+                return false;
+            }
+
+            if (_workflowCoordinator?.IsRunning == true || IsTaskActive(_workflowTask))
+            {
+                AppendBotLog("[Startup] Automatic workflow start skipped because a workflow is already running.");
+                return false;
+            }
+
+            int postSelectionDelayMs = BotConstants.Connection.RecoveryPostCharacterSelectionDelayMs;
+            AppendBotLog(
+                $"[Startup] Waiting {postSelectionDelayMs / 1000.0:F0} seconds for the character to enter the world before attaching.");
+            await Task.Delay(postSelectionDelayMs, token);
+
+            token.ThrowIfCancellationRequested();
+            AppendBotLog($"[Startup] Attaching to the started game process (PID={gameProcessId}) for the automatic workflow start.");
+            bool attached = false;
+            for (int attempt = 1; attempt <= BotConstants.Connection.StartupAttachAttempts && !attached; attempt++)
+            {
+                if (attempt > 1)
+                {
+                    AppendBotLog(
+                        $"[Startup] Attach attempt {attempt - 1}/{BotConstants.Connection.StartupAttachAttempts} failed; retrying in " +
+                        $"{BotConstants.Connection.StartupAttachRetryDelayMs / 1000.0:F0} seconds.");
+                    await Task.Delay(BotConstants.Connection.StartupAttachRetryDelayMs, token);
+                }
+
+                token.ThrowIfCancellationRequested();
+                attached = await RunOnUiThreadAsync(async () =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    PidText = gameProcessId.ToString();
+                    return await AttachToProcessCoreAsync((uint)gameProcessId);
+                });
+            }
+
+            if (!attached)
+            {
+                AppendBotLog($"[Startup] Automatic attach to PID={gameProcessId} failed; the workflow was not started.");
+                return false;
+            }
+
+            token.ThrowIfCancellationRequested();
+            AppendBotLog("[Startup] Waiting until the logged-in character's map and position are readable...");
+            if (!await WaitForGameWorldReadyAsync(
+                    "[Startup]",
+                    BotConstants.Connection.RecoveryMapLoadTimeoutMs,
+                    token))
+            {
+                AppendBotLog("[Startup] The game world did not become readable in time; the profile was not started automatically.");
+                return false;
+            }
+
+            token.ThrowIfCancellationRequested();
+            return await RunOnUiThreadAsync(() =>
+            {
+                if (!_isAttached)
+                {
+                    AppendBotLog("[Startup] The profile was not started because the bot is no longer attached.");
+                    return Task.FromResult(false);
+                }
+
+                if (_workflowCoordinator?.IsRunning == true || IsTaskActive(_workflowTask))
+                {
+                    AppendBotLog("[Startup] The profile was not started because a workflow started in the meantime.");
+                    return Task.FromResult(false);
+                }
+
+                AppendBotLog($"[Startup] Starting the workflow with profile '{profile.Name}'.");
+                StartWorkflowCore(profile, fromCrashRecovery: false);
+                bool started = _workflowCoordinator?.ActiveProfile?.Name == profile.Name &&
+                               IsTaskActive(_workflowTask);
+                if (started)
+                    AppendBotLog($"[Startup] Workflow started automatically with profile '{profile.Name}'.");
+                return Task.FromResult(started);
+            });
         }
 
         /// <summary>

@@ -1438,6 +1438,17 @@ namespace DriverScanTester
             /// <summary>Profile that is started automatically after a successful crash
             /// recovery. When it cannot be loaded the previously active profile is used.</summary>
             public const string RecoveryMainProfileName = "MainCOT";
+
+            /// <summary>Profile that is started automatically after the Bot Window
+            /// "Start Client" sequence when no profile is selected in that window.</summary>
+            public const string StartupDefaultProfileName = "MainCOT";
+
+            /// <summary>Number of attach attempts when the bot attaches to the freshly started
+            /// client for the automatic profile start.</summary>
+            public const int StartupAttachAttempts = 3;
+
+            /// <summary>Delay between the attach attempts for the automatic profile start.</summary>
+            public const int StartupAttachRetryDelayMs = 5_000;
         }
 
         // ════════════════════════════════════════════════════════════════
