@@ -26,5 +26,35 @@ namespace DriverScanTester.Tests
             Assert.False(ItemSellerService.IsSellerScanPointWithinSafeArea(0, 0, 0, 768));
             Assert.False(ItemSellerService.IsSellerScanPointWithinSafeArea(0, 0, 1024, 0));
         }
+
+        [Fact]
+        public void SellerDialogAppearingAfterFormerTwoHundredMillisecondWaitIsAccepted()
+        {
+            int elapsed = 0;
+            bool opened = ItemSellerService.WaitForNpcDialog(
+                () => elapsed >= 350,
+                ms => elapsed += ms,
+                timeoutMs: 700,
+                pollMs: 25,
+                out int waited);
+
+            Assert.True(opened);
+            Assert.Equal(350, waited);
+        }
+
+        [Fact]
+        public void SellerDialogWaitStopsAtItsBoundWhenClickMisses()
+        {
+            int elapsed = 0;
+            bool opened = ItemSellerService.WaitForNpcDialog(
+                () => false,
+                ms => elapsed += ms,
+                timeoutMs: 700,
+                pollMs: 25,
+                out int waited);
+
+            Assert.False(opened);
+            Assert.Equal(700, waited);
+        }
     }
 }

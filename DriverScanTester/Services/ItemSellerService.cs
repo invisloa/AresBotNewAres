@@ -1483,6 +1483,23 @@ namespace DriverScanTester.Services
                 if (TryOpenSellerDialogByScanningCore(clickShopOption, maxFullScans, stableCameraAngleBits))
                     return true;
 
+                // A right-click can open the NPC dialogue after the fast point's
+                // first wait. The following sweeps cannot hover the seller while
+                // that dialogue covers the game. Finish this verified dialogue
+                // before the calibration stage closes it with Escape.
+                if (clickShopOption && _memory.IsDialogOpen())
+                {
+                    _log("ItemSeller: NPC dialogue appeared during the fast scan; opening its Shop option.");
+                    ClickShopOptionInDialog();
+                    for (int retry = 0; retry < BotConstants.Repot.OpenShopRetries && !_memory.IsShopOpen(); retry++)
+                        Thread.Sleep(BotConstants.Delays.OpenShopRetryMs);
+                    if (_memory.IsShopOpen())
+                    {
+                        Thread.Sleep(500);
+                        return true;
+                    }
+                }
+
                 if (!allowCalibration)
                     return false;
 
@@ -1715,9 +1732,24 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Moves the mouse to one safe client-coordinate point, waits for the mouseover
-        /// value, then right-clicks a detected NPC and optionally opens its Shop option.
-        /// Returns true when the requested dialog/shop has opened and the scan should stop.
+        /// Polls for a delayed NPC dialogue after right-clicking its confirmed hover.
+        /// </summary>
+        internal static bool WaitForNpcDialog(
+            Func<bool> isOpen, Action<int> delay, int timeoutMs, int pollMs, out int waitedMs)
+        {
+            waitedMs = 0;
+            while (!isOpen() && waitedMs < timeoutMs)
+            {
+                int wait = Math.Min(pollMs, timeoutMs - waitedMs);
+                delay(wait);
+                waitedMs += wait;
+            }
+            return isOpen();
+        }
+
+        /// <summary>
+        /// Moves to one safe client point, right-clicks a detected seller, and opens
+        /// its Shop option only after the NPC dialogue is confirmed.
         /// </summary>
         private bool ScanSellerAtClientPoint(int clientX, int clientY,
                                              int clientOriginX, int clientOriginY,
@@ -1759,27 +1791,27 @@ namespace DriverScanTester.Services
             // before clicking anything — clicking while dialog == 0 hits empty
             // ground (left-click = walk) and sends the player off in a random
             // direction. Poll instead of a fixed sleep so slow renders are handled.
-            const int dialogTimeoutMs = 200;
-            const int dialogPollMs = 20;
+            const int dialogTimeoutMs = NpcDiscoveryDialogOpenTimeoutMs;
             int dialogWaitedMs = 0;
-            while (!_memory.IsDialogOpen() && dialogWaitedMs < dialogTimeoutMs)
-            {
-                Thread.Sleep(dialogPollMs);
-                dialogWaitedMs += dialogPollMs;
-            }
+            bool dialogOpened = WaitForNpcDialog(
+                () => _memory.IsDialogOpen(),
+                ms => Thread.Sleep(ms),
+                dialogTimeoutMs,
+                NpcDiscoveryStatePollMs,
+                out dialogWaitedMs);
 
             if (!clickShopOption)
             {
                 // Caller only wanted the NPC found and right-clicked (e.g. a custom
                 // operation that will handle the dialog itself).
-                _log($"ItemSeller: NPC found and right-clicked (no dialog option clicked). IsDialogOpen={_memory.IsDialogOpen()} after {dialogWaitedMs}ms.");
+                _log($"ItemSeller: NPC found and right-clicked (no dialog option clicked). IsDialogOpen={dialogOpened} after {dialogWaitedMs}ms.");
                 return true;
             }
 
             // GATE: only click the "Shop" option when the dialog is confirmed open.
             // Without this, a missed/slow dialog means ClickShopOptionInDialog()
             // clicks air at (145,460) and the player walks away.
-            if (!_memory.IsDialogOpen())
+            if (!dialogOpened)
             {
                 _log($"ItemSeller: NPC dialog did NOT open (S_IsDialogOpen1 != 1 after {dialogTimeoutMs}ms) — skipping Shop-option click, continuing scan.");
                 return false;
