@@ -529,6 +529,13 @@ namespace DriverScanTester.Services
         /// <summary>Log throttle for the close-mob TAB search start of the current phase.</summary>
         private bool _postKillCloseMobLadderStartLogged;
 
+        // Deadlock backstop for a Deferred post-kill obligation that lost its owner (the mob it
+        // was waiting for was abandoned without a kill, e.g. a CombatGate target release). The
+        // orphan anchor is only kept while the orphaned condition is continuously true.
+        private DateTime _postKillLootOrphanSinceUtc = DateTime.MinValue;
+        private DateTime _postKillLootOrphanLastLogUtc = DateTime.MinValue;
+        private int _postKillLootOrphanRescues;
+
         private LootSystem? _lootSystemRef;
 
         /// <summary>
@@ -748,6 +755,21 @@ namespace DriverScanTester.Services
         /// runs in its own HealManaSystem task).
         /// </summary>
         public bool IsMoveOnlyActive => CurrentMode == BotMode.OnlyMove;
+
+        /// <summary>
+        /// Other-player detection is exclusive to combat-enabled movement modes. The
+        /// live current waypoint mode is authoritative (never the path-level configuration
+        /// or the first waypoint), so a mode transition enables/disables detection
+        /// immediately. OnlyMove is pure navigation and performs no marker scans.
+        /// </summary>
+        public bool IsOtherPlayerDetectionEnabled => SupportsOtherPlayerDetection(CurrentMode);
+
+        /// <summary>Short alias for consumers that only need the live detection gate.</summary>
+        public bool IsPlayerDetectionEnabled => IsOtherPlayerDetectionEnabled;
+
+        /// <summary>Pure movement-mode policy: OnlyMove never detects other players.</summary>
+        internal static bool SupportsOtherPlayerDetection(BotMode mode)
+            => mode != BotMode.OnlyMove;
 
         /// <summary>
         /// Loop cadence (ms) the host must use between <see cref="Update"/> calls.
@@ -2995,7 +3017,7 @@ namespace DriverScanTester.Services
 
             int targetId = _combatGateTargetReleaseTargetId;
             int currentTargetId = _memoryService.GetSelectedTargetId();
-            CombatTargetValidation validation = _targetSafety.Validate();
+            CombatTargetValidation validation = ValidateCurrentTarget();
             if (currentTargetId != targetId || validation.TargetId != targetId)
             {
                 CompleteCombatGateTargetRelease(targetId,
@@ -3037,7 +3059,7 @@ namespace DriverScanTester.Services
             _combatGateTargetReleaseClickCount++;
             _combatGateTargetReleaseWaitLogged = false;
             int targetAfterClick = _memoryService.GetSelectedTargetId();
-            CombatTargetValidation afterClick = _targetSafety.Validate();
+            CombatTargetValidation afterClick = ValidateCurrentTarget();
             if (targetAfterClick != targetId || afterClick.TargetId != targetId)
             {
                 CompleteCombatGateTargetRelease(targetId,
@@ -3853,7 +3875,7 @@ namespace DriverScanTester.Services
             // The selected monster was deliberately released before this return began. A
             // cleared selection is therefore expected; a different non-monster selection still
             // follows the established safety abort, but recovery itself never TABs or attacks.
-            CombatTargetValidation validation = _targetSafety.Validate();
+            CombatTargetValidation validation = ValidateCurrentTarget();
             if (validation.TargetId > 0 && !validation.IsConfirmedMonster)
             {
                 string context = DescribeCombatGateReturnContext(sampleX, sampleY);
@@ -4035,6 +4057,67 @@ namespace DriverScanTester.Services
                  $"elapsed={elapsedMs:F0}ms — W released, handoff released, CombatGate cleared; " +
                  "waypoint unchanged and loot obligation preserved (camera-verified completion still required).");
             _log("[CombatGate] Recovery complete; pending loot handling continues.");
+            ResumeWithheldPostKillLootAfterCombatGateReturn(requestId);
+        }
+
+        /// <summary>
+        /// Restores the owner of the withheld normal loot after a CombatGate waypoint return.
+        ///
+        /// The return happens because a suppressed monster interrupted the post-kill close-mob
+        /// search. When that search had already ended with "a nearby mob is selected", the mob is
+        /// now released and the normal item cycle stays withheld with no owner: the loot
+        /// obligation remains Deferred, the barrier keeps navigation blocked and every periodic
+        /// TAB stays suppressed, so the bot can neither fight nor loot again (observed in CoT on
+        /// 2026-11-14: 4.5 and 1.5 minute standstills until an external action or the repot
+        /// detector broke the deadlock).
+        ///
+        /// Re-arming the same bounded close-mob decision for the same request generation gives
+        /// the withheld items an owner again: the pipeline either takes the existing CombatGate
+        /// bypass ("attack is disengaged by CombatGate — close-mob TAB check skipped") and
+        /// releases the normal loot, or the regular ladder decides again. It never sends input
+        /// itself and never releases navigation.
+        /// </summary>
+        private void ResumeWithheldPostKillLootAfterCombatGateReturn(long requestId)
+        {
+            if (requestId <= 0 ||
+                IsAutomaticLootDisabled ||
+                !RequiresMandatoryLootBarrier(CurrentMode) ||
+                !_postKillNormalLootWithheld ||
+                _postKillCloseMobCheckActive ||
+                _combatGateTargetReleasePending)
+                return;
+
+            if (!_lootBarrier.IsActive ||
+                _lootBarrier.Phase != LootBarrierPhase.Deferred ||
+                _lootBarrier.Reason != LootBarrierReason.PostKill ||
+                _lootBarrier.RequestId != requestId)
+                return;
+
+            LootSystem? loot = LootSystemRef;
+            if (loot == null ||
+                loot.IsCollecting ||
+                loot.IsScanActive ||
+                loot.IsLootCycleActive ||
+                loot.IsPinkScanPendingOrActive)
+                return;
+
+            if (!loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus status) ||
+                status.RequestId != requestId ||
+                status.Reason != LootBarrierReason.PostKill ||
+                status.State != LootRequestState.Deferred)
+                return;
+
+            // An entity is still selected: combat (or the loot pause) still owns the step.
+            if (_memoryService.IsMobSelected())
+                return;
+
+            _postKillCloseMobCheckActive = true;
+            _postKillCloseMobCheckSince = DateTime.UtcNow;
+            _postKillCloseMobHoldLogged = false;
+            _postKillCloseMobLadderStartLogged = false;
+            _postKillRetargetRequestId = requestId;
+            _log($"[PostKillLoot] CombatGate return complete — close-mob check re-armed for request={requestId}; " +
+                 "normal items stay withheld until it ends without a mob.");
         }
 
         /// <summary>
@@ -4870,7 +4953,7 @@ namespace DriverScanTester.Services
             // Central, single-source target classification for this tick. Only a confirmed
             // monster may be attacked; players/NPCs/unknown targets never are.
             CombatTargetValidation targetValidation = targetId > 0
-                ? _targetSafety.Validate()
+                ? ValidateCurrentTarget()
                 : default;
             bool confirmedMonsterTarget = targetValidation.IsConfirmedMonster;
             if (_manaRegenActive)
@@ -4903,6 +4986,7 @@ namespace DriverScanTester.Services
             // combat evaluation can issue input. This path deliberately does not use the
             // CombatGate release helper, whose click reserves a route-return handoff.
             RefreshLootBarrier();
+            ResumeOrphanedPostKillLootObligation(targetId, confirmedMonsterTarget);
             if (_postKillTargetReleaseId > 0)
             {
                 ProcessPostKillTargetRelease(token);
@@ -5414,7 +5498,7 @@ namespace DriverScanTester.Services
                     // The selected target is not a confirmed monster. Release 3 immediately,
                     // invalidate the combat context, cancel the pending retry and - for a
                     // confirmed other player - run the project's existing player response.
-                    CombatTargetValidation rejected = _targetSafety.Validate();
+                    CombatTargetValidation rejected = ValidateCurrentTarget();
                     HandleRejectedCombatTarget(rejected);
                     if (ShouldCycleTargetAwayFromRejectedTarget(rejected.TargetId))
                     {
@@ -6968,6 +7052,11 @@ namespace DriverScanTester.Services
         /// </summary>
         private async Task RunAttackStartPlayerMarkerCheck(CancellationToken token)
         {
+            // OnlyMove is pure navigation: do not zoom the camera, capture a frame or run
+            // any other-player marker validation at all.
+            if (!IsOtherPlayerDetectionEnabled)
+                return;
+
             if (_memoryService.GetIsInCity())
                 return;
 
@@ -6991,7 +7080,12 @@ namespace DriverScanTester.Services
                 // Give the client a moment to render the zoomed-out view.
                 await Task.Delay(BotConstants.Camera.PlayerMarkerCheckCameraSettleMs, token);
 
-                CombatTargetValidation validation = _targetSafety.Validate(forcePlayerScan: true);
+                // The active waypoint may have changed to OnlyMove during the delay; the
+                // fresh scan must not run for a mode that forbids player detection.
+                if (!IsOtherPlayerDetectionEnabled)
+                    return;
+
+                CombatTargetValidation validation = ValidateCurrentTarget(forcePlayerScan: true);
                 if (validation.Kind != TargetEntityKind.OtherPlayer ||
                     validation.PlayerMarker is not { } candidate)
                     return;
@@ -8478,7 +8572,7 @@ namespace DriverScanTester.Services
                     _wKeyCameraController == null
                         ? null
                         : () => _wKeyCameraController.TrySetStationaryWhenIdle("waypoint mob recovery"),
-                    () => _targetSafety.IsConfirmedMonster());
+                    () => IsCurrentTargetConfirmedMonster());
                 _waypointMobRecovery.Start(currX, currY, target.StuckRecoveryMobCameraDistance);
                 return;
             }
@@ -8968,7 +9062,7 @@ namespace DriverScanTester.Services
         /// </summary>
         private bool IsRetryTargetStillAttackable()
         {
-            CombatTargetValidation validation = _targetSafety.Validate(forcePlayerScan: true);
+            CombatTargetValidation validation = ValidateCurrentTarget(forcePlayerScan: true);
             if (validation.AttackAllowed)
                 return true;
 
@@ -9544,7 +9638,7 @@ namespace DriverScanTester.Services
                 // Every code path that presses 3 funnels through here. Only a CONFIRMED
                 // monster may be attacked; a player/NPC/invalid/unknown target never is.
                 // A new target always triggers a fresh other-player scan first.
-                CombatTargetValidation validation = _targetSafety.Validate();
+                CombatTargetValidation validation = ValidateCurrentTarget();
                 if (!validation.AttackAllowed)
                 {
                     CancelAttackKeyRetry($"target not attackable ({validation.Kind})");
@@ -9573,7 +9667,7 @@ namespace DriverScanTester.Services
                 // The one-second retry may never restart an attack on a target that is not a
                 // confirmed monster (e.g. the player that TAB selected next). The current target
                 // is validated even when it changed since the key was pressed.
-                CombatTargetValidation validation = targetId > 0 ? _targetSafety.Validate() : default;
+                CombatTargetValidation validation = targetId > 0 ? ValidateCurrentTarget() : default;
                 bool targetRejected = targetId > 0 && !validation.AttackAllowed;
 
                 string? cancelReason = null;
@@ -9652,6 +9746,17 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// Central validation call: passes the live movement-mode gate so no
+        /// other-player marker scan/capture can run while OnlyMove is active.
+        /// </summary>
+        private CombatTargetValidation ValidateCurrentTarget(bool forcePlayerScan = false)
+            => _targetSafety.Validate(forcePlayerScan, IsOtherPlayerDetectionEnabled);
+
+        private bool IsCurrentTargetConfirmedMonster()
+            => _targetSafety.IsConfirmedMonster(
+                playerDetectionEnabled: IsOtherPlayerDetectionEnabled);
+
+        /// <summary>
         /// Central reaction to a target that is not a confirmed monster (player, NPC,
         /// invalid or unknown/unreadable). Releases the attack key immediately, cancels the
         /// pending one-second retry, invalidates the combat context and - for a confirmed
@@ -9676,7 +9781,8 @@ namespace DriverScanTester.Services
 
             if (validation.Kind == TargetEntityKind.OtherPlayer &&
                 validation.PlayerMarker is { } candidate &&
-                _reportedPlayerTargetId != validation.TargetId)
+                _reportedPlayerTargetId != validation.TargetId &&
+                IsOtherPlayerDetectionEnabled)
             {
                 // Existing project response to a confirmed other player on screen: stop the
                 // EXP loop and return to town (LootSystem owns the stop-on-player policy).
@@ -9907,12 +10013,143 @@ namespace DriverScanTester.Services
             }
         }
 
+        /// <summary>
+        /// Deadlock backstop for the MoveAndAttackAndLoot post-kill obligation.
+        ///
+        /// The obligation stays Deferred while a nearby mob is fought (the withheld normal item
+        /// cycle waits for that mob's death). If that combat is abandoned without a kill — a
+        /// CombatGate target release, a lost selection, a mob killed by someone else — nothing
+        /// re-evaluates the withholding: the loot cycle never starts, the navigation barrier keeps
+        /// every periodic TAB suppressed and the bot cannot even acquire the next target. The
+        /// character then stands still indefinitely (the production "Fwd:False Unst:False Mob:False"
+        /// freeze observed in CoT on 2026-11-14).
+        ///
+        /// This guard reacts only when the state is unambiguously orphaned for a sustained period:
+        /// the armed request is Deferred, no component owns the next step (no close-mob search,
+        /// retarget, target release, CombatGate return or other recovery), the loot system has no
+        /// work in flight and nothing is selected. It then releases the withheld normal loot and
+        /// asks the loot system to service the obligation again.
+        ///
+        /// It never releases navigation by itself: the regular camera-verified loot scan still
+        /// decides, so a completed obligation remains the only thing that unblocks the waypoint.
+        /// </summary>
+        private void ResumeOrphanedPostKillLootObligation(int targetId, bool confirmedMonsterTarget)
+        {
+            if (!TryDescribeOrphanedPostKillLootObligation(targetId, confirmedMonsterTarget,
+                    out long requestId, out string detail))
+            {
+                _postKillLootOrphanSinceUtc = DateTime.MinValue;
+                _postKillLootOrphanLastLogUtc = DateTime.MinValue;
+                _postKillLootOrphanRescues = 0;
+                return;
+            }
+
+            DateTime now = DateTime.UtcNow;
+            if (_postKillLootOrphanSinceUtc == DateTime.MinValue)
+            {
+                _postKillLootOrphanSinceUtc = now;
+                _postKillLootOrphanLastLogUtc = DateTime.MinValue;
+                _postKillLootOrphanRescues = 0;
+                return;
+            }
+
+            if ((now - _postKillLootOrphanSinceUtc).TotalMilliseconds <
+                BotConstants.Loot.PostKillOrphanedObligationGraceMs)
+                return;
+
+            bool releasedWithholding = _postKillNormalLootWithheld;
+            _postKillNormalLootWithheld = false;
+            _postKillLootOrphanSinceUtc = now;
+            _postKillLootOrphanRescues++;
+            LootSystemRef?.RequestPostKillLootResume(requestId, detail);
+
+            if (_postKillLootOrphanRescues == 1 ||
+                (now - _postKillLootOrphanLastLogUtc).TotalMilliseconds >=
+                    BotConstants.Loot.PostKillOrphanedObligationLogIntervalMs)
+            {
+                _postKillLootOrphanLastLogUtc = now;
+                _log($"[LootBarrier] Orphaned post-kill obligation request={requestId} had no owner for " +
+                     $"{BotConstants.Loot.PostKillOrphanedObligationGraceMs}ms ({detail}) — " +
+                     $"{(releasedWithholding ? "withheld normal loot released, " : string.Empty)}" +
+                     "loot service resumed; navigation still waits for the verified scan.");
+            }
+        }
+
+        /// <summary>
+        /// True only while a Deferred post-kill obligation has no component that could ever
+        /// advance it. Every participating owner (close-mob search, retarget image request,
+        /// target release, CombatGate return, combat/other recovery, mob grouping, a selected
+        /// entity, an in-flight loot scan or collection) disqualifies the state, so a healthy
+        /// fight or scan is never interrupted.
+        /// </summary>
+        private bool TryDescribeOrphanedPostKillLootObligation(
+            int targetId,
+            bool confirmedMonsterTarget,
+            out long requestId,
+            out string detail)
+        {
+            requestId = 0;
+            detail = string.Empty;
+
+            if (IsAutomaticLootDisabled || !RequiresMandatoryLootBarrier(CurrentMode))
+                return false;
+
+            if (!_lootBarrier.IsActive ||
+                !_lootBarrier.IsBlockingNavigation ||
+                _lootBarrier.Reason != LootBarrierReason.PostKill ||
+                _lootBarrier.Phase != LootBarrierPhase.Deferred ||
+                !_lootBarrier.TryGetRequestId(out requestId))
+                return false;
+
+            // Any component that owns the next step keeps the state healthy.
+            if (_postKillCloseMobCheckActive ||
+                _postKillRetargetRequestId > 0 ||
+                _postKillTargetReleaseId > 0 ||
+                _combatGateTargetReleasePending ||
+                _combatGateReturnActive ||
+                IsCombatRecoveryMovementAuthorized ||
+                _combatRetargetCameraStage != CombatRetargetCameraStage.None ||
+                IsMobGroupingSequenceActive ||
+                _isUnstuckRoutineActive ||
+                _reverseDiagonalRecovery.IsActive ||
+                IsWaypointSpecialRecoveryActive ||
+                _recoveryOwnershipHeld ||
+                _repotHelper.IsReportAndGoBackActive ||
+                _mapTransitionGuardActive ||
+                _mapTransitionConfirmed)
+                return false;
+
+            // A selected entity means combat (or the loot pause) legitimately owns the wait.
+            if (confirmedMonsterTarget || targetId > 0 || _memoryService.IsMobSelected())
+                return false;
+
+            LootSystem? loot = LootSystemRef;
+            if (loot == null)
+                return false;
+
+            if (loot.IsCollecting ||
+                loot.IsScanActive ||
+                loot.IsLootCycleActive ||
+                loot.IsPinkScanPendingOrActive)
+                return false;
+
+            if (!loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus status) ||
+                status.RequestId != requestId ||
+                status.Reason != LootBarrierReason.PostKill ||
+                status.State != LootRequestState.Deferred)
+                return false;
+
+            detail = _postKillNormalLootWithheld
+                ? "withheld normal loot, no close-mob check, no combat and no loot work in flight"
+                : "deferred obligation, no close-mob check, no combat and no loot work in flight";
+            return true;
+        }
+
         private async Task<bool> HandlePostKillRetargetRequestAsync(CancellationToken token)
         {
             long requestId = _postKillRetargetRequestId;
             if (requestId <= 0)
                 return false;
-
             if (_combatGateReturnActive)
                 return false;
 
@@ -9956,7 +10193,7 @@ namespace DriverScanTester.Services
 
                 int currentTargetId = _memoryService.GetSelectedTargetId();
                 CombatTargetValidation currentTarget = currentTargetId > 0
-                    ? _targetSafety.Validate()
+                    ? ValidateCurrentTarget()
                     : default;
                 if (currentTargetId > 0 && !currentTarget.IsConfirmedMonster)
                     return false;
@@ -9978,7 +10215,7 @@ namespace DriverScanTester.Services
 
             int selectedTargetId = _memoryService.GetSelectedTargetId();
             CombatTargetValidation validation = selectedTargetId > 0
-                ? _targetSafety.Validate()
+                ? ValidateCurrentTarget()
                 : default;
             if (validation.IsConfirmedMonster)
             {
@@ -10013,7 +10250,7 @@ namespace DriverScanTester.Services
 
             int selectedTargetId = _memoryService.GetSelectedTargetId();
             CombatTargetValidation validation = selectedTargetId > 0
-                ? _targetSafety.Validate()
+                ? ValidateCurrentTarget()
                 : default;
             bool sameKilledTarget = _postKillCloseTargetCheckPending &&
                                     selectedTargetId == _postKillTargetIdBeforeTab;
@@ -10150,7 +10387,7 @@ namespace DriverScanTester.Services
             int targetId = _memoryService.GetSelectedTargetId();
             if (targetId <= 0)
                 return false;
-            CombatTargetValidation validation = _targetSafety.Validate();
+            CombatTargetValidation validation = ValidateCurrentTarget();
             return validation.IsConfirmedMonster &&
                    (!_postKillCloseTargetCheckPending || targetId != _postKillTargetIdBeforeTab);
         }

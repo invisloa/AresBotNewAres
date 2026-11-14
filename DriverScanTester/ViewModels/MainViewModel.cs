@@ -390,6 +390,12 @@ namespace DriverScanTester.ViewModels
                 });
             };
 
+            // Session statistics shown in the Bot Control Panel. The sampler keeps
+            // running while the panel is closed; paused time is not counted as work.
+            BotStatisticsService.Instance.Configure(
+                () => _isMovementBotRunning || _isLootBotRunning || _isHealManaBotRunning || IsWorkflowRunning,
+                () => PauseController.IsPaused);
+
             if (startHotkeyListener)
                 StartHotkeyListener();
         }
@@ -775,7 +781,10 @@ namespace DriverScanTester.ViewModels
                 _lootSystem = new LootSystem(memoryService, AppendBotLog, GetSharedCameraControllerForLoot())
                 {
                     AutomaticLootDisabled = disableAllLootByPath,
-                    ShouldIgnoreOtherPlayerMarker = ShouldIgnoreDetectedPlayerMarker
+                    ShouldIgnoreOtherPlayerMarker = ShouldIgnoreDetectedPlayerMarker,
+                    // OnlyMove is mandatory navigation: no other-player scan is allowed.
+                    IsPlayerDetectionEnabled = () =>
+                        _movementSystem?.IsOtherPlayerDetectionEnabled ?? true
                 };
                 _lootSystem.ShouldStopOnOtherPlayerMarker = () => StopOnOtherPlayerDetected;
                 Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 0);
@@ -817,6 +826,14 @@ namespace DriverScanTester.ViewModels
 
         private void HandleStandalonePlayerMarkerDetected(GameMemoryService memoryService, BotProfile profile)
         {
+            // A delayed detection from a previous combat waypoint must not stop the bot once
+            // the active waypoint switched to OnlyMove.
+            if (_movementSystem?.IsOtherPlayerDetectionEnabled == false)
+            {
+                AppendBotLog("[PlayerPixels] Delayed other-player result ignored — the active movement mode is OnlyMove (player detection disabled).");
+                return;
+            }
+
             if (Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 1) != 0)
                 return;
 
@@ -3480,6 +3497,18 @@ namespace DriverScanTester.ViewModels
         public int WorkflowCycleCount => _workflowCoordinator?.CompletedCycles ?? 0;
 
         /// <summary>
+        /// Total active work time of every bot run in this session (pauses excluded).
+        /// Shown in the read-only Statistics section of the Bot Control Panel.
+        /// </summary>
+        public string StatisticsWorkTimeText => BotStatisticsService.Instance.WorkTimeText;
+
+        /// <summary>Total completed workflow cycles in this session.</summary>
+        public int StatisticsCompletedCycles => BotStatisticsService.Instance.CompletedCycles;
+
+        /// <summary>Total items sold by the bot in this session.</summary>
+        public int StatisticsItemsSold => BotStatisticsService.Instance.ItemsSold;
+
+        /// <summary>
         /// Starts the route workflow (Stage 1 Repot, Stage 2 Go to EXP chain,
         /// Stage 3 EXP Path) for the given profile. Requires a non-null valid profile;
         /// there is no no-profile fallback mode.
@@ -3624,9 +3653,12 @@ namespace DriverScanTester.ViewModels
             };
             _workflowCoordinator.OnCycleCompleted = count =>
             {
+                // Session statistics also count cycles from previous runs.
+                BotStatisticsService.Instance.IncrementCompletedCycles();
                 System.Windows.Application.Current?.Dispatcher?.Invoke(() =>
                 {
                     OnPropertyChanged(nameof(WorkflowCycleCount));
+                    OnPropertyChanged(nameof(StatisticsCompletedCycles));
                 });
             };
             _workflowCoordinator.OnStopped = () =>
@@ -5191,6 +5223,8 @@ namespace DriverScanTester.ViewModels
                                 _workflowCoordinator?.IsRunning != true)
                                 Interlocked.Exchange(ref _gameFailureStopHandled, 0);
                             _lootSystem = new LootSystem(memoryService, AppendBotLog, sharedCameraController);
+                            _lootSystem.IsPlayerDetectionEnabled = () =>
+                                _movementSystem?.IsOtherPlayerDetectionEnabled ?? true;
                             _lootSystem.ShouldStopOnOtherPlayerMarker = () => StopOnOtherPlayerDetected;
                             _lootSystem.ShouldIgnoreOtherPlayerMarker = ShouldIgnoreDetectedPlayerMarker;
                             Interlocked.Exchange(ref _standalonePlayerMarkerStopHandled, 0);

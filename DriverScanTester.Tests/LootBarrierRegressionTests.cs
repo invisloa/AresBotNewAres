@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
@@ -1104,6 +1104,73 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void StalePostKillHandoffGuardCannotParkTheObligationForever()
+        {
+            // Production 2026-11-14 16:57 (CoT): a death observation arrived AFTER the fresh
+            // post-kill request was armed, which armed the ordering guard with no later arm or
+            // death to clear it. The Deferred obligation then never started its scan while the
+            // navigation barrier suppressed every target cycle — the bot stood still for 5m22s
+            // until the repot detector fired.
+            using var loot = CreateLoot(_ => { });
+            loot.MoveAndAttackAndLootMode = true;
+            loot.ShouldWithholdPostKillNormalLoot = () => false;
+
+            long postKillId = loot.BeginMandatoryLootRequest(
+                LootBarrierReason.PostKill, freshPostKill: true);
+            loot.NotifyNavigationHeld(postKillId);
+
+            SetPrivateField(loot, "_mobSelectionGeneration", 7L);
+            InvokePrivate(loot, "MarkPostKillHandoffIfNeeded");
+            Assert.True(loot.IsPostKillHandoffPending);
+
+            // Inside the ordering window the guard still holds the obligation back.
+            RunMandatoryService(loot);
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(postKillId, out LootRequestStatus pending));
+            Assert.Equal(LootRequestState.Pending, pending.State);
+
+            // Aged beyond its TTL the guard can never keep the obligation parked.
+            SetPrivateField(loot, "_awaitingPostKillHandoffSinceTick",
+                Environment.TickCount64 - BotConstants.Loot.PostKillHandoffTtlMs - 1000);
+
+            RunMandatoryService(loot);
+            Assert.False(loot.IsPostKillHandoffPending);
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(postKillId, out LootRequestStatus running));
+            Assert.Equal(LootRequestState.Running, running.State);
+        }
+
+        [Fact]
+        public void PostKillResumeRequestNeverCompletesOrCancelsTheObligation()
+        {
+            using var loot = CreateLoot(_ => { });
+            loot.MoveAndAttackAndLootMode = true;
+            loot.ShouldWithholdPostKillNormalLoot = () => true;
+
+            long postKillId = loot.BeginMandatoryLootRequest(
+                LootBarrierReason.PostKill, freshPostKill: true);
+            loot.NotifyNavigationHeld(postKillId);
+            RunMandatoryService(loot);
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(postKillId, out LootRequestStatus deferred));
+            Assert.Equal(LootRequestState.Deferred, deferred.State);
+
+            loot.RequestPostKillLootResume(postKillId, "test orphan");
+
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(postKillId, out LootRequestStatus resumed));
+            Assert.Equal(LootRequestState.Deferred, resumed.State);
+            Assert.False(resumed.CameraVerified);
+            Assert.Equal(0, resumed.ItemsCollected);
+
+            // Still withheld by the movement gate: the resume request must not bypass it.
+            RunMandatoryService(loot);
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(postKillId, out LootRequestStatus stillDeferred));
+            Assert.Equal(LootRequestState.Deferred, stillDeferred.State);
+
+            // A foreign generation is ignored (never resurrect an old obligation).
+            loot.RequestPostKillLootResume(postKillId + 99, "test foreign generation");
+            Assert.True(loot.TryGetMandatoryLootRequestStatus(postKillId, out LootRequestStatus untouched));
+            Assert.Equal(LootRequestState.Deferred, untouched.State);
+        }
+
+        [Fact]
         public void FindingAnotherMobKeepsNormalLootWithheldUntilAnEmptyTargetLadder()
         {
             using var scenario = CreateRetargetScenario();
@@ -1272,6 +1339,111 @@ namespace DriverScanTester.Tests
                 CompleteMandatory(scenario.Loot, requestId, ValidEmptyOutcome());
                 await scenario.Movement.Update(CancellationToken.None);
                 Assert.False(scenario.Movement.IsLootNavigationBlocked);
+            }
+            finally
+            {
+                MobGroupingRuntimeSettings.Enabled = groupingWasEnabled;
+            }
+        }
+
+        [Fact]
+        public async Task OrphanedDeferredPostKillObligationIsResumedAfterTheGraceWindow()
+        {
+            bool groupingWasEnabled = MobGroupingRuntimeSettings.Enabled;
+            try
+            {
+                MobGroupingRuntimeSettings.Enabled = false;
+                using var scenario = CreateRetargetScenario();
+
+                // Production state after the close-mob search found a mob that was then
+                // abandoned by a CombatGate target release: normal loot withheld, no
+                // close-mob search active, no target, Deferred obligation.
+                SetPrivateField(scenario.Movement, "_postKillNormalLootWithheld", true);
+                long requestId = scenario.Loot.BeginMandatoryLootRequest(
+                    LootBarrierReason.PostKill, freshPostKill: true);
+                scenario.Loot.NotifyNavigationHeld(requestId);
+                // Production state: the obligation was deferred by the withhold gate.
+                RunMandatoryService(scenario.Loot, mobSelected: true);
+                InvokePrivate(scenario.Movement, "RefreshLootBarrier");
+                Assert.True(scenario.Movement.IsLootNavigationBlocked);
+                Assert.True(scenario.Loot.TryGetMandatoryLootRequestStatus(
+                    requestId, out LootRequestStatus deferredBeforeUpdate));
+                Assert.Equal(LootRequestState.Deferred, deferredBeforeUpdate.State);
+
+                // The first tick only starts the orphan window — nothing may be released yet.
+                await scenario.Movement.Update(CancellationToken.None);
+                Assert.True(ReadPrivateField<bool>(scenario.Movement, "_postKillNormalLootWithheld"));
+                Assert.DoesNotContain(scenario.Log,
+                    l => l.Contains("Orphaned post-kill obligation", StringComparison.Ordinal));
+
+                // Deterministically age the sustained orphan window instead of sleeping.
+                SetPrivateField(scenario.Movement, "_postKillLootOrphanSinceUtc",
+                    DateTime.UtcNow.AddMilliseconds(
+                        -(BotConstants.Loot.PostKillOrphanedObligationGraceMs + 500)));
+                await scenario.Movement.Update(CancellationToken.None);
+
+                Assert.False(ReadPrivateField<bool>(scenario.Movement, "_postKillNormalLootWithheld"));
+                Assert.Contains(scenario.Log,
+                    l => l.Contains("Orphaned post-kill obligation", StringComparison.Ordinal));
+                Assert.Contains(scenario.Log,
+                    l => l.Contains($"request={requestId}", StringComparison.Ordinal));
+
+                // The rescue only restores the loot service — the request is not completed and
+                // navigation stays blocked until the verified scan runs.
+                Assert.True(scenario.Loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus saved));
+                Assert.Equal(LootRequestState.Deferred, saved.State);
+                Assert.False(saved.CameraVerified);
+                Assert.True(scenario.Movement.IsLootNavigationBlocked);
+
+                RunMandatoryService(scenario.Loot);
+                Assert.True(scenario.Loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus running));
+                Assert.Equal(LootRequestState.Running, running.State);
+
+                CompleteMandatory(scenario.Loot, requestId, ValidEmptyOutcome());
+                await scenario.Movement.Update(CancellationToken.None);
+                Assert.False(scenario.Movement.IsLootNavigationBlocked);
+            }
+            finally
+            {
+                MobGroupingRuntimeSettings.Enabled = groupingWasEnabled;
+            }
+        }
+
+        [Fact]
+        public async Task OrphanedObligationRescueNeverFiresWhileAMobIsSelectedOrTheCheckOwnsTheTick()
+        {
+            bool groupingWasEnabled = MobGroupingRuntimeSettings.Enabled;
+            try
+            {
+                MobGroupingRuntimeSettings.Enabled = false;
+                using var scenario = CreateRetargetScenario();
+                SetPrivateField(scenario.Movement, "_postKillNormalLootWithheld", true);
+                long requestId = scenario.Loot.BeginMandatoryLootRequest(
+                    LootBarrierReason.PostKill, freshPostKill: true);
+                scenario.Loot.NotifyNavigationHeld(requestId);
+                RunMandatoryService(scenario.Loot, mobSelected: true);
+                InvokePrivate(scenario.Movement, "RefreshLootBarrier");
+
+                // A selected entity always owns the wait: combat or the loot pause is legit.
+                scenario.Memory.TargetId = 16386;
+                SetPrivateField(scenario.Movement, "_postKillLootOrphanSinceUtc",
+                    DateTime.UtcNow.AddMilliseconds(
+                        -(BotConstants.Loot.PostKillOrphanedObligationGraceMs + 1000)));
+                await scenario.Movement.Update(CancellationToken.None);
+                Assert.True(ReadPrivateField<bool>(scenario.Movement, "_postKillNormalLootWithheld"));
+                Assert.DoesNotContain(scenario.Log,
+                    l => l.Contains("Orphaned post-kill obligation", StringComparison.Ordinal));
+
+                // An active close-mob check owns the same withholding.
+                scenario.Memory.TargetId = 0;
+                SetPrivateField(scenario.Movement, "_postKillCloseMobCheckActive", true);
+                SetPrivateField(scenario.Movement, "_postKillLootOrphanSinceUtc",
+                    DateTime.UtcNow.AddMilliseconds(
+                        -(BotConstants.Loot.PostKillOrphanedObligationGraceMs + 1000)));
+                await scenario.Movement.Update(CancellationToken.None);
+                Assert.True(ReadPrivateField<bool>(scenario.Movement, "_postKillNormalLootWithheld"));
+                Assert.DoesNotContain(scenario.Log,
+                    l => l.Contains("Orphaned post-kill obligation", StringComparison.Ordinal));
             }
             finally
             {

@@ -350,15 +350,57 @@ namespace DriverScanTester.Services
         private volatile bool _awaitingPostKillHandoff;
         private long _mobSelectionGeneration;
         private long _freshPostKillRequestSelectionGeneration = -1;
-        internal bool IsPostKillHandoffPending => _awaitingPostKillHandoff;
+
+        /// <summary>
+        /// Environment.TickCount64 stamp of the moment <see cref="_awaitingPostKillHandoff"/> was
+        /// armed. The handoff is a one-tick ordering guard between the death observation here and
+        /// MovementSystem arming the fresh post-kill request; if a later selection change re-arms
+        /// the guard after that request already exists, nothing would ever clear it and the
+        /// mandatory obligation would stay Deferred forever (the bot stands still with the
+        /// loot barrier blocking navigation). The stamp bounds that window.
+        /// </summary>
+        private long _awaitingPostKillHandoffSinceTick;
+
+        internal bool IsPostKillHandoffPending =>
+            _awaitingPostKillHandoff && !IsPostKillHandoffExpired();
 
         private void MarkPostKillHandoffIfNeeded()
         {
             // MovementSystem and LootSystem run on separate ticks. Their death
             // observations may arrive in either order.
-            _awaitingPostKillHandoff =
+            bool handoffRequired =
                 System.Threading.Interlocked.Read(ref _freshPostKillRequestSelectionGeneration) !=
                 System.Threading.Interlocked.Read(ref _mobSelectionGeneration);
+            if (!handoffRequired)
+            {
+                ClearPostKillHandoff();
+                return;
+            }
+
+            if (!_awaitingPostKillHandoff)
+            {
+                System.Threading.Volatile.Write(
+                    ref _awaitingPostKillHandoffSinceTick, Environment.TickCount64);
+                _awaitingPostKillHandoff = true;
+            }
+        }
+
+        private void ClearPostKillHandoff()
+        {
+            _awaitingPostKillHandoff = false;
+            System.Threading.Volatile.Write(ref _awaitingPostKillHandoffSinceTick, 0);
+        }
+
+        private bool IsPostKillHandoffExpired()
+        {
+            if (!_awaitingPostKillHandoff)
+                return false;
+
+            long since = System.Threading.Volatile.Read(ref _awaitingPostKillHandoffSinceTick);
+            if (since <= 0)
+                return true;
+
+            return Environment.TickCount64 - since > BotConstants.Loot.PostKillHandoffTtlMs;
         }
         private MandatoryLootRequest? _activeMandatoryLootRequest;
         private MandatoryLootRequest? _lastMandatoryLootRequest;
@@ -520,7 +562,7 @@ namespace DriverScanTester.Services
                     bool changed = _moveAndAttackAndLootMode != value;
                     _moveAndAttackAndLootMode = value;
                     if (!value)
-                        _awaitingPostKillHandoff = false;
+                        ClearPostKillHandoff();
                     if (!value && !_pinkLootOnlyMode &&
                         (changed || _pinkScanRequested || _pinkScanOwnsCameraCursor ||
                          _lootState == LootMachineState.PinkScan))
@@ -569,7 +611,7 @@ namespace DriverScanTester.Services
 
                 if (value)
                 {
-                    _awaitingPostKillHandoff = false;
+                    ClearPostKillHandoff();
                     StopScanSpacebarSpam();
                     ResetPlayerMarkerConfirmation();
                     CancelAllLootWork("automatic loot disabled by profile/path policy");
@@ -679,7 +721,7 @@ namespace DriverScanTester.Services
                     System.Threading.Interlocked.Exchange(
                         ref _freshPostKillRequestSelectionGeneration,
                         System.Threading.Interlocked.Read(ref _mobSelectionGeneration));
-                    _awaitingPostKillHandoff = false;
+                    ClearPostKillHandoff();
                 }
 
                 if (_activeMandatoryLootRequest != null &&
@@ -890,6 +932,17 @@ namespace DriverScanTester.Services
             }
         }
 
+        /// <summary>
+        /// Live movement-mode gate for other-player detection. The host wires this to the
+        /// active <see cref="MovementSystem.CurrentMode"/> so OnlyMove never scans. Null keeps
+        /// the existing behavior (detection allowed) for standalone/manual loot instances.
+        /// Evaluated immediately before each scan/report, so a delayed result from a previous
+        /// combat waypoint cannot trigger the city response after the mode switched.
+        /// </summary>
+        public Func<bool>? IsPlayerDetectionEnabled { get; set; }
+
+        private bool IsOtherPlayerDetectionAllowed => IsPlayerDetectionEnabled?.Invoke() ?? true;
+
         /// <summary>Called when a confirmed other-player marker should trigger bot safety behavior.</summary>
         public Action? OtherPlayerMarkerDetected { get; set; }
 
@@ -917,6 +970,14 @@ namespace DriverScanTester.Services
         /// </summary>
         internal void ReportImmediateOtherPlayerMarker(PlayerMarkerCandidate candidate, string source)
         {
+            if (!IsOtherPlayerDetectionAllowed)
+            {
+                ResetPlayerMarkerConfirmation();
+                _log($"[PlayerPixels] {source}: other-player marker ignored — detection is disabled " +
+                     "for the active movement mode (OnlyMove).");
+                return;
+            }
+
             _log($"[PlayerPixels] {source}: other-player marker detected — " +
                  $"{candidate.Faction} bounds={FormatRectangle(candidate.Bounds)} " +
                  $"pixels={candidate.PixelCount} fill={candidate.FillRatio:P0} aspect={candidate.AspectRatio:F2}.");
@@ -2738,7 +2799,17 @@ namespace DriverScanTester.Services
         private void ServiceMandatoryLootRequest(bool isMobSelected)
         {
             if (_awaitingPostKillHandoff)
-                return;
+            {
+                if (!IsPostKillHandoffExpired())
+                    return;
+
+                // The ordering guard outlived its purpose with no fresh post-kill request to
+                // hand off to. Keeping it armed would park a Deferred obligation forever while
+                // the navigation barrier suppresses every target cycle.
+                ClearPostKillHandoff();
+                _log($"[LootBarrier] Post-kill handoff guard expired after {BotConstants.Loot.PostKillHandoffTtlMs}ms " +
+                     "without a fresh post-kill request — servicing the obligation.");
+            }
             if (_automaticLootDisabled)
             {
                 lock (_cameraCursorOwnershipGate)
@@ -2915,6 +2986,47 @@ namespace DriverScanTester.Services
                 attempt = ++_activeMandatoryLootRequest.CaptureAttempts;
                 _activeMandatoryLootRequest.UpdatedAtUtc = DateTime.UtcNow;
                 return attempt < maxAttempts;
+            }
+        }
+
+        /// <summary>
+        /// Movement-owned deadlock backstop. The movement tick observed that the armed post-kill
+        /// obligation has been Deferred for a sustained period with no owner (no close-mob search,
+        /// no combat recovery, nothing selected and no loot work in flight). Clearing the ordering
+        /// guard and forcing a fresh cycle lets the next loot tick service the obligation instead
+        /// of leaving navigation blocked forever.
+        ///
+        /// It never completes, cancels or fails the request and never releases navigation: the
+        /// regular camera-verified scan result still decides. Idempotent and safe to call for a
+        /// stale or foreign generation.
+        /// </summary>
+        internal void RequestPostKillLootResume(long requestId, string reason)
+        {
+            if (requestId <= 0)
+                return;
+
+            lock (_cameraCursorOwnershipGate)
+            {
+                MandatoryLootRequest? request = _activeMandatoryLootRequest;
+                if (request == null ||
+                    request.Id != requestId ||
+                    request.Reason != LootBarrierReason.PostKill ||
+                    request.State != LootRequestState.Deferred ||
+                    _combatRecoveryMovementRequestId == requestId)
+                    return;
+
+                bool handoffPending = _awaitingPostKillHandoff;
+                ClearPostKillHandoff();
+                request.NeedsFreshCycle = true;
+                // A resume starts a fresh cycle: the bounded capture/camera budgets belong to
+                // the interrupted pass, not to the obligation (a partially used budget would
+                // otherwise fail the request without ever capturing a full frame).
+                request.CaptureAttempts = 0;
+                request.CameraAttempts = 0;
+                request.Detail = reason ?? "resume requested";
+                request.UpdatedAtUtc = DateTime.UtcNow;
+                _log($"[LootBarrier] Resume requested request={requestId} reason={request.Detail}" +
+                     (handoffPending ? " (ordering guard cleared)." : "."));
             }
         }
 
@@ -4641,7 +4753,8 @@ namespace DriverScanTester.Services
 
         private void ScanForOtherPlayerPixels()
         {
-            if (!PlayerMarkerScanEnabled || _bitmap == null || _memoryService.GetIsInCity())
+            if (!PlayerMarkerScanEnabled || !IsOtherPlayerDetectionAllowed ||
+                _bitmap == null || _memoryService.GetIsInCity())
             {
                 ResetPlayerMarkerConfirmation();
                 return;
@@ -4707,6 +4820,14 @@ namespace DriverScanTester.Services
             if (!PlayerMarkerScanEnabled || !_playerMarkerConfirmationPending)
                 return false;
 
+            if (!IsOtherPlayerDetectionAllowed)
+            {
+                // A pending result from a previous combat waypoint must not survive a switch
+                // to OnlyMove; discard it before any capture or marker recognition.
+                ResetPlayerMarkerConfirmation();
+                return false;
+            }
+
             int delayMs = _playerMarkerChecksConfirmed == 1
                 ? BotConstants.Delays.OtherPlayerMarkerConfirmMs
                 : BotConstants.Delays.OtherPlayerMarkerFinalConfirmMs;
@@ -4764,6 +4885,16 @@ namespace DriverScanTester.Services
 
                 _playerMarkerConfirmationPending = false;
                 _playerMarkerCandidateDetectedAt = DateTime.MinValue;
+                if (!IsOtherPlayerDetectionAllowed)
+                {
+                    // The movement mode switched to OnlyMove while the confirmation pipeline
+                    // was pending. This delayed result must not interrupt the navigation.
+                    ResetPlayerMarkerConfirmation();
+                    _log("[PlayerPixels] Confirmed marker discarded — detection is disabled for the " +
+                         "active movement mode (OnlyMove).");
+                    return false;
+                }
+
                 _log($"[PlayerPixels] Other-player marker confirmed on all " +
                      $"{OtherPlayerMarkerRequiredChecks} consecutive checks: " +
                      $"{DescribePlayerMarkerCandidate(confirmedCandidate)}; " +

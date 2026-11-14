@@ -242,6 +242,49 @@ namespace DriverScanTester.Services
                 }
             }
 
+            // Sum of every sellable item quantity in the inventory. The difference after
+            // the run is exactly how many items were really sold: failed sell clicks
+            // change nothing and slot reordering does not affect a sum.
+            int quantityBeforeSelling = TotalSellableInventoryQuantity();
+
+            try
+            {
+                SellInventoryPasses();
+            }
+            finally
+            {
+                // Also runs when the sell run aborts (e.g. the shop window closed), so
+                // the items sold before the abort still reach the statistics.
+                RecordSoldQuantity(quantityBeforeSelling, TotalSellableInventoryQuantity());
+            }
+
+            _howManyTries = 0;
+            Thread.Sleep(50);
+
+            // ── POST-SELL: high-value items left in inventory ──
+            // If more than 3 inventory slots still hold high-value items after
+            // the sell pass, the bot should make a trip to storage to bank them
+            // so they don't sit in the inventory at risk. The trip itself is
+            // not implemented yet — GoToStorage() is a stub.
+            int highValueSlotCount = CountHighValueItemsInInventory();
+            if (highValueSlotCount > 3)
+            {
+                _log($"ItemSeller: {highValueSlotCount} high-value item slots remain in inventory (> 3). Calling GoToStorage(city={_memory.GetCurrentMap()}).");
+                GoToStorage(_memory.GetCurrentMap());
+            }
+
+            // Note: this method intentionally does NOT touch storage. The bot is
+            // configured to sell only inventory items; storage-to-inventory
+            // transfer is handled elsewhere (or not at all in this version).
+        }
+
+        /// <summary>
+        /// Sells every inventory slot that qualified for sale, pass by pass, until no
+        /// sellable item is left or the shop window closes. Counted items are recorded
+        /// by the caller through the before/after inventory quantity sum.
+        /// </summary>
+        private void SellInventoryPasses()
+        {
             int noProgressPasses = 0;
 
             while (_memory.IsShopOpen())
@@ -315,25 +358,6 @@ namespace DriverScanTester.Services
                     throw new InvalidOperationException("Sell routine stuck — no items sold after 5 full passes.");
                 }
             }
-
-            _howManyTries = 0;
-            Thread.Sleep(50);
-
-            // ── POST-SELL: high-value items left in inventory ──
-            // If more than 3 inventory slots still hold high-value items after
-            // the sell pass, the bot should make a trip to storage to bank them
-            // so they don't sit in the inventory at risk. The trip itself is
-            // not implemented yet — GoToStorage() is a stub.
-            int highValueSlotCount = CountHighValueItemsInInventory();
-            if (highValueSlotCount > 3)
-            {
-                _log($"ItemSeller: {highValueSlotCount} high-value item slots remain in inventory (> 3). Calling GoToStorage(city={_memory.GetCurrentMap()}).");
-                GoToStorage(_memory.GetCurrentMap());
-            }
-
-            // Note: this method intentionally does NOT touch storage. The bot is
-            // configured to sell only inventory items; storage-to-inventory
-            // transfer is handled elsewhere (or not at all in this version).
         }
 
         public void SellSpecificSlot(int realSlot)
@@ -356,7 +380,10 @@ namespace DriverScanTester.Services
 
                 Thread.Sleep(180);
 
+                int quantityBefore = _memory.TryGetSellSlotItemCount(target.MemorySlot);
                 SellInventorySlotByMouse(realSlot, target);
+                Thread.Sleep(200);
+                RecordSoldQuantity(quantityBefore, _memory.TryGetSellSlotItemCount(target.MemorySlot));
                 _log($"ItemSeller: Specific slot {realSlot} sell attempt finished.");
             }
             catch (Exception ex)
@@ -374,6 +401,32 @@ namespace DriverScanTester.Services
             public int LocalIndex;
             public int Row;
             public int Column;
+        }
+
+        /// <summary>
+        /// Total quantity of every sellable inventory slot. Comparing a reading taken
+        /// before and after a sell run gives exactly how many items were really sold:
+        /// failed sell clicks change nothing and slot reordering does not affect a sum.
+        /// </summary>
+        private int TotalSellableInventoryQuantity()
+        {
+            int total = 0;
+            for (int realSlot = FirstSellableRealSlotTab1; realSlot <= LastSellableRealSlotTab1; realSlot++)
+                total += _memory.TryGetSellSlotItemCount(RealInventorySlotToMemorySlot(realSlot));
+            for (int realSlot = FirstRealSlotTab2; realSlot <= LastRealSlotTab2; realSlot++)
+                total += _memory.TryGetSellSlotItemCount(RealInventorySlotToMemorySlot(realSlot));
+            return total;
+        }
+
+        /// <summary>Records the sold quantity of a sell run (or a single specific slot).</summary>
+        private void RecordSoldQuantity(int quantityBefore, int quantityAfter)
+        {
+            if (quantityAfter >= quantityBefore)
+                return;
+
+            int sold = quantityBefore - quantityAfter;
+            int total = BotStatisticsService.Instance.AddItemsSold(sold);
+            _log($"ItemSeller: Sold {sold} item(s) — {total} item(s) sold in total this session.");
         }
 
         /// <summary>

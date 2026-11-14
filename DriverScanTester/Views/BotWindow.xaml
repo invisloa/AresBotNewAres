@@ -222,6 +222,7 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
                                 <Grid Grid.Row="0" Margin="0,0,0,7">
                                     <Grid.ColumnDefinitions>
@@ -251,7 +252,6 @@
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="1.05*"/>
                                         <ColumnDefinition Width="1.8*"/>
-                                        <ColumnDefinition Width="0.75*"/>
                                         <ColumnDefinition Width="1.1*"/>
                                         <ColumnDefinition Width="1.2*"/>
                                     </Grid.ColumnDefinitions>
@@ -280,19 +280,13 @@
                                     </Border>
                                     <Border Grid.Column="2" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="2">
                                         <StackPanel>
-                                            <TextBlock Text="Cycles" FontSize="10" Foreground="Gray"/>
-                                            <TextBlock Text="{Binding WorkflowCycleCount}" FontWeight="SemiBold"/>
-                                        </StackPanel>
-                                    </Border>
-                                    <Border Grid.Column="3" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="2">
-                                        <StackPanel>
                                             <TextBlock Text="Run duration (min)" FontSize="10" Foreground="Gray"
                                                        ToolTip="Optional limit. Empty or 0 runs indefinitely."/>
                                             <TextBox Text="{Binding RunDurationMinutesText, UpdateSourceTrigger=PropertyChanged}"
                                                      MinWidth="70" ToolTip="Applies to Start Workflow and Start Manual Bot."/>
                                         </StackPanel>
                                     </Border>
-                                    <Border Grid.Column="4" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="2">
+                                    <Border Grid.Column="3" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="2">
                                         <StackPanel>
                                             <TextBlock Text="Auto-stop remaining" FontSize="10" Foreground="Gray"/>
                                             <TextBlock Text="{Binding RunTimeRemainingText}" FontWeight="SemiBold" Foreground="#FF245B91"/>
@@ -300,7 +294,44 @@
                                     </Border>
                                 </Grid>
 
-                                <Border Grid.Row="2" Background="#FFF7F8FA" BorderBrush="#FFE0E4E8"
+                                <!-- Read-only session statistics: the values are never editable here. -->
+                                <Border Grid.Row="2" BorderBrush="#FFD3D9DF" BorderThickness="1" CornerRadius="3"
+                                        Background="#FFF7F8FA" Padding="6,4" Margin="2,0,0,7">
+                                    <DockPanel LastChildFill="True">
+                                        <TextBlock DockPanel.Dock="Left" Text="Statistics (read-only)" FontWeight="Bold"
+                                                   Foreground="#FF555D65" VerticalAlignment="Center" Margin="2,0,10,0"/>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Border Grid.Column="0" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="2">
+                                                <StackPanel>
+                                                    <TextBlock Text="Work time (total)" FontSize="10" Foreground="Gray"
+                                                               ToolTip="Total time the bot has been running since the app was started. Paused time is excluded."/>
+                                                    <TextBlock Text="{Binding StatisticsWorkTimeText}" FontWeight="SemiBold"/>
+                                                </StackPanel>
+                                            </Border>
+                                            <Border Grid.Column="1" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="2">
+                                                <StackPanel>
+                                                    <TextBlock Text="Cycles (total)" FontSize="10" Foreground="Gray"
+                                                               ToolTip="Total repot - EXP cycles completed since the app was started."/>
+                                                    <TextBlock Text="{Binding StatisticsCompletedCycles}" FontWeight="SemiBold"/>
+                                                </StackPanel>
+                                            </Border>
+                                            <Border Grid.Column="2" Style="{StaticResource RuntimeBadgeBorderStyle}" Margin="2">
+                                                <StackPanel>
+                                                    <TextBlock Text="Items sold (total)" FontSize="10" Foreground="Gray"
+                                                               ToolTip="Total items the bot has sold since the app was started."/>
+                                                    <TextBlock Text="{Binding StatisticsItemsSold}" FontWeight="SemiBold"/>
+                                                </StackPanel>
+                                            </Border>
+                                        </Grid>
+                                    </DockPanel>
+                                </Border>
+
+                                <Border Grid.Row="3" Background="#FFF7F8FA" BorderBrush="#FFE0E4E8"
                                         BorderThickness="1" CornerRadius="3" Padding="5" Margin="2,0">
                                     <ScrollViewer MaxHeight="54" VerticalScrollBarVisibility="Auto"
                                                   HorizontalScrollBarVisibility="Disabled">

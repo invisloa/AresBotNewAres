@@ -1206,6 +1206,83 @@ namespace DriverScanTester.Tests
             Assert.DoesNotContain(scenario.Log, l => l.Contains("[CombatGateReturn] COMPLETE", StringComparison.Ordinal));
         }
 
+        // ── P. Withheld post-kill loot regains an owner when the return completes ──
+
+        [Fact]
+        public async Task ReturnReArmsTheCloseMobCheckForWithheldPostKillLoot()
+        {
+            using var scenario = new ReturnScenario();
+
+            // Production state (CoT 2026-11-14 17:14 and 17:23): the close-mob search had
+            // already found a nearby mob, so the normal item cycle was withheld; that mob then
+            // hit the CombatGate overshoot and was released by the waypoint return. Without an
+            // owner the Deferred obligation never ran again, the barrier kept navigation and
+            // every periodic TAB blocked, and the bot stood still until an external action.
+            SetField(scenario.Movement, "_postKillNormalLootWithheld", true);
+            scenario.ArmPostKill();
+            scenario.DeferForCombat();
+
+            await scenario.TickAsync();
+            Assert.True(scenario.ReturnActive);
+            Assert.True(GetBoolField(scenario.Movement, "_postKillNormalLootWithheld"));
+
+            // Approach the waypoint so the dedicated return completes successfully.
+            scenario.Stub.X = 165f;
+            scenario.Stub.Y = 138f;
+            await TickUntilAsync(scenario, () =>
+                scenario.Log.Any(l => l.Contains("[CombatGateReturn] COMPLETE", StringComparison.Ordinal)));
+
+            // The withheld normal loot regains an owner on the very same completion.
+            Assert.Contains(scenario.Log, l => l.Contains(
+                "CombatGate return complete — close-mob check re-armed", StringComparison.Ordinal));
+            Assert.True(scenario.Movement.IsPostKillCloseMobCheckPending);
+
+            // The re-armed decision takes the existing CombatGate bypass: normal loot is released
+            // without any TAB input because the suppressed target still owns this waypoint leg.
+            await scenario.TickAsync();
+            Assert.Contains(scenario.Log, l => l.Contains(
+                "waypoint attack is disengaged by CombatGate", StringComparison.Ordinal));
+            Assert.False(scenario.Movement.IsPostKillCloseMobCheckPending);
+            Assert.False(GetBoolField(scenario.Movement, "_postKillNormalLootWithheld"));
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+            Assert.Equal(0, scenario.Movement.SkillThreeDowns);
+
+            // Normal loot now has an owner again: the real request starts its stationary cycle
+            // and navigation is still waiting for the verified scan (no fake completion).
+            LootRequestStatus beforeService = scenario.Status();
+            Assert.Equal(LootRequestState.Deferred, beforeService.State);
+            Invoke(scenario.Loot, "ServiceMandatoryLootRequest", false);
+            LootRequestStatus running = scenario.Status();
+            Assert.Equal(LootRequestState.Running, running.State);
+            Assert.False(running.CameraVerified);
+            Assert.True(GetBoolField(scenario.Movement, "_lootNavigationBarrierHoldsInput"));
+            Assert.Equal(1, QueueCount(scenario.Movement));
+        }
+
+        [Fact]
+        public async Task ReturnDoesNotReArmTheCheckWhenLootWasAlreadyReleased()
+        {
+            using var scenario = new ReturnScenario();
+            scenario.ArmPostKill();
+            scenario.DeferForCombat();
+
+            // No withholding → the close-mob search already concluded and nothing may re-run it.
+            Assert.False(GetBoolField(scenario.Movement, "_postKillNormalLootWithheld"));
+
+            await scenario.TickAsync();
+            Assert.True(scenario.ReturnActive);
+
+            scenario.Stub.X = 165f;
+            scenario.Stub.Y = 138f;
+            await TickUntilAsync(scenario, () =>
+                scenario.Log.Any(l => l.Contains("[CombatGateReturn] COMPLETE", StringComparison.Ordinal)));
+
+            Assert.DoesNotContain(scenario.Log, l => l.Contains(
+                "close-mob check re-armed", StringComparison.Ordinal));
+            Assert.False(scenario.Movement.IsPostKillCloseMobCheckPending);
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+        }
+
         // ── O. Pre-fix mechanics: the barrier alone never produced movement ─────
 
         [Fact]

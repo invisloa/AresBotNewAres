@@ -394,6 +394,15 @@ namespace DriverScanTester.ViewModels
         /// <summary>Completed repot-&gt;exp cycles of the running workflow (0 while idle).</summary>
         public int WorkflowCycleCount => _main.WorkflowCycleCount;
 
+        /// <summary>Read-only statistics: total active work time of every bot run this session.</summary>
+        public string StatisticsWorkTimeText => _main.StatisticsWorkTimeText;
+
+        /// <summary>Read-only statistics: total completed workflow cycles this session.</summary>
+        public int StatisticsCompletedCycles => _main.StatisticsCompletedCycles;
+
+        /// <summary>Read-only statistics: total items sold this session.</summary>
+        public int StatisticsItemsSold => _main.StatisticsItemsSold;
+
         /// <summary>
         /// Pass-through for the "stop and teleport to city when another player is detected"
         /// option. Kept editable while detached so profiles can be prepared offline.
@@ -1496,6 +1505,11 @@ namespace DriverScanTester.ViewModels
                 IsWorkflowRunning = _main.IsWorkflowRunning;
                 WorkflowPhaseText = _main.WorkflowPhaseText;
                 OnPropertyChanged(nameof(WorkflowCycleCount));
+
+                // Read-only session statistics (work time, cycles, items sold).
+                OnPropertyChanged(nameof(StatisticsWorkTimeText));
+                OnPropertyChanged(nameof(StatisticsCompletedCycles));
+                OnPropertyChanged(nameof(StatisticsItemsSold));
 
                 // Run-duration countdown (updated every second with the stats poll).
                 var remaining = _main.GetAutoStopRemaining();

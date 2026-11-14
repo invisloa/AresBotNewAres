@@ -321,15 +321,18 @@ namespace DriverScanTester.Services
         /// Classifies the currently selected target and decides whether an attack may be
         /// initiated, resumed or retried. <paramref name="forcePlayerScan"/> requests fresh
         /// other-player evidence (used when a new target was selected and before the first
-        /// attack of a target).
+        /// attack of a target). <paramref name="playerDetectionEnabled"/> is the live
+        /// movement-mode gate: when false (OnlyMove) no other-player marker scan is performed.
         /// </summary>
-        public CombatTargetValidation Validate(bool forcePlayerScan = false)
+        public CombatTargetValidation Validate(
+            bool forcePlayerScan = false,
+            bool playerDetectionEnabled = true)
         {
             int targetId = _readTargetId();
             if (targetId != _lastTargetId)
                 forcePlayerScan = true;
 
-            CombatTargetValidation validation = Classify(targetId, forcePlayerScan);
+            CombatTargetValidation validation = Classify(targetId, forcePlayerScan, playerDetectionEnabled);
 
             _lastTargetId = targetId;
             LogValidation(validation);
@@ -340,10 +343,13 @@ namespace DriverScanTester.Services
         /// True only for a confirmed monster. Convenience wrapper for code paths that only
         /// need the boolean (e.g. mob-grouping combat context).
         /// </summary>
-        public bool IsConfirmedMonster(bool forcePlayerScan = false)
-            => Validate(forcePlayerScan).IsConfirmedMonster;
+        public bool IsConfirmedMonster(bool forcePlayerScan = false, bool playerDetectionEnabled = true)
+            => Validate(forcePlayerScan, playerDetectionEnabled).IsConfirmedMonster;
 
-        private CombatTargetValidation Classify(int targetId, bool forcePlayerScan)
+        private CombatTargetValidation Classify(
+            int targetId,
+            bool forcePlayerScan,
+            bool playerDetectionEnabled)
         {
             if (targetId <= 0)
             {
@@ -364,6 +370,16 @@ namespace DriverScanTester.Services
                 return new CombatTargetValidation(
                     targetId, TargetEntityKind.Npc, "in-city", false,
                     "player is in the city (NPC/non-combat area)", null);
+            }
+
+            // OnlyMove is pure navigation: no other-player marker scan may run. The target-id
+            // player-domain check above still rejects player targets, and the in-city check
+            // still rejects NPCs; a mob-domain target is authorized without any screen scan.
+            if (!playerDetectionEnabled)
+            {
+                return new CombatTargetValidation(
+                    targetId, TargetEntityKind.Monster, "other-player-detection-disabled", true,
+                    "other-player detection disabled (OnlyMove)", null);
             }
 
             // An ignored faction behaves exactly like an empty screen: the bot keeps moving

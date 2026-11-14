@@ -213,7 +213,7 @@ namespace DriverScanTester
         public static class SpeedPotion
         {
             /// <summary>Attack speed value at which bot drinks speed potions (key 6 + key 7).</summary>
-            public const short AttackSpeedThreshold = 16341; //16341 +2 speed //16384 +3 speed (archer bos+giko)
+            public const short AttackSpeedThreshold = 16384; //16341 +2 speed //16384 +3 speed (archer bos+giko)
 
             /// <summary>
             /// Sorcerer/Mage buff detection by RUN speed (the white potion raises run speed,
@@ -2142,6 +2142,31 @@ namespace DriverScanTester
             /// <summary>How long a post-kill pink-scan request stays valid (ms). Requests older
             /// than this are dropped instead of starting a stale scan after a pause.</summary>
             public const int PinkScanRequestTtlMs = 5000;
+
+            /// <summary>
+            /// Upper bound (ms) for the post-kill death/handoff ordering guard. The guard only
+            /// exists to bridge the loot tick between "the mob just died" and MovementSystem
+            /// arming the fresh post-kill request; it is never a legitimate multi-second wait.
+            /// When it expires the obligation is serviced instead of parking navigation forever
+            /// (production 2026-11-14 16:57: the guard stayed armed with no later arm or death
+            /// to clear it and the bot stood still in CoT for over five minutes).
+            /// </summary>
+            public const int PostKillHandoffTtlMs = 1000;
+
+            /// <summary>
+            /// Sustained time (ms) a Deferred post-kill obligation may sit with no owner — no
+            /// close-mob search, no retarget, no target release, no CombatGate/other recovery,
+            /// no loot work in flight and nothing selected — before the movement tick releases
+            /// the withheld normal loot and asks the loot system to resume. This is a deadlock
+            /// backstop only: the regular camera-verified scan still decides, so navigation is
+            /// never released without a completed loot pass.
+            /// </summary>
+            public const int PostKillOrphanedObligationGraceMs = 3000;
+
+            /// <summary>Minimum time (ms) between two "orphaned post-kill obligation" rescue
+            /// log lines for the same episode, so a genuinely broken loot service cannot spam
+            /// the log once per grace window.</summary>
+            public const int PostKillOrphanedObligationLogIntervalMs = 30000;
 
             /// <summary>Weight (lb) of one SOD/SOP scroll. When the player is at the weight
             /// limit a confirmed pink pickup would fail, so the pink scan drinks a potion

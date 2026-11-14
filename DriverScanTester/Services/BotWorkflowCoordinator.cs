@@ -1614,8 +1614,21 @@ namespace DriverScanTester.Services
                     AutomaticLootDisabled = disableAllLoot,
                     ShouldStopOnOtherPlayerMarker = () => ShouldStopOnOtherPlayerDetected?.Invoke() ?? true,
                     ShouldIgnoreOtherPlayerMarker = ShouldIgnoreDetectedPlayerMarker,
+                    // Live movement-mode gate: OnlyMove is pure navigation and must never
+                    // start, continue or confirm an other-player marker scan.
+                    IsPlayerDetectionEnabled = () =>
+                        _pathRunner.CurrentMovement?.IsOtherPlayerDetectionEnabled ?? true,
                     OtherPlayerMarkerDetected = () =>
                     {
+                        // A detection obtained in a previous combat waypoint may arrive after
+                        // the route switched to OnlyMove. It must not interrupt the EXP loop.
+                        if (_pathRunner.CurrentMovement?.IsOtherPlayerDetectionEnabled == false)
+                        {
+                            _log("[PlayerPixels] Delayed other-player result ignored — the active " +
+                                 "movement mode is OnlyMove (player detection disabled).");
+                            return;
+                        }
+
                         if (Interlocked.Exchange(ref otherPlayerMarkerDetected, 1) == 0)
                         {
                             _log("[ExpLoop] Other player pixels detected — interrupting EXP and returning to the city.");
