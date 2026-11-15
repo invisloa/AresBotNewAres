@@ -427,6 +427,31 @@ namespace DriverScanTester.Services
             int sold = quantityBefore - quantityAfter;
             int total = BotStatisticsService.Instance.AddItemsSold(sold);
             _log($"ItemSeller: Sold {sold} item(s) — {total} item(s) sold in total this session.");
+
+            // The money ("segel") progress is refreshed here — on every sell only — so the
+            // panel keeps showing the difference against the profile start instead of a
+            // value that jumps around while the bot is fighting or looting.
+            RefreshMoneyProgress();
+        }
+
+        /// <summary>
+        /// Reads the money ("segel") value at <c>[Ares.exe + 0x489BC8] + 0xEBC</c> and
+        /// updates the change against the value captured when the profile started.
+        /// A failed read leaves the last shown value untouched.
+        /// </summary>
+        private void RefreshMoneyProgress()
+        {
+            if (!_memory.TryReadMoneySegel(out int money))
+            {
+                _log("ItemSeller: Money (segel) read failed — money progress not updated.");
+                return;
+            }
+
+            long? change = BotStatisticsService.Instance.UpdateMoney(money);
+            if (change.HasValue)
+                _log($"ItemSeller: Money now {money}; change since profile start {change.Value:+#,0;-#,0;0}.");
+            else
+                _log($"ItemSeller: Money now {money}; no profile money baseline yet.");
         }
 
         /// <summary>

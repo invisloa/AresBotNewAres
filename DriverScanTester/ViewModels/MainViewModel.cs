@@ -46,29 +46,50 @@ namespace DriverScanTester.ViewModels
         private MovementPrecision _selectedPrecision = MovementPrecision.Medium;
         private BotMode _selectedBotMode = BotMode.OnlyMove;
         private bool _stopOnOtherPlayerDetected = true;
-        private bool _isMageLoginSelected;
+        private LoginCharacter _selectedLoginCharacter = LoginCharacter.Knight;
+
+        /// <summary>Character the automatic launcher login should use (Knight/Archer/Mage).</summary>
+        public LoginCharacter SelectedLoginCharacter
+        {
+            get => _selectedLoginCharacter;
+            set
+            {
+                if (!SetProperty(ref _selectedLoginCharacter, value))
+                    return;
+
+                OnPropertyChanged(nameof(IsKnightLoginSelected));
+                OnPropertyChanged(nameof(IsArcherLoginSelected));
+                OnPropertyChanged(nameof(IsMageLoginSelected));
+            }
+        }
 
         public bool IsKnightLoginSelected
         {
-            get => !_isMageLoginSelected;
+            get => _selectedLoginCharacter == LoginCharacter.Knight;
             set
             {
-                if (!value || !_isMageLoginSelected)
-                    return;
+                if (value)
+                    SelectedLoginCharacter = LoginCharacter.Knight;
+            }
+        }
 
-                _isMageLoginSelected = false;
-                OnPropertyChanged(nameof(IsMageLoginSelected));
-                OnPropertyChanged();
+        public bool IsArcherLoginSelected
+        {
+            get => _selectedLoginCharacter == LoginCharacter.Archer;
+            set
+            {
+                if (value)
+                    SelectedLoginCharacter = LoginCharacter.Archer;
             }
         }
 
         public bool IsMageLoginSelected
         {
-            get => _isMageLoginSelected;
+            get => _selectedLoginCharacter == LoginCharacter.Mage;
             set
             {
-                if (SetProperty(ref _isMageLoginSelected, value))
-                    OnPropertyChanged(nameof(IsKnightLoginSelected));
+                if (value)
+                    SelectedLoginCharacter = LoginCharacter.Mage;
             }
         }
 
@@ -3509,6 +3530,13 @@ namespace DriverScanTester.ViewModels
         public int StatisticsItemsSold => BotStatisticsService.Instance.ItemsSold;
 
         /// <summary>
+        /// Money ("segel", <c>[Ares.exe + 0x489BC8] + 0xEBC</c>) gained/lost since the
+        /// current profile started. The zero point is read when the profile starts and the
+        /// value is refreshed only after an item sell, never polled continuously.
+        /// </summary>
+        public string StatisticsMoneyChangeText => BotStatisticsService.Instance.MoneyChangeText;
+
+        /// <summary>
         /// Starts the route workflow (Stage 1 Repot, Stage 2 Go to EXP chain,
         /// Stage 3 EXP Path) for the given profile. Requires a non-null valid profile;
         /// there is no no-profile fallback mode.
@@ -3577,6 +3605,14 @@ namespace DriverScanTester.ViewModels
                     return;
                 }
             }
+            // Money ("segel") zero point for this profile run: the value read right now is
+            // the reference, and only the difference is shown in the Statistics section.
+            bool moneyBaselineRead = memoryService.TryReadMoneySegel(out int moneyAtProfileStart);
+            BotStatisticsService.Instance.SetMoneyBaseline(moneyBaselineRead ? moneyAtProfileStart : (int?)null);
+            AppendBotLog(moneyBaselineRead
+                ? $"Money baseline captured at profile start: {moneyAtProfileStart}."
+                : "Money baseline could not be read at profile start — it will be captured on the first sell.");
+
             var repotSystem = new RepotSystem(memoryService, AppendBotLog, _wKeyCameraController);
             var repotDetector = new RepotDetectorService(AppendBotLog);
             var pathLoader = new SavedPathLoader(AppendBotLog);
@@ -4004,7 +4040,7 @@ namespace DriverScanTester.ViewModels
                 var recovery = new GameCrashRecoveryService(
                     AppendBotLog,
                     _internetConnectionProbe.IsInternetAvailableAsync,
-                    (useMageLogin, ct) => _recoveryGameClientStartupService.StartAsync(useMageLogin, ct),
+                    (loginCharacter, ct) => _recoveryGameClientStartupService.StartAsync(loginCharacter, ct),
                     AttachToGameForRecoveryAsync,
                     WaitForGameMapLoadedForRecoveryAsync,
                     TeleportToCityForRecoveryAsync,
@@ -4013,7 +4049,7 @@ namespace DriverScanTester.ViewModels
                 GameCrashRecoveryOutcome outcome = await recovery.RecoverAsync(
                     crashedGameProcessId,
                     profile,
-                    IsMageLoginSelected,
+                    SelectedLoginCharacter,
                     token);
 
                 if (outcome == GameCrashRecoveryOutcome.Failed)

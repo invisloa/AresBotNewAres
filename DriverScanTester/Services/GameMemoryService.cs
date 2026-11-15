@@ -72,6 +72,7 @@ namespace DriverScanTester.Services
         private const ulong AttackSpeed2Offset = BotConstants.MemoryOffsets.AttackSpeed2;
         private const ulong CurrentActionOffset = BotConstants.MemoryOffsets.CurrentAction;
         private const ulong CurrentClassPlayerOffset = BotConstants.MemoryOffsets.CurrentClassPlayer;
+        private const ulong MoneySegelOffset = BotConstants.MemoryOffsets.MoneySegel;
         // A_CurrentAction values: 0=idle, 3=running, 4=being hit, 7=attacking -knight no weapon
         // A_CurrentAction values: 25=idle, 27=running, 28wd=being hit, 39=attacking -knight sword
 
@@ -1068,6 +1069,25 @@ namespace DriverScanTester.Services
                 BotConstants.PlayerClassIds.Spear => PlayerClass.Spear,
                 _ => PlayerClass.Unknown,
             };
+        }
+
+        /// <summary>
+        /// Reads the money ("segel") 32-bit int from the player structure
+        /// (<c>[Ares.exe + 0x489BC8] + 0xEBC</c>, lock-tool name: XMoneySegel,
+        /// ValueType = CLong). The bot only observes the value: the difference between
+        /// the value at profile start and the value after each sell is what the
+        /// Statistics section shows.
+        /// Returns false when the player pointer or the money value cannot be read, so a
+        /// failed read is never reported as a real balance (0 would look like free money).
+        /// </summary>
+        public bool TryReadMoneySegel(out int money)
+        {
+            money = 0;
+
+            ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
+            if (playerBase == 0) return false;
+
+            return TryReadInt(playerBase + MoneySegelOffset, out money);
         }
 
         public (int current, int max) GetWeight()

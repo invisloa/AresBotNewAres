@@ -1,5 +1,13 @@
 [
   {
+    "AddressText": "[Ares.exe \u002B 0x489BC8] \u002B 0xEBC",
+    "NameText": "XMoneySegel",
+    "ValueText": "",
+    "ValueType": 2,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
     "AddressText": "[[Ares.exe \u002B 0x489BE8] \u002B 0x178] \u002B 0x12C",
     "NameText": "FirstSlotBuff",
     "ValueText": "3384",

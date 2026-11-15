@@ -35,7 +35,7 @@ namespace DriverScanTester.Services
     {
         private readonly Action<string> _log;
         private readonly Func<CancellationToken, Task<bool>> _hasInternetConnectionAsync;
-        private readonly Func<bool, CancellationToken, Task<GameClientStartupResult>> _startGameClientAsync;
+        private readonly Func<LoginCharacter, CancellationToken, Task<GameClientStartupResult>> _startGameClientAsync;
         private readonly Func<int, CancellationToken, Task<bool>> _attachToGameAsync;
         private readonly Func<int, CancellationToken, Task<bool>> _waitForMapLoadedAsync;
         private readonly Func<BotProfile, CancellationToken, Task<bool>> _teleportToCityAsync;
@@ -68,7 +68,7 @@ namespace DriverScanTester.Services
         public GameCrashRecoveryService(
             Action<string> log,
             Func<CancellationToken, Task<bool>> hasInternetConnectionAsync,
-            Func<bool, CancellationToken, Task<GameClientStartupResult>> startGameClientAsync,
+            Func<LoginCharacter, CancellationToken, Task<GameClientStartupResult>> startGameClientAsync,
             Func<int, CancellationToken, Task<bool>> attachToGameAsync,
             Func<int, CancellationToken, Task<bool>> waitForMapLoadedAsync,
             Func<BotProfile, CancellationToken, Task<bool>> teleportToCityAsync,
@@ -95,7 +95,7 @@ namespace DriverScanTester.Services
         public async Task<GameCrashRecoveryOutcome> RecoverAsync(
             uint crashedGameProcessId,
             BotProfile profile,
-            bool useMageLogin,
+            LoginCharacter loginCharacter,
             CancellationToken token)
         {
             if (profile == null)
@@ -114,7 +114,7 @@ namespace DriverScanTester.Services
                 await WaitForInternetAsync(token);
 
                 _log("[GameRecovery] Starting the game client and logging in...");
-                GameClientStartupResult startup = await _startGameClientAsync(useMageLogin, token);
+                GameClientStartupResult startup = await _startGameClientAsync(loginCharacter, token);
                 if (startup.Status == GameClientStartupStatus.Cancelled)
                 {
                     _log("[GameRecovery] Client startup cancelled; recovery stopped.");

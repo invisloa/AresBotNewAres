@@ -404,6 +404,13 @@ namespace DriverScanTester.ViewModels
         public int StatisticsItemsSold => _main.StatisticsItemsSold;
 
         /// <summary>
+        /// Read-only statistics: money ("segel") gained/lost since the current profile
+        /// started. The zero point is read at profile start and the value is refreshed
+        /// only after an item sell.
+        /// </summary>
+        public string StatisticsMoneyChangeText => _main.StatisticsMoneyChangeText;
+
+        /// <summary>
         /// Pass-through for the "stop and teleport to city when another player is detected"
         /// option. Kept editable while detached so profiles can be prepared offline.
         /// </summary>
@@ -1155,19 +1162,19 @@ namespace DriverScanTester.ViewModels
             if (_gameClientStartupService.IsRunning)
                 return;
 
-            string characterName = _main.IsMageLoginSelected ? "Mage" : "Knight";
+            string characterName = _main.SelectedLoginCharacter.ToDisplayName();
             AppendBotLog($"[Startup] Automatic game startup requested; selected login character={characterName}. Credentials are kept out of the log.");
             var startupCts = new CancellationTokenSource();
             _gameStartupCts = startupCts;
-            _ = StartGameClientAsync(startupCts, _main.IsMageLoginSelected);
+            _ = StartGameClientAsync(startupCts, _main.SelectedLoginCharacter);
         }
 
-        private async Task StartGameClientAsync(CancellationTokenSource startupCts, bool useMageLogin)
+        private async Task StartGameClientAsync(CancellationTokenSource startupCts, LoginCharacter loginCharacter)
         {
             GameClientStartupResult? startedResult = null;
             try
             {
-                GameClientStartupResult result = await _gameClientStartupService.StartAsync(useMageLogin, startupCts.Token);
+                GameClientStartupResult result = await _gameClientStartupService.StartAsync(loginCharacter, startupCts.Token);
                 if (result.Status == GameClientStartupStatus.Started)
                 {
                     AppendBotLog(
@@ -1510,6 +1517,7 @@ namespace DriverScanTester.ViewModels
                 OnPropertyChanged(nameof(StatisticsWorkTimeText));
                 OnPropertyChanged(nameof(StatisticsCompletedCycles));
                 OnPropertyChanged(nameof(StatisticsItemsSold));
+                OnPropertyChanged(nameof(StatisticsMoneyChangeText));
 
                 // Run-duration countdown (updated every second with the stats poll).
                 var remaining = _main.GetAutoStopRemaining();

@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using DriverScanTester.Models;
 
 namespace DriverScanTester.Services
 {
@@ -66,6 +67,7 @@ namespace DriverScanTester.Services
         private const int CharacterSelectionOffsetX = 179;
         private const int CharacterSelectionOffsetY = 437;
         private const string KnightLoginUsername = "superknaj87";
+        private const string ArcherLoginUsername = "superloa87";
         private const string MageLoginUsername = "supermage";
         private const string GameLoginPassword = "Jankoza8712";
 
@@ -98,7 +100,7 @@ namespace DriverScanTester.Services
         /// throwing for expected failures; cancellation is reported as
         /// <see cref="GameClientStartupStatus.Cancelled"/>.
         /// </summary>
-        public async Task<GameClientStartupResult> StartAsync(bool useMageLogin, CancellationToken token)
+        public async Task<GameClientStartupResult> StartAsync(LoginCharacter loginCharacter, CancellationToken token)
         {
             if (Interlocked.CompareExchange(ref _startupGuard, 1, 0) != 0)
             {
@@ -115,7 +117,7 @@ namespace DriverScanTester.Services
             try
             {
                 RunningChanged?.Invoke(true);
-                return await StartCoreAsync(useMageLogin, token);
+                return await StartCoreAsync(loginCharacter, token);
             }
             catch (OperationCanceledException)
             {
@@ -137,7 +139,7 @@ namespace DriverScanTester.Services
             }
         }
 
-        private async Task<GameClientStartupResult> StartCoreAsync(bool useMageLogin, CancellationToken token)
+        private async Task<GameClientStartupResult> StartCoreAsync(LoginCharacter loginCharacter, CancellationToken token)
         {
             var overallTimer = Stopwatch.StartNew();
 
@@ -262,7 +264,7 @@ namespace DriverScanTester.Services
                 overallTimer,
                 token);
             if (startupObservation == GameStartupObservation.WindowDetected)
-                return await CompleteLoginResultAsync(gameProcessIdsBeforeLaunch, useMageLogin, token);
+                return await CompleteLoginResultAsync(gameProcessIdsBeforeLaunch, loginCharacter, token);
             if (startupObservation == GameStartupObservation.ProcessStartedWithoutWindow)
             {
                 return Fail("The Ares process started, but its visible game window did not appear within the startup grace period.");
@@ -318,7 +320,7 @@ namespace DriverScanTester.Services
                         overallTimer,
                         token);
                     if (beforeClickObservation == GameStartupObservation.WindowDetected)
-                        return await CompleteLoginResultAsync(gameProcessIdsBeforeLaunch, useMageLogin, token);
+                        return await CompleteLoginResultAsync(gameProcessIdsBeforeLaunch, loginCharacter, token);
                     if (beforeClickObservation == GameStartupObservation.ProcessStartedWithoutWindow)
                     {
                         return Fail("The Ares process started before the next PLAY click, but its visible game window did not appear within the startup grace period. No duplicate click was made.");
@@ -349,7 +351,7 @@ namespace DriverScanTester.Services
                     overallTimer,
                     token);
                 if (startupObservation == GameStartupObservation.WindowDetected)
-                    return await CompleteLoginResultAsync(gameProcessIdsBeforeLaunch, useMageLogin, token);
+                    return await CompleteLoginResultAsync(gameProcessIdsBeforeLaunch, loginCharacter, token);
                 if (startupObservation == GameStartupObservation.ProcessStartedWithoutWindow)
                 {
                     return Fail("The Ares process started, but its visible game window did not appear within the startup grace period. No duplicate PLAY click was made.");
@@ -381,12 +383,11 @@ namespace DriverScanTester.Services
             return Fail($"Ares did not start after {MaxPlayClickAttempts} PLAY click attempts.");
         }
 
-        private async Task<GameClientStartupResult> CompleteLoginResultAsync(
-            HashSet<int> gameProcessIdsBeforeLaunch,
-            bool useMageLogin,
+        private async Task<GameClientStartupResult> CompleteLoginResultAsync(            HashSet<int> gameProcessIdsBeforeLaunch,
+            LoginCharacter loginCharacter,
             CancellationToken token)
         {
-            bool completed = await CompleteGameStartupLoginAsync(gameProcessIdsBeforeLaunch, useMageLogin, token);
+            bool completed = await CompleteGameStartupLoginAsync(gameProcessIdsBeforeLaunch, loginCharacter, token);
             if (!completed)
             {
                 return Fail("The automatic login/character selection sequence did not complete.");
@@ -397,6 +398,14 @@ namespace DriverScanTester.Services
                 StartedGameProcessId,
                 "The game client was started and the login/character selection inputs were dispatched.");
         }
+
+        /// <summary>Account username for the selected login character (password is shared).</summary>
+        private static string ResolveLoginUsername(LoginCharacter loginCharacter) => loginCharacter switch
+        {
+            LoginCharacter.Mage => MageLoginUsername,
+            LoginCharacter.Archer => ArcherLoginUsername,
+            _ => KnightLoginUsername
+        };
 
         private enum GameStartupObservation
         {
@@ -488,11 +497,11 @@ namespace DriverScanTester.Services
 
         private async Task<bool> CompleteGameStartupLoginAsync(
             HashSet<int> gameProcessIdsBeforeLaunch,
-            bool useMageLogin,
+            LoginCharacter loginCharacter,
             CancellationToken token)
         {
-            string characterName = useMageLogin ? "Mage" : "Knight";
-            string username = useMageLogin ? MageLoginUsername : KnightLoginUsername;
+            string characterName = loginCharacter.ToDisplayName();
+            string username = ResolveLoginUsername(loginCharacter);
             _log($"[Login] Step 1/8: selected {characterName}; username configured (password will not be logged).");
             _log("[Login] Step 2/8: waiting 15 seconds for the login screen.");
             await Task.Delay(GameLoginDelayMs, token);

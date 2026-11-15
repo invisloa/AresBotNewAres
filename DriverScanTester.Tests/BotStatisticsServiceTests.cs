@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
 using DriverScanTester.Services;
 using Xunit;
 
@@ -128,6 +129,88 @@ namespace DriverScanTester.Tests
             stats.SampleForTests(start + Stopwatch.Frequency * 2);
 
             Assert.Equal(TimeSpan.Zero, stats.WorkTime);
+        }
+
+        [Fact]
+        public void MoneyChangeIsMeasuredAgainstTheProfileStartValueOnly()
+        {
+            var stats = new BotStatisticsService(samplerEnabled: false);
+
+            // No profile run yet: nothing to show.
+            Assert.False(stats.HasMoneyBaseline);
+            Assert.Null(stats.MoneyChangeSinceProfileStart);
+            Assert.Equal(BotStatisticsService.UnknownMoneyText, stats.MoneyChangeText);
+
+            // Profile start: the current balance is the zero point, not money made.
+            stats.SetMoneyBaseline(1_000_000);
+            Assert.True(stats.HasMoneyBaseline);
+            Assert.Equal(0, stats.MoneyChangeSinceProfileStart);
+
+            // Refreshed only by the sell path: the difference is the profit.
+            Assert.Equal(25_500, stats.UpdateMoney(1_025_500));
+            Assert.Equal(25_500, stats.MoneyChangeSinceProfileStart);
+            Assert.Equal(30_000, stats.UpdateMoney(1_030_000));
+
+            // Spending (e.g. potions bought during repot) shows up as a negative change.
+            Assert.Equal(-12_000, stats.UpdateMoney(988_000));
+        }
+
+        [Fact]
+        public void MoneyBaselineRestartsWithEveryNewProfile()
+        {
+            var stats = new BotStatisticsService(samplerEnabled: false);
+
+            stats.SetMoneyBaseline(500);
+            Assert.Equal(1_500, stats.UpdateMoney(2_000));
+
+            // A new profile treats its own starting balance as point 0.
+            stats.SetMoneyBaseline(2_000);
+            Assert.Equal(0, stats.MoneyChangeSinceProfileStart);
+            Assert.Equal(400, stats.UpdateMoney(2_400));
+        }
+
+        [Fact]
+        public void UnreadableBaselineIsAdoptedOnTheFirstSuccessfulRead()
+        {
+            var stats = new BotStatisticsService(samplerEnabled: false);
+
+            // The balance could not be read when the profile started.
+            stats.SetMoneyBaseline(null);
+            Assert.False(stats.HasMoneyBaseline);
+            Assert.Equal(BotStatisticsService.UnknownMoneyText, stats.MoneyChangeText);
+
+            // The first value read after the first sell becomes the zero point, so money
+            // that was already there is never reported as profit.
+            Assert.Equal(0, stats.UpdateMoney(7_000));
+            Assert.Equal(250, stats.UpdateMoney(7_250));
+        }
+
+        [Fact]
+        public void MoneyChangeFormattingUsesAnExplicitSign()
+        {
+            Assert.Equal("--", BotStatisticsService.FormatMoneyChange(null));
+            Assert.Equal("0", BotStatisticsService.FormatMoneyChange(0));
+            Assert.Equal("+500", BotStatisticsService.FormatMoneyChange(500));
+            Assert.Equal("-500", BotStatisticsService.FormatMoneyChange(-500));
+
+            long large = 1_234_567;
+            Assert.Equal("+" + large.ToString("N0", CultureInfo.CurrentCulture),
+                BotStatisticsService.FormatMoneyChange(large));
+            Assert.Equal((-large).ToString("N0", CultureInfo.CurrentCulture),
+                BotStatisticsService.FormatMoneyChange(-large));
+        }
+
+        [Fact]
+        public void ResetClearsMoneyTrackingToo()
+        {
+            var stats = new BotStatisticsService(samplerEnabled: false);
+            stats.SetMoneyBaseline(100);
+            stats.UpdateMoney(150);
+
+            stats.Reset();
+
+            Assert.False(stats.HasMoneyBaseline);
+            Assert.Null(stats.MoneyChangeSinceProfileStart);
         }
     }
 }

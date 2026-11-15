@@ -1043,6 +1043,12 @@ namespace DriverScanTester
             // Use PlayerClassIds for the values; never compare against bare numbers.
             public const ulong CurrentClassPlayer = 0xA9C;
 
+            // Money ("segel") — 32-bit int read from the player base:
+            //   [Ares.exe + 0x489BC8] + 0xEBC     (lock-tool name: XMoneySegel, ValueType = CLong)
+            // Read-only for the bot: the value at profile start is the money zero point and
+            // the Bot Control Panel shows only the difference, refreshed after every sell.
+            public const ulong MoneySegel = 0xEBC;
+
             // Camera structure
             public const ulong CameraPtr = 0x4883F0;
             public const ulong CameraDistance = 0x1a6;

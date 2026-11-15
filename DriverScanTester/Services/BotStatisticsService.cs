@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
 using System.Threading;
 
 namespace DriverScanTester.Services
@@ -23,6 +24,9 @@ namespace DriverScanTester.Services
 
         private const int SampleIntervalMs = 1000;
 
+        /// <summary>Placeholder shown while the money zero point is not known yet.</summary>
+        public const string UnknownMoneyText = "--";
+
         /// <summary>
         /// Upper bound for a single sample. A suspended machine (sleep/hibernate) or a
         /// stalled sampler must not turn into hours of counted bot work.
@@ -38,6 +42,12 @@ namespace DriverScanTester.Services
         private TimeSpan _workTime;
         private int _itemsSold;
         private int _completedCycles;
+
+        // Money ("segel") tracking: the value read when the current profile started is the
+        // zero point; only the difference is shown and it is refreshed after every sell.
+        private readonly object _moneyGate = new object();
+        private long? _moneyAtProfileStart;
+        private long? _moneyChangeSinceProfileStart;
 
         /// <summary>
         /// Creates the statistics holder. Internal so tests can create an isolated
@@ -103,6 +113,78 @@ namespace DriverScanTester.Services
         /// <summary>Adds one completed workflow cycle and returns the new session total.</summary>
         public int IncrementCompletedCycles() => Interlocked.Increment(ref _completedCycles);
 
+        /// <summary>
+        /// Money ("segel", <c>[Ares.exe + 0x489BC8] + 0xEBC</c>) gained/lost since the
+        /// current profile was started, or null when no zero point is known.
+        /// </summary>
+        public long? MoneyChangeSinceProfileStart
+        {
+            get
+            {
+                lock (_moneyGate)
+                    return _moneyChangeSinceProfileStart;
+            }
+        }
+
+        /// <summary>True once the money zero point of the current profile is captured.</summary>
+        public bool HasMoneyBaseline
+        {
+            get
+            {
+                lock (_moneyGate)
+                    return _moneyAtProfileStart.HasValue;
+            }
+        }
+
+        /// <summary><see cref="MoneyChangeSinceProfileStart"/> formatted for the panel.</summary>
+        public string MoneyChangeText => FormatMoneyChange(MoneyChangeSinceProfileStart);
+
+        /// <summary>
+        /// Starts money tracking for a new profile run: <paramref name="moneyAtProfileStart"/>
+        /// (the current money value, null when it could not be read) becomes the zero point,
+        /// so every following <see cref="UpdateMoney"/> reports only the difference.
+        /// </summary>
+        public void SetMoneyBaseline(long? moneyAtProfileStart)
+        {
+            lock (_moneyGate)
+            {
+                _moneyAtProfileStart = moneyAtProfileStart;
+                _moneyChangeSinceProfileStart = moneyAtProfileStart.HasValue ? 0 : (long?)null;
+            }
+        }
+
+        /// <summary>
+        /// Records the money value read after an item sell and returns the change since the
+        /// profile started. When no zero point was captured (read failed at start, or the
+        /// bot was never started) the first reported value becomes the zero point, so the
+        /// panel never shows money that was already there before tracking began.
+        /// </summary>
+        public long? UpdateMoney(long money)
+        {
+            lock (_moneyGate)
+            {
+                if (!_moneyAtProfileStart.HasValue)
+                {
+                    _moneyAtProfileStart = money;
+                    _moneyChangeSinceProfileStart = 0;
+                    return 0;
+                }
+
+                _moneyChangeSinceProfileStart = money - _moneyAtProfileStart.Value;
+                return _moneyChangeSinceProfileStart;
+            }
+        }
+
+        /// <summary>Drops the money zero point (shown as unknown until a new profile starts).</summary>
+        public void ClearMoneyTracking()
+        {
+            lock (_moneyGate)
+            {
+                _moneyAtProfileStart = null;
+                _moneyChangeSinceProfileStart = null;
+            }
+        }
+
         /// <summary>Clears every session statistic (work time, sold items, cycles).</summary>
         public void Reset()
         {
@@ -113,6 +195,7 @@ namespace DriverScanTester.Services
             }
             Interlocked.Exchange(ref _itemsSold, 0);
             Interlocked.Exchange(ref _completedCycles, 0);
+            ClearMoneyTracking();
         }
 
         internal void SampleForTests(long nowTimestamp) => Sample(nowTimestamp);
@@ -161,6 +244,21 @@ namespace DriverScanTester.Services
             return value.TotalDays >= 1
                 ? $"{(int)value.TotalDays}d {value.Hours:D2}:{value.Minutes:D2}:{value.Seconds:D2}"
                 : $"{(int)value.TotalHours:D2}:{value.Minutes:D2}:{value.Seconds:D2}";
+        }
+
+        /// <summary>
+        /// Formats the money change since the profile start with an explicit sign
+        /// ("+12 340" / "-500" / "0"); an unknown zero point is shown as 
+        /// <see cref="UnknownMoneyText"/> rather than as a misleading 0.
+        /// </summary>
+        public static string FormatMoneyChange(long? change)
+        {
+            if (!change.HasValue)
+                return UnknownMoneyText;
+
+            long value = change.Value;
+            string text = value.ToString("N0", CultureInfo.CurrentCulture);
+            return value > 0 ? "+" + text : text;
         }
     }
 }

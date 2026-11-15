@@ -30,7 +30,7 @@ namespace DriverScanTester.Tests
             public bool StartProfileSucceeds = true;
             public GameClientStartupResult StartupResult =
                 new(GameClientStartupStatus.Started, 456, "started");
-            public bool? StartupUseMageLogin;
+            public LoginCharacter? StartupLoginCharacter;
             public BotProfile? TeleportProfile;
             public BotProfile? StartedProfile;
 
@@ -44,9 +44,9 @@ namespace DriverScanTester.Tests
                         Events.Add($"internet:{InternetChecks}");
                         return Task.FromResult(InternetChecks > InternetFailuresBeforeSuccess);
                     },
-                    startGameClientAsync: (useMageLogin, _) =>
+                    startGameClientAsync: (loginCharacter, _) =>
                     {
-                        StartupUseMageLogin = useMageLogin;
+                        StartupLoginCharacter = loginCharacter;
                         Events.Add("startup");
                         return Task.FromResult(StartupResult);
                     },
@@ -106,11 +106,11 @@ namespace DriverScanTester.Tests
             GameCrashRecoveryOutcome outcome = await service.RecoverAsync(
                 123,
                 Profile(),
-                useMageLogin: true,
+                loginCharacter: LoginCharacter.Mage,
                 CancellationToken.None);
 
             Assert.Equal(GameCrashRecoveryOutcome.Completed, outcome);
-            Assert.True(rig.StartupUseMageLogin);
+            Assert.Equal(LoginCharacter.Mage, rig.StartupLoginCharacter);
             Assert.Equal("MainCOT", rig.TeleportProfile?.Name);
             Assert.Equal("MainCOT", rig.StartedProfile?.Name);
             Assert.Equal(2, rig.InternetChecks);
@@ -129,7 +129,7 @@ namespace DriverScanTester.Tests
             GameCrashRecoveryOutcome outcome = await service.RecoverAsync(
                 123,
                 Profile(),
-                useMageLogin: false,
+                loginCharacter: LoginCharacter.Knight,
                 CancellationToken.None);
 
             Assert.Equal(GameCrashRecoveryOutcome.Completed, outcome);
@@ -147,7 +147,7 @@ namespace DriverScanTester.Tests
             GameCrashRecoveryOutcome outcome = await service.RecoverAsync(
                 0,
                 Profile(),
-                useMageLogin: false,
+                loginCharacter: LoginCharacter.Knight,
                 CancellationToken.None);
 
             Assert.Equal(GameCrashRecoveryOutcome.Completed, outcome);
@@ -167,7 +167,7 @@ namespace DriverScanTester.Tests
             GameCrashRecoveryOutcome outcome = await service.RecoverAsync(
                 123,
                 Profile(),
-                useMageLogin: false,
+                loginCharacter: LoginCharacter.Knight,
                 CancellationToken.None);
 
             Assert.Equal(GameCrashRecoveryOutcome.Failed, outcome);
@@ -189,7 +189,7 @@ namespace DriverScanTester.Tests
             GameCrashRecoveryOutcome outcome = await service.RecoverAsync(
                 0,
                 Profile(),
-                useMageLogin: false,
+                loginCharacter: LoginCharacter.Knight,
                 CancellationToken.None);
 
             Assert.Equal(GameCrashRecoveryOutcome.Failed, outcome);
@@ -207,7 +207,7 @@ namespace DriverScanTester.Tests
             GameCrashRecoveryOutcome outcome = await service.RecoverAsync(
                 0,
                 Profile(),
-                useMageLogin: false,
+                loginCharacter: LoginCharacter.Knight,
                 CancellationToken.None);
 
             Assert.Equal(GameCrashRecoveryOutcome.Failed, outcome);
@@ -225,7 +225,7 @@ namespace DriverScanTester.Tests
             GameCrashRecoveryOutcome outcome = await service.RecoverAsync(
                 0,
                 Profile(),
-                useMageLogin: false,
+                loginCharacter: LoginCharacter.Knight,
                 CancellationToken.None);
 
             Assert.Equal(GameCrashRecoveryOutcome.Completed, outcome);
@@ -246,7 +246,7 @@ namespace DriverScanTester.Tests
             Task<GameCrashRecoveryOutcome> recovery = service.RecoverAsync(
                 0,
                 Profile(),
-                useMageLogin: false,
+                loginCharacter: LoginCharacter.Knight,
                 cts.Token);
             await Task.Delay(5);
             cts.Cancel();
@@ -254,6 +254,25 @@ namespace DriverScanTester.Tests
             GameCrashRecoveryOutcome outcome = await recovery;
             Assert.Equal(GameCrashRecoveryOutcome.Cancelled, outcome);
             Assert.DoesNotContain("startup", rig.Events);
+        }
+
+        [Theory]
+        [InlineData(LoginCharacter.Knight)]
+        [InlineData(LoginCharacter.Archer)]
+        [InlineData(LoginCharacter.Mage)]
+        public async Task RecoveryPassesTheSelectedLoginCharacterToTheStartup(LoginCharacter loginCharacter)
+        {
+            var rig = new Rig();
+            GameCrashRecoveryService service = rig.CreateService();
+
+            GameCrashRecoveryOutcome outcome = await service.RecoverAsync(
+                0,
+                Profile(),
+                loginCharacter,
+                CancellationToken.None);
+
+            Assert.Equal(GameCrashRecoveryOutcome.Completed, outcome);
+            Assert.Equal(loginCharacter, rig.StartupLoginCharacter);
         }
     }
 }
