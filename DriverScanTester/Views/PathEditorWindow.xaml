@@ -575,6 +575,7 @@
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
                                     </Grid.RowDefinitions>
 
                                     <Label Grid.Row="0" Grid.Column="0" Content="Minimum HP potions:"/>
@@ -591,6 +592,13 @@
 
                                     <Label Grid.Row="2" Grid.Column="0" Content="Minimum mana:"/>
                                     <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding MinMana, UpdateSourceTrigger=PropertyChanged}" Width="70" Margin="2" HorizontalAlignment="Left"/>
+
+                                    <Label Grid.Row="3" Grid.Column="0" Content="Maximum weight (exact value):"/>
+                                    <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding MaxWeightValue, UpdateSourceTrigger=PropertyChanged}" Width="70" Margin="2" HorizontalAlignment="Left"
+                                             IsEnabled="{Binding MaxWeightValueEditable}"
+                                             ToolTip="Class only. Repot as soon as the current weight reaches this exact value (e.g. 3200). Overrides the percentage above while greater than 0. Shared defaults always use the percentage."/>
+                                    <TextBlock Grid.Row="3" Grid.Column="2" Grid.ColumnSpan="2" VerticalAlignment="Center" Foreground="Gray" TextWrapping="Wrap"
+                                               Text="Class only — 0 uses the % above."/>
                                 </Grid>
                             </GroupBox>
 

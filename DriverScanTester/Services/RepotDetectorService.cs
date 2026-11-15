@@ -20,6 +20,14 @@ namespace DriverScanTester.Services
         public float MaxWeightRatio { get; set; } = BotConstants.Repot.DefaultMaxWeightRatio;
 
         /// <summary>
+        /// Optional exact weight limit (same units as <c>GameSnapshot.CurrentWeight</c>).
+        /// When greater than 0 it replaces <see cref="MaxWeightRatio"/>: the repot fires
+        /// as soon as the current weight reaches this value. 0 means "use the ratio".
+        /// Class-specific profile settings may set it; shared defaults never do.
+        /// </summary>
+        public int MaxWeightValue { get; set; } = 0;
+
+        /// <summary>
         /// Whether the weight-ratio check participates in repot decisions. Only enabled
         /// when the profile uses LOOT PRIORITY — loot fills the inventory up to the
         /// weight limit, so a full bag means it is time to repot. Without loot priority
@@ -76,13 +84,26 @@ namespace DriverScanTester.Services
             // The weight check only applies with loot priority enabled (the profile's
             // "Loot Priority" flag). Without loot priority the bot keeps exp'ing as the
             // profile states and a full bag never forces a repot.
-            if (WeightRepotEnabled && snapshot.MaxWeight > 0)
+            if (WeightRepotEnabled)
             {
-                float ratio = (float)snapshot.CurrentWeight / snapshot.MaxWeight;
-                if (ratio >= MaxWeightRatio)
+                // An exact weight limit for the current class takes precedence over the
+                // percentage, so it also works when the game reports no max weight.
+                if (MaxWeightValue > 0)
                 {
-                    _log($"[RepotDetector] Weight high: {snapshot.CurrentWeight}/{snapshot.MaxWeight} ({ratio:P0} >= {MaxWeightRatio:P0})");
-                    return true;
+                    if (snapshot.CurrentWeight >= MaxWeightValue)
+                    {
+                        _log($"[RepotDetector] Weight high: {snapshot.CurrentWeight} >= {MaxWeightValue} (exact class limit)");
+                        return true;
+                    }
+                }
+                else if (snapshot.MaxWeight > 0)
+                {
+                    float ratio = (float)snapshot.CurrentWeight / snapshot.MaxWeight;
+                    if (ratio >= MaxWeightRatio)
+                    {
+                        _log($"[RepotDetector] Weight high: {snapshot.CurrentWeight}/{snapshot.MaxWeight} ({ratio:P0} >= {MaxWeightRatio:P0})");
+                        return true;
+                    }
                 }
             }
 

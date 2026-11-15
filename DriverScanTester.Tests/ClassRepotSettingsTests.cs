@@ -148,6 +148,7 @@ namespace DriverScanTester.Tests
             archer.MinHp = 400;
             archer.MinMana = 200;
             archer.MaxWeightRatio = 0.8f;
+            archer.MaxWeightValue = 3200;
             profile.GetOrCreateRepotSettings(PlayerClass.Knight).HpBuyTarget = 180;
             var repot = new RepotSystem(memory, _ => { });
             var detector = new RepotDetectorService(_ => { });
@@ -165,13 +166,88 @@ namespace DriverScanTester.Tests
             Assert.Equal(400, detector.MinHp);
             Assert.Equal(200, detector.MinMana);
             Assert.Equal(0.8f, detector.MaxWeightRatio);
+            Assert.Equal(3200, detector.MaxWeightValue);
             currentClass = PlayerClass.Knight;
             coordinator.ApplyClassRepotSettings();
             Assert.Equal(180, repot.HpBuyTarget);
+            Assert.Equal(0, detector.MaxWeightValue);
             Assert.Equal(9, detector.MinHpPotions);
             failRead = true;
             coordinator.ApplyClassRepotSettings();
             Assert.Equal(111, repot.HpBuyTarget);
+        }
+        [Fact]
+        public void ExactClassWeight_OverridesPercentageOnlyWhenSet()
+        {
+            var detector = new RepotDetectorService(_ => { })
+            {
+                MinHpPotions = 0,
+                MinManaPotions = 0,
+                MinHp = 0,
+                MinMana = 0,
+                MaxWeightRatio = 0.9f,
+                MaxWeightValue = 3200
+            };
+
+            Assert.False(detector.NeedsRepot(Snapshot(3199, 10000)));
+            Assert.True(detector.NeedsRepot(Snapshot(3200, 10000)));
+            // The exact limit does not depend on the game's max weight being readable.
+            Assert.True(detector.NeedsRepot(Snapshot(3200, 0)));
+
+            // 0 disables the exact value and restores the percentage behaviour.
+            detector.MaxWeightValue = 0;
+            Assert.False(detector.NeedsRepot(Snapshot(3200, 10000)));
+            Assert.True(detector.NeedsRepot(Snapshot(9000, 10000)));
+        }
+
+        private static GameSnapshot Snapshot(int currentWeight, int maxWeight) =>
+            new(0f, 0f, 1, 1, false, hp: 5000, mana: 5000, hpPotions: 50, manaPotions: 50, currentWeight, maxWeight);
+
+        [Fact]
+        public void Editor_ExactWeightIsClassOnly_AndSurvivesJsonRoundTrip()
+        {
+            var profile = new BotProfile();
+            var editor = new ProfileEditorViewModel { CurrentProfile = profile };
+
+            // Shared defaults never get an exact value.
+            Assert.False(editor.MaxWeightValueEditable);
+            editor.MaxWeightValue = 3200;
+            Assert.Equal(0, editor.MaxWeightValue);
+            Assert.Empty(profile.RepotSettingsByClass);
+
+            editor.SelectedRepotClass = PlayerClass.Archer;
+            Assert.True(editor.MaxWeightValueEditable);
+            Assert.Equal(0, editor.MaxWeightValue);
+            editor.MaxWeightValue = 3200;
+            Assert.Equal(3200, editor.MaxWeightValue);
+            Assert.Equal(3200, profile.GetRepotSettings(PlayerClass.Archer).MaxWeightValue);
+            Assert.Equal(0, profile.GetRepotSettings(PlayerClass.Knight).MaxWeightValue);
+
+            // The percentage stays independently editable for the same class.
+            editor.MaxWeightPercent = 70;
+            Assert.Equal(3200, editor.MaxWeightValue);
+
+            var reloaded = JsonSerializer.Deserialize<BotProfile>(JsonSerializer.Serialize(profile))!;
+            Assert.Equal(3200, reloaded.GetRepotSettings(PlayerClass.Archer).MaxWeightValue);
+            Assert.Equal(0, reloaded.GetRepotSettings(PlayerClass.Unknown).MaxWeightValue);
+        }
+
+        [Fact]
+        public void Validation_RejectsNegativeOrTooLargeExactClassWeight()
+        {
+            var profile = new BotProfile();
+            var loader = new BotProfileLoader(_ => { });
+            var archer = profile.GetOrCreateRepotSettings(PlayerClass.Archer);
+
+            archer.MaxWeightValue = -1;
+            Assert.Contains(loader.ValidateProfile(profile), e => e.Contains("Archer repot settings: exact max weight"));
+
+            // Weights are read as Int16, so larger values can never be reached.
+            archer.MaxWeightValue = short.MaxValue + 1;
+            Assert.Contains(loader.ValidateProfile(profile), e => e.Contains("Archer repot settings: exact max weight"));
+
+            archer.MaxWeightValue = 3200;
+            Assert.DoesNotContain(loader.ValidateProfile(profile), e => e.Contains("Archer repot settings"));
         }
     }
 }

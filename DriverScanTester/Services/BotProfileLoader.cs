@@ -373,6 +373,10 @@ namespace DriverScanTester.Services
                 errors.Add($"{label}: repot thresholds cannot be negative.");
             if (!float.IsFinite(settings.MaxWeightRatio) || settings.MaxWeightRatio <= 0 || settings.MaxWeightRatio > 1f)
                 errors.Add($"{label}: MaxWeightRatio should be between 0 and 1.");
+            // Exact weight limit is class-only and optional: 0 = use the percentage above.
+            // The game reports weights as Int16, so anything above short.MaxValue is unreadable.
+            if (settings.MaxWeightValue < 0 || settings.MaxWeightValue > short.MaxValue)
+                errors.Add($"{label}: exact max weight should be between 0 and {short.MaxValue} (0 uses the percentage instead).");
             if (settings.HpBuyTarget < 0 || settings.ManaBuyTarget < 0 || settings.RedBuyTarget < 0 || settings.WhiteBuyTarget < 0)
                 errors.Add($"{label}: potion buy targets cannot be negative.");
         }
