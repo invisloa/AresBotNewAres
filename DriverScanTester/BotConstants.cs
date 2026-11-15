@@ -246,7 +246,7 @@ namespace DriverScanTester
         }
 
         // ════════════════════════════════════════════════════════════════
-        //  REBUFF — class buff timing (currently the Sorcerer/Mage rebuff)
+        //  REBUFF — shared class buff timing (Mage and Archer)
         // ════════════════════════════════════════════════════════════════
         public static class Rebuff
         {
@@ -258,21 +258,23 @@ namespace DriverScanTester
             /// </summary>
             public const short RapidBuffActiveValue = 3384; // 0x0D38
 
+            /// <summary>16-bit buff-slot value identifying the Archer SpeedUpBuff as active.</summary>
+            public const short SpeedUpBuffActiveValue = 12;
+
             /// <summary>
-            /// Gap in ms between the two buff-key (4) presses of the mage rebuff — the mage
-            /// buff is cast by pressing key 4 twice, roughly half a second apart.
+            /// Gap in ms between the two class buff-key presses (Mage: 4, Archer: 5).
             /// </summary>
             public const int KeyPressIntervalMs = 500;
 
             /// <summary>
-            /// Settle time (ms) after releasing W/A/D before the first buff-key (4) press.
+            /// Settle time (ms) after releasing W/A/D before the first class buff-key press.
             /// The client ignores the buff key while the character is still running, so the
             /// bot must stop and let the movement state settle before rebuffing.
             /// </summary>
             public const int StopMovementSettleMs = 200;
 
             /// <summary>
-            /// Settle time (ms) after the second buff-key (4) press, still with movement
+            /// Settle time (ms) after the second class buff-key press, still with movement
             /// stopped, so the cast can finish before W is pressed again on the next tick.
             /// </summary>
             public const int PostCastSettleMs = 200;
@@ -1333,6 +1335,10 @@ namespace DriverScanTester
             // Key 4 (class buff / rebuff)
             public const byte Vk4 = 0x34;
             public const byte Scan4 = 0x05;
+
+            // Key 5 (Archer SpeedUpBuff)
+            public const byte Vk5 = 0x35;
+            public const byte Scan5 = 0x06;
 
             // Key 6 (red potion)
             public const byte Vk6 = 0x36;

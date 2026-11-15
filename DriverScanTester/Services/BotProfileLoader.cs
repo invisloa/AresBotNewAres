@@ -298,10 +298,25 @@ namespace DriverScanTester.Services
                 errors.Add("MinHp is negative.");
             if (profile.MinMana < 0)
                 errors.Add("MinMana is negative.");
-            if (profile.MaxWeightRatio <= 0 || profile.MaxWeightRatio > 1f)
+            if (!float.IsFinite(profile.MaxWeightRatio) || profile.MaxWeightRatio <= 0 || profile.MaxWeightRatio > 1f)
                 errors.Add("MaxWeightRatio should be between 0 and 1.");
             if (profile.MaxTeleportRetries < 0)
                 errors.Add("MaxTeleportRetries is negative.");
+
+            if (profile.HpBuyTarget < 0 || profile.ManaBuyTarget < 0 || profile.RedBuyTarget < 0 || profile.WhiteBuyTarget < 0)
+                errors.Add("Shared repot settings: potion buy targets cannot be negative.");
+            if (profile.RepotSettingsByClass != null)
+            {
+                foreach (var entry in profile.RepotSettingsByClass)
+                {
+                    if (!BotProfile.IsRepotClass(entry.Key))
+                        errors.Add($"Repot settings: unsupported class {entry.Key}.");
+                    if (entry.Value == null)
+                        errors.Add($"{entry.Key} repot settings are missing.");
+                    else
+                        ValidateRepotSettings(errors, entry.Value, $"{entry.Key} repot settings");
+                }
+            }
 
             // --- Start position check / protection ---
             if (profile.EnableStartPositionCheck && profile.ProtectionMapNumber <= 0)
@@ -350,6 +365,16 @@ namespace DriverScanTester.Services
             }
 
             return errors;
+        }
+
+        private static void ValidateRepotSettings(List<string> errors, ClassRepotSettings settings, string label)
+        {
+            if (settings.MinHpPotions < 0 || settings.MinManaPotions < 0 || settings.MinHp < 0 || settings.MinMana < 0)
+                errors.Add($"{label}: repot thresholds cannot be negative.");
+            if (!float.IsFinite(settings.MaxWeightRatio) || settings.MaxWeightRatio <= 0 || settings.MaxWeightRatio > 1f)
+                errors.Add($"{label}: MaxWeightRatio should be between 0 and 1.");
+            if (settings.HpBuyTarget < 0 || settings.ManaBuyTarget < 0 || settings.RedBuyTarget < 0 || settings.WhiteBuyTarget < 0)
+                errors.Add($"{label}: potion buy targets cannot be negative.");
         }
 
         /// <summary>

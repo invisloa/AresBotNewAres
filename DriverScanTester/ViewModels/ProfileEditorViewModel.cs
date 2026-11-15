@@ -141,6 +141,7 @@ namespace DriverScanTester.ViewModels
                 if (SetProperty(ref _currentProfile, value))
                 {
                     OnPropertyChanged(nameof(HasProfile));
+                    OnPropertyChanged(nameof(RepotSettingsScope));
                     OnPropertyChanged(nameof(ProfileName));
                     OnPropertyChanged(nameof(MinHpPotions));
                     OnPropertyChanged(nameof(MinManaPotions));
@@ -184,27 +185,71 @@ namespace DriverScanTester.ViewModels
             set { if (CurrentProfile != null) { CurrentProfile.Name = value; OnPropertyChanged(); } }
         }
 
+        public IReadOnlyList<KeyValuePair<PlayerClass, string>> RepotClassOptions { get; } =
+            new[]
+            {
+                new KeyValuePair<PlayerClass, string>(PlayerClass.Unknown, "Shared defaults"),
+                new KeyValuePair<PlayerClass, string>(PlayerClass.Knight, "Knight"),
+                new KeyValuePair<PlayerClass, string>(PlayerClass.Archer, "Archer"),
+                new KeyValuePair<PlayerClass, string>(PlayerClass.Mage, "Mage / Sorcerer"),
+                new KeyValuePair<PlayerClass, string>(PlayerClass.Spear, "Spear")
+            };
+
+        private PlayerClass _selectedRepotClass = PlayerClass.Unknown;
+        public PlayerClass SelectedRepotClass
+        {
+            get => _selectedRepotClass;
+            set
+            {
+                if (!SetProperty(ref _selectedRepotClass, value)) return;
+                foreach (string property in new[] { nameof(MinHpPotions), nameof(MinManaPotions),
+                    nameof(MaxWeightPercent), nameof(MinHp), nameof(MinMana), nameof(HpBuyTarget),
+                    nameof(ManaBuyTarget), nameof(RedBuyTarget), nameof(WhiteBuyTarget), nameof(RepotSettingsScope) })
+                    OnPropertyChanged(property);
+            }
+        }
+
+        public string RepotSettingsScope => SelectedRepotClass == PlayerClass.Unknown
+            ? "Shared defaults apply to classes without custom settings and when the class cannot be read."
+            : CurrentProfile?.RepotSettingsByClass?.ContainsKey(SelectedRepotClass) == true
+                ? "Custom settings for this class. Other classes are unaffected."
+                : "Using shared defaults. Editing any value creates independent settings for this class.";
+
+        private ClassRepotSettings DisplayedRepotSettings =>
+            CurrentProfile?.GetRepotSettings(SelectedRepotClass) ?? new ClassRepotSettings();
+
+        private void SetRepotValue(Action<BotProfile> setShared, Action<ClassRepotSettings> setClass)
+        {
+            if (CurrentProfile == null) return;
+            if (SelectedRepotClass == PlayerClass.Unknown)
+                setShared(CurrentProfile);
+            else
+                setClass(CurrentProfile.GetOrCreateRepotSettings(SelectedRepotClass));
+            OnPropertyChanged(nameof(RepotSettingsScope));
+        }
+
         public int MinHpPotions
         {
-            get => CurrentProfile?.MinHpPotions ?? BotConstants.Repot.DefaultMinHpPotions;
-            set { if (CurrentProfile != null) { CurrentProfile.MinHpPotions = value; OnPropertyChanged(); } }
+            get => DisplayedRepotSettings.MinHpPotions;
+            set { SetRepotValue(p => p.MinHpPotions = value, s => s.MinHpPotions = value); OnPropertyChanged(); }
         }
 
         public int MinManaPotions
         {
-            get => CurrentProfile?.MinManaPotions ?? BotConstants.Repot.DefaultMinManaPotions;
-            set { if (CurrentProfile != null) { CurrentProfile.MinManaPotions = value; OnPropertyChanged(); } }
+            get => DisplayedRepotSettings.MinManaPotions;
+            set { SetRepotValue(p => p.MinManaPotions = value, s => s.MinManaPotions = value); OnPropertyChanged(); }
         }
 
         /// <summary>MaxWeightRatio (0..1) exposed to the UI as a percentage (0..100).</summary>
         public int MaxWeightPercent
         {
-            get => (int)Math.Round((CurrentProfile?.MaxWeightRatio ?? BotConstants.Repot.DefaultMaxWeightRatio) * 100f);
+            get => (int)Math.Round(DisplayedRepotSettings.MaxWeightRatio * 100f);
             set
             {
                 if (CurrentProfile != null)
                 {
-                    CurrentProfile.MaxWeightRatio = Math.Clamp(value, 0, 100) / 100f;
+                    float ratio = Math.Clamp(value, 0, 100) / 100f;
+                    SetRepotValue(p => p.MaxWeightRatio = ratio, s => s.MaxWeightRatio = ratio);
                     OnPropertyChanged();
                 }
             }
@@ -212,38 +257,38 @@ namespace DriverScanTester.ViewModels
 
         public int MinHp
         {
-            get => CurrentProfile?.MinHp ?? BotConstants.Repot.DefaultMinHp;
-            set { if (CurrentProfile != null) { CurrentProfile.MinHp = value; OnPropertyChanged(); } }
+            get => DisplayedRepotSettings.MinHp;
+            set { SetRepotValue(p => p.MinHp = value, s => s.MinHp = value); OnPropertyChanged(); }
         }
 
         public int MinMana
         {
-            get => CurrentProfile?.MinMana ?? BotConstants.Repot.DefaultMinMana;
-            set { if (CurrentProfile != null) { CurrentProfile.MinMana = value; OnPropertyChanged(); } }
+            get => DisplayedRepotSettings.MinMana;
+            set { SetRepotValue(p => p.MinMana = value, s => s.MinMana = value); OnPropertyChanged(); }
         }
 
         public int HpBuyTarget
         {
-            get => CurrentProfile?.HpBuyTarget ?? BotConstants.Repot.HpBuyTarget;
-            set { if (CurrentProfile != null) { CurrentProfile.HpBuyTarget = value; OnPropertyChanged(); } }
+            get => DisplayedRepotSettings.HpBuyTarget;
+            set { SetRepotValue(p => p.HpBuyTarget = value, s => s.HpBuyTarget = value); OnPropertyChanged(); }
         }
 
         public int ManaBuyTarget
         {
-            get => CurrentProfile?.ManaBuyTarget ?? BotConstants.Repot.ManaBuyTarget;
-            set { if (CurrentProfile != null) { CurrentProfile.ManaBuyTarget = value; OnPropertyChanged(); } }
+            get => DisplayedRepotSettings.ManaBuyTarget;
+            set { SetRepotValue(p => p.ManaBuyTarget = value, s => s.ManaBuyTarget = value); OnPropertyChanged(); }
         }
 
         public int RedBuyTarget
         {
-            get => CurrentProfile?.RedBuyTarget ?? BotConstants.Repot.RedBuyTarget;
-            set { if (CurrentProfile != null) { CurrentProfile.RedBuyTarget = value; OnPropertyChanged(); } }
+            get => DisplayedRepotSettings.RedBuyTarget;
+            set { SetRepotValue(p => p.RedBuyTarget = value, s => s.RedBuyTarget = value); OnPropertyChanged(); }
         }
 
         public int WhiteBuyTarget
         {
-            get => CurrentProfile?.WhiteBuyTarget ?? BotConstants.Repot.WhiteBuyTarget;
-            set { if (CurrentProfile != null) { CurrentProfile.WhiteBuyTarget = value; OnPropertyChanged(); } }
+            get => DisplayedRepotSettings.WhiteBuyTarget;
+            set { SetRepotValue(p => p.WhiteBuyTarget = value, s => s.WhiteBuyTarget = value); OnPropertyChanged(); }
         }
 
         public bool DryRunRepot

@@ -14,7 +14,7 @@ namespace DriverScanTester.Tests
     ///     slot equals <see cref="BotConstants.Rebuff.RapidBuffActiveValue"/> (3384 / 0x0D38),
     ///   • rebuffs only when every readable slot holds a different value,
     ///   • an unreadable slot makes the state unknown, so no buff keys are pressed,
-    ///   • no other class has a rebuff condition yet.
+    ///   • Archer uses the same checks with SpeedUpBuff value 12 and key 5.
     /// The action itself (key 4 twice, ~500 ms apart) is performed by
     /// <see cref="MovementSystem.PerformRebuffAsync"/>.
     /// </summary>
@@ -107,7 +107,6 @@ namespace DriverScanTester.Tests
 
         [Theory]
         [InlineData(PlayerClass.Knight)]
-        [InlineData(PlayerClass.Archer)]
         [InlineData(PlayerClass.Spear)]
         [InlineData(PlayerClass.Unknown)]
         public void OtherClasses_HaveNoRebuffConditionYet(PlayerClass playerClass)
@@ -165,6 +164,73 @@ namespace DriverScanTester.Tests
             // exactly like the potion keys.
             Assert.False(combat.CheckRebuff(service, PlayerClass.Mage));
             Assert.False(combat.CheckRebuff(service, PlayerClass.Mage));
+        }
+
+        [Theory]
+        [InlineData(0)]
+        [InlineData(1)]
+        [InlineData(2)]
+        [InlineData(3)]
+        [InlineData(4)]
+        [InlineData(5)]
+        public void Archer_SpeedUpBuffInAnySlot_DoesNotRebuff(int slot)
+        {
+            var memory = new MemoryFixture();
+            memory.SetSlot(slot, 12);
+            var combat = new CombatHandler(_ => { });
+
+            Assert.False(combat.CheckRebuff(memory.CreateService(), PlayerClass.Archer));
+            Assert.True(combat.LastSpeedUpBuffActive);
+            Assert.False(combat.LastRapidBuffActive);
+        }
+
+        [Fact]
+        public void Archer_MissingSpeedUpBuff_RebuffsAndIsThrottled()
+        {
+            var memory = new MemoryFixture();
+            memory.SetSlot(0, BotConstants.Rebuff.RapidBuffActiveValue);
+            var service = memory.CreateService();
+            var combat = new CombatHandler(_ => { });
+
+            Assert.True(combat.CheckRebuff(service, PlayerClass.Archer));
+            Assert.False(combat.LastSpeedUpBuffActive);
+            Assert.False(combat.CheckRebuff(service, PlayerClass.Archer));
+        }
+
+        [Theory]
+        [InlineData(true, false, -1)]
+        [InlineData(false, true, -1)]
+        [InlineData(false, false, 0)]
+        [InlineData(false, false, 5)]
+        public void Archer_CityOrUnknownState_NeverRebuffs(bool inCity, bool unreadableCity, int failedSlot)
+        {
+            var memory = new MemoryFixture { InCity = inCity, CityFlagUnreadable = unreadableCity };
+            if (failedSlot >= 0)
+                memory.FailSlot(failedSlot);
+            var combat = new CombatHandler(_ => { });
+
+            Assert.False(combat.CheckRebuff(memory.CreateService(), PlayerClass.Archer));
+        }
+
+        [Theory]
+        [InlineData(PlayerClass.Mage, "rapid buff", 3384, 0x34, 0x05)]
+        [InlineData(PlayerClass.Archer, "SpeedUpBuff", 12, 0x35, 0x06)]
+        public void ClassDefinition_UsesExpectedBuffAndKey(PlayerClass playerClass, string name, short value, byte key, byte scan)
+        {
+            var definition = ClassRebuffDefinition.ForClass(playerClass);
+            Assert.NotNull(definition);
+            Assert.Equal(name, definition.Name);
+            Assert.Equal(value, definition.ActiveValue);
+            Assert.Equal(key, definition.VirtualKey);
+            Assert.Equal(scan, definition.ScanCode);
+        }
+
+        [Fact]
+        public void Mage_SpeedUpBuffDoesNotReplaceRapidBuff()
+        {
+            var memory = new MemoryFixture();
+            memory.SetSlot(0, 12);
+            Assert.True(new CombatHandler(_ => { }).CheckRebuff(memory.CreateService(), PlayerClass.Mage));
         }
 
         private sealed class MemoryFixture

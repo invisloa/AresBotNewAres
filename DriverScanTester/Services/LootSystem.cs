@@ -1727,16 +1727,6 @@ namespace DriverScanTester.Services
                         token.ThrowIfCancellationRequested();
                         passes++;
 
-                        LootScanPassResult small = ScanRegion(
-                            smallX, smallY, "SmallScan-Diag", scanMode: LootScanMode.NormalCombined);
-                        if (small == LootScanPassResult.Collected)
-                        {
-                            items++;
-                            continue;
-                        }
-                        if (small != LootScanPassResult.NoItem)
-                            return CompleteDiagnosticPass(mode, small, items, passes);
-
                         LootScanPassResult big = ScanRegion(
                             bigX, bigY, "BigScan-Diag", scanMode: LootScanMode.NormalCombined);
                         if (big == LootScanPassResult.Collected)
@@ -3064,8 +3054,8 @@ namespace DriverScanTester.Services
                     request.State = LootRequestState.Completed;
                     request.CameraVerified = true;
                     request.Detail = travelCandidate
-                        ? "travel candidate verified empty (SmallScan + BigScan)"
-                        : "verified full scan pass (SmallScan + BigScan)";
+                        ? "travel candidate verified empty (combined nearest-first scan)"
+                        : "verified full scan pass (combined nearest-first scan)";
                     request.UpdatedAtUtc = DateTime.UtcNow;
                     _activeMandatoryLootRequest = null;
                     if (_combatRecoveryMovementRequestId == requestId)
@@ -3848,7 +3838,7 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// One normal loot cycle (SmallScan + BigScan). Wraps the unchanged pixel scan with
+        /// One normal loot cycle over the combined region. Wraps the pixel scan with
         /// the automatic item MouseOver value re-discovery: while the discovery is active the
         /// probes settle longer and every item candidate publishes its raw hovered value. The
         /// discovery request itself is decided before the scan; the result feeds the
@@ -3930,34 +3920,20 @@ namespace DriverScanTester.Services
                     cameraDetail);
             }
 
-            _log("[Loot] SmallScan started");
-            LootScanPassResult small = ScanRegion(
-                smallX, smallY, "SmallScan", scanMode: LootScanMode.NormalCombined, verifyLootCamera: true);
-            _log($"[Loot] SmallScan completed status={small}");
-            if (small == LootScanPassResult.Collected)
-            {
-                return new LootScanPassOutcome(
-                    LootScanPassResult.Collected, small, null, CameraVerified: true, "small-region item collected");
-            }
-            if (small != LootScanPassResult.NoItem)
-            {
-                return new LootScanPassOutcome(
-                    small, small, null,
-                    CameraVerified: small != LootScanPassResult.CameraVerificationFailed,
-                    $"SmallScan status={small}");
-            }
-
+            // Rank the whole loot region in one frame. A separate small-region pass
+            // could collect a normal item before a distant SOD/SOP, or a farther item
+            // inside the small rectangle before a nearer one outside it.
             _log("[Loot] BigScan started");
             LootScanPassResult big = ScanRegion(
                 bigX, bigY, "BigScan", scanMode: LootScanMode.NormalCombined, verifyLootCamera: true);
             _log($"[Loot] BigScan completed status={big}");
 
-            bool cameraVerified = big != LootScanPassResult.CameraVerificationFailed &&
-                                  small != LootScanPassResult.CameraVerificationFailed;
-            LootScanPassResult result = CombineNormalLootScanResults(small, big, cameraVerified);
+            bool cameraVerified = big != LootScanPassResult.CameraVerificationFailed;
+            // The single combined pass covers both legacy regions. Preserve the barrier
+            // contract: only a verified, fully exhausted scan can report either empty.
             return new LootScanPassOutcome(
-                result, small, big, cameraVerified,
-                $"SmallScan={small}, BigScan={big}");
+                big, big, big, cameraVerified,
+                $"Combined nearest-first scan={big}");
         }
 
         /// <summary>
@@ -4198,7 +4174,8 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Applies the production connected-component filters to independently gathered
-        /// color masks and returns accepted candidates in pink-first deterministic order.
+        /// color masks and returns candidates pink-first, then nearest to the full
+        /// game-client center within each kind (the player is at that center).
         /// Full scans and passive pre-scans share this classifier/filter path.
         /// </summary>
         internal static List<TypedLootCandidate> AnalyzeLootCandidateMasks(
@@ -4237,12 +4214,10 @@ namespace DriverScanTester.Services
                 aquamarineCandidates.RemoveAll(textGlyphs.Contains);
 
             List<LootComponent> acceptedPink = pinkAnalysis.CandidateComponents.ToList();
-            aquamarineCandidates.Sort((a, b) => a.XMin != b.XMin
-                ? a.XMin.CompareTo(b.XMin)
-                : a.YMin.CompareTo(b.YMin));
-            acceptedPink.Sort((a, b) => a.XMin != b.XMin
-                ? a.XMin.CompareTo(b.XMin)
-                : a.YMin.CompareTo(b.YMin));
+            Comparison<LootComponent> nearestFirst = (a, b) => CompareLootDistanceToPlayer(
+                a, b, bitmap.Width, bitmap.Height);
+            aquamarineCandidates.Sort(nearestFirst);
+            acceptedPink.Sort(nearestFirst);
 
             allComponents = aquamarineComponents.Concat(pinkAnalysis.AllComponents).ToList();
             return acceptedPink
@@ -4250,6 +4225,22 @@ namespace DriverScanTester.Services
                 .Concat(aquamarineCandidates.Select(component =>
                     new TypedLootCandidate(component, LootCandidateKind.NormalAquamarine)))
                 .ToList();
+        }
+
+        /// <summary>Ranks item anchors by squared distance to the full client center, not the scan rectangle.</summary>
+        internal static int CompareLootDistanceToPlayer(LootComponent a, LootComponent b, int clientWidth, int clientHeight)
+        {
+            double DistanceSquared(LootComponent component)
+            {
+                double dx = component.XMin + component.Width / 2 - clientWidth / 2.0;
+                double dy = component.YMin + component.Height / 2 - clientHeight / 2.0;
+                return dx * dx + dy * dy;
+            }
+
+            int distanceOrder = DistanceSquared(a).CompareTo(DistanceSquared(b));
+            if (distanceOrder != 0) return distanceOrder;
+            int xOrder = a.XMin.CompareTo(b.XMin);
+            return xOrder != 0 ? xOrder : a.YMin.CompareTo(b.YMin);
         }
 
         /// <summary>
@@ -4528,9 +4519,9 @@ namespace DriverScanTester.Services
                 // ── Phase C: probe only the surviving candidate blobs. Loot components
                 //    use a deterministic two-stage plan: Stage A covers every occupied
                 //    spatial cell with an actual aquamarine pixel; Stage B then exhausts the
-                //    remaining aquamarine pixels of the same component. Probes are interleaved
-                //    round-robin between candidates so one large component cannot starve
-                //    the others. Tiny pink blobs keep the old ±1 diagonal search.
+                //    remaining aquamarine pixels of the same component. Finish each candidate
+                //    before moving farther from the player, with every pink candidate first.
+                //    Tiny pink blobs keep the old ±1 diagonal search.
                 //
                 //    The normal-loot scan stays bounded by MaxLootProbesPerRegion
                 //    so UI clutter can never stall it; hitting that budget returns
@@ -5784,9 +5775,8 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Bounded, deterministic probe sweep over the accepted candidates. Normal
-        /// loot is interleaved round-robin between candidates so a large component cannot
-        /// consume the whole budget before smaller components are touched. Pink SOD/SOP
-        /// keeps its existing candidate-by-candidate order and probes every pixel.
+        /// loot exhausts each candidate in the supplied nearest-first order. Pink SOD/SOP
+        /// precedes all normal candidates and probes every pixel.
         /// Already-examined loot coordinates from a previous incomplete pass are skipped
         /// so a bounded budget continues instead of restarting the same prefix forever.
         /// </summary>
@@ -5794,23 +5784,16 @@ namespace DriverScanTester.Services
         {
             private readonly List<List<Point>> _points;
             private readonly List<int> _next;
-            private readonly bool _interleave;
-            private readonly int _priorityCount;
-            private int _priorityCursor;
             private int _cursor;
 
             private LootProbePlanner(
                 List<List<Point>> points,
-                bool interleave,
-                int previouslyProbedSkipped,
-                int priorityCount = 0)
+                int previouslyProbedSkipped)
             {
                 _points = points;
                 _next = new List<int>(points.Count);
                 for (int i = 0; i < points.Count; i++)
                     _next.Add(0);
-                _interleave = interleave;
-                _priorityCount = Math.Clamp(priorityCount, 0, points.Count);
                 PreviouslyProbedSkipped = previouslyProbedSkipped;
 
                 int initialRemaining = 0;
@@ -5846,7 +5829,7 @@ namespace DriverScanTester.Services
                     }
                     points.Add(remaining);
                 }
-                return new LootProbePlanner(points, interleave: true, skipped);
+                return new LootProbePlanner(points, skipped);
             }
 
             public static LootProbePlanner CreateForCombined(
@@ -5856,7 +5839,6 @@ namespace DriverScanTester.Services
                 ArgumentNullException.ThrowIfNull(candidates);
                 var points = new List<List<Point>>(candidates.Count);
                 int skipped = 0;
-                int priorityCount = 0;
                 bool normalCandidateSeen = false;
                 foreach (TypedLootCandidate typedCandidate in candidates)
                 {
@@ -5868,7 +5850,6 @@ namespace DriverScanTester.Services
                         // Pink candidates are exhaustive and never inherit the normal
                         // continuation set or 400-probe budget.
                         points.Add(new List<Point>(candidate.Points));
-                        priorityCount++;
                         continue;
                     }
 
@@ -5882,7 +5863,7 @@ namespace DriverScanTester.Services
                     }
                     points.Add(remaining);
                 }
-                return new LootProbePlanner(points, interleave: true, skipped, priorityCount);
+                return new LootProbePlanner(points, skipped);
             }
 
             public static LootProbePlanner CreateForPink(IReadOnlyList<LootComponent> candidates)
@@ -5891,7 +5872,7 @@ namespace DriverScanTester.Services
                 var points = new List<List<Point>>(candidates.Count);
                 foreach (LootComponent candidate in candidates)
                     points.Add(new List<Point>(candidate.Points));
-                return new LootProbePlanner(points, interleave: false, previouslyProbedSkipped: 0);
+                return new LootProbePlanner(points, previouslyProbedSkipped: 0);
             }
 
             public int PreviouslyProbedSkipped { get; }
@@ -5933,57 +5914,16 @@ namespace DriverScanTester.Services
 
             public bool TryNext(out int candidateIndex, out Point point)
             {
-                while (_priorityCursor < _priorityCount)
+                while (_cursor < _points.Count)
                 {
-                    int priorityIndex = _priorityCursor;
-                    if (_next[priorityIndex] < _points[priorityIndex].Count)
+                    List<Point> candidatePoints = _points[_cursor];
+                    if (_next[_cursor] < candidatePoints.Count)
                     {
-                        point = _points[priorityIndex][_next[priorityIndex]++];
-                        candidateIndex = priorityIndex;
-                        if (_next[priorityIndex] >= _points[priorityIndex].Count) _priorityCursor++;
+                        point = candidatePoints[_next[_cursor]++];
+                        candidateIndex = _cursor;
                         return true;
                     }
-                    _priorityCursor++;
-                }
-                if (_points.Count == 0)
-                {
-                    candidateIndex = -1;
-                    point = default;
-                    return false;
-                }
-
-                if (!_interleave)
-                {
-                    while (_cursor < _points.Count)
-                    {
-                        List<Point> candidatePoints = _points[_cursor];
-                        if (_next[_cursor] < candidatePoints.Count)
-                        {
-                            point = candidatePoints[_next[_cursor]];
-                            _next[_cursor]++;
-                            candidateIndex = _cursor;
-                            return true;
-                        }
-                        _cursor++;
-                    }
-
-                    candidateIndex = -1;
-                    point = default;
-                    return false;
-                }
-
-                for (int offset = 0; offset < _points.Count; offset++)
-                {
-                    int index = (_cursor + offset) % _points.Count;
-                    List<Point> candidatePoints = _points[index];
-                    if (_next[index] >= candidatePoints.Count)
-                        continue;
-
-                    point = candidatePoints[_next[index]];
-                    _next[index]++;
-                    _cursor = (index + 1) % _points.Count;
-                    candidateIndex = index;
-                    return true;
+                    _cursor++;
                 }
 
                 candidateIndex = -1;

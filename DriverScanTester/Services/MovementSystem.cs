@@ -304,7 +304,7 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// If true (default), the production speed-potion rebuff (keys 6+7) and the class
-        /// rebuff (key 4 for the mage) run in every mode exactly as before. The
+        /// rebuff (Mage: key 4, Archer: key 5) run in every mode exactly as before. The
         /// movement-synchronization diagnostic sets this to false for TEST 9 so its isolated
         /// OnlyMove experiment cannot emit unrelated potion or buff input. Production callers
         /// never change it.
@@ -1930,30 +1930,30 @@ namespace DriverScanTester.Services
             bool WhitePotionOnly);
 
         /// <summary>
-        /// Performs the class rebuff. Today only the Sorcerer/Mage rebuff is defined: the
-        /// class buff is cast by pressing key 4 twice, roughly half a second apart. Other
-        /// classes have no rebuff action yet (their conditions will be added in
-        /// <see cref="CombatHandler.CheckRebuff"/>), so nothing is pressed for them.
+        /// Performs the configured class rebuff (Mage: key 4, Archer: key 5), pressing
+        /// the key twice roughly half a second apart. Unconfigured classes do nothing.
         /// </summary>
         internal async Task PerformRebuffAsync(PlayerClass playerClass, CancellationToken token)
         {
-            if (playerClass != PlayerClass.Mage)
+            var buff = ClassRebuffDefinition.ForClass(playerClass);
+            if (buff == null)
                 return;
 
             // The client ignores the buff key while the character is running. Release W
             // (and any A/D turn / camera W hold) and let the movement state settle before
-            // pressing key 4. The main loop is awaiting, so nothing re-presses W until the
+            // pressing the class buff key. The main loop is awaiting, so nothing re-presses W until the
             // whole two-key rebuff sequence has finished.
             StopMoving();
             await Task.Delay(BotConstants.Rebuff.StopMovementSettleMs, token);
 
             string slotValues = string.Join(", ", _combatHandler.LastBuffSlotValues);
-            _log($"[Tick {_tickCount}] [Rebuff] Mage rapid buff inactive (no buff slot = {BotConstants.Rebuff.RapidBuffActiveValue}; slots=[{slotValues}]) — movement stopped, pressing key 4 twice, {BotConstants.Rebuff.KeyPressIntervalMs} ms apart.");
-            _log("[Key] 4 (rebuff, first press)");
-            GameInput.PressKey(GameInput.VK_4, GameInput.SCAN_4);
+            char key = (char)buff.VirtualKey;
+            _log($"[Tick {_tickCount}] [Rebuff] {playerClass} {buff.Name} inactive (no buff slot = {buff.ActiveValue}; slots=[{slotValues}]) — movement stopped, pressing key {key} twice, {BotConstants.Rebuff.KeyPressIntervalMs} ms apart.");
+            _log($"[Key] {key} (rebuff, first press)");
+            GameInput.PressKey(buff.VirtualKey, buff.ScanCode);
             await Task.Delay(BotConstants.Rebuff.KeyPressIntervalMs, token);
-            _log("[Key] 4 (rebuff, second press)");
-            GameInput.PressKey(GameInput.VK_4, GameInput.SCAN_4);
+            _log($"[Key] {key} (rebuff, second press)");
+            GameInput.PressKey(buff.VirtualKey, buff.ScanCode);
 
             // Keep movement stopped for one more short window so the cast animation can
             // finish before the next movement tick presses W again.
@@ -4878,11 +4878,9 @@ namespace DriverScanTester.Services
 
             // ── Class rebuff (same check cycle as the speed potions) ──
             // Evaluated on the SAME throttle as the white/red potion check and only outside
-            // the city. The condition itself lives in CombatHandler.CheckRebuff: today only
-            // the Sorcerer/Mage has one (no buff slot holds the rapid-buff value 3384); other
-            // classes will get theirs there and never rebuff until then.
-            if (playerClass == PlayerClass.Mage &&
-                _combatHandler.CheckRebuff(_memoryService, playerClass))
+            // the city. CombatHandler.CheckRebuff uses the shared class definition for
+            // Mage rapid buff (3384) and Archer SpeedUpBuff (12).
+            if (_combatHandler.CheckRebuff(_memoryService, playerClass))
             {
                 await PerformRebuffAsync(playerClass, token);
             }

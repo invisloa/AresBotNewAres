@@ -106,7 +106,7 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void MultipleLootComponentsAreProbedFairlyAndSurviveFreshCapture()
+        public void MultipleLootComponentsAreExhaustedInOrderAndSurviveFreshCapture()
         {
             LootSystem.LootComponent large = MakeBlobAt(0, 0, 30, 30);
             LootSystem.LootComponent small = MakeBlobAt(80, 0, 10, 10);
@@ -115,25 +115,20 @@ namespace DriverScanTester.Tests
             var planner = LootSystem.LootProbePlanner.CreateForNormal(candidates, alreadyProbed: null);
             Assert.True(planner.TryNext(out int firstIndex, out _));
             Assert.True(planner.TryNext(out int secondIndex, out _));
-            Assert.NotEqual(firstIndex, secondIndex);
+            Assert.Equal(0, firstIndex);
+            Assert.Equal(firstIndex, secondIndex);
             Assert.Equal(2, planner.CandidatesWithRemainingProbes);
 
-            // The 900-pixel component cannot starve the 100-pixel component: the small
-            // candidate's whole plan is consumed after at most two round-robin turns.
-            var fairness = LootSystem.LootProbePlanner.CreateForNormal(candidates, alreadyProbed: null);
-            int smallPlanCount = fairness.InitialRemainingFor(1);
-            int probes = 0;
-            while (fairness.TryNext(out _, out _))
+            // The production classifier supplies nearest-first candidates. A later
+            // candidate must not be confirmed before the earlier one is exhausted.
+            var ordered = LootSystem.LootProbePlanner.CreateForNormal(candidates, alreadyProbed: null);
+            for (int i = 0; i < ordered.InitialRemainingFor(0); i++)
             {
-                probes++;
-                if (fairness.AttemptsFor(1) >= smallPlanCount)
-                    break;
+                Assert.True(ordered.TryNext(out int index, out _));
+                Assert.Equal(0, index);
             }
-            Assert.Equal(smallPlanCount, fairness.AttemptsFor(1));
-            Assert.True(probes <= 2 * smallPlanCount,
-                $"Small candidate took {probes} probes for {smallPlanCount} points.");
-            Assert.True(fairness.AttemptsFor(0) > 0 &&
-                        fairness.AttemptsFor(0) < fairness.InitialRemainingFor(0));
+            Assert.True(ordered.TryNext(out int nextIndex, out _));
+            Assert.Equal(1, nextIndex);
 
             // Simulate picking up the small item, then a FRESH capture that only
             // contains the large candidate: the remaining loot stays eligible.
@@ -244,9 +239,8 @@ namespace DriverScanTester.Tests
 
             Assert.True(planner.TryNext(out int firstNormal, out _));
             Assert.True(planner.TryNext(out int secondNormal, out _));
-            Assert.NotEqual(firstNormal, secondNormal);
-            Assert.Contains(firstNormal, new[] { 1, 2 });
-            Assert.Contains(secondNormal, new[] { 1, 2 });
+            Assert.Equal(1, firstNormal);
+            Assert.Equal(firstNormal, secondNormal);
 
             // Simulate the 400 normal-probe cap: pink work is already fully complete,
             // and exhausting the normal cap cannot leave a pink candidate pending.

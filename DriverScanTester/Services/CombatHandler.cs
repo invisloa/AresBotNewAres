@@ -195,17 +195,18 @@ namespace DriverScanTester.Services
         /// </summary>
         public bool LastRapidBuffActive { get; private set; }
 
+        /// <summary>Whether the last successful Archer buff-slot read found SpeedUpBuff.</summary>
+        public bool LastSpeedUpBuffActive { get; private set; }
+
         /// <summary>
         /// Decides whether the class rebuff must run in this check cycle. Evaluated on the
         /// SAME throttled cadence as the white/red speed-potion check (every
         /// <see cref="BotConstants.SpeedPotion.CheckIntervalSeconds"/> seconds) and only
         /// OUTSIDE the city.
         ///
-        /// Currently only the Sorcerer/Mage defines a condition: NONE of the six buff slots
-        /// may hold <see cref="BotConstants.Rebuff.RapidBuffActiveValue"/> (3384 / 0x0D38,
-        /// a 16-bit slot value). If any slot equals that value the rapid buff is active and
-        /// no rebuff is needed; when the buff is missing from every slot the bot recasts it.
-        /// Other classes will get their own conditions here — until then they never rebuff.
+        /// Uses the class buff definition: Mage rapid buff = 3384, Archer SpeedUpBuff = 12.
+        /// Any matching slot means the buff is active; only a buff missing from all six
+        /// readable slots is recast. Classes without a definition never rebuff.
         ///
         /// A failed read of the city flag or of ANY buff slot means "do not rebuff": the bot
         /// must never fire buff keys based on an unknown state.
@@ -220,8 +221,8 @@ namespace DriverScanTester.Services
 
             _lastRebuffCheck = DateTime.Now;
 
-            // No class condition defined yet apart from the mage.
-            if (playerClass != PlayerClass.Mage)
+            var buff = ClassRebuffDefinition.ForClass(playerClass);
+            if (buff == null)
                 return false;
 
             // Rebuff is forbidden inside the city — and an unreadable city flag is not
@@ -235,12 +236,14 @@ namespace DriverScanTester.Services
 
             LastBuffSlotValues = buffValues;
             LastRapidBuffActive = false;
+            LastSpeedUpBuffActive = false;
 
             for (int i = 0; i < buffValues.Length; i++)
             {
-                if (buffValues[i] == BotConstants.Rebuff.RapidBuffActiveValue)
+                if (buffValues[i] == buff.ActiveValue)
                 {
-                    LastRapidBuffActive = true;
+                    LastRapidBuffActive = playerClass == PlayerClass.Mage;
+                    LastSpeedUpBuffActive = playerClass == PlayerClass.Archer;
                     return false;
                 }
             }

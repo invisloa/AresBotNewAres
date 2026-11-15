@@ -462,12 +462,7 @@ namespace DriverScanTester.Services
                 memoryService, log, focusGameWindow,
                 wKeyCameraController: pathRunner.WCameraController);
 
-            // Apply profile thresholds to detector
-            _repotDetector.MinHpPotions = profile.MinHpPotions;
-            _repotDetector.MinManaPotions = profile.MinManaPotions;
-            _repotDetector.MaxWeightRatio = profile.MaxWeightRatio;
-            _repotDetector.MinHp = profile.MinHp;
-            _repotDetector.MinMana = profile.MinMana;
+            ApplyClassRepotSettings();
 
             // Weight-based repot only applies with loot priority selected in the profile:
             // loot fills the bag up to the weight limit, so reaching it means it is time
@@ -475,11 +470,21 @@ namespace DriverScanTester.Services
             // and weight never forces a repot.
             _repotDetector.WeightRepotEnabled = profile.LootPriority;
 
-            // Apply profile potion buy targets
-            _repotSystem.HpBuyTarget = profile.HpBuyTarget;
-            _repotSystem.ManaBuyTarget = profile.ManaBuyTarget;
-            _repotSystem.RedBuyTarget = profile.RedBuyTarget;
-            _repotSystem.WhiteBuyTarget = profile.WhiteBuyTarget;
+        }
+
+        /// <summary>Refresh settings from the live player class before repot checks and purchases.</summary>
+        internal void ApplyClassRepotSettings()
+        {
+            var settings = _profile.GetRepotSettings(_memoryService.GetPlayerClass());
+            _repotDetector.MinHpPotions = settings.MinHpPotions;
+            _repotDetector.MinManaPotions = settings.MinManaPotions;
+            _repotDetector.MaxWeightRatio = settings.MaxWeightRatio;
+            _repotDetector.MinHp = settings.MinHp;
+            _repotDetector.MinMana = settings.MinMana;
+            _repotSystem.HpBuyTarget = settings.HpBuyTarget;
+            _repotSystem.ManaBuyTarget = settings.ManaBuyTarget;
+            _repotSystem.RedBuyTarget = settings.RedBuyTarget;
+            _repotSystem.WhiteBuyTarget = settings.WhiteBuyTarget;
         }
 
         // ======================== Lifecycle ========================
@@ -1242,6 +1247,7 @@ namespace DriverScanTester.Services
             _log("[Repot] Performing repot sequence (sell + buy)...");
             try
             {
+                ApplyClassRepotSettings();
                 _repotSystem.Repot();
                 _shopClosedRepotRestartCount = 0;
                 _log("[Repot] Repot completed.");
@@ -1337,24 +1343,24 @@ namespace DriverScanTester.Services
             // phase is a no-op (no scroll wasted).
             int redPots = _memoryService.GetRedPotionCount();
             int whitePots = _memoryService.GetWhitePotionCount();
-            if (snapshot.HpPotions < _profile.HpBuyTarget ||
-                snapshot.ManaPotions < _profile.ManaBuyTarget ||
-                redPots < _profile.RedBuyTarget ||
-                whitePots < _profile.WhiteBuyTarget)
+            if (snapshot.HpPotions < _repotSystem.HpBuyTarget ||
+                snapshot.ManaPotions < _repotSystem.ManaBuyTarget ||
+                redPots < _repotSystem.RedBuyTarget ||
+                whitePots < _repotSystem.WhiteBuyTarget)
             {
                 _postRepotVerifyRetryCount++;
                 if (_postRepotVerifyRetryCount >= BotConstants.Repot.MaxPostRepotVerifyRetries)
                 {
                     _log($"[Repot] Potion targets still not met after {_postRepotVerifyRetryCount} tries " +
-                         $"(HP {snapshot.HpPotions}/{_profile.HpBuyTarget}, Mana {snapshot.ManaPotions}/{_profile.ManaBuyTarget}, " +
-                         $"Red {redPots}/{_profile.RedBuyTarget}, White {whitePots}/{_profile.WhiteBuyTarget}). Giving up.");
+                         $"(HP {snapshot.HpPotions}/{_repotSystem.HpBuyTarget}, Mana {snapshot.ManaPotions}/{_repotSystem.ManaBuyTarget}, " +
+                         $"Red {redPots}/{_repotSystem.RedBuyTarget}, White {whitePots}/{_repotSystem.WhiteBuyTarget}). Giving up.");
                     _postRepotVerifyRetryCount = 0;
                     CurrentPhase = BotPhase.Failed;
                     return false;
                 }
                 _log($"[Repot] Potion targets not met " +
-                     $"(HP {snapshot.HpPotions}/{_profile.HpBuyTarget}, Mana {snapshot.ManaPotions}/{_profile.ManaBuyTarget}, " +
-                     $"Red {redPots}/{_profile.RedBuyTarget}, White {whitePots}/{_profile.WhiteBuyTarget}) — " +
+                     $"(HP {snapshot.HpPotions}/{_repotSystem.HpBuyTarget}, Mana {snapshot.ManaPotions}/{_repotSystem.ManaBuyTarget}, " +
+                     $"Red {redPots}/{_repotSystem.RedBuyTarget}, White {whitePots}/{_repotSystem.WhiteBuyTarget}) — " +
                      $"waiting {BotConstants.Repot.PostRepotVerifyRetryDelayMs / 60000} min before redoing the full repot " +
                      $"(attempt {_postRepotVerifyRetryCount}/{BotConstants.Repot.MaxPostRepotVerifyRetries}).");
                 try
@@ -1846,6 +1852,7 @@ namespace DriverScanTester.Services
                         continue;
                     lastRepotCheckAt = DateTime.UtcNow;
 
+                    ApplyClassRepotSettings();
                     if (_repotDetector.NeedsRepot(snapshot))
                     {
                         _log("[ExpLoop] Repot condition detected. Stopping exp loop.");
@@ -3739,6 +3746,7 @@ namespace DriverScanTester.Services
                     return;
                 }
 
+                ApplyClassRepotSettings();
                 _repotSystem.Repot();
                 _log("[StartProtection] Repot completed.");
             }
@@ -3817,6 +3825,7 @@ namespace DriverScanTester.Services
             try
             {
                 var snapshot = _memoryService.GetSnapshot();
+                ApplyClassRepotSettings();
                 if (_repotDetector.IsLowHpPotions(snapshot))
                     CaptureLowHpPotionsScreenshot(snapshot);
             }

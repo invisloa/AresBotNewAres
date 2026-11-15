@@ -49,6 +49,47 @@ namespace DriverScanTester.Models
         /// <summary>Target count for White potions (buy up to this many).</summary>
         public int WhiteBuyTarget { get; set; } = BotConstants.Repot.WhiteBuyTarget;
 
+        /// <summary>
+        /// Optional class-specific repot settings. Missing classes (and unreadable player
+        /// classes) use the shared values above, preserving existing profiles.
+        /// </summary>
+        public Dictionary<PlayerClass, ClassRepotSettings> RepotSettingsByClass { get; set; } = new();
+
+        public ClassRepotSettings GetRepotSettings(PlayerClass playerClass)
+        {
+            if (IsRepotClass(playerClass) && RepotSettingsByClass != null &&
+                RepotSettingsByClass.TryGetValue(playerClass, out var settings) && settings != null)
+                return settings;
+
+            return new ClassRepotSettings
+            {
+                MinHpPotions = MinHpPotions,
+                MinManaPotions = MinManaPotions,
+                MaxWeightRatio = MaxWeightRatio,
+                MinHp = MinHp,
+                MinMana = MinMana,
+                HpBuyTarget = HpBuyTarget,
+                ManaBuyTarget = ManaBuyTarget,
+                RedBuyTarget = RedBuyTarget,
+                WhiteBuyTarget = WhiteBuyTarget
+            };
+        }
+
+        /// <summary>Creates an independent copy of the shared values on the first class edit.</summary>
+        public ClassRepotSettings GetOrCreateRepotSettings(PlayerClass playerClass)
+        {
+            if (!IsRepotClass(playerClass))
+                throw new System.ArgumentOutOfRangeException(nameof(playerClass));
+
+            var settings = GetRepotSettings(playerClass);
+            RepotSettingsByClass ??= new();
+            RepotSettingsByClass[playerClass] = settings;
+            return settings;
+        }
+
+        internal static bool IsRepotClass(PlayerClass playerClass) => playerClass is
+            PlayerClass.Knight or PlayerClass.Archer or PlayerClass.Mage or PlayerClass.Spear;
+
         // --- Workflow options ---
         /// <summary>If true, skip actual RepotSystem.Repot() and just log "dry run".</summary>
         public bool DryRunRepot { get; set; } = false;
