@@ -41,6 +41,7 @@ namespace DriverScanTester.Services
                 ["Enter_COT"] = EnterCOT,
                 ["ScanForNpc"] = ScanForNpc,
                 ["EtanaRepotUnstuck"] = EtanaRepotUnstuck,
+                ["EtanaConditionalMove"] = EtanaConditionalMove,
             };
 
         /// <summary>All registered operation names, for the profile editor and validation.</summary>
@@ -618,6 +619,325 @@ namespace DriverScanTester.Services
 
             ctx.Log("[Operation] EtanaRepotUnstuck: done (W-up callback completed; game-side release not independently verified). ");
             return true;
+        }
+
+        // ───────────────────── EtanaConditionalMove ─────────────────────
+
+        /// <summary>Etana map id, shared with the repot/vendor logic (map 35).</summary>
+        internal const int EtanaConditionalMoveMapId = ItemSellerService.MapEtana;
+
+        /// <summary>Diagnostic route label of the temporary navigation leg.</summary>
+        internal const string EtanaConditionalMoveRouteLabel = "EtanaConditionalMove";
+
+        /// <summary>
+        /// Independent per-axis arrival tolerance (tiles) of the conditional move. This is a
+        /// rectangular check (|dx| &lt;= 1 AND |dy| &lt;= 1), not a Euclidean distance check.
+        /// </summary>
+        internal const float EtanaConditionalMoveTolerance = 1f;
+
+        /// <summary>
+        /// Upper bound of navigation legs for one destination. The destination is selected
+        /// once; a further leg is only started when the existing navigation reported the
+        /// temporary waypoint as finished while the real position is still outside the ±1
+        /// tolerance (so a plain re-run can never reselect the second destination).
+        /// </summary>
+        internal const int EtanaConditionalMoveMaxNavigationLegs = 3;
+
+        /// <summary>
+        /// 0 = idle, 1 = an EtanaConditionalMove is executing. This action can itself be
+        /// configured as the Unstuck/StuckRecovery action; this guard makes sure its own
+        /// movement can never start the action again (no recursive unstuck execution).
+        /// </summary>
+        private static int _etanaConditionalMoveActive;
+
+        /// <summary>
+        /// Etana-only conditional move used as a custom operation (selectable as a normal
+        /// flow operation and as a waypoint Unstuck/StuckRecovery operation):
+        ///
+        ///   1. Read one coherent map + X/Y snapshot and refuse to act on unreadable data.
+        ///   2. Skip (no movement) unless the player is on Etana (map 35).
+        ///   3. Select the destination exactly once from the strict coordinate condition.
+        ///   4. Navigate to it with the existing waypoint movement
+        ///      (<see cref="PathRunnerService"/> → <see cref="MovementSystem"/>) using the
+        ///      existing DirectCamera recovery steering mode.
+        ///
+        /// The existing stuck detection and the standard unstuck (ReverseDiagonalRecovery)
+        /// of that movement system stay fully active: the temporary waypoint is a Default
+        /// recovery waypoint, so a stuck during this action always dispatches the standard
+        /// unstuck routine and never a configurable recovery operation (which could re-enter
+        /// this action). Because the waypoint list is created once and reused, a successful
+        /// unstuck only resumes the movement toward the same, unchanged destination.
+        /// </summary>
+        public static Task<bool> EtanaConditionalMove(OperationContext ctx, CancellationToken token)
+            => EtanaConditionalMoveAsync(ctx, token, navigationOverride: null);
+
+        /// <summary>
+        /// Execution core. <paramref name="navigationOverride"/> exists so tests can run the
+        /// complete decision/recovery/resume logic against a deterministic navigation leg
+        /// without touching a live game. Production always passes null and therefore runs the
+        /// existing host-provided <see cref="OperationContext.PathRunner"/>.
+        /// </summary>
+        internal static async Task<bool> EtanaConditionalMoveAsync(
+            OperationContext ctx,
+            CancellationToken token,
+            Func<List<Waypoint>, CancellationToken, Task<bool>>? navigationOverride)
+        {
+            if (Interlocked.CompareExchange(ref _etanaConditionalMoveActive, 1, 0) != 0)
+            {
+                ctx.Log("[EtanaConditionalMove] Re-entrant call rejected — this action is already running. " +
+                        "No new movement was started (the active instance keeps its destination and its standard unstuck).");
+                return false;
+            }
+
+            try
+            {
+                return await EtanaConditionalMoveCoreAsync(ctx, token, navigationOverride);
+            }
+            finally
+            {
+                Volatile.Write(ref _etanaConditionalMoveActive, 0);
+            }
+        }
+
+        private static async Task<bool> EtanaConditionalMoveCoreAsync(
+            OperationContext ctx,
+            CancellationToken token,
+            Func<List<Waypoint>, CancellationToken, Task<bool>>? navigationOverride)
+        {
+            ctx.Log("[EtanaConditionalMove] Started.");
+            token.ThrowIfCancellationRequested();
+
+            // ── 1. Validated map + position reading (single coherent snapshot) ──
+            PlayerStateSnapshot snapshot = await ReadValidatedEtanaConditionalMoveStateAsync(ctx, token);
+            if (!snapshot.HasCoherentState)
+            {
+                ctx.Log("[EtanaConditionalMove] Invalid map/position reading — no destination decision is made " +
+                        "and no movement is started. The existing position/failure handling applies. " + snapshot.Describe());
+                return false;
+            }
+
+            int map = snapshot.Map;
+            float currentX = snapshot.X;
+            float currentY = snapshot.Y;
+            ctx.Log($"[EtanaConditionalMove] Current Map={map}, position=({currentX:F0},{currentY:F0}).");
+
+            // ── 2. Etana-only guard: never navigate to Etana coordinates elsewhere ──
+            if (map != EtanaConditionalMoveMapId)
+            {
+                ctx.Log($"[EtanaConditionalMove] Skipped (not applicable) — map {map} is not Etana " +
+                        $"({EtanaConditionalMoveMapId}); no movement started.");
+                return false;
+            }
+
+            // ── 3. Destination selection: strictly once, at the beginning ──
+            bool inCondition = IsEtanaConditionalMoveConditionMet(currentX, currentY);
+            (float targetX, float targetY) = SelectEtanaConditionalMoveDestination(currentX, currentY);
+            ctx.Log($"[EtanaConditionalMove] Condition (267<X<270 && 190<Y<194) on ({currentX:F0},{currentY:F0}) " +
+                    $"→ {inCondition}. Destination selected: ({targetX:F0},{targetY:F0}) — fixed for the whole action " +
+                    "(including any internal unstuck).");
+
+            if (IsEtanaConditionalMoveDestinationReached(currentX, currentY, targetX, targetY))
+            {
+                ctx.Log($"[EtanaConditionalMove] Already within ±{EtanaConditionalMoveTolerance:F0} of " +
+                        $"({targetX:F0},{targetY:F0}) at ({currentX:F0},{currentY:F0}) — no movement needed. Result=Success.");
+                return true;
+            }
+
+            // ── 4. Temporary navigation target (no saved path / configured route is touched) ──
+            // Input goes to the game window, exactly like the other movement operations.
+            ctx.FocusGameWindow();
+            var waypoints = new List<Waypoint> { CreateEtanaConditionalMoveWaypoint(targetX, targetY) };
+            float lastX = currentX;
+            float lastY = currentY;
+
+            for (int leg = 1; leg <= EtanaConditionalMoveMaxNavigationLegs; leg++)
+            {
+                token.ThrowIfCancellationRequested();
+                ctx.Log($"[EtanaConditionalMove] Navigation started toward the retained destination " +
+                        $"({targetX:F0},{targetY:F0}) — leg {leg}/{EtanaConditionalMoveMaxNavigationLegs}; " +
+                        "the existing stuck detection and standard unstuck stay active.");
+
+                bool completed = navigationOverride != null
+                    ? await navigationOverride(waypoints, token)
+                    : await RunEtanaConditionalMoveNavigationLegAsync(ctx, waypoints, token);
+
+                // Stop All / Pause interruption / operation timeout must end the action here,
+                // after the existing runner released its own inputs.
+                token.ThrowIfCancellationRequested();
+
+                snapshot = await ReadValidatedEtanaConditionalMoveStateAsync(ctx, token);
+                if (!snapshot.HasCoherentState)
+                {
+                    ctx.Log($"[EtanaConditionalMove] Final map/position could not be read after navigation " +
+                            $"(leg {leg}, completed={completed}); no success is reported. " + snapshot.Describe());
+                    return false;
+                }
+
+                lastX = snapshot.X;
+                lastY = snapshot.Y;
+                ctx.Log($"[EtanaConditionalMove] Navigation leg {leg}/{EtanaConditionalMoveMaxNavigationLegs} finished: " +
+                        $"completed={completed}, Map={snapshot.Map}, position=({lastX:F0},{lastY:F0}), " +
+                        $"destination=({targetX:F0},{targetY:F0}) (retained).");
+
+                // Teleport escalation / portal may have left Etana — never navigate
+                // Etana coordinates on another map.
+                if (snapshot.Map != EtanaConditionalMoveMapId)
+                {
+                    ctx.Log($"[EtanaConditionalMove] Map changed from Etana ({EtanaConditionalMoveMapId}) to " +
+                            $"{snapshot.Map} — action terminated; no further movement on this map. Result=Failure.");
+                    return false;
+                }
+
+                if (IsEtanaConditionalMoveDestinationReached(lastX, lastY, targetX, targetY))
+                {
+                    ctx.Log($"[EtanaConditionalMove] Destination reached — final position=({lastX:F0},{lastY:F0}) " +
+                            $"is within ±{EtanaConditionalMoveTolerance:F0} of ({targetX:F0},{targetY:F0}). " +
+                            $"Result=Success (leg {leg}/{EtanaConditionalMoveMaxNavigationLegs}).");
+                    return true;
+                }
+
+                if (!completed)
+                {
+                    ctx.Log($"[EtanaConditionalMove] Navigation stopped without reaching the destination " +
+                            $"(completed=False, position=({lastX:F0},{lastY:F0}), destination=({targetX:F0},{targetY:F0})). " +
+                            $"{DescribeLegStop(ctx)} The existing navigation/recovery failure handling applies. Result=Failure.");
+                    return false;
+                }
+
+                if (leg < EtanaConditionalMoveMaxNavigationLegs)
+                {
+                    ctx.Log($"[EtanaConditionalMove] Destination not reached yet — resuming navigation toward the " +
+                            $"retained destination ({targetX:F0},{targetY:F0}) after the existing navigation/stuck handling.");
+                }
+            }
+
+            ctx.Log($"[EtanaConditionalMove] Destination ({targetX:F0},{targetY:F0}) was not reached after " +
+                    $"{EtanaConditionalMoveMaxNavigationLegs} navigation legs (final position=({lastX:F0},{lastY:F0})). " +
+                    "Result=Failure.");
+            return false;
+        }
+
+        /// <summary>
+        /// Production navigation leg: runs the temporary waypoint list through the existing
+        /// <see cref="PathRunnerService"/> (host-provided through the operation context, which
+        /// is the auxiliary DirectCamera recovery runner when this action runs as a waypoint
+        /// recovery operation). The Etana map invariant aborts the leg as soon as the player is
+        /// confirmed on another map; cancel/stop/pause are the existing runner mechanisms.
+        /// </summary>
+        internal static async Task<bool> RunEtanaConditionalMoveNavigationLegAsync(
+            OperationContext ctx,
+            List<Waypoint> waypoints,
+            CancellationToken token)
+        {
+            PathRunnerService runner = ctx.PathRunner;
+
+            // Movement ownership: never create a second movement system on a runner that is
+            // already navigating (e.g. the action selected as an On-Arrival operation of a
+            // running route). The active route keeps its ownership untouched.
+            if (runner.IsRunning)
+            {
+                ctx.Log("[EtanaConditionalMove] The host path runner is already navigating — refusing to start a " +
+                        "competing movement system. Result=Failure.");
+                return false;
+            }
+
+            // Pause must hold this leg in place, exactly like a route. The main runner
+            // already carries the workflow's pause controller; the auxiliary recovery
+            // runner receives it from the operation context.
+            if (ctx.PauseController != null)
+                runner.PauseController = ctx.PauseController;
+
+            return await runner.RunPathAsync(
+                waypoints,
+                loop: false,
+                token,
+                expectedMap: EtanaConditionalMoveMapId,
+                routeLabel: EtanaConditionalMoveRouteLabel,
+                disableAllLoot: ctx.Profile.DisableAllLoot,
+                ignoreAlliancePlayers: ctx.Profile.IgnoreAlliancePlayers,
+                ignoreEmpirePlayers: ctx.Profile.IgnoreEmpirePlayers);
+        }
+
+        /// <summary>
+        /// Diagnostic summary of the existing navigation/recovery termination state, so the
+        /// action's failure log shows why the standard recovery policy stopped the leg.
+        /// </summary>
+        private static string DescribeLegStop(OperationContext ctx)
+        {
+            PathRunnerService runner = ctx.PathRunner;
+            MovementSystem? movement = runner.CurrentMovement;
+            if (movement == null)
+                return $"PathRunner stopReason={runner.LastStopReason}.";
+
+            return $"PathRunner stopReason={runner.LastStopReason}, " +
+                   $"cityStuck={movement.IsCityStuckFatal}, " +
+                   $"navigationFailure={movement.IsNavigationFailureEscalationRequested}, " +
+                   $"reportAndGoBack={movement.IsReportAndGoBackRequested}, " +
+                   $"zoneBlocked={movement.IsZoneBlocked}, " +
+                   $"specialRecoveryActive={movement.IsWaypointSpecialRecoveryActive}.";
+        }
+
+        /// <summary>
+        /// Builds the temporary navigation waypoint for one destination:
+        /// Exact precision (tightest existing reach threshold), OnlyMove (no combat / no
+        /// loot obligation during the recovery movement), DirectCamera (the existing
+        /// recovery steering mode) and <see cref="WaypointStuckRecoveryType.Default"/>
+        /// so a stuck inside this action always uses the standard unstuck instead of a
+        /// configurable recovery operation (recursion guard).
+        /// </summary>
+        private static Waypoint CreateEtanaConditionalMoveWaypoint(float targetX, float targetY)
+            => new Waypoint(
+                targetX,
+                targetY,
+                MovementPrecision.Exact,
+                BotMode.OnlyMove,
+                zoneRestriction: ZoneRestriction.Both,
+                stuckRecoveryType: WaypointStuckRecoveryType.Default,
+                steeringMode: MovementSteeringMode.DirectCamera);
+
+        /// <summary>
+        /// Strict coordinate condition that selects the first destination:
+        /// <c>currentX &gt; 267 &amp;&amp; currentX &lt; 270 &amp;&amp; currentY &gt; 190 &amp;&amp; currentY &lt; 194</c>.
+        /// </summary>
+        internal static bool IsEtanaConditionalMoveConditionMet(float currentX, float currentY)
+            => currentX > 267 && currentX < 270 && currentY > 190 && currentY < 194;
+
+        /// <summary>
+        /// The single destination decision: (274,191) inside the strict condition,
+        /// (263,199) everywhere else.
+        /// </summary>
+        internal static (float X, float Y) SelectEtanaConditionalMoveDestination(float currentX, float currentY)
+            => IsEtanaConditionalMoveConditionMet(currentX, currentY)
+                ? (274f, 191f)
+                : (263f, 199f);
+
+        /// <summary>
+        /// Rectangular arrival check: both axes must be within ±1 simultaneously
+        /// (|dx| &lt;= 1 AND |dy| &lt;= 1) — never a Euclidean radius.
+        /// </summary>
+        internal static bool IsEtanaConditionalMoveDestinationReached(
+            float currentX, float currentY, float targetX, float targetY)
+            => Math.Abs(currentX - targetX) <= EtanaConditionalMoveTolerance &&
+               Math.Abs(currentY - targetY) <= EtanaConditionalMoveTolerance;
+
+        /// <summary>
+        /// Reads one coherent map + X/Y snapshot through the existing memory reader, with a
+        /// small bounded retry so a single transient failed read is not treated as a position.
+        /// No coordinate is ever fabricated or reused from an earlier read.
+        /// </summary>
+        private static async Task<PlayerStateSnapshot> ReadValidatedEtanaConditionalMoveStateAsync(
+            OperationContext ctx, CancellationToken token)
+        {
+            PlayerStateSnapshot snapshot = ctx.Memory.GetPlayerStateSnapshot();
+            for (int attempt = 1; attempt < 3 && !snapshot.HasCoherentState; attempt++)
+            {
+                ctx.Log($"[EtanaConditionalMove] Map/position read attempt {attempt}/3 was not coherent " +
+                        $"({snapshot.Describe()}); re-reading in 150 ms.");
+                await Task.Delay(150, token);
+                snapshot = ctx.Memory.GetPlayerStateSnapshot();
+            }
+
+            return snapshot;
         }
 
         // ─────────────────── COT calibrated-click helpers ───────────────────

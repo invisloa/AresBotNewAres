@@ -51,6 +51,15 @@ namespace DriverScanTester.Services
         public int CurrentOperationMaxAttempts { get; internal set; } = OperationRunnerService.MaxAttempts;
 
         /// <summary>
+        /// Shared pause switch of the running workflow, published by
+        /// <see cref="OperationRunnerService"/> when it invokes an operation. Operations that
+        /// run their own navigation (e.g. <see cref="BotOperations.EtanaConditionalMove"/>) hand
+        /// it to their path runner so a Pause holds the movement in place instead of letting the
+        /// leg run to completion. Null when no pause controller is configured (standalone run).
+        /// </summary>
+        public BotPauseController? PauseController { get; internal set; }
+
+        /// <summary>
         /// Optional capture hook for operation failure diagnostics. Production leaves this
         /// null so <see cref="ScreenshotService.CaptureOperationFailureScreenshot"/> is used;
         /// tests can inject a deterministic capture that records calls without touching a

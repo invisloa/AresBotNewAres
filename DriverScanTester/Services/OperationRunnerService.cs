@@ -131,6 +131,8 @@ namespace DriverScanTester.Services
 
             _ctx.CurrentOperationAttempt = Math.Max(1, attemptNumber);
             _ctx.CurrentOperationMaxAttempts = MaxAttempts;
+            // Operations that run movement need the same pause switch as the route loops.
+            _ctx.PauseController = PauseController;
 
             _log($"[Operation] Running '{name}'...");
             try

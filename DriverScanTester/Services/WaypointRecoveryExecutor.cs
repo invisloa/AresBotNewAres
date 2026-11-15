@@ -27,7 +27,8 @@ namespace DriverScanTester.Services
             Action<string> log,
             Action focusGameWindow,
             PositionSyncService? positionSync = null,
-            WKeyCameraController? wKeyCameraController = null)
+            WKeyCameraController? wKeyCameraController = null,
+            BotPauseController? pauseController = null)
         {
             if (memoryService == null) throw new ArgumentNullException(nameof(memoryService));
             _pathLoader = pathLoader ?? throw new ArgumentNullException(nameof(pathLoader));
@@ -51,6 +52,11 @@ namespace DriverScanTester.Services
                 positionSync,
                 wKeyCameraController);
             _operationRunner = new OperationRunnerService(context, log);
+
+            // Recovery operations run inside an awaited stuck dispatch, so they are not part
+            // of the route loop's pause checkpoints. Handing them the workflow's pause switch
+            // lets a Pause hold a recovery operation (e.g. EtanaConditionalMove) in place.
+            _operationRunner.PauseController = pauseController;
         }
 
         public async Task<bool> RunOperationAsync(string operationName, CancellationToken token)
