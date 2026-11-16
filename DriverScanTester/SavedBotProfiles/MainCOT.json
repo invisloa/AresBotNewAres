@@ -40,6 +40,26 @@
           "StartPositionY": 0,
           "ProtectionMapNumber": 0,
           "StartPositionTolerance": 5
+        },
+        {
+          "PathFile": "Etana Repot 04.json",
+          "StartDelayMs": 0,
+          "StartMapNumber": 35,
+          "StartCheckEnabled": false,
+          "StartPositionX": 0,
+          "StartPositionY": 0,
+          "ProtectionMapNumber": 0,
+          "StartPositionTolerance": 5
+        },
+        {
+          "PathFile": "Etana Repot 05.json",
+          "StartDelayMs": 0,
+          "StartMapNumber": 35,
+          "StartCheckEnabled": false,
+          "StartPositionX": 0,
+          "StartPositionY": 0,
+          "ProtectionMapNumber": 0,
+          "StartPositionTolerance": 5
         }
       ]
     },
