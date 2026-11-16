@@ -213,7 +213,7 @@ namespace DriverScanTester
         public static class SpeedPotion
         {
             /// <summary>Attack speed value at which bot drinks speed potions (key 6 + key 7).</summary>
-            public const short AttackSpeedThreshold = 16384; //16341 +2 speed //16384 +3 speed (archer bos+giko)
+            public const short AttackSpeedThreshold = 16341; //16341 +2 speed //16384 +3 speed (archer bos+giko)
 
             /// <summary>
             /// Sorcerer/Mage buff detection by RUN speed (the white potion raises run speed,
@@ -564,6 +564,16 @@ namespace DriverScanTester
             /// solid shield body there; hollow/ring-shaped UI glyphs stay rejected.
             /// </summary>
             public const float EmblemMinimumLowerHalfFillRatio = 0.30f;
+
+            /// <summary>
+            /// Minimum ratio between the pixel mass of the emblem's upper third and the pixel
+            /// mass of its lower third. A player class emblem is a banner/flag: the wide cloth
+            /// is on top and it tapers into the pole at the bottom. Dropped-item gems
+            /// ("Ykshali", "Supakna"), monster bodies and HUD glyphs are rendered with the same
+            /// saturated faction colors but are vertically symmetric or bottom-heavy, so this
+            /// ratio is what keeps them from producing a false "other player detected".
+            /// </summary>
+            public const float EmblemMinimumUpperThirdToLowerThirdRatio = 1.25f;
         }
 
         // ════════════════════════════════════════════════════════════════

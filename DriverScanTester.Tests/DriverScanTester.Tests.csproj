@@ -26,4 +26,37 @@
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Real client frames that produced FALSE "other player detected" reports between
+         2026-11-04 and 2026-11-16: dropped-item gems, monster bodies, spell effects and HUD
+         glyphs, all rendered in the same saturated yellow as the Empire faction marker. -->
+    <None Include="..\DriverScanTester\Screenshots\PlayerPixels\Test-2026-11-16_13-05-57-247.png"
+          Link="Fixtures\PlayerPixels\Test-2026-11-16_13-05-57-247.png"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\DriverScanTester\Screenshots\PlayerPixels\Test-2026-11-15_19-40-47-337.png"
+          Link="Fixtures\PlayerPixels\Test-2026-11-15_19-40-47-337.png"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\DriverScanTester\Screenshots\PlayerPixels\Test-2026-11-15_15-39-34-244.png"
+          Link="Fixtures\PlayerPixels\Test-2026-11-15_15-39-34-244.png"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\DriverScanTester\Screenshots\PlayerPixels\Test-2026-11-15_10-58-49-934.png"
+          Link="Fixtures\PlayerPixels\Test-2026-11-15_10-58-49-934.png"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\DriverScanTester\Screenshots\PlayerPixels\Test-2026-11-10_17-05-12-004.png"
+          Link="Fixtures\PlayerPixels\Test-2026-11-10_17-05-12-004.png"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\DriverScanTester\Screenshots\PlayerPixels\Test-2026-11-10_16-51-50-739.png"
+          Link="Fixtures\PlayerPixels\Test-2026-11-10_16-51-50-739.png"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\DriverScanTester\Screenshots\PlayerPixels\Test-2026-11-10_16-54-21-171.png"
+          Link="Fixtures\PlayerPixels\Test-2026-11-10_16-54-21-171.png"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\DriverScanTester\Screenshots\PlayerPixels\Test-2026-11-09_02-53-38-252.png"
+          Link="Fixtures\PlayerPixels\Test-2026-11-09_02-53-38-252.png"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\DriverScanTester\Screenshots\PlayerPixels\Test-2026-11-04_01-46-57-441.png"
+          Link="Fixtures\PlayerPixels\Test-2026-11-04_01-46-57-441.png"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

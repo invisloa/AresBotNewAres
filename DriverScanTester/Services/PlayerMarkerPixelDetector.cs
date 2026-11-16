@@ -20,6 +20,15 @@ namespace DriverScanTester.Services
     /// the local-player exclusion or known HUD regions are ignored, and faction-specific
     /// shape checks reject compact UI glyphs. This exclusion applies only to marker
     /// detection; the loot pixel scan covers the whole scan region.
+    ///
+    /// Real client frames show that this game paints a LOT of objects in exactly the same
+    /// emissive pure yellow as the Empire actor marker: dropped-item gems ("Ykshali",
+    /// "Supakna"), monster bodies ("[PRIME] Thread Weaver", "Nanima"), spell effects and HUD
+    /// icons. Color + size + "solid blob" tests therefore reported a false "other player"
+    /// next to the character all the time (2026-11-04..16). Acceptance now requires the
+    /// marker silhouettes actually drawn by the game: the Empire banner (wide band crossed by
+    /// a narrow stem) or the Alliance triangle, on top of real-world size floors. Yellow solid
+    /// blobs are never accepted, because a yellow drop item is silhouette-identical to them.
     /// </summary>
     internal sealed class PlayerMarkerPixelDetector
     {
@@ -31,15 +40,36 @@ namespace DriverScanTester.Services
         // variation while still rejecting most terrain and UI colors.
         private const int MarkerChannelMin = 205;
         private const int OtherChannelMax = 55;
-        private const int MinimumComponentDimensionAbsolutePx = 10;
-        private const float MinimumComponentDimensionAtReferenceHeightPx = 12f;
-        private const int MinimumComponentPixelsAbsolute = 60;
-        private const float MinimumComponentPixelsAtReferenceHeight = 80f;
+
+        // Size floors. Every yellow item model, monster part, spell effect and HUD glyph in
+        // this game is rendered with the same saturated pure yellow as the Empire marker, so
+        // small fragments are never a reliable marker. Real markers measured on the client
+        // are 19x21 px (164 px) up to 33x30 px (430 px) at the 840 px reference height; the
+        // fragments that produced the 2026-11-16 false "other player" were 9x10..12x13 px
+        // (54..78 px), i.e. clearly below these floors.
+        private const int MinimumComponentDimensionAbsolutePx = 12;
+        private const float MinimumComponentDimensionAtReferenceHeightPx = 14f;
+        private const int MinimumComponentPixelsAbsolute = 80;
+        private const float MinimumComponentPixelsAtReferenceHeight = 120f;
         private const float MaximumComponentDimensionAtReferenceHeight = 72f;
         private const float EmpireMaximumAspectRatio = 1.7f;
         private const float AllianceMaximumAspectRatio = 2.2f;
         private const float EmpireMinimumFillRatio = 0.30f;
         private const float AllianceMinimumFillRatio = 0.28f;
+
+        // ── Empire/yellow "banner" silhouette ──
+        // The verified Empire ground marker is a flat decal: a wide horizontal band crossed by
+        // a much narrower vertical stem (33x30 px rows = 12,12,...,33,33,33,...,12 and
+        // 19x21 px rows = 6,6,...,19,19,19,...,6 in real client frames).
+        // A plain "dense blob" test accepted every solid yellow game object — dropped-item
+        // gems ("Ykshali", "Supakna"), monster bodies, spell effects and HUD icons — which is
+        // exactly what the false other-player reports of 2026-11-04..16 were. The silhouette
+        // checks below require the stem/band contrast instead, so solid squares, slabs and
+        // smooth diamonds are rejected no matter how yellow they are.
+        private const float EmpireMinimumBandToStemWidthRatio = 2f;
+        private const float EmpireMinimumBandToAdjacentWidthRatio = 2f;
+        private const float EmpireMaximumBandRowFraction = 0.30f;
+        private const float EmpireMinimumStemRowFraction = 0.50f;
 
         private byte[] _pixelKinds = Array.Empty<byte>();
         private int[] _queue = Array.Empty<int>();
@@ -350,20 +380,28 @@ namespace DriverScanTester.Services
                 if (aspectRatio > maxAspectRatio || fillRatio < minimumFillRatio)
                     continue;
 
-                // Keep square-like Empire components spatially supported in both axes;
-                // Alliance markers must have a triangular, widening silhouette. This
-                // rejects compact colored UI glyphs that pass color/size tests alone.
+                // The Empire marker must show the banner silhouette (wide band + narrow stem);
+                // Alliance markers must have a triangular, widening silhouette. Together with
+                // the size floors this rejects solid yellow game objects (dropped items, monster
+                // models, spell effects, HUD glyphs) that only pass the color test.
                 //
                 // Combat-time safety (allowClassEmblems) additionally accepts the verified
-                // player CLASS EMBLEM: a large, solid, faction-colored shield/flag silhouette
-                // rendered above another player's character. The 2026-10-29 incident player
-                // was rendered exactly like that, and the plain ground-marker shape checks
-                // rejected it. The loot scan does not enable this, so its behavior is unchanged.
+                // player CLASS EMBLEM: a large, solid faction-colored banner/flag silhouette
+                // rendered above another player's character. The 2026-10-29 incident player was
+                // rendered exactly like that and the plain ground-marker shape checks rejected
+                // it. The loot scan does not enable this, so its behavior is unchanged.
+                //
+                // The emblem path is limited to ALLIANCE/green on purpose: every real false
+                // "other player" report so far (2026-11-04..16) was a yellow game object —
+                // dropped-item gems ("Ykshali", "Supakna"), monster bodies and HUD glyphs — and a
+                // yellow dome/slab is silhouette-identical to a green banner. Yellow therefore
+                // only counts when the verified banner silhouette is present.
                 bool passesStrictShape =
-                    (markerKind == EmpireMarker && HasDenseProjection(_queue, tail, width, componentBounds)) ||
+                    (markerKind == EmpireMarker && HasBannerStemProfile(_queue, tail, width, componentBounds)) ||
                     (markerKind == AllianceMarker && HasTriangleProfile(_queue, tail, width, componentBounds));
                 if (!passesStrictShape &&
                     !(allowClassEmblems &&
+                      markerKind == AllianceMarker &&
                       IsClassEmblemProfile(
                           _queue, tail, width,
                           componentBounds, count, fillRatio, aspectRatio, height)))
@@ -425,7 +463,155 @@ namespace DriverScanTester.Services
             }
 
             float lowerHalfFill = lowerHalfPixels / (float)(bounds.Width * lowerHalfHeight);
-            return lowerHalfFill >= BotConstants.CombatSafety.EmblemMinimumLowerHalfFillRatio;
+            if (lowerHalfFill < BotConstants.CombatSafety.EmblemMinimumLowerHalfFillRatio)
+                return false;
+
+            // The verified class emblem is a banner/flag carried above the player: the wide
+            // cloth sits in the upper half and tapers into the pole at the bottom. Ground items
+            // ("Ykshali", "Supakna"), monster bodies and HUD glyphs are vertically symmetric
+            // diamonds/slabs or bottom-heavy, so they fail this top-heavy profile even though
+            // they are large, solid and faction-colored.
+            int[] rowPixels = new int[bounds.Height];
+            for (int i = 0; i < componentPixelCount; i++)
+                rowPixels[(componentPixels[i] / frameWidth) - bounds.Top]++;
+
+            int third = Math.Max(1, bounds.Height / 3);
+            int upperThirdPixels = 0;
+            int lowerThirdPixels = 0;
+            for (int row = 0; row < third; row++)
+            {
+                upperThirdPixels += rowPixels[row];
+                lowerThirdPixels += rowPixels[rowPixels.Length - 1 - row];
+            }
+
+            return upperThirdPixels > 0 &&
+                   upperThirdPixels >=
+                   BotConstants.CombatSafety.EmblemMinimumUpperThirdToLowerThirdRatio * lowerThirdPixels;
+        }
+
+        /// <summary>
+        /// Empire faction-marker silhouette: a wide horizontal band crossed by a much narrower
+        /// vertical stem. Both the row and the column profile are tested so a marker rendered
+        /// with a rotated/oblique camera still validates. Solid squares, slabs, diamonds and
+        /// arbitrary monster/item blobs have no narrow stem and are rejected.
+        /// </summary>
+        private static bool HasBannerStemProfile(
+            int[] componentPixels,
+            int componentPixelCount,
+            int frameWidth,
+            Rectangle bounds)
+        {
+            return HasBannerProfileAlongAxis(
+                       componentPixels, componentPixelCount, frameWidth, bounds, horizontalAxis: false) ||
+                   HasBannerProfileAlongAxis(
+                       componentPixels, componentPixelCount, frameWidth, bounds, horizontalAxis: true);
+        }
+
+        private static bool HasBannerProfileAlongAxis(
+            int[] componentPixels,
+            int componentPixelCount,
+            int frameWidth,
+            Rectangle bounds,
+            bool horizontalAxis)
+        {
+            int profileLength = horizontalAxis ? bounds.Width : bounds.Height;
+            if (profileLength < 8)
+                return false;
+
+            int[] minimumCrossCoordinate = new int[profileLength];
+            int[] maximumCrossCoordinate = new int[profileLength];
+            Array.Fill(minimumCrossCoordinate, int.MaxValue);
+            Array.Fill(maximumCrossCoordinate, -1);
+
+            for (int i = 0; i < componentPixelCount; i++)
+            {
+                int index = componentPixels[i];
+                int x = index % frameWidth;
+                int y = index / frameWidth;
+                int profileIndex = horizontalAxis ? x - bounds.Left : y - bounds.Top;
+                int crossCoordinate = horizontalAxis ? y - bounds.Top : x - bounds.Left;
+                minimumCrossCoordinate[profileIndex] = Math.Min(
+                    minimumCrossCoordinate[profileIndex], crossCoordinate);
+                maximumCrossCoordinate[profileIndex] = Math.Max(
+                    maximumCrossCoordinate[profileIndex], crossCoordinate);
+            }
+
+            int occupied = 0;
+            int maximumWidth = 0;
+            int firstOccupied = -1;
+            int lastOccupied = -1;
+            for (int i = 0; i < profileLength; i++)
+            {
+                if (maximumCrossCoordinate[i] < 0)
+                    continue;
+                int width = maximumCrossCoordinate[i] - minimumCrossCoordinate[i] + 1;
+                maximumWidth = Math.Max(maximumWidth, width);
+                if (firstOccupied < 0)
+                    firstOccupied = i;
+                lastOccupied = i;
+                occupied++;
+            }
+
+            if (occupied < 8 || maximumWidth < 8)
+                return false;
+
+            int[] widths = new int[lastOccupied - firstOccupied + 1];
+            for (int i = firstOccupied; i <= lastOccupied; i++)
+            {
+                widths[i - firstOccupied] = maximumCrossCoordinate[i] < 0
+                    ? 0
+                    : maximumCrossCoordinate[i] - minimumCrossCoordinate[i] + 1;
+            }
+
+            int[] sortedWidths = (int[])widths.Clone();
+            Array.Sort(sortedWidths);
+            float medianWidth = sortedWidths[sortedWidths.Length / 2];
+            if (maximumWidth < EmpireMinimumBandToStemWidthRatio * medianWidth)
+                return false;
+            float bandFloor = maximumWidth * 0.80f;
+            float stemCeiling = maximumWidth * 0.55f;
+            int bandRows = 0;
+            int stemRows = 0;
+            foreach (int width in widths)
+            {
+                if (width >= bandFloor)
+                    bandRows++;
+                if (width > 0 && width <= stemCeiling)
+                    stemRows++;
+            }
+
+            if (bandRows == 0 || bandRows > occupied * EmpireMaximumBandRowFraction)
+                return false;
+            if (stemRows < occupied * EmpireMinimumStemRowFraction)
+                return false;
+
+            // The band must appear abruptly: the rows touching the band have to be far narrower
+            // than the band itself. A smoothly widening dome (dropped-item gem, monster body) has
+            // wide neighbours and is rejected even when its overall width statistics look
+            // banner-like.
+            int firstBandRow = -1;
+            int lastBandRow = -1;
+            for (int i = 0; i < widths.Length; i++)
+            {
+                if (widths[i] < bandFloor)
+                    continue;
+                if (firstBandRow < 0)
+                    firstBandRow = i;
+                lastBandRow = i;
+            }
+
+            int widestNeighbour = 0;
+            if (firstBandRow > 0)
+                widestNeighbour = Math.Max(widestNeighbour, widths[firstBandRow - 1]);
+            if (lastBandRow >= 0 && lastBandRow + 1 < widths.Length)
+                widestNeighbour = Math.Max(widestNeighbour, widths[lastBandRow + 1]);
+            if (maximumWidth < EmpireMinimumBandToAdjacentWidthRatio * widestNeighbour)
+                return false;
+
+            // The stem must reach both ends of the component, i.e. the wide band is interior
+            // and not just a slab edge.
+            return widths[0] > 0 && widths[0] <= stemCeiling &&
+                   widths[widths.Length - 1] > 0 && widths[widths.Length - 1] <= stemCeiling;
         }
 
         private static bool IntersectsAny(Rectangle bounds, Rectangle[] exclusionAreas)
@@ -436,40 +622,6 @@ namespace DriverScanTester.Services
                     return true;
             }
             return false;
-        }
-
-        private static bool HasDenseProjection(
-            int[] componentPixels,
-            int componentPixelCount,
-            int frameWidth,
-            Rectangle bounds)
-        {
-            int[] rowCounts = new int[bounds.Height];
-            int[] columnCounts = new int[bounds.Width];
-            for (int i = 0; i < componentPixelCount; i++)
-            {
-                int index = componentPixels[i];
-                int x = index % frameWidth - bounds.Left;
-                int y = index / frameWidth - bounds.Top;
-                rowCounts[y]++;
-                columnCounts[x]++;
-            }
-
-            int occupiedRows = 0;
-            foreach (int count in rowCounts)
-            {
-                if (count > 0)
-                    occupiedRows++;
-            }
-            int occupiedColumns = 0;
-            foreach (int count in columnCounts)
-            {
-                if (count > 0)
-                    occupiedColumns++;
-            }
-
-            return occupiedRows >= Math.Ceiling(bounds.Height * 0.75) &&
-                   occupiedColumns >= Math.Ceiling(bounds.Width * 0.75);
         }
 
         private static bool HasTriangleProfile(

@@ -270,10 +270,36 @@ namespace DriverScanTester.Tests
         private static Bitmap CreateEmpireMarkerFrame()
         {
             Bitmap frame = new(320, 240, PixelFormat.Format32bppArgb);
-            for (int y = 90; y < 104; y++)
-            for (int x = 210; x < 224; x++)
-                frame.SetPixel(x, y, Color.FromArgb(255, 255, 0));
+            FillEmpireBannerMarker(frame, x: 210, y: 90);
             return frame;
+        }
+
+        /// <summary>
+        /// Draws the verified Empire (yellow) ground marker: a wide horizontal band crossed by a
+        /// much narrower vertical stem. A solid yellow square is NOT a marker any more — every
+        /// yellow game object (dropped items, monster models, effects, HUD glyphs) looks like
+        /// that and produced the 2026-11-04..16 false "other player" reports.
+        /// </summary>
+        private static void FillEmpireBannerMarker(Bitmap frame, int x, int y)
+        {
+            const int width = 15;
+            const int height = 19;
+            const int bandHeight = 3;
+            const int stemWidth = 5;
+            int bandTop = y + ((height - bandHeight) / 2);
+            int stemLeft = x + ((width - stemWidth) / 2);
+
+            Color yellow = Color.FromArgb(255, 255, 0);
+            for (int row = 0; row < height; row++)
+            {
+                bool inBand = y + row >= bandTop && y + row < bandTop + bandHeight;
+                for (int column = inBand ? x : stemLeft;
+                     column < (inBand ? x + width : stemLeft + stemWidth);
+                     column++)
+                {
+                    frame.SetPixel(column, y + row, yellow);
+                }
+            }
         }
 
         private static object? InvokePrivateResult(object target, string method, params object?[] args)
