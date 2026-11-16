@@ -479,6 +479,7 @@ namespace DriverScanTester.Services
             _repotDetector.MinHpPotions = settings.MinHpPotions;
             _repotDetector.MinManaPotions = settings.MinManaPotions;
             _repotDetector.MaxWeightRatio = settings.MaxWeightRatio;
+            _repotDetector.MaxWeightValue = settings.MaxWeightValue;
             _repotDetector.MinHp = settings.MinHp;
             _repotDetector.MinMana = settings.MinMana;
             _repotSystem.HpBuyTarget = settings.HpBuyTarget;

@@ -743,7 +743,8 @@ namespace DriverScanTester.ViewModels
                 profile,
                 AppendBotLog,
                 FocusGameWindow,
-                wKeyCameraController: _wKeyCameraController);
+                wKeyCameraController: _wKeyCameraController,
+                pauseController: PauseController);
             Interlocked.Exchange(ref _gameFailureStopHandled, 0);
             Interlocked.Exchange(ref _standalonePlayerDeathHandled, 0);
             _movementSystem = new MovementSystem(
@@ -3637,7 +3638,8 @@ namespace DriverScanTester.ViewModels
                 AppendBotLog,
                 FocusGameWindow,
                 positionSync,
-                _wKeyCameraController);
+                _wKeyCameraController,
+                PauseController);
             pathRunner.WaypointRecoveryExecutor = waypointRecoveryExecutor;
 
             var operationContext = new OperationContext(

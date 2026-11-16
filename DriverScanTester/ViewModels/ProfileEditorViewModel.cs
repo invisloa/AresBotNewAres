@@ -146,6 +146,8 @@ namespace DriverScanTester.ViewModels
                     OnPropertyChanged(nameof(MinHpPotions));
                     OnPropertyChanged(nameof(MinManaPotions));
                     OnPropertyChanged(nameof(MaxWeightPercent));
+                    OnPropertyChanged(nameof(MaxWeightValue));
+                    OnPropertyChanged(nameof(MaxWeightValueEditable));
                     OnPropertyChanged(nameof(MinHp));
                     OnPropertyChanged(nameof(MinMana));
                     OnPropertyChanged(nameof(HpBuyTarget));
@@ -203,7 +205,8 @@ namespace DriverScanTester.ViewModels
             {
                 if (!SetProperty(ref _selectedRepotClass, value)) return;
                 foreach (string property in new[] { nameof(MinHpPotions), nameof(MinManaPotions),
-                    nameof(MaxWeightPercent), nameof(MinHp), nameof(MinMana), nameof(HpBuyTarget),
+                    nameof(MaxWeightPercent), nameof(MaxWeightValue), nameof(MaxWeightValueEditable),
+                    nameof(MinHp), nameof(MinMana), nameof(HpBuyTarget),
                     nameof(ManaBuyTarget), nameof(RedBuyTarget), nameof(WhiteBuyTarget), nameof(RepotSettingsScope) })
                     OnPropertyChanged(property);
             }
@@ -254,6 +257,30 @@ namespace DriverScanTester.ViewModels
                 }
             }
         }
+
+        /// <summary>
+        /// Exact weight limit for the selected class (0 = unused, the percentage applies).
+        /// Only class-specific settings support an exact value — the shared defaults keep
+        /// using <see cref="MaxWeightPercent"/>, so this returns/stores 0 for them.
+        /// </summary>
+        public int MaxWeightValue
+        {
+            get => SelectedRepotClass == PlayerClass.Unknown ? 0 : DisplayedRepotSettings.MaxWeightValue;
+            set
+            {
+                if (CurrentProfile == null || SelectedRepotClass == PlayerClass.Unknown)
+                    return;
+
+                CurrentProfile.GetOrCreateRepotSettings(SelectedRepotClass).MaxWeightValue =
+                    Math.Clamp(value, 0, short.MaxValue);
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(RepotSettingsScope));
+            }
+        }
+
+        /// <summary>False for the shared defaults — the exact weight option is class-only.</summary>
+        public bool MaxWeightValueEditable =>
+            CurrentProfile != null && SelectedRepotClass != PlayerClass.Unknown;
 
         public int MinHp
         {

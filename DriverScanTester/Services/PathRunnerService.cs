@@ -56,6 +56,17 @@ namespace DriverScanTester.Services
         public Action<string>? OnGameUnresponsiveDetected { get; set; }
         public PathRunStopReason LastStopReason { get; private set; } = PathRunStopReason.None;
 
+        /// <summary>
+        /// True while <see cref="RunPathAsync"/> owns this runner. A caller that would start
+        /// its own path on a shared runner (e.g. a custom operation moving the player) must
+        /// check this first: starting a second run would replace the active movement system
+        /// and leave two movement owners.
+        /// </summary>
+        public bool IsRunning
+        {
+            get { lock (_runLock) return _activeRunCts != null; }
+        }
+
         public PathRunnerService(
             GameMemoryService memoryService,
             Action<string> log,
