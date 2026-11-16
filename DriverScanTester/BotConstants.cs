@@ -100,15 +100,15 @@ namespace DriverScanTester
             /// <summary>
             /// Legacy name kept for compatibility. It carries the tilted movement value
             /// (16160); the NPC scan and every non-W view must use the top-down
-            /// <see cref="StationaryVerticalLock"/> (16330) instead.
+            /// <see cref="StationaryVerticalLock"/> (16310) instead.
             /// </summary>
             public const short DefaultVerticalLock = 16160;
 
             /// <summary>
             /// Stationary vertical camera lock: the original normal-camera baseline
-            /// (16330), used for targeting, normal loot scans and every non-W view.
+            /// (16310), used for targeting, normal loot scans and every non-W view.
             /// </summary>
-            public const short StationaryVerticalLock = 16330;
+            public const short StationaryVerticalLock = 16310;
 
             /// <summary>
             /// Vertical camera lock used only while a bot-owned W input is held (16160).
@@ -120,7 +120,7 @@ namespace DriverScanTester
             /// Vertical camera lock used while the bot scans the game window for an NPC
             /// (seller, COT entry NPC, ...) and while it works in the NPC's dialog.
             /// The scan MUST run in the top-down view: this is the stationary baseline
-            /// (16330), not the tilted 16160 movement/walk view. Scanning top-down keeps
+            /// (16310), not the tilted 16160 movement/walk view. Scanning top-down keeps
             /// the view identical to the one restored when the NPC is clicked, so the
             /// camera no longer changes only after the NPC has already been found.
             /// </summary>
