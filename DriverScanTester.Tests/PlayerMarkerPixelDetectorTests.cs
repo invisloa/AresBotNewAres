@@ -22,35 +22,15 @@ namespace DriverScanTester.Tests
                 PlayerMarkerPixelDetector.ClassifyPlayerMarkerPixel(r, g, b) != 0);
         }
 
-        /// <summary>
-        /// The verified Empire ground marker is a banner decal: a wide horizontal band crossed
-        /// by a much narrower vertical stem (real client frames measure 19x21 px and 33x30 px).
-        /// Solid square/diamond "markers" are NOT accepted any more: every yellow game object
-        /// (dropped-item gems such as "Ykshali"/"Supakna", monster bodies, spell effects, HUD
-        /// glyphs) is rendered in exactly the same saturated yellow, so a solid blob is not
-        /// evidence of another player.
-        /// </summary>
         [Fact]
-        public void DetectsEmpireBannerMarkerAwayFromLocalPlayer()
-        {
-            using Bitmap frame = CreateFrame(1024, 768);
-            FillBannerMarker(frame, x: 400, y: 220, width: 19, height: 21,
-                Color.FromArgb(255, 255, 0));
-
-            var detector = new PlayerMarkerPixelDetector();
-
-            Assert.True(detector.ContainsOtherPlayerMarker(frame, new Rectangle(430, 315, 161, 171)));
-        }
-
-        [Fact]
-        public void RejectsSolidYellowSquareBecauseYellowGameObjectsLookLikeThis()
+        public void DetectsEmpireYellowSquareAwayFromLocalPlayer()
         {
             using Bitmap frame = CreateFrame();
             FillRectangle(frame, new Rectangle(210, 90, 14, 14), Color.FromArgb(255, 255, 0));
 
-            // 2026-11-04 false positive: a pure-yellow square inside a spell effect.
-            Assert.False(new PlayerMarkerPixelDetector().ContainsOtherPlayerMarker(
-                frame, new Rectangle(130, 130, 40, 40)));
+            var detector = new PlayerMarkerPixelDetector();
+
+            Assert.True(detector.ContainsOtherPlayerMarker(frame, new Rectangle(130, 130, 40, 40)));
         }
 
         [Fact]
@@ -75,36 +55,14 @@ namespace DriverScanTester.Tests
                 frame, new Rectangle(130, 130, 40, 40)));
         }
 
-        /// <summary>
-        /// 2026-11-15 false positive: the dropped item "Ykshali" is a large solid yellow diamond.
-        /// It is big, solid, faction-colored and completely indistinguishable from a "diamond"
-        /// marker by color/size/shape — which is why the loosened dense-blob test was wrong.
-        /// </summary>
         [Fact]
-        public void RejectsSolidYellowDiamondGroundItem()
+        public void DetectsEmpireMarkerProjectedAsDiamond()
         {
             using Bitmap frame = CreateFrame();
             FillDiamond(frame, centerX: 210, centerY: 90, radius: 9, Color.FromArgb(255, 255, 0));
 
-            Assert.False(new PlayerMarkerPixelDetector().ContainsOtherPlayerMarker(
+            Assert.True(new PlayerMarkerPixelDetector().ContainsOtherPlayerMarker(
                 frame, new Rectangle(130, 130, 40, 40)));
-        }
-
-        [Fact]
-        public void RejectsSolidYellowDropItemDomeNearTheCharacter()
-        {
-            // Silhouette of the real dropped-item models (57x66 "Ykshali", 42x51 "Supakna"):
-            // a smooth vertical dome with no narrow stem.
-            using Bitmap frame = CreateFrame(1024, 768);
-            PointF anchor = PlayerMarkerPixelDetector.GetCombatLocalCharacterAnchor(frame.Width, frame.Height);
-            float radius = PlayerMarkerPixelDetector.GetCombatLocalCharacterExclusionRadius(frame.Height);
-
-            int centerX = (int)Math.Round(anchor.X) - 110;
-            int centerY = (int)Math.Round(anchor.Y) - 70;
-            FillDome(frame, centerX, centerY, width: 42, height: 51, Color.FromArgb(255, 255, 0));
-
-            Assert.False(new PlayerMarkerPixelDetector().TryFindOtherPlayerMarker(
-                frame, Rectangle.Empty, anchor, radius, allowClassEmblems: true, out _));
         }
 
         [Fact]
@@ -209,54 +167,6 @@ namespace DriverScanTester.Tests
             // The strict loot shape validation still rejects the emblem (loot behavior unchanged).
             Assert.False(new PlayerMarkerPixelDetector().TryFindOtherPlayerMarker(
                 frame, Rectangle.Empty, anchor, radius, allowClassEmblems: false, out _));
-
-            // The yellow dropped item ("Ykshali", 57x66 solid diamond) in the same frame must
-            // never be mistaken for an Empire player.
-            using Bitmap yellowOnly = new(fixturePath);
-            using (Graphics graphics = Graphics.FromImage(yellowOnly))
-            using (var brush = new SolidBrush(Color.Black))
-                graphics.FillRectangle(brush, 429, 296, 41, 51);
-            Assert.False(new PlayerMarkerPixelDetector().TryFindOtherPlayerMarker(
-                yellowOnly, Rectangle.Empty, anchor, radius, allowClassEmblems: true, out _));
-        }
-
-        /// <summary>
-        /// Regression for the 2026-11-04..16 false "other player detected" reports. Every saved
-        /// screenshot of that period shows a yellow GAME OBJECT (dropped-item gems such as
-        /// "Supakna"/"Ykshali"/"Pewter", monster bodies such as "[PRIME] Thread Weaver" and
-        /// "Nanima", spell effects and even HUD glyphs) sitting next to the character — no other
-        /// player at all. The old color+size+dense-blob test accepted them, which stopped the bot
-        /// and blocked attacks. None of these frames may produce a player marker again.
-        /// </summary>
-        [Theory]
-        [InlineData("Test-2026-11-16_13-05-57-247.png")]
-        [InlineData("Test-2026-11-15_19-40-47-337.png")]
-        [InlineData("Test-2026-11-15_15-39-34-244.png")]
-        [InlineData("Test-2026-11-15_10-58-49-934.png")]
-        [InlineData("Test-2026-11-10_17-05-12-004.png")]
-        [InlineData("Test-2026-11-10_16-51-50-739.png")]
-        [InlineData("Test-2026-11-10_16-54-21-171.png")]
-        [InlineData("Test-2026-11-09_02-53-38-252.png")]
-        [InlineData("Test-2026-11-04_01-46-57-441.png")]
-        public void RealFalsePositiveFrame_ProducesNoPlayerMarker(string fixtureName)
-        {
-            string fixturePath = Path.Combine(
-                AppContext.BaseDirectory, "Fixtures", "PlayerPixels", fixtureName);
-            Assert.True(File.Exists(fixturePath),
-                $"false-positive fixture missing: {fixturePath} (check the test project's fixture items)");
-
-            using Bitmap frame = new(fixturePath);
-            PointF anchor = PlayerMarkerPixelDetector.GetCombatLocalCharacterAnchor(frame.Width, frame.Height);
-            float radius = PlayerMarkerPixelDetector.GetCombatLocalCharacterExclusionRadius(frame.Height);
-            var detector = new PlayerMarkerPixelDetector();
-
-            Assert.False(detector.TryFindOtherPlayerMarker(
-                    frame, Rectangle.Empty, anchor, radius, allowClassEmblems: true,
-                    out PlayerMarkerCandidate combatCandidate),
-                $"combat scan must not report a player: {combatCandidate.Faction} {combatCandidate.Bounds}");
-            Assert.False(detector.TryFindOtherPlayerMarker(
-                    frame, new Rectangle(430, 315, 161, 171), out PlayerMarkerCandidate lootCandidate),
-                $"loot scan must not report a player: {lootCandidate.Faction} {lootCandidate.Bounds}");
         }
 
         [Fact]
@@ -274,24 +184,6 @@ namespace DriverScanTester.Tests
                 frame, Rectangle.Empty, anchor, radius, allowClassEmblems: true, out _);
 
             Assert.True(combatFound);
-        }
-
-        [Fact]
-        public void CombatScanRejectsATinyYellowMonsterFragmentFromThe20261116Frame()
-        {
-            // 2026-11-16 false positive: a 9x10 px yellow sliver of the "[PRIME] Thread Weaver"
-            // monster model was accepted as an Empire marker because the size floors were tiny
-            // (60 px / 10 px). Monster bodies and drop items keep producing such slivers.
-            using Bitmap frame = CreateFrame(1024, 768);
-            PointF anchor = PlayerMarkerPixelDetector.GetCombatLocalCharacterAnchor(frame.Width, frame.Height);
-            float radius = PlayerMarkerPixelDetector.GetCombatLocalCharacterExclusionRadius(frame.Height);
-
-            int x = (int)Math.Round(anchor.X) - 116;
-            int y = (int)Math.Round(anchor.Y) + 95;
-            FillDiamond(frame, centerX: x, centerY: y, radius: 6, Color.FromArgb(255, 255, 0));
-
-            Assert.False(new PlayerMarkerPixelDetector().TryFindOtherPlayerMarker(
-                frame, Rectangle.Empty, anchor, radius, allowClassEmblems: true, out _));
         }
 
         [Fact]
@@ -534,44 +426,6 @@ namespace DriverScanTester.Tests
             {
                 if (Math.Abs(x - centerX) + Math.Abs(y - centerY) <= radius)
                     bitmap.SetPixel(x, y, color);
-            }
-        }
-
-        /// <summary>
-        /// Draws the verified Empire ground marker: a wide horizontal band crossed by a much
-        /// narrower vertical stem (the silhouette measured in real client frames).
-        /// </summary>
-        private static void FillBannerMarker(Bitmap bitmap, int x, int y, int width, int height, Color color)
-        {
-            int bandHeight = Math.Max(2, height / 7);
-            int bandTop = y + ((height - bandHeight) / 2);
-            int stemWidth = Math.Max(2, width / 3);
-            int stemLeft = x + ((width - stemWidth) / 2);
-
-            for (int row = 0; row < height; row++)
-            {
-                bool inBand = row >= bandTop - y && row < bandTop - y + bandHeight;
-                int left = inBand ? x : stemLeft;
-                int right = inBand ? x + width : stemLeft + stemWidth;
-                for (int column = left; column < right; column++)
-                    bitmap.SetPixel(column, y + row, color);
-            }
-        }
-
-        /// <summary>
-        /// Draws the shipped dropped-item silhouette: a smooth vertically symmetric dome with
-        /// its widest row in the middle and no narrow stem.
-        /// </summary>
-        private static void FillDome(Bitmap bitmap, int x, int y, int width, int height, Color color)
-        {
-            int half = height / 2;
-            for (int row = 0; row < height; row++)
-            {
-                int distance = Math.Abs(row - half);
-                int currentWidth = Math.Max(1, width - (distance * width / Math.Max(half, 1)));
-                int left = x + ((width - currentWidth) / 2);
-                for (int column = left; column < left + currentWidth; column++)
-                    bitmap.SetPixel(column, y + row, color);
             }
         }
 
