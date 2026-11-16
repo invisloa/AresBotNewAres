@@ -521,7 +521,7 @@ namespace DriverScanTester
             /// on 2026-10-29 (marker centre ~89 px from the character, nearest marker pixel
             /// ~57 px), which is exactly how TargetId=718 was attacked.
             /// </summary>
-            public const float LocalCharacterMarkerExclusionRadiusPx = 56f;
+            public const float LocalCharacterMarkerExclusionRadiusPx = 68f;
 
             /// <summary>
             /// How many consecutive TAB presses may be spent cycling away from the same

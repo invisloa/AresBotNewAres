@@ -252,6 +252,21 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void CombatExclusionIgnoresLocalMarkerAtTopOfCharacterFromNovemberScreenshot()
+        {
+            using Bitmap frame = CreateFrame(1024, 768);
+            PointF anchor = PlayerMarkerPixelDetector.GetCombatLocalCharacterAnchor(1024, 768);
+            float radius = PlayerMarkerPixelDetector.GetCombatLocalCharacterExclusionRadius(768);
+
+            // The local marker in Test-2026-11-17_00-16-20-763.png appears near
+            // (525, 352), just outside the former 56 px reference-height radius.
+            FillTriangle(frame, x: 516, y: 340, size: 18, Color.FromArgb(0, 255, 0));
+
+            Assert.False(new PlayerMarkerPixelDetector().TryFindOtherPlayerMarker(
+                frame, Rectangle.Empty, anchor, radius, allowClassEmblems: true, out _));
+        }
+
+        [Fact]
         public void LootExclusionRectangleStillHidesTheAdjacentMarker()
         {
             // Documents the root cause: the legacy loot rectangle (translated into this frame)
