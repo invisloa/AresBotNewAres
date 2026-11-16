@@ -146,8 +146,8 @@
       "MaxWeightValue": 1631,
       "MinHp": 999,
       "MinMana": 100,
-      "HpBuyTarget": 33,
-      "ManaBuyTarget": 55,
+      "HpBuyTarget": 25,
+      "ManaBuyTarget": 50,
       "RedBuyTarget": 4,
       "WhiteBuyTarget": 4
     }

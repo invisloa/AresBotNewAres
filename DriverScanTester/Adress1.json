@@ -1,5 +1,13 @@
 [
   {
+    "AddressText": "[[Ares.exe \u002B 0x489BE8] \u002B 0x178] \u002B 0x144",
+    "NameText": "First slot White pot buff? 2304",
+    "ValueText": "",
+    "ValueType": 1,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
     "AddressText": "[Ares.exe \u002B 0x489BC8] \u002B 0xEBC",
     "NameText": "XMoneySegel",
     "ValueText": "",
@@ -345,7 +353,7 @@
   },
   {
     "AddressText": "[[Ares.exe \u002B 0x489BE8] \u002B 0x178] \u002B 0x13A",
-    "NameText": "CastSpeedBuff?",
+    "NameText": "First slot buff timer",
     "ValueText": "",
     "ValueType": 1,
     "Priority": 2,
@@ -356,6 +364,14 @@
     "NameText": "A_RunSpeed",
     "ValueText": "",
     "ValueType": 0,
+    "Priority": 2,
+    "LockGroup": 0
+  },
+  {
+    "AddressText": "[[Ares.exe \u002B 0x489BE8] \u002B 0x178] \u002B 0x194",
+    "NameText": "SecondSlotBuff cos nie wiem co?",
+    "ValueText": "",
+    "ValueType": 1,
     "Priority": 2,
     "LockGroup": 0
   }
