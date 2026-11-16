@@ -156,17 +156,68 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void MoneyBaselineRestartsWithEveryNewProfile()
+        public void SetMoneyBaselineRestartsTrackingFromScratch()
         {
             var stats = new BotStatisticsService(samplerEnabled: false);
 
             stats.SetMoneyBaseline(500);
             Assert.Equal(1_500, stats.UpdateMoney(2_000));
 
-            // A new profile treats its own starting balance as point 0.
+            // Production uses SetMoneyBaseline only for the first profile of a session;
+            // this call is what a fresh (not re-anchored) baseline would do.
             stats.SetMoneyBaseline(2_000);
             Assert.Equal(0, stats.MoneyChangeSinceProfileStart);
             Assert.Equal(400, stats.UpdateMoney(2_400));
+        }
+
+        [Fact]
+        public void RebaseMoneyKeepsTheTotalAcrossAProfileRestart()
+        {
+            var stats = new BotStatisticsService(samplerEnabled: false);
+
+            stats.SetMoneyBaseline(1_000_000);
+            Assert.Equal(3_000_000, stats.UpdateMoney(4_000_000));
+
+            // Crash recovery: the game client restarted and the profile starts again. The
+            // balance is the same character's money, so the already earned 3 000 000 must
+            // survive the new zero point.
+            stats.RebaseMoney(4_000_000);
+            Assert.True(stats.HasMoneyBaseline);
+            Assert.Equal(3_000_000, stats.MoneyChangeSinceProfileStart);
+
+            // Only the money earned after the recovery is added on top.
+            Assert.Equal(3_500_000, stats.UpdateMoney(4_500_000));
+
+            // A second recovery keeps accumulating as well.
+            stats.RebaseMoney(4_600_000);
+            Assert.Equal(3_500_000, stats.MoneyChangeSinceProfileStart);
+            Assert.Equal(3_700_000, stats.UpdateMoney(4_800_000));
+        }
+
+        [Fact]
+        public void RebaseMoneyWithoutABaselineAdoptsTheReadValue()
+        {
+            var stats = new BotStatisticsService(samplerEnabled: false);
+
+            stats.RebaseMoney(9_000);
+            Assert.True(stats.HasMoneyBaseline);
+            Assert.Equal(0, stats.MoneyChangeSinceProfileStart);
+            Assert.Equal(100, stats.UpdateMoney(9_100));
+        }
+
+        [Fact]
+        public void RebaseMoneyWithUnreadableBalanceKeepsTheCurrentZeroPoint()
+        {
+            var stats = new BotStatisticsService(samplerEnabled: false);
+
+            stats.SetMoneyBaseline(100);
+            Assert.Equal(50, stats.UpdateMoney(150));
+
+            // The balance could not be read at the restart: nothing is re-anchored and the
+            // total stays exactly where it was.
+            stats.RebaseMoney(null);
+            Assert.Equal(50, stats.MoneyChangeSinceProfileStart);
+            Assert.Equal(80, stats.UpdateMoney(180));
         }
 
         [Fact]

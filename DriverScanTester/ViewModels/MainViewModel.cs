@@ -3531,9 +3531,10 @@ namespace DriverScanTester.ViewModels
         public int StatisticsItemsSold => BotStatisticsService.Instance.ItemsSold;
 
         /// <summary>
-        /// Money ("segel", <c>[Ares.exe + 0x489BC8] + 0xEBC</c>) gained/lost since the
-        /// current profile started. The zero point is read when the profile starts and the
-        /// value is refreshed only after an item sell, never polled continuously.
+        /// Money ("segel", <c>[Ares.exe + 0x489BC8] + 0xEBC</c>) gained/lost since money
+        /// tracking started in this session (profile restarts and crash recoveries keep the
+        /// running total). The zero point is read when the first profile starts and the value
+        /// is refreshed only after an item sell, never polled continuously.
         /// </summary>
         public string StatisticsMoneyChangeText => BotStatisticsService.Instance.MoneyChangeText;
 
@@ -3606,13 +3607,25 @@ namespace DriverScanTester.ViewModels
                     return;
                 }
             }
-            // Money ("segel") zero point for this profile run: the value read right now is
-            // the reference, and only the difference is shown in the Statistics section.
+            // Money ("segel") zero point: the first profile of the session fixes the
+            // reference. Every later profile start (including the automatic restart after
+            // a crash recovery) only re-anchors that reference, so the money already shown
+            // in the Statistics section is never thrown away.
             bool moneyBaselineRead = memoryService.TryReadMoneySegel(out int moneyAtProfileStart);
-            BotStatisticsService.Instance.SetMoneyBaseline(moneyBaselineRead ? moneyAtProfileStart : (int?)null);
-            AppendBotLog(moneyBaselineRead
-                ? $"Money baseline captured at profile start: {moneyAtProfileStart}."
-                : "Money baseline could not be read at profile start — it will be captured on the first sell.");
+            if (BotStatisticsService.Instance.HasMoneyBaseline)
+            {
+                BotStatisticsService.Instance.RebaseMoney(moneyBaselineRead ? moneyAtProfileStart : (int?)null);
+                AppendBotLog(moneyBaselineRead
+                    ? $"Money zero point re-anchored at profile start: {moneyAtProfileStart}; total since tracking started {BotStatisticsService.FormatMoneyChange(BotStatisticsService.Instance.MoneyChangeSinceProfileStart)}."
+                    : "Money (segel) could not be read at profile start — the previous zero point and total are kept.");
+            }
+            else
+            {
+                BotStatisticsService.Instance.SetMoneyBaseline(moneyBaselineRead ? moneyAtProfileStart : (int?)null);
+                AppendBotLog(moneyBaselineRead
+                    ? $"Money baseline captured at profile start: {moneyAtProfileStart}."
+                    : "Money baseline could not be read at profile start — it will be captured on the first sell.");
+            }
 
             var repotSystem = new RepotSystem(memoryService, AppendBotLog, _wKeyCameraController);
             var repotDetector = new RepotDetectorService(AppendBotLog);

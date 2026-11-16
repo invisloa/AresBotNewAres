@@ -43,8 +43,11 @@ namespace DriverScanTester.Services
         private int _itemsSold;
         private int _completedCycles;
 
-        // Money ("segel") tracking: the value read when the current profile started is the
-        // zero point; only the difference is shown and it is refreshed after every sell.
+        // Money ("segel") tracking: the value read when the profile started is the zero
+        // point; only the difference is shown and it is refreshed after every sell.
+        // The accumulated difference survives a profile restart (crash recovery, manual
+        // restart): a re-anchored zero point keeps the running total, otherwise every
+        // recovered crash would silently erase the money earned so far.
         private readonly object _moneyGate = new object();
         private long? _moneyAtProfileStart;
         private long? _moneyChangeSinceProfileStart;
@@ -114,8 +117,10 @@ namespace DriverScanTester.Services
         public int IncrementCompletedCycles() => Interlocked.Increment(ref _completedCycles);
 
         /// <summary>
-        /// Money ("segel", <c>[Ares.exe + 0x489BC8] + 0xEBC</c>) gained/lost since the
-        /// current profile was started, or null when no zero point is known.
+        /// Money ("segel", <c>[Ares.exe + 0x489BC8] + 0xEBC</c>) gained/lost since money
+        /// tracking started in this session, or null when no zero point is known. The
+        /// total is cumulative: restarting the profile (including after a crash recovery)
+        /// re-anchors the zero point instead of discarding the money already counted.
         /// </summary>
         public long? MoneyChangeSinceProfileStart
         {
@@ -140,9 +145,11 @@ namespace DriverScanTester.Services
         public string MoneyChangeText => FormatMoneyChange(MoneyChangeSinceProfileStart);
 
         /// <summary>
-        /// Starts money tracking for a new profile run: <paramref name="moneyAtProfileStart"/>
-        /// (the current money value, null when it could not be read) becomes the zero point,
-        /// so every following <see cref="UpdateMoney"/> reports only the difference.
+        /// Starts money tracking: <paramref name="moneyAtProfileStart"/> (the current money
+        /// value, null when it could not be read) becomes the zero point, so every following
+        /// <see cref="UpdateMoney"/> reports only the difference. Use this for the first
+        /// baseline of the session only — later profile starts must call
+        /// <see cref="RebaseMoney"/> so the accumulated total is preserved.
         /// </summary>
         public void SetMoneyBaseline(long? moneyAtProfileStart)
         {
@@ -154,8 +161,35 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Records the money value read after an item sell and returns the change since the
-        /// profile started. When no zero point was captured (read failed at start, or the
+        /// Moves the money zero point to <paramref name="money"/> while keeping the money
+        /// already accumulated. Called whenever a profile is started again after the first
+        /// run (crash recovery, user restart): the balance is the same character's money, so
+        /// only the reference has to move — the total earned must not jump back to 0.
+        /// A null value (balance unreadable at that moment) leaves tracking untouched.
+        /// </summary>
+        public void RebaseMoney(long? money)
+        {
+            lock (_moneyGate)
+            {
+                if (!money.HasValue)
+                    return;
+
+                if (!_moneyAtProfileStart.HasValue)
+                {
+                    _moneyAtProfileStart = money.Value;
+                    _moneyChangeSinceProfileStart = 0;
+                    return;
+                }
+
+                // Shift the zero point by the total already accumulated, so the next
+                // UpdateMoney() returns the old total plus only the new difference.
+                _moneyAtProfileStart = money.Value - (_moneyChangeSinceProfileStart ?? 0);
+            }
+        }
+
+        /// <summary>
+        /// Records the money value read after an item sell and returns the change since money
+        /// tracking started. When no zero point was captured (read failed at start, or the
         /// bot was never started) the first reported value becomes the zero point, so the
         /// panel never shows money that was already there before tracking began.
         /// </summary>
@@ -175,7 +209,7 @@ namespace DriverScanTester.Services
             }
         }
 
-        /// <summary>Drops the money zero point (shown as unknown until a new profile starts).</summary>
+        /// <summary>Drops the money total and zero point (shown as unknown until tracking starts again).</summary>
         public void ClearMoneyTracking()
         {
             lock (_moneyGate)

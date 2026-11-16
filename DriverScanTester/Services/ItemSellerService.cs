@@ -436,8 +436,8 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Reads the money ("segel") value at <c>[Ares.exe + 0x489BC8] + 0xEBC</c> and
-        /// updates the change against the value captured when the profile started.
-        /// A failed read leaves the last shown value untouched.
+        /// updates the total gained/lost since money tracking started (profile restarts keep
+        /// the running total). A failed read leaves the last shown value untouched.
         /// </summary>
         private void RefreshMoneyProgress()
         {
@@ -449,9 +449,9 @@ namespace DriverScanTester.Services
 
             long? change = BotStatisticsService.Instance.UpdateMoney(money);
             if (change.HasValue)
-                _log($"ItemSeller: Money now {money}; change since profile start {change.Value:+#,0;-#,0;0}.");
+                _log($"ItemSeller: Money now {money}; total since tracking started {change.Value:+#,0;-#,0;0}.");
             else
-                _log($"ItemSeller: Money now {money}; no profile money baseline yet.");
+                _log($"ItemSeller: Money now {money}; no money zero point yet.");
         }
 
         /// <summary>
