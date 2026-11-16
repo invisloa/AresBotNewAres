@@ -455,11 +455,32 @@ namespace DriverScanTester.Tests
             return new GameMemoryService(0, read, write, 0, 8, _ => { });
         }
 
-        /// <summary>320x240 client frame with a valid Empire (yellow) ground marker.</summary>
+        /// <summary>
+        /// 320x240 client frame with a valid Empire (yellow) ground marker. The marker is drawn
+        /// with its verified banner silhouette (wide band + narrow stem); a solid yellow square
+        /// is rejected by design because every yellow game object looks like that.
+        /// </summary>
         private static Bitmap CreateEmpireMarkerFrame()
         {
             Bitmap frame = new(320, 240, PixelFormat.Format32bppArgb);
-            FillRectangle(frame, new Rectangle(210, 90, 14, 14), Color.FromArgb(255, 255, 0));
+            const int x = 210;
+            const int y = 90;
+            const int width = 15;
+            const int height = 19;
+            const int bandHeight = 3;
+            const int stemWidth = 5;
+            Color yellow = Color.FromArgb(255, 255, 0);
+            int bandTop = y + ((height - bandHeight) / 2);
+            int stemLeft = x + ((width - stemWidth) / 2);
+
+            for (int row = 0; row < height; row++)
+            {
+                bool inBand = y + row >= bandTop && y + row < bandTop + bandHeight;
+                int left = inBand ? x : stemLeft;
+                int right = inBand ? x + width : stemLeft + stemWidth;
+                FillRectangle(frame, new Rectangle(left, y + row, right - left, 1), yellow);
+            }
+
             return frame;
         }
 
