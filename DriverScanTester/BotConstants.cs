@@ -213,7 +213,7 @@ namespace DriverScanTester
         public static class SpeedPotion
         {
             /// <summary>Attack speed value at which bot drinks speed potions (key 6 + key 7).</summary>
-            public const short AttackSpeedThreshold = 16384; //16341 +2 speed //16384 +3 speed (archer bos+giko)
+            public const short AttackSpeedThreshold = 16341; //16341 +2 speed //16384 +3 speed (archer bos+giko)
 
             /// <summary>
             /// Sorcerer/Mage buff detection by RUN speed (the white potion raises run speed,
