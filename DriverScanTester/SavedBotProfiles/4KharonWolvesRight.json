@@ -1,0 +1,139 @@
+{
+  "Name": "4KharonWolvesRight",
+  "FlowSteps": [
+    {
+      "Type": 1,
+      "StartMapNumber": 0,
+      "PathFile": "",
+      "StartDelayMs": 0,
+      "Routes": [],
+      "CompletionMode": 0,
+      "ExpectedDestinationMapNumber": 0,
+      "OperationName": "",
+      "RepotPaths": [
+        {
+          "PathFile": "4KharonRepor_01.json",
+          "StartDelayMs": 0,
+          "StartMapNumber": 44,
+          "StartCheckEnabled": true,
+          "StartPositionX": 127,
+          "StartPositionY": 114,
+          "ProtectionMapNumber": 44,
+          "StartPositionTolerance": 5
+        }
+      ]
+    },
+    {
+      "Type": 0,
+      "StartMapNumber": 0,
+      "PathFile": "4KharonGoExp_1.json",
+      "StartDelayMs": 0,
+      "Routes": [
+        {
+          "PathFile": "4KharonGoExp_1.json",
+          "StartDelayMs": 0,
+          "StartMapNumber": 0,
+          "StartCheckEnabled": false,
+          "StartPositionX": 0,
+          "StartPositionY": 0,
+          "ProtectionMapNumber": 0,
+          "StartPositionTolerance": 5
+        },
+        {
+          "PathFile": "4KharonGoExp_2.json",
+          "StartDelayMs": 0,
+          "StartMapNumber": 0,
+          "StartCheckEnabled": false,
+          "StartPositionX": 0,
+          "StartPositionY": 0,
+          "ProtectionMapNumber": 0,
+          "StartPositionTolerance": 5
+        },
+        {
+          "PathFile": "4KharonGoExp_3.json",
+          "StartDelayMs": 0,
+          "StartMapNumber": 0,
+          "StartCheckEnabled": false,
+          "StartPositionX": 0,
+          "StartPositionY": 0,
+          "ProtectionMapNumber": 0,
+          "StartPositionTolerance": 5
+        }
+      ],
+      "CompletionMode": 1,
+      "ExpectedDestinationMapNumber": 45,
+      "OperationName": "",
+      "RepotPaths": []
+    },
+    {
+      "Type": 0,
+      "StartMapNumber": 0,
+      "PathFile": "4KharonGoWolvesRight.json",
+      "StartDelayMs": 10000,
+      "Routes": [
+        {
+          "PathFile": "4KharonGoWolvesRight.json",
+          "StartDelayMs": 10000,
+          "StartMapNumber": 45,
+          "StartCheckEnabled": true,
+          "StartPositionX": 75,
+          "StartPositionY": 68,
+          "ProtectionMapNumber": 45,
+          "StartPositionTolerance": 5
+        }
+      ],
+      "CompletionMode": 0,
+      "ExpectedDestinationMapNumber": 0,
+      "OperationName": "Wait",
+      "RepotPaths": []
+    },
+    {
+      "Type": 3,
+      "StartMapNumber": 0,
+      "PathFile": "4KharonEXPWolvesRight.json",
+      "StartDelayMs": 0,
+      "Routes": [
+        {
+          "PathFile": "4KharonEXPWolvesRight.json",
+          "StartDelayMs": 0,
+          "StartMapNumber": 0,
+          "StartCheckEnabled": false,
+          "StartPositionX": 0,
+          "StartPositionY": 0,
+          "ProtectionMapNumber": 0,
+          "StartPositionTolerance": 5
+        }
+      ],
+      "CompletionMode": 0,
+      "ExpectedDestinationMapNumber": 0,
+      "OperationName": "",
+      "RepotPaths": []
+    }
+  ],
+  "MinHpPotions": 10,
+  "MinManaPotions": 10,
+  "MaxWeightRatio": 0.85,
+  "MinHp": 500,
+  "MinMana": 100,
+  "HpBuyTarget": 120,
+  "ManaBuyTarget": 99,
+  "RedBuyTarget": 3,
+  "WhiteBuyTarget": 3,
+  "RepotSettingsByClass": {},
+  "DryRunRepot": false,
+  "EnableStartPositionCheck": true,
+  "StartPositionX": 127,
+  "StartPositionY": 114,
+  "ProtectionMapNumber": 44,
+  "StartPositionTolerance": 5,
+  "LootPriority": false,
+  "DisableAllLoot": false,
+  "EnableManaRegen": false,
+  "IgnoreAlliancePlayers": false,
+  "IgnoreEmpirePlayers": false,
+  "TeleportKey": 56,
+  "TeleportScanCode": 9,
+  "MaxTeleportRetries": 3,
+  "WindowOffsetX": 0,
+  "WindowOffsetY": 0
+}
