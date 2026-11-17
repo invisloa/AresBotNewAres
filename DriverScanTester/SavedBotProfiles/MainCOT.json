@@ -182,6 +182,18 @@
       "ManaBuyTarget": 45,
       "RedBuyTarget": 4,
       "WhiteBuyTarget": 4
+    },
+    "Mage": {
+      "MinHpPotions": 2,
+      "MinManaPotions": 2,
+      "MaxWeightRatio": 0.9,
+      "MaxWeightValue": 0,
+      "MinHp": 999,
+      "MinMana": 100,
+      "HpBuyTarget": 33,
+      "ManaBuyTarget": 15,
+      "RedBuyTarget": 4,
+      "WhiteBuyTarget": 4
     }
   },
   "DryRunRepot": false,
