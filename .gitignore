@@ -33,12 +33,14 @@ bld/
 [Ll]og/
 [Ll]ogs/
 LootSSFolder/
-# Ignore generated screenshots generally, but allow death screenshots to be committed.
+# Ignore generated screenshots except for selected diagnostic folders.
 Screenshots/
 !DriverScanTester/Screenshots/
 DriverScanTester/Screenshots/*
 !DriverScanTester/Screenshots/Dead/
 !DriverScanTester/Screenshots/PlayerPixels/
+!DriverScanTester/Screenshots/Stuck/
+!DriverScanTester/Screenshots/Stuck/*.png
 # Manual Tools-tab loot-test screenshots are intentionally tracked in Git Changes.
 !DriverScanTester/Screenshots/LootTest/
 !DriverScanTester/Screenshots/LootTest/**

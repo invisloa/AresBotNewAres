@@ -187,7 +187,7 @@
       "MinHpPotions": 2,
       "MinManaPotions": 2,
       "MaxWeightRatio": 0.9,
-      "MaxWeightValue": 0,
+      "MaxWeightValue": 1321,
       "MinHp": 999,
       "MinMana": 100,
       "HpBuyTarget": 33,
