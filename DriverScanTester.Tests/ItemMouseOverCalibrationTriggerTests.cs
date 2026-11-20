@@ -7,7 +7,7 @@ namespace DriverScanTester.Tests
     /// Trigger rule for the automatic item MouseOver re-discovery:
     ///   - no configured value → immediately,
     ///   - NPC value auto-calibrated in this game session → on the next scan (once),
-    ///   - otherwise only after N consecutive scans that found no item.
+    ///   - otherwise after three distinct item candidates miss.
     /// </summary>
     public sealed class ItemMouseOverCalibrationTriggerTests
     {
@@ -18,7 +18,7 @@ namespace DriverScanTester.Tests
         {
             bool start = LootSystem.TryGetItemCalibrationReason(
                 activeItemValue: 0,
-                consecutiveEmptyScans: 0,
+                failedItemCandidates: 0,
                 needsItemValueDiscovery: false,
                 npcTriggerAttempted: false,
                 itemValueDiscoveryPending: false,
@@ -35,7 +35,7 @@ namespace DriverScanTester.Tests
         {
             bool start = LootSystem.TryGetItemCalibrationReason(
                 ActiveValue,
-                consecutiveEmptyScans: 0,
+                failedItemCandidates: 0,
                 needsItemValueDiscovery: true,
                 npcTriggerAttempted: false,
                 itemValueDiscoveryPending: false,
@@ -52,7 +52,7 @@ namespace DriverScanTester.Tests
         {
             bool start = LootSystem.TryGetItemCalibrationReason(
                 ActiveValue,
-                consecutiveEmptyScans: 0,
+                failedItemCandidates: 0,
                 needsItemValueDiscovery: true,
                 npcTriggerAttempted: true,
                 itemValueDiscoveryPending: false,
@@ -64,11 +64,11 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void EmptyScanStreakStartsDiscoveryOnlyAfterTheConfiguredNumberOfScans()
+        public void FailedItemCountStartsDiscoveryOnlyAfterTheConfiguredNumberOfItems()
         {
             bool beforeThreshold = LootSystem.TryGetItemCalibrationReason(
                 ActiveValue,
-                consecutiveEmptyScans: BotConstants.Loot.ItemCalibrationAfterEmptyScans - 1,
+                failedItemCandidates: 2,
                 needsItemValueDiscovery: false,
                 npcTriggerAttempted: true,
                 itemValueDiscoveryPending: false,
@@ -77,7 +77,7 @@ namespace DriverScanTester.Tests
 
             bool atThreshold = LootSystem.TryGetItemCalibrationReason(
                 ActiveValue,
-                consecutiveEmptyScans: BotConstants.Loot.ItemCalibrationAfterEmptyScans,
+                failedItemCandidates: 3,
                 needsItemValueDiscovery: false,
                 npcTriggerAttempted: true,
                 itemValueDiscoveryPending: false,
@@ -87,15 +87,15 @@ namespace DriverScanTester.Tests
             Assert.False(beforeThreshold);
             Assert.True(atThreshold);
             Assert.False(consumeNpcTrigger);
-            Assert.Contains("consecutive loot scans found no item", reason);
+            Assert.Contains("item candidates had no matching MouseOver value", reason);
         }
 
         [Fact]
-        public void NpcTriggerTakesPrecedenceOverTheEmptyScanStreak()
+        public void NpcTriggerTakesPrecedenceOverTheFailedItemCount()
         {
             bool start = LootSystem.TryGetItemCalibrationReason(
                 ActiveValue,
-                consecutiveEmptyScans: BotConstants.Loot.ItemCalibrationAfterEmptyScans,
+                failedItemCandidates: 3,
                 needsItemValueDiscovery: true,
                 npcTriggerAttempted: false,
                 itemValueDiscoveryPending: false,
@@ -112,7 +112,7 @@ namespace DriverScanTester.Tests
         {
             bool start = LootSystem.TryGetItemCalibrationReason(
                 ActiveValue,
-                consecutiveEmptyScans: 0,
+                failedItemCandidates: 0,
                 needsItemValueDiscovery: false,
                 npcTriggerAttempted: true,
                 itemValueDiscoveryPending: true,
@@ -129,7 +129,7 @@ namespace DriverScanTester.Tests
         {
             bool start = LootSystem.TryGetItemCalibrationReason(
                 ActiveValue,
-                consecutiveEmptyScans: 0,
+                failedItemCandidates: 0,
                 needsItemValueDiscovery: true,
                 npcTriggerAttempted: false,
                 itemValueDiscoveryPending: true,
@@ -173,7 +173,7 @@ namespace DriverScanTester.Tests
         {
             bool start = LootSystem.TryGetItemCalibrationReason(
                 ActiveValue,
-                consecutiveEmptyScans: 0,
+                failedItemCandidates: 0,
                 needsItemValueDiscovery: false,
                 npcTriggerAttempted: false,
                 itemValueDiscoveryPending: false,

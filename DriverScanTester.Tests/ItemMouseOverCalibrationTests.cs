@@ -52,6 +52,20 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void ConfiguredDiscoveryConfirmsOnTheSecondTextureWithAMatchingValue()
+        {
+            var calibration = new ItemMouseOverCalibration(
+                BotConstants.Loot.ItemCalibrationRequiredDistinctItems,
+                minItemSeparationPx: BotConstants.Loot.ItemCalibrationMinItemSeparationPx);
+
+            Assert.False(calibration.RecordObservation(100, 100, 0));
+            Assert.False(calibration.RecordObservation(100, 100, 121498128));
+            Assert.False(calibration.RecordObservation(100, 100, 121498128));
+            Assert.True(calibration.RecordObservation(108, 100, 121498128));
+            Assert.Equal(121498128, calibration.ConfirmedValue);
+        }
+
+        [Fact]
         public void NoHoveredObjectNeverConfirmsAValue()
         {
             var calibration = new ItemMouseOverCalibration(requiredDistinctItems: 2);

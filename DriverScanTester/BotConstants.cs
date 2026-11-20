@@ -1,4 +1,4 @@
-﻿// <copyright file="BotConstants.cs" company="DriverScanTester">
+// <copyright file="BotConstants.cs" company="DriverScanTester">
 //     Copyright (c) DriverScanTester. All rights reserved.
 // </copyright>
 
@@ -213,7 +213,7 @@ namespace DriverScanTester
         public static class SpeedPotion
         {
             /// <summary>Attack speed value at which bot drinks speed potions (key 6 + key 7).</summary>
-            public const short AttackSpeedThreshold = 16341; //16341 +2 speed //16384 +3 speed (archer bos+giko)
+            public const short AttackSpeedThreshold = 16384; //16341 +2 speed //16384 +3 speed (archer bos+giko)
 
             /// <summary>
             /// Sorcerer/Mage buff detection by RUN speed (the white potion raises run speed,
@@ -2051,44 +2051,17 @@ namespace DriverScanTester
             /// <summary>Selected G9 ground-drop texture: exact painted blue channel (170).</summary>
             public const int AquamarinePixelB = 170;
 
-            /// <summary>
-            /// How many CONSECUTIVE complete loot scans that found no item must run before the
-            /// slow item MouseOver calibration is attempted. A successful automatic NPC
-            /// calibration in the same game session requests the item calibration immediately
-            /// instead (both values change together with the game launch).
-            /// </summary>
-            public const int ItemCalibrationAfterEmptyScans = 5;
+            /// <summary>Fully probed item candidates that must miss to trigger rediscovery.</summary>
+            public const int ItemCalibrationAfterFailedItems = 3;
 
-            /// <summary>
-            /// How many DIFFERENT item candidates must publish the same raw mouseover value
-            /// within ONE loot scan before it is accepted immediately. This is only the fast
-            /// path: a normal loot pass often contains a single drop, so the same value may
-            /// also be confirmed across separate scans — see
-            /// <see cref="ItemCalibrationRequiredScans"/>.
-            /// </summary>
-            public const int ItemCalibrationRequiredDistinctItems = 3;
+            /// <summary>Matching item candidates required within one loot scan.</summary>
+            public const int ItemCalibrationRequiredDistinctItems = 2;
 
-            /// <summary>
-            /// How many SEPARATE loot scans must publish the same raw mouseover value before
-            /// it is accepted as the item MouseOver value. The scans do not have to be in the
-            /// same bot run (e.g. one scan after each of three kills); the observations are
-            /// persisted, so a stopped/started bot continues where it left off.
-            /// </summary>
-            public const int ItemCalibrationRequiredScans = 3;
+            /// <summary>Matching observations required across separate loot scans.</summary>
+            public const int ItemCalibrationRequiredScans = 2;
 
-            /// <summary>
-            /// Upper bound of slow calibration probes per scan attempt. When it is reached
-            /// without a confirmation the attempt ends and the scan returns to normal speed;
-            /// the next attempt needs another <see cref="ItemCalibrationAfterEmptyScans"/>
-            /// empty scans.
-            /// </summary>
-            public const int ItemCalibrationMaxProbes = 120;
-
-            /// <summary>
-            /// Minimum separation (px, per axis) between two counted item candidates. Probes
-            /// closer than this belong to the same item blob and count as one item.
-            /// </summary>
-            public const int ItemCalibrationMinItemSeparationPx = 12;
+            /// <summary>Different texture centers can contribute separate observations.</summary>
+            public const int ItemCalibrationMinItemSeparationPx = 0;
 
             /// <summary>Minimum width (px) a connected pink blob must have to be probed as a
             /// SOD/SOP drop. The painted loot square is at least 10x10 px; smaller pink

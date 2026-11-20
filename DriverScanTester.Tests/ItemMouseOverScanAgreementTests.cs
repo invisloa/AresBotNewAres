@@ -50,6 +50,19 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
+        public void ConfiguredAgreementConfirmsASecondMatchingScanAfterRestoringTheFirst()
+        {
+            int requiredScans = BotConstants.Loot.ItemCalibrationRequiredScans;
+            var firstRun = new ItemMouseOverScanAgreement(requiredScans);
+            Assert.False(firstRun.RecordScan(ItemValue));
+
+            var nextRun = new ItemMouseOverScanAgreement(requiredScans, firstRun.Snapshot());
+            Assert.False(nextRun.RecordScan(ItemValue + 1));
+            Assert.True(nextRun.RecordScan(ItemValue));
+            Assert.Equal(ItemValue, nextRun.ConfirmedValue);
+        }
+
+        [Fact]
         public void ZeroMeansNothingHoveredAndNeverCounts()
         {
             var agreement = new ItemMouseOverScanAgreement(requiredScans: 3);

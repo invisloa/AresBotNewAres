@@ -30,6 +30,7 @@ namespace DriverScanTester.Tests
             public bool StartProfileSucceeds = true;
             public GameClientStartupResult StartupResult =
                 new(GameClientStartupStatus.Started, 456, "started");
+            public Func<GameClientStartupResult>? StartClient;
             public LoginCharacter? StartupLoginCharacter;
             public BotProfile? TeleportProfile;
             public BotProfile? StartedProfile;
@@ -48,7 +49,7 @@ namespace DriverScanTester.Tests
                     {
                         StartupLoginCharacter = loginCharacter;
                         Events.Add("startup");
-                        return Task.FromResult(StartupResult);
+                        return Task.FromResult(StartClient?.Invoke() ?? StartupResult);
                     },
                     attachToGameAsync: (pid, _) =>
                     {
@@ -174,6 +175,34 @@ namespace DriverScanTester.Tests
             Assert.DoesNotContain("internet:1", rig.Events);
             Assert.DoesNotContain("startup", rig.Events);
             Assert.Contains(rig.Events, e => e.Contains("still alive", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public async Task RecoveryRetriesWhenAresReappearsBeforeStartup()
+        {
+            var rig = new Rig();
+            rig.RunningProcesses.Add(123);
+            rig.StartClient = () =>
+            {
+                if (rig.Events.Count(e => e == "startup") == 1)
+                {
+                    rig.RunningProcesses.Add(789);
+                    return new GameClientStartupResult(GameClientStartupStatus.AlreadyRunning, 789, "already running");
+                }
+
+                Assert.Empty(rig.RunningProcesses);
+                return rig.StartupResult;
+            };
+
+            GameCrashRecoveryOutcome outcome = await rig.CreateService().RecoverAsync(
+                123,
+                Profile(),
+                LoginCharacter.Knight,
+                CancellationToken.None);
+
+            Assert.Equal(GameCrashRecoveryOutcome.Completed, outcome);
+            string[] expected = { "kill:123", "internet:1", "startup", "kill:789", "startup", "attach:456", "map", "teleport", "map", "start-profile" };
+            Assert.Equal(expected, rig.Events.Where(e => !e.StartsWith("[")));
         }
 
         [Fact]

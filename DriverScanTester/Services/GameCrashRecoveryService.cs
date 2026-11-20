@@ -33,6 +33,8 @@ namespace DriverScanTester.Services
     /// </summary>
     internal sealed class GameCrashRecoveryService
     {
+        private const int MaxStartupAttempts = 3;
+
         private readonly Action<string> _log;
         private readonly Func<CancellationToken, Task<bool>> _hasInternetConnectionAsync;
         private readonly Func<LoginCharacter, CancellationToken, Task<GameClientStartupResult>> _startGameClientAsync;
@@ -113,8 +115,7 @@ namespace DriverScanTester.Services
 
                 await WaitForInternetAsync(token);
 
-                _log("[GameRecovery] Starting the game client and logging in...");
-                GameClientStartupResult startup = await _startGameClientAsync(loginCharacter, token);
+                GameClientStartupResult startup = await StartGameClientWithRetryAsync(loginCharacter, token);
                 if (startup.Status == GameClientStartupStatus.Cancelled)
                 {
                     _log("[GameRecovery] Client startup cancelled; recovery stopped.");
@@ -187,6 +188,25 @@ namespace DriverScanTester.Services
             {
                 _log($"[GameRecovery] Unexpected recovery error: {ex.Message}. Manual restart is required.");
                 return GameCrashRecoveryOutcome.Failed;
+            }
+        }
+
+        private async Task<GameClientStartupResult> StartGameClientWithRetryAsync(
+            LoginCharacter loginCharacter,
+            CancellationToken token)
+        {
+            for (int attempt = 1; ; attempt++)
+            {
+                token.ThrowIfCancellationRequested();
+                _log($"[GameRecovery] Starting the game client and logging in (attempt {attempt}/{MaxStartupAttempts})...");
+                GameClientStartupResult startup = await _startGameClientAsync(loginCharacter, token);
+                if (startup.Status != GameClientStartupStatus.AlreadyRunning || attempt == MaxStartupAttempts)
+                    return startup;
+
+                _log("[GameRecovery] Startup detected an existing Ares client. Checking that it exits before retrying.");
+                uint existingGameProcessId = startup.GameProcessId > 0 ? (uint)startup.GameProcessId : 0;
+                if (!await EnsureGameClientStoppedAsync(existingGameProcessId, token))
+                    return startup;
             }
         }
 
@@ -311,7 +331,7 @@ namespace DriverScanTester.Services
             try
             {
                 using Process process = Process.GetProcessById(pid);
-                return !process.HasExited;
+                return !process.HasExited && string.Equals(process.ProcessName, "Ares", StringComparison.OrdinalIgnoreCase);
             }
             catch (ArgumentException)
             {
@@ -338,7 +358,7 @@ namespace DriverScanTester.Services
             try
             {
                 using Process process = Process.GetProcessById(pid);
-                if (process.HasExited)
+                if (process.HasExited || !string.Equals(process.ProcessName, "Ares", StringComparison.OrdinalIgnoreCase))
                     return true;
 
                 process.Kill(entireProcessTree: true);
