@@ -186,12 +186,12 @@
     "Mage": {
       "MinHpPotions": 2,
       "MinManaPotions": 2,
-      "MaxWeightRatio": 0.9,
-      "MaxWeightValue": 1321,
+      "MaxWeightRatio": 0.92,
+      "MaxWeightValue": 0,
       "MinHp": 999,
       "MinMana": 100,
-      "HpBuyTarget": 33,
-      "ManaBuyTarget": 15,
+      "HpBuyTarget": 40,
+      "ManaBuyTarget": 22,
       "RedBuyTarget": 4,
       "WhiteBuyTarget": 4
     }
