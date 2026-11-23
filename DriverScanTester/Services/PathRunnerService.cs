@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using DriverScanTester.Models;
 
 namespace DriverScanTester.Services
 {
@@ -107,6 +108,9 @@ namespace DriverScanTester.Services
         /// EXP hunting, so this is never inferred from <c>loop</c>.</param>
         /// <param name="enableManaRegen">Profile switch for Mage mana regeneration;
         /// false for old profiles and all non-EXP routes.</param>
+        /// <param name="dotOpeningByClass">Per-class DoT opening configuration of the active
+        /// profile. It is copied into the movement run only for the EXP loop; travel, repot,
+        /// city and recovery routes never receive it.</param>
         /// <returns>True if the path completed normally (non-loop); false if cancelled.</returns>
         public async Task<bool> RunPathAsync(
             List<Waypoint> waypoints,
@@ -118,7 +122,8 @@ namespace DriverScanTester.Services
             bool ignoreAlliancePlayers = false,
             bool ignoreEmpirePlayers = false,
             bool expHuntLoop = false,
-            bool enableManaRegen = false)
+            bool enableManaRegen = false,
+            IReadOnlyDictionary<PlayerClass, DotOpeningSettings>? dotOpeningByClass = null)
         {
             LastStopReason = PathRunStopReason.None;
             if (waypoints == null || waypoints.Count == 0)
@@ -135,6 +140,27 @@ namespace DriverScanTester.Services
 
             // Determine initial mode from first waypoint
             var initialMode = waypoints[0].Mode;
+
+            // DoT opening is EXP-only: copy the per-class settings for this route execution
+            // so later profile edits cannot mutate a run that is already in progress. Every
+            // non-EXP caller (travel, repot, operations, recovery) leaves this null.
+            IReadOnlyDictionary<PlayerClass, DotOpeningSettings>? routeDotOpening = null;
+            if (expHuntLoop && dotOpeningByClass != null)
+            {
+                var copy = new Dictionary<PlayerClass, DotOpeningSettings>();
+                foreach (var entry in dotOpeningByClass)
+                {
+                    if (entry.Value == null)
+                        continue;
+                    copy[entry.Key] = new DotOpeningSettings
+                    {
+                        Enabled = entry.Value.Enabled,
+                        Skill4AttackCount = entry.Value.Skill4AttackCount,
+                        AttackIntervalMs = entry.Value.AttackIntervalMs
+                    };
+                }
+                routeDotOpening = copy;
+            }
 
             MovementSystem movementSystem;
             try
@@ -166,7 +192,8 @@ namespace DriverScanTester.Services
                     // Explicit EXP-loop flag: enables the mana regen skill only
                     // for the workflow ExpLoop step with a combat waypoint mode.
                     ExpHuntLoopMode = expHuntLoop,
-                    EnableManaRegen = enableManaRegen
+                    EnableManaRegen = enableManaRegen,
+                    DotOpeningByClass = routeDotOpening
                 };
             }
             catch

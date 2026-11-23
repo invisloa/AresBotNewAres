@@ -1597,7 +1597,10 @@ namespace DriverScanTester.Services
                 // EXP-loop context and the profile switch are both required for
                 // mana regen (key 6). Travel, repot, city and recovery
                 // routes never pass it, regardless of their loop flag.
-                expHuntLoop: true);
+                expHuntLoop: true,
+                // DoT opening is scoped to this EXP route execution only; the
+                // path runner copies the class settings before the run starts.
+                dotOpeningByClass: _profile.DotOpeningByClass);
 
             // The EXP route is a hunting route: run the loot system in parallel so drops
             // are collected while walking and after kills. MoveAndAttackAndLoot routes use

@@ -322,6 +322,34 @@ namespace DriverScanTester.Services
         public bool ExpHuntLoopMode { get; set; }
         public bool EnableManaRegen { get; set; } = false;
 
+        /// <summary>
+        /// Route-scoped DoT opening configuration (per class). Assigned by
+        /// <see cref="PathRunnerService"/> only for the workflow ExpLoop step; travel,
+        /// repot, city and recovery routes always leave it null. Entries are independent
+        /// copies, never process-global state.
+        /// </summary>
+        public IReadOnlyDictionary<PlayerClass, DotOpeningSettings>? DotOpeningByClass
+        {
+            get => _dotOpeningByClass;
+            set
+            {
+                _dotOpeningByClass = value;
+                _hasEnabledDotOpeningConfiguration = value != null && value.Any(entry =>
+                    BotProfile.IsDotOpeningClass(entry.Key) && entry.Value?.Enabled == true);
+                _dotOpeningConfigLogged.Clear();
+                _dotOpeningBlockedTargetId = 0;
+                _dotOpeningMarkerCheckTargetId = 0;
+                _dotOpeningFallbackLoggedTargetId = 0;
+                _dotOpeningController.Cancel("route configuration changed", log: false);
+            }
+        }
+
+        /// <summary>Clock used by the DoT opening sequence (tests replace it deterministically).</summary>
+        internal Func<DateTime> DotOpeningNowProvider { get; set; } = () => DateTime.UtcNow;
+
+        /// <summary>Exposed for regression tests of the opening state machine.</summary>
+        internal DotOpeningController DotOpeningController => _dotOpeningController;
+
         private bool _isWaypointSpecialRecoveryActive;
         private bool _waypointRepotRequested;
         private WaypointMobRecovery? _waypointMobRecovery;
@@ -909,6 +937,10 @@ namespace DriverScanTester.Services
         private void StartMobGroupingMove(MobGroupingDecision decision)
         {
             CancelCombatGateWaypointReturn("mob grouping owns movement");
+            // Preserve the DoT opening progress and drop a stale activation deadline: after
+            // grouping releases combat, the sequence resumes with normal spacing instead of
+            // firing delayed skill-4 activations back to back.
+            _dotOpeningController.Suspend(DotOpeningNowProvider());
             ReleaseSkillThree();
             StopMoving();
             _combatHandler.SuspendForExternalMovement();
@@ -1059,6 +1091,10 @@ namespace DriverScanTester.Services
                 _mobGroupingOwnsMovement = false;
             }
             ReleaseSkillThree();
+            // Resume the unfinished opener without restarting it and without letting the
+            // grouping resume flag hold skill 3 prematurely. Suspend() only moves the next
+            // allowed activation deadline to "now", preserving the completed count.
+            _dotOpeningController.Suspend(DotOpeningNowProvider());
             _combatHandler.ResumeAfterExternalMovement();
             _resumeCombatSkillAfterGrouping =
                 resumeCombat && MobGroupingController.IsSupportedCombatMode(CurrentMode);
@@ -1689,10 +1725,23 @@ namespace DriverScanTester.Services
 
         private bool _isMovingForward = false;
         private bool _isSkillThreeHeld = false;
+        private bool _isSkillFourHeld = false;
         private DateTime _attackRetryStartedAt = DateTime.MinValue;
         private int _attackRetryLastMana = int.MinValue;
         private int _attackRetryTargetId;
         private bool _attackSuppressedForCurrentWaypoint = false;
+
+        // ── DoT opening attack (skill 4 → skill 3, Sorcerer/Archer, EXP loop only) ──
+        // Configuration is route-scoped (assigned by PathRunnerService) and the live class
+        // is resolved from GameMemoryService before every activation. The controller only
+        // holds sequence state; all input and safety checks stay in this movement loop.
+        private readonly DotOpeningController _dotOpeningController;
+        private IReadOnlyDictionary<PlayerClass, DotOpeningSettings>? _dotOpeningByClass;
+        private bool _hasEnabledDotOpeningConfiguration;
+        private readonly HashSet<PlayerClass> _dotOpeningConfigLogged = new();
+        private int _dotOpeningMarkerCheckTargetId;
+        private int _dotOpeningBlockedTargetId;
+        private int _dotOpeningFallbackLoggedTargetId;
         /// <summary>
         /// One-shot flag for the speed-pot slot-reserve log: while a consumed potion type
         /// sits at the reserve (1), its key(s) are skipped and this suppresses the repeat
@@ -1844,6 +1893,7 @@ namespace DriverScanTester.Services
             _wKeyCameraController = wKeyCameraController;
             _wKeyCameraOwner = wKeyCameraController?.CreateOwner("MovementSystem", SendSyntheticForwardKeyEvent);
             _combatHandler = new CombatHandler(log);
+            _dotOpeningController = new DotOpeningController(log);
             _targetSafety = targetSafety ?? new CombatTargetSafety(
                 () => memoryService.GetSelectedTargetId(),
                 new ScreenCombatPlayerPresenceScanner(
@@ -5246,7 +5296,16 @@ namespace DriverScanTester.Services
                     return;
             }
 
-            var combatAction = _combatHandler.EvaluateCombatAction(_memoryService, currentMode, _isUnstuckRoutineActive, currX, currY, _targetSafety);
+            bool dotOpeningCapable = IsDotOpeningCombatCapable();
+            var combatAction = _combatHandler.EvaluateCombatAction(
+                _memoryService,
+                currentMode,
+                _isUnstuckRoutineActive,
+                currX,
+                currY,
+                _targetSafety,
+                dotOpeningCapable,
+                _dotOpeningController.IsOpeningActive ? _dotOpeningController.AttackIntervalMs : 0);
             if (combatAction == CombatAction.Unstuck || combatAction == CombatAction.RepositionAndRetry)
                 CancelMobGrouping($"{combatAction} has priority");
             if (combatAction == CombatAction.TargetRejected)
@@ -5332,6 +5391,7 @@ namespace DriverScanTester.Services
             switch (combatAction)
             {
                 case CombatAction.TabAfterKill:
+                    CancelDotOpening("target lost");
                     _resumeCombatSkillAfterGrouping = false;
                     // A kill starts a fresh SOD/SOP, target and normal-loot generation.
                     _postKillNormalLootWithheld = CurrentMode == BotMode.MoveAndAttackAndLoot &&
@@ -5421,6 +5481,7 @@ namespace DriverScanTester.Services
                     goto case CombatAction.TabTarget;
 
                 case CombatAction.TabTarget:
+                    CancelDotOpening("target lost");
                     _resumeCombatSkillAfterGrouping = false;
                     if ((currentMode == BotMode.MoveAndAttack || currentMode == BotMode.MoveAndAttackAndLoot) &&
                         _isSkillThreeHeld &&
@@ -5446,6 +5507,20 @@ namespace DriverScanTester.Services
 
                 case CombatAction.Attack:
                     _resumeCombatSkillAfterGrouping = false;
+
+                    // DoT opening: a confirmed new monster receives its skill-4 sequence
+                    // instead of the ordinary skill-3 hold. When the feature is not
+                    // applicable this returns false and the original behavior runs unchanged.
+                    if (await TryBeginOrResumeDotOpeningOnAttackAsync(currentMode, token))
+                    {
+                        if (token.IsCancellationRequested)
+                            return;
+                        if (_isMovingForward)
+                            StopMoving();
+                        await Task.Delay(BotConstants.Delays.CombatAttackWaitMs, token);
+                        return;
+                    }
+
                     // Extra safety check on every newly selected attack target: verify that
                     // no other-player marker (player pixels) is visible on screen with the
                     // camera zoomed out BEFORE the first attack swing is held.
@@ -5461,6 +5536,16 @@ namespace DriverScanTester.Services
                     return;
 
                 case CombatAction.CombatWait:
+                    // The DoT opening runs incrementally inside this tick loop. While skill 4
+                    // owns the sequence, the ordinary skill-3 hold/retry must not run.
+                    if (await TryTickDotOpeningAsync(currentMode, token))
+                    {
+                        if (token.IsCancellationRequested)
+                            return;
+                        await Task.Delay(BotConstants.Delays.CombatAttackWaitMs, token);
+                        return;
+                    }
+
                     // A grouping walk released the existing combat-owned hold. Reacquire it
                     // here through MovementSystem once ordinary combat evaluation resumes.
                     // Both attack modes restore the skill; the mode check only excludes a
@@ -5481,6 +5566,7 @@ namespace DriverScanTester.Services
                     // Perform the STANDARD unstuck action so the player really walks away
                     // from the stuck spot. Combat is suppressed while the recovery is
                     // active (_isUnstuckRoutineActive), so TAB/attack cannot interrupt it.
+                    BlockDotOpeningForRecovery("combat unstuck recovery");
                     StartCombatUnstuck(currX, currY);
                     return;
 
@@ -5489,6 +5575,7 @@ namespace DriverScanTester.Services
                     // connecting — phantom/unreachable target, mob HP never drops).
                     // Walk toward the next waypoint for a short time, then TAB and
                     // attack the (re-selected) target again.
+                    BlockDotOpeningForRecovery("attack reposition recovery");
                     await RepositionAndRetryAttack(currX, currY, token);
                     return;
 
@@ -5520,6 +5607,7 @@ namespace DriverScanTester.Services
 
             // Combat is over — release skill 3 if held
             ReleaseSkillThree();
+            CancelDotOpening("combat disengaged");
 
             // ── Mandatory MoveAndAttackAndLoot barrier ──
             // This is the authoritative post-combat navigation gate. The old timestamp-
@@ -7048,7 +7136,7 @@ namespace DriverScanTester.Services
         /// periodic detection, and the subsequent hold of key 3 is refused by the same central
         /// validation. The camera is always restored afterwards.
         /// </summary>
-        private async Task RunAttackStartPlayerMarkerCheck(CancellationToken token)
+        protected virtual async Task RunAttackStartPlayerMarkerCheck(CancellationToken token)
         {
             // OnlyMove is pure navigation: do not zoom the camera, capture a frame or run
             // any other-player marker validation at all.
@@ -8227,6 +8315,8 @@ namespace DriverScanTester.Services
             _routeResyncPendingAfterCombat = false;
             _attackSuppressedForCurrentWaypoint = false;
             ClearCombatGateTargetSuppression();
+            CancelDotOpening($"route reset: {reason}");
+            ClearDotOpeningRecoveryBlock();
             _combatHandler.ResetState();
             _resumeCombatSkillAfterGrouping = false;
             ResetPostKillRetargetState();
@@ -8260,6 +8350,7 @@ namespace DriverScanTester.Services
         private void PrepareSpecialRecovery(Waypoint target)
         {
             CancelMobGrouping("waypoint special recovery started");
+            BlockDotOpeningForRecovery("waypoint special recovery");
             _resumeCombatSkillAfterGrouping = false;
             _activeSpecialRecoveryTarget = target;
             _isWaypointSpecialRecoveryActive = true;
@@ -9611,7 +9702,8 @@ namespace DriverScanTester.Services
         public bool IsAttackKeyHeld => _isSkillThreeHeld;
 
         /// <summary>
-        /// Releases combat-owned held keys (currently the attack skill 3).
+        /// Releases combat-owned held keys (the attack skill 3 and any unfinished
+        /// skill-4 DoT opening press).
         /// Idempotent: calling it when no combat key is held sends nothing and
         /// leaves the next combat cycle unaffected.
         /// Must be called before another workflow phase takes control (e.g. the
@@ -9622,8 +9714,773 @@ namespace DriverScanTester.Services
         /// </summary>
         public void ReleaseCombatKeys()
         {
+            ReleaseSkillFour();
             ReleaseSkillThree();
         }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  DoT OPENING ATTACK (skill 4 → skill 3)
+        //  Tick-driven, EXP-loop only, Sorcerer/Archer only. The live class is
+        //  re-read before every authorization; every physical key press is
+        //  guarded by the same target-safety mechanism skill 3 uses.
+        // ═══════════════════════════════════════════════════════════════════
+
+        /// <summary>Pure gate: only the two attack waypoint modes may run the opener.</summary>
+        internal static bool IsDotOpeningCombatMode(BotMode mode) =>
+            mode == BotMode.MoveAndAttack || mode == BotMode.MoveAndAttackAndLoot;
+
+        private static bool IsValidDotOpeningSettings(DotOpeningSettings settings) =>
+            settings.Skill4AttackCount is >= DotOpeningSettings.MinSkill4AttackCount and <= DotOpeningSettings.MaxSkill4AttackCount &&
+            settings.AttackIntervalMs is >= DotOpeningSettings.MinAttackIntervalMs and <= DotOpeningSettings.MaxAttackIntervalMs;
+
+        /// <summary>
+        /// True only when the live class can authorize skill 4 right now. Used by the combat
+        /// handler to distinguish a genuine new monster from a target replacement that must
+        /// keep the original behavior (DoT disabled / unsupported class / non-EXP route).
+        /// </summary>
+        private bool IsDotOpeningCombatCapable()
+        {
+            if (!ExpHuntLoopMode ||
+                !_hasEnabledDotOpeningConfiguration ||
+                !IsDotOpeningCombatMode(CurrentMode))
+                return false;
+
+            PlayerClass liveClass = _memoryService.GetPlayerClass();
+            return BotProfile.IsDotOpeningClass(liveClass) &&
+                   _dotOpeningByClass != null &&
+                   _dotOpeningByClass.TryGetValue(liveClass, out DotOpeningSettings? settings) &&
+                   settings != null &&
+                   settings.Enabled &&
+                   IsValidDotOpeningSettings(settings);
+        }
+
+        /// <summary>
+        /// Reads the LIVE player class (never a cached one) and resolves its enabled settings.
+        /// A failed/unreadable class read returns false, which always falls back to skill 3.
+        /// </summary>
+        private bool TryResolveLiveDotOpeningPlan(
+            out PlayerClass playerClass,
+            out DotOpeningSettings? settings,
+            out string reason)
+        {
+            playerClass = PlayerClass.Unknown;
+            settings = null;
+            reason = string.Empty;
+
+            if (!ExpHuntLoopMode)
+            {
+                reason = "not the EXP loop";
+                return false;
+            }
+
+            if (!_hasEnabledDotOpeningConfiguration || _dotOpeningByClass == null)
+            {
+                reason = "DoT opening is not configured";
+                return false;
+            }
+
+            // Only read the live class when an enabled configuration exists: a disabled
+            // feature must not add any read/scan to ordinary combat.
+            playerClass = _memoryService.GetPlayerClass();
+
+            if (!BotProfile.IsDotOpeningClass(playerClass))
+            {
+                reason = $"class {playerClass} does not support DoT opening";
+                return false;
+            }
+
+            if (!_dotOpeningByClass.TryGetValue(playerClass, out DotOpeningSettings? candidate) || candidate == null)
+            {
+                reason = $"no DoT opening settings for {playerClass}";
+                return false;
+            }
+
+            if (!candidate.Enabled)
+            {
+                reason = $"DoT opening is disabled for {playerClass}";
+                return false;
+            }
+
+            if (!IsValidDotOpeningSettings(candidate))
+            {
+                reason = $"invalid DoT opening settings for {playerClass}";
+                return false;
+            }
+
+            settings = candidate;
+            return true;
+        }
+
+        private void EnsureDotOpeningConfigurationLogged(PlayerClass playerClass, DotOpeningSettings settings)
+        {
+            if (!_dotOpeningConfigLogged.Add(playerClass))
+                return;
+
+            _log($"[DoT] Enabled for {playerClass}, count={settings.Skill4AttackCount}, interval={settings.AttackIntervalMs}ms");
+        }
+
+        /// <summary>
+        /// Central pre-skill-4 safety gate. Called immediately before every activation and
+        /// before the transition to skill 3.
+        /// </summary>
+        private bool CanSendSkillFourNow(
+            BotMode currentMode,
+            int targetId,
+            PlayerClass playerClass,
+            DotOpeningSettings settings)
+        {
+            if (!ExpHuntLoopMode || !IsDotOpeningCombatMode(currentMode))
+                return false;
+
+            // Re-check the LIVE effective mode immediately before input: the asynchronous
+            // attack-start camera check can run while the route advances to OnlyMove.
+            if (!IsDotOpeningCombatMode(CurrentMode))
+                return false;
+
+            if (!BotProfile.IsDotOpeningClass(playerClass) || !settings.Enabled || !IsValidDotOpeningSettings(settings))
+                return false;
+
+            if (Volatile.Read(ref _stopRequested) != 0 ||
+                _gameUnresponsiveDetected ||
+                _isCityStuckFatal)
+                return false;
+
+            if (_isUnstuckRoutineActive ||
+                IsWaypointSpecialRecoveryActive ||
+                _combatGateReturnActive ||
+                _attackSuppressedForCurrentWaypoint)
+                return false;
+
+            if (IsMobGroupingSequenceActive)
+                return false;
+
+            if (!IsAutomaticLootDisabled)
+            {
+                LootSystem? loot = LootSystemRef;
+                if (loot != null && (loot.IsCollecting || loot.IsPinkScanPendingOrActive))
+                    return false;
+            }
+
+            if (_memoryService.GetSelectedTargetId() != targetId)
+                return false;
+
+            // Target id alone never authorizes an attack: the central classifier must confirm
+            // a real monster with trustworthy evidence.
+            CombatTargetValidation validation = ValidateCurrentTarget();
+            return validation.AttackAllowed && validation.TargetId == targetId;
+        }
+
+        /// <summary>
+        /// Runs the existing attack-start player-marker check once for the encounter and then
+        /// revalidates the selected target, because the camera adjustment is asynchronous and
+        /// the selection may have changed while it ran.
+        /// </summary>
+        private async Task<bool> EnsureDotOpeningMarkerCheckAsync(int targetId, CancellationToken token)
+        {
+            if (_dotOpeningMarkerCheckTargetId == targetId)
+                return true;
+
+            await RunAttackStartPlayerMarkerCheck(token);
+
+            if (token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
+                return false;
+
+            if (!IsDotOpeningCombatMode(CurrentMode))
+            {
+                CancelDotOpening($"combat mode changed to {CurrentMode} during attack-start check");
+                return false;
+            }
+
+            int afterTargetId = _memoryService.GetSelectedTargetId();
+            if (afterTargetId != targetId)
+            {
+                CancelDotOpening("target changed during attack-start check");
+                return false;
+            }
+
+            CombatTargetValidation validation = ValidateCurrentTarget();
+            if (!validation.AttackAllowed || validation.TargetId != targetId)
+            {
+                CancelDotOpening($"target not attackable after attack-start check ({validation.Kind})");
+                return false;
+            }
+
+            _dotOpeningMarkerCheckTargetId = targetId;
+            return true;
+        }
+
+        /// <summary>
+        /// Attack action handler for the DoT sequence. Returns true when the DoT feature owns
+        /// this attack tick (including a deliberate fallback to the existing skill-3 hold);
+        /// false means the caller must execute the original skill-3 Attack behavior.
+        /// </summary>
+        internal async Task<bool> TryBeginOrResumeDotOpeningOnAttackAsync(
+            BotMode currentMode,
+            CancellationToken token)
+        {
+            bool ownsSequence = _dotOpeningController.OwnsAttackSequence;
+            if (!ownsSequence && (!_hasEnabledDotOpeningConfiguration || !ExpHuntLoopMode))
+                return false; // fully disabled: zero extra reads/input/camera operations
+
+            if (!IsDotOpeningCombatMode(currentMode) || !ExpHuntLoopMode)
+            {
+                if (ownsSequence)
+                {
+                    int target = _dotOpeningController.ActiveTargetId;
+                    CancelDotOpeningForRemainderOfEncounter("combat context no longer supports DoT opening");
+                    _log($"[DoT] Falling back to ordinary combat for Target={target}.");
+                }
+                return false;
+            }
+
+            if (Volatile.Read(ref _stopRequested) != 0 ||
+                token.IsCancellationRequested ||
+                _gameUnresponsiveDetected ||
+                _isCityStuckFatal)
+            {
+                if (ownsSequence)
+                    CancelDotOpeningForRemainderOfEncounter("bot stopped or game unavailable");
+                return ownsSequence;
+            }
+
+            if (_isUnstuckRoutineActive || IsWaypointSpecialRecoveryActive || _combatGateReturnActive)
+            {
+                if (ownsSequence)
+                    CancelDotOpeningForRemainderOfEncounter("recovery owns combat input");
+                return ownsSequence;
+            }
+
+            if (IsMobGroupingSequenceActive)
+            {
+                if (ownsSequence)
+                    _dotOpeningController.Suspend(DotOpeningNowProvider());
+
+                // Grouping may have intercepted the FIRST Attack action before the skill-4
+                // opener was initialized. Returning true here prevents the grouping resume
+                // flag from holding skill 3; the opener initializes through CombatWait once
+                // grouping releases combat.
+                return ownsSequence || IsDotOpeningCombatCapable();
+            }
+
+            if (!TryResolveLiveDotOpeningPlan(out PlayerClass playerClass, out DotOpeningSettings? settings, out string reason) ||
+                settings == null)
+            {
+                if (ownsSequence)
+                {
+                    int target = _dotOpeningController.ActiveTargetId;
+                    CancelDotOpeningForRemainderOfEncounter(reason);
+                    _log($"[DoT] Falling back to skill 3 for Target={target} ({reason}).");
+                    HoldSkillThree();
+                    return true;
+                }
+                return false;
+            }
+
+            int targetId = _memoryService.GetSelectedTargetId();
+            if (targetId <= 0)
+            {
+                if (ownsSequence)
+                    CancelDotOpening("target lost");
+                return false;
+            }
+
+            EnsureDotOpeningConfigurationLogged(playerClass, settings);
+
+            if (ownsSequence && _dotOpeningController.ActiveTargetId == targetId)
+            {
+                // Same monster: resume the existing phase, never restart the opening.
+                if (_dotOpeningController.ActiveClass != playerClass)
+                {
+                    CancelDotOpeningForRemainderOfEncounter("live class changed");
+                    _log($"[DoT] Falling back to skill 3 for Target={targetId} (live class changed).");
+                    HoldSkillThree();
+                    return true;
+                }
+
+                if (_dotOpeningController.IsMainAttackActive)
+                {
+                    HoldSkillThree();
+                    return true;
+                }
+
+                ReleaseSkillThree();
+                _dotOpeningController.Suspend(DotOpeningNowProvider());
+                if (!await EnsureDotOpeningMarkerCheckAsync(targetId, token))
+                    return true;
+                DriveDotOpening(currentMode, token);
+                return true;
+            }
+
+            // A different monster was acquired (direct replacement or after a kill).
+            if (_dotOpeningBlockedTargetId == targetId)
+            {
+                if (ownsSequence)
+                    CancelDotOpening("target replaced by a recovery-blocked target");
+                LogDotOpeningFallback(targetId, "opening was cancelled by an earlier recovery");
+                HoldSkillThree();
+                return true;
+            }
+
+            // Never carry opening progress to another monster and never hold 3 during skill 4.
+            ReleaseSkillThree();
+            if (!await EnsureDotOpeningMarkerCheckAsync(targetId, token))
+                return true;
+
+            if (!TryResolveLiveDotOpeningPlan(out PlayerClass resolvedClass, out DotOpeningSettings? resolvedSettings, out string resolvedReason) ||
+                resolvedSettings == null ||
+                _memoryService.GetSelectedTargetId() != targetId)
+            {
+                CancelDotOpening(string.IsNullOrEmpty(resolvedReason)
+                    ? "target changed during attack-start check"
+                    : resolvedReason);
+                return true;
+            }
+
+            EnsureDotOpeningConfigurationLogged(resolvedClass, resolvedSettings);
+            _dotOpeningController.BeginEncounter(
+                targetId,
+                resolvedClass,
+                resolvedSettings.Skill4AttackCount,
+                resolvedSettings.AttackIntervalMs,
+                DotOpeningNowProvider());
+
+            DriveDotOpening(currentMode, token);
+            return true;
+        }
+
+        /// <summary>
+        /// CombatWait handler for the DoT sequence. Returns true when the feature owns the
+        /// tick (opening in progress, completed opening, or deliberate fallback). This is also
+        /// where an opening initializes when Mob Grouping intercepted the initial Attack
+        /// action before the switch executed.
+        /// </summary>
+        internal async Task<bool> TryTickDotOpeningAsync(BotMode currentMode, CancellationToken token)
+        {
+            bool ownsSequence = _dotOpeningController.OwnsAttackSequence;
+            if (!ownsSequence && (!_hasEnabledDotOpeningConfiguration || !ExpHuntLoopMode))
+                return false; // fully disabled: zero extra reads/input/camera operations
+
+            if (!IsDotOpeningCombatMode(currentMode) || !ExpHuntLoopMode)
+            {
+                if (ownsSequence)
+                {
+                    int target = _dotOpeningController.ActiveTargetId;
+                    CancelDotOpeningForRemainderOfEncounter($"combat mode {currentMode} does not support DoT opening");
+                    _log($"[DoT] Falling back to ordinary combat for Target={target}.");
+                }
+                return false;
+            }
+
+            if (Volatile.Read(ref _stopRequested) != 0 ||
+                token.IsCancellationRequested ||
+                _gameUnresponsiveDetected ||
+                _isCityStuckFatal)
+            {
+                if (ownsSequence)
+                    CancelDotOpeningForRemainderOfEncounter("bot stopped or game unavailable");
+                return ownsSequence;
+            }
+
+            if (_isUnstuckRoutineActive || IsWaypointSpecialRecoveryActive || _combatGateReturnActive)
+            {
+                if (ownsSequence)
+                    CancelDotOpeningForRemainderOfEncounter("recovery owns combat input");
+                return ownsSequence;
+            }
+
+            if (IsMobGroupingSequenceActive)
+            {
+                // Grouping owns movement: preserve progress, stop initiating skill 4 and never
+                // let the resume flag press skill 3 while the opening is incomplete. Even when
+                // the opener was not initialized yet (initial Attack intercepted by grouping),
+                // suppress skill 3 while an enabled DoT configuration applies.
+                if (ownsSequence)
+                    _dotOpeningController.Suspend(DotOpeningNowProvider());
+                return ownsSequence || IsDotOpeningCombatCapable();
+            }
+
+            if (ownsSequence && !IsAutomaticLootDisabled)
+            {
+                LootSystem? loot = LootSystemRef;
+                if (loot != null && (loot.IsCollecting || loot.IsPinkScanPendingOrActive))
+                {
+                    _dotOpeningController.Suspend(DotOpeningNowProvider());
+                    return true;
+                }
+            }
+
+            int targetId = _memoryService.GetSelectedTargetId();
+            if (targetId <= 0)
+            {
+                if (ownsSequence)
+                {
+                    CancelDotOpening("target lost");
+                    return true;
+                }
+                return false;
+            }
+
+            bool sameTarget = ownsSequence && _dotOpeningController.ActiveTargetId == targetId;
+
+            if (sameTarget)
+            {
+                // Same monster: never restart the opening. Skill 3 continues after the
+                // opening completed; while skill 4 owns the opener, Drive() validates the
+                // live class only when the next activation/transition is actually due.
+                if (_dotOpeningController.IsMainAttackActive)
+                {
+                    HoldSkillThree();
+                    _resumeCombatSkillAfterGrouping = false;
+                    CheckAttackKeyRetry(token);
+                    return true;
+                }
+
+                if (!await EnsureDotOpeningMarkerCheckAsync(targetId, token))
+                    return true;
+                DriveDotOpening(currentMode, token);
+                return true;
+            }
+
+            if (_dotOpeningBlockedTargetId == targetId)
+            {
+                if (ownsSequence)
+                    CancelDotOpening("target replaced by a recovery-blocked target");
+                LogDotOpeningFallback(targetId, "opening was cancelled by an earlier recovery");
+                HoldSkillThree();
+                return true;
+            }
+
+            // A new encounter (or the initial opening intercepted by grouping) needs the
+            // live class/settings now.
+            if (!TryResolveLiveDotOpeningPlan(out PlayerClass playerClass, out DotOpeningSettings? settings, out string reason) ||
+                settings == null)
+            {
+                if (ownsSequence)
+                {
+                    int target = _dotOpeningController.ActiveTargetId;
+                    CancelDotOpeningForRemainderOfEncounter(reason);
+                    _log($"[DoT] Falling back to skill 3 for Target={target} ({reason}).");
+                    HoldSkillThree();
+                    return true;
+                }
+                return false;
+            }
+
+            EnsureDotOpeningConfigurationLogged(playerClass, settings);
+
+            if (ownsSequence)
+            {
+                // Direct target replacement while an opening is active: discard the old
+                // progress. BeginEncounter below logs the target change.
+                _dotOpeningMarkerCheckTargetId = 0;
+            }
+
+            // Initialization path for a grouping-intercepted Attack action (combat resumes
+            // through CombatWait) and for any other CombatWait that acquired a new monster.
+            ReleaseSkillThree();
+            if (!await EnsureDotOpeningMarkerCheckAsync(targetId, token))
+                return true;
+
+            if (!TryResolveLiveDotOpeningPlan(out PlayerClass resolvedClass, out DotOpeningSettings? resolvedSettings, out string resolvedReason) ||
+                resolvedSettings == null ||
+                _memoryService.GetSelectedTargetId() != targetId)
+            {
+                CancelDotOpening(string.IsNullOrEmpty(resolvedReason)
+                    ? "target changed during attack-start check"
+                    : resolvedReason);
+                return true;
+            }
+
+            EnsureDotOpeningConfigurationLogged(resolvedClass, resolvedSettings);
+            _dotOpeningController.BeginEncounter(
+                targetId,
+                resolvedClass,
+                resolvedSettings.Skill4AttackCount,
+                resolvedSettings.AttackIntervalMs,
+                DotOpeningNowProvider());
+
+            DriveDotOpening(currentMode, token);
+            return true;
+        }
+
+        /// <summary>
+        /// Incremental sequence step: sends at most ONE skill-4 activation per tick, or
+        /// completes the opening and hands combat back to the existing skill-3 mechanism.
+        /// It never blocks and never runs its own combat loop.
+        /// </summary>
+        private void DriveDotOpening(BotMode currentMode, CancellationToken token)
+        {
+            if (!_dotOpeningController.IsOpeningActive)
+                return;
+
+            DateTime now = DotOpeningNowProvider();
+            if (!_dotOpeningController.CanActivate(now) &&
+                !_dotOpeningController.CanSwitchToMainAttack(now))
+            {
+                // No attack is due: do not read the class, scan the target or issue input.
+                // A transient unreadable class must never abort a healthy opening between
+                // two configured activations.
+                return;
+            }
+
+            if (!TryResolveLiveDotOpeningPlan(out PlayerClass playerClass, out DotOpeningSettings? settings, out string reason) ||
+                settings == null)
+            {
+                int target = _dotOpeningController.ActiveTargetId;
+                CancelDotOpeningForRemainderOfEncounter(reason);
+                _log($"[DoT] Falling back to skill 3 for Target={target} ({reason}).");
+                HoldSkillThree();
+                return;
+            }
+
+            if (_dotOpeningController.ActiveClass != playerClass)
+            {
+                int target = _dotOpeningController.ActiveTargetId;
+                CancelDotOpeningForRemainderOfEncounter("live class changed");
+                _log($"[DoT] Falling back to skill 3 for Target={target} (live class changed).");
+                HoldSkillThree();
+                return;
+            }
+
+            int targetId = _dotOpeningController.ActiveTargetId;
+            if (_memoryService.GetSelectedTargetId() != targetId)
+            {
+                CancelDotOpening("target lost");
+                return;
+            }
+
+            if (!IsDotOpeningCombatMode(CurrentMode))
+            {
+                CancelDotOpening($"combat mode changed to {CurrentMode}");
+                return;
+            }
+
+            if (IsMobGroupingSequenceActive)
+            {
+                _dotOpeningController.Suspend(DotOpeningNowProvider());
+                return;
+            }
+
+            if (Volatile.Read(ref _stopRequested) != 0 ||
+                token.IsCancellationRequested ||
+                _gameUnresponsiveDetected ||
+                _isCityStuckFatal)
+            {
+                CancelDotOpeningForRemainderOfEncounter("bot stopped or game unavailable");
+                return;
+            }
+
+            if (_isUnstuckRoutineActive || IsWaypointSpecialRecoveryActive || _combatGateReturnActive)
+            {
+                CancelDotOpeningForRemainderOfEncounter("recovery owns combat input");
+                return;
+            }
+
+            if (!IsAutomaticLootDisabled)
+            {
+                LootSystem? loot = LootSystemRef;
+                if (loot != null && (loot.IsCollecting || loot.IsPinkScanPendingOrActive))
+                {
+                    _dotOpeningController.Suspend(DotOpeningNowProvider());
+                    return;
+                }
+            }
+
+            if (_dotOpeningController.CanActivate(now))
+            {
+                if (!CanSendSkillFourNow(currentMode, targetId, playerClass, settings))
+                {
+                    CancelOrSuspendDotOpeningOnFailedSafety(currentMode, targetId);
+                    return;
+                }
+
+                if (SendSkillFourActivation(targetId, token))
+                    _dotOpeningController.RegisterActivation(DotOpeningNowProvider());
+                return;
+            }
+
+            if (_dotOpeningController.CanSwitchToMainAttack(now))
+            {
+                // Final opening interval elapsed. Revalidate the same monster immediately
+                // before releasing skill 4 and handing over to the existing skill 3 attack.
+                if (!CanSendSkillFourNow(currentMode, targetId, playerClass, settings))
+                {
+                    CancelOrSuspendDotOpeningOnFailedSafety(currentMode, targetId);
+                    return;
+                }
+
+                _dotOpeningController.CompleteOpening(DotOpeningNowProvider());
+                _resumeCombatSkillAfterGrouping = false;
+                HoldSkillThree();
+            }
+
+        }
+
+        private void CancelOrSuspendDotOpeningOnFailedSafety(BotMode currentMode, int targetId)
+        {
+            if (!IsDotOpeningCombatMode(currentMode) ||
+                Volatile.Read(ref _stopRequested) != 0 ||
+                _isUnstuckRoutineActive ||
+                IsWaypointSpecialRecoveryActive ||
+                _combatGateReturnActive ||
+                _attackSuppressedForCurrentWaypoint)
+            {
+                CancelDotOpeningForRemainderOfEncounter("combat input no longer available");
+                return;
+            }
+
+            if (IsMobGroupingSequenceActive)
+            {
+                _dotOpeningController.Suspend(DotOpeningNowProvider());
+                return;
+            }
+
+            if (_memoryService.GetSelectedTargetId() != targetId)
+            {
+                CancelDotOpening("target lost or changed");
+                return;
+            }
+
+            CombatTargetValidation validation = ValidateCurrentTarget();
+            if (!validation.AttackAllowed || validation.TargetId != targetId)
+            {
+                CancelDotOpening($"target no longer attackable ({validation.Kind})");
+                return;
+            }
+
+            // Loot/grouping or another temporary owner is active. Keep progress and let the
+            // next tick resume with normal spacing once the owner releases combat input.
+            _dotOpeningController.Suspend(DotOpeningNowProvider());
+        }
+
+        /// <summary>
+        /// Sends one proper key-down/key-up pair for skill 4. Key-up is guaranteed in a finally
+        /// block, so an interrupted/cancelled activation can never leave key 4 held.
+        /// </summary>
+        private bool SendSkillFourActivation(int expectedTargetId, CancellationToken token)
+        {
+            lock (_inputLock)
+            {
+                if (token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
+                    return false;
+
+                // Final identity check inside the input lock: the sequence may only ever press
+                // skill 4 for the monster that owns the active encounter.
+                if (_memoryService.GetSelectedTargetId() != expectedTargetId)
+                    return false;
+
+                // Skill 4 owns the opening: the hold of 3 must not remain active.
+                if (_isSkillThreeHeld)
+                {
+                    CancelAttackKeyRetry("skill 4 opening owns the attack");
+                    _log("[Key] 3 up");
+                    SendSkillThreeKeyEvent(keyUp: true);
+                    _isSkillThreeHeld = false;
+                }
+
+                bool keyDownSent = false;
+                bool keyUpSent = false;
+                _log("[Key] 4 press (skill 4 opening)");
+                _isSkillFourHeld = true;
+                try
+                {
+                    SendSkillFourKeyEvent(keyUp: false);
+                    keyDownSent = true;
+                    Thread.Sleep(BotConstants.Keyboard.PressKeyGapMs);
+                }
+                catch (Exception ex)
+                {
+                    _log($"[DoT] Skill 4 key-down failed: {ex.Message}");
+                }
+                finally
+                {
+                    try
+                    {
+                        SendSkillFourKeyEvent(keyUp: true);
+                        keyUpSent = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        _log($"[DoT] Skill 4 key-up failed: {ex.Message}");
+                    }
+                    _isSkillFourHeld = !keyUpSent;
+                }
+
+                return keyDownSent;
+            }
+        }
+
+        private void ReleaseSkillFour()
+        {
+            lock (_inputLock)
+            {
+                if (!_isSkillFourHeld)
+                    return;
+
+                try
+                {
+                    SendSkillFourKeyEvent(keyUp: true);
+                }
+                catch (Exception ex)
+                {
+                    _log($"[DoT] Skill 4 cleanup key-up failed: {ex.Message}");
+                }
+                _isSkillFourHeld = false;
+            }
+        }
+
+        private void LogDotOpeningFallback(int targetId, string reason)
+        {
+            if (_dotOpeningFallbackLoggedTargetId == targetId)
+                return;
+            _dotOpeningFallbackLoggedTargetId = targetId;
+            _log($"[DoT] Falling back to skill 3 for Target={targetId} ({reason}).");
+        }
+
+        /// <summary>Cancels the sequence and forgets the per-encounter marker-check evidence.</summary>
+        internal void CancelDotOpening(string reason, bool log = true)
+        {
+            _dotOpeningMarkerCheckTargetId = 0;
+            _dotOpeningController.Cancel(reason, log);
+        }
+
+        /// <summary>
+        /// Cancels an ACTIVE opening because of a disruption (mode change, unreadable class,
+        /// attack suppression, ...). The same monster must not get a SECOND opening later,
+        /// so it continues with ordinary skill 3 until a different monster is acquired.
+        /// </summary>
+        private void CancelDotOpeningForRemainderOfEncounter(string reason)
+        {
+            int targetId = _dotOpeningController.ActiveTargetId;
+            if (targetId > 0)
+                _dotOpeningBlockedTargetId = targetId;
+            CancelDotOpening(reason);
+        }
+
+        /// <summary>
+        /// A combat recovery interrupted the encounter. The same monster must not receive
+        /// endless repeated skill-4 openings after an unsuccessful recovery, so it is marked
+        /// to continue with ordinary skill 3 if it is still selected afterward. A different
+        /// monster still gets its own fresh opening.
+        /// </summary>
+        internal void BlockDotOpeningForRecovery(string reason)
+        {
+            if (!_dotOpeningController.OwnsAttackSequence)
+                return;
+
+            _dotOpeningBlockedTargetId = _dotOpeningController.ActiveTargetId;
+            CancelDotOpening(reason);
+        }
+
+        private void ClearDotOpeningRecoveryBlock()
+        {
+            _dotOpeningBlockedTargetId = 0;
+            _dotOpeningFallbackLoggedTargetId = 0;
+        }
+
+        protected virtual void SendSkillFourKeyEvent(bool keyUp)
+            => GameInput.keybd_event(GameInput.VK_4, GameInput.SCAN_4,
+                keyUp ? (uint)GameInput.KEYEVENTF_KEYUP : 0u, 0);
 
         private void HoldSkillThree()
         {
@@ -9765,6 +10622,7 @@ namespace DriverScanTester.Services
             bool attackWasHeld = _isSkillThreeHeld;
 
             ReleaseSkillThree();
+            CancelDotOpening("target rejected");
             CancelAttackKeyRetry($"target rejected ({validation.Kind})");
             _combatHandler.ResetState();
             CancelMobGrouping("combat target rejected");

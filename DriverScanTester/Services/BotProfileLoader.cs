@@ -318,6 +318,20 @@ namespace DriverScanTester.Services
                 }
             }
 
+            // --- DoT opening attack (EXP loop, Sorcerer/Archer only) ---
+            if (profile.DotOpeningByClass != null)
+            {
+                foreach (var entry in profile.DotOpeningByClass)
+                {
+                    if (!BotProfile.IsDotOpeningClass(entry.Key))
+                        errors.Add($"DoT opening: unsupported class {entry.Key}.");
+                    if (entry.Value == null)
+                        errors.Add($"{entry.Key} DoT opening settings are missing.");
+                    else
+                        ValidateDotOpeningSettings(errors, entry.Value, $"{entry.Key} DoT opening settings");
+                }
+            }
+
             // --- Start position check / protection ---
             if (profile.EnableStartPositionCheck && profile.ProtectionMapNumber <= 0)
                 errors.Add("Start position check: protected map number must be greater than 0. Set the map the player must be on after the start teleport.");
@@ -379,6 +393,14 @@ namespace DriverScanTester.Services
                 errors.Add($"{label}: exact max weight should be between 0 and {short.MaxValue} (0 uses the percentage instead).");
             if (settings.HpBuyTarget < 0 || settings.ManaBuyTarget < 0 || settings.RedBuyTarget < 0 || settings.WhiteBuyTarget < 0)
                 errors.Add($"{label}: potion buy targets cannot be negative.");
+        }
+
+        private static void ValidateDotOpeningSettings(List<string> errors, DotOpeningSettings settings, string label)
+        {
+            if (settings.Skill4AttackCount is < DotOpeningSettings.MinSkill4AttackCount or > DotOpeningSettings.MaxSkill4AttackCount)
+                errors.Add($"{label}: opening attacks must be {DotOpeningSettings.MinSkill4AttackCount} or {DotOpeningSettings.MaxSkill4AttackCount}.");
+            if (settings.AttackIntervalMs is < DotOpeningSettings.MinAttackIntervalMs or > DotOpeningSettings.MaxAttackIntervalMs)
+                errors.Add($"{label}: attack interval must be between {DotOpeningSettings.MinAttackIntervalMs} and {DotOpeningSettings.MaxAttackIntervalMs} ms.");
         }
 
         /// <summary>

@@ -171,6 +171,11 @@ namespace DriverScanTester.ViewModels
                     OnPropertyChanged(nameof(StartPositionTolerance));
                     OnPropertyChanged(nameof(WindowOffsetX));
                     OnPropertyChanged(nameof(WindowOffsetY));
+                    OnPropertyChanged(nameof(SelectedDotOpeningClass));
+                    OnPropertyChanged(nameof(DotOpeningEnabled));
+                    OnPropertyChanged(nameof(DotOpeningInputsEnabled));
+                    OnPropertyChanged(nameof(DotOpeningAttackCount));
+                    OnPropertyChanged(nameof(DotOpeningAttackIntervalMs));
                     LoadProfileIntoEditor();
                     CommandManager.InvalidateRequerySuggested();
                 }
@@ -316,6 +321,90 @@ namespace DriverScanTester.ViewModels
         {
             get => DisplayedRepotSettings.WhiteBuyTarget;
             set { SetRepotValue(p => p.WhiteBuyTarget = value, s => s.WhiteBuyTarget = value); OnPropertyChanged(); }
+        }
+
+        // ──────────────────── DoT opening attack (EXP loop) ────────────────────
+
+        /// <summary>
+        /// Only the classes that support the DoT opening are selectable here. This is a
+        /// separate selection from <see cref="SelectedRepotClass"/> and never changes the
+        /// repot configuration.
+        /// </summary>
+        public IReadOnlyList<KeyValuePair<PlayerClass, string>> DotOpeningClassOptions { get; } =
+            new[]
+            {
+                new KeyValuePair<PlayerClass, string>(PlayerClass.Mage, "Sorcerer"),
+                new KeyValuePair<PlayerClass, string>(PlayerClass.Archer, "Archer")
+            };
+
+        private PlayerClass _selectedDotOpeningClass = PlayerClass.Mage;
+        public PlayerClass SelectedDotOpeningClass
+        {
+            get => _selectedDotOpeningClass;
+            set
+            {
+                if (!SetProperty(ref _selectedDotOpeningClass, value)) return;
+                OnPropertyChanged(nameof(DotOpeningEnabled));
+                OnPropertyChanged(nameof(DotOpeningInputsEnabled));
+                OnPropertyChanged(nameof(DotOpeningAttackCount));
+                OnPropertyChanged(nameof(DotOpeningAttackIntervalMs));
+            }
+        }
+
+        /// <summary>
+        /// Returns the selected class settings WITHOUT creating a dictionary entry. Editing
+        /// any control creates an independent copy for exactly that class.
+        /// </summary>
+        private DotOpeningSettings DisplayedDotOpeningSettings =>
+            CurrentProfile?.GetDotOpeningSettings(SelectedDotOpeningClass) ?? new DotOpeningSettings();
+
+        private DotOpeningSettings GetOrCreateDisplayedDotOpeningSettings()
+            => CurrentProfile!.GetOrCreateDotOpeningSettings(SelectedDotOpeningClass);
+
+        public bool DotOpeningEnabled
+        {
+            get => DisplayedDotOpeningSettings.Enabled;
+            set
+            {
+                if (CurrentProfile == null || DisplayedDotOpeningSettings.Enabled == value)
+                    return;
+                GetOrCreateDisplayedDotOpeningSettings().Enabled = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(DotOpeningInputsEnabled));
+            }
+        }
+
+        /// <summary>
+        /// When disabled the additional controls are visually disabled, but their saved
+        /// values are not cleared and remain part of the profile.
+        /// </summary>
+        public bool DotOpeningInputsEnabled => CurrentProfile != null && DotOpeningEnabled;
+
+        public IReadOnlyList<int> DotOpeningAttackCountOptions { get; } =
+            new[] { DotOpeningSettings.MinSkill4AttackCount, DotOpeningSettings.MaxSkill4AttackCount };
+
+        public int DotOpeningAttackCount
+        {
+            get => DisplayedDotOpeningSettings.Skill4AttackCount;
+            set
+            {
+                if (CurrentProfile == null || DisplayedDotOpeningSettings.Skill4AttackCount == value)
+                    return;
+                GetOrCreateDisplayedDotOpeningSettings().Skill4AttackCount = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public int DotOpeningAttackIntervalMs
+        {
+            get => DisplayedDotOpeningSettings.AttackIntervalMs;
+            set
+            {
+                if (CurrentProfile == null || DisplayedDotOpeningSettings.AttackIntervalMs == value)
+                    return;
+                GetOrCreateDisplayedDotOpeningSettings().AttackIntervalMs = value;
+                OnPropertyChanged();
+            }
         }
 
         public bool DryRunRepot

@@ -631,6 +631,49 @@
                                 </Grid>
                             </GroupBox>
 
+                            <!-- ─────────── DOT OPENING ATTACK (EXP LOOP) ─────────── -->
+                            <GroupBox Header="DoT Opening Attack" Margin="0,0,0,10" BorderBrush="#FF99CCFF" BorderThickness="1" Padding="4">
+                                <StackPanel Margin="3">
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                        <TextBlock Text="Class:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                        <ComboBox ItemsSource="{Binding DotOpeningClassOptions}" DisplayMemberPath="Value" SelectedValuePath="Key"
+                                                  SelectedValue="{Binding SelectedDotOpeningClass}" Width="180" HorizontalAlignment="Left"
+                                                  ToolTip="Sorcerer and Archer have independent DoT opening settings. This selection only affects the DoT opening section."/>
+                                    </StackPanel>
+                                    <CheckBox Content="Enable DoT Opening (Skill 4 → Skill 3)"
+                                              IsChecked="{Binding DotOpeningEnabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                              Margin="2" VerticalAlignment="Center"
+                                              ToolTip="During the EXP loop only, every newly acquired monster is attacked with skill 4 the configured number of times, then ordinary skill-3 combat continues until the monster dies or the target changes."/>
+                                    <Grid Margin="0,6,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+
+                                        <Label Grid.Row="0" Grid.Column="0" Content="Opening attacks (skill 4):"/>
+                                        <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding DotOpeningAttackCountOptions}"
+                                                  SelectedItem="{Binding DotOpeningAttackCount}" Width="60" Margin="2" HorizontalAlignment="Left"
+                                                  IsEnabled="{Binding DotOpeningInputsEnabled}"
+                                                  ToolTip="Number of initiated skill-4 attack activations before switching to skill 3 (2 or 3)."/>
+
+                                        <Label Grid.Row="0" Grid.Column="2" Content="Attack interval (ms):" Margin="12,0,0,0"/>
+                                        <TextBox Grid.Row="0" Grid.Column="3" Text="{Binding DotOpeningAttackIntervalMs, UpdateSourceTrigger=PropertyChanged}"
+                                                 Width="80" Margin="2" HorizontalAlignment="Left"
+                                                 IsEnabled="{Binding DotOpeningInputsEnabled}"
+                                                 ToolTip="Minimum delay between individual skill-4 activations (500–3000 ms). It is not a skill cooldown."/>
+
+                                        <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="4" TextWrapping="Wrap" Foreground="Gray" Margin="2,4,2,0"
+                                                   Text="Enabled only during the profile's EXP loop on MoveAndAttack / MoveAndAttackAndLoot waypoints. Knight, Spearman and unknown classes keep skill 3 only. Values here are stored per class even when the checkbox is off."/>
+                                    </Grid>
+                                </StackPanel>
+                            </GroupBox>
+
                             <!-- ─────────── START POSITION CHECK / PROTECTION ─────────── -->
                             <GroupBox Header="Start position check (protection)" Margin="0,0,0,10" BorderBrush="#FF99CCFF" BorderThickness="1" Padding="4">
                                 <StackPanel Margin="3">

@@ -90,6 +90,44 @@ namespace DriverScanTester.Models
         internal static bool IsRepotClass(PlayerClass playerClass) => playerClass is
             PlayerClass.Knight or PlayerClass.Archer or PlayerClass.Mage or PlayerClass.Spear;
 
+        /// <summary>
+        /// Optional class-specific DoT opening settings for the EXP loop. Missing classes
+        /// (and old profiles without this dictionary) never use the feature. Reading a
+        /// value never creates or mutates a dictionary entry.
+        /// </summary>
+        public Dictionary<PlayerClass, DotOpeningSettings> DotOpeningByClass { get; set; } = new();
+
+        /// <summary>
+        /// Resolves the DoT opening settings for a class without modifying the profile.
+        /// Unsupported classes and missing entries return a disabled default instance.
+        /// </summary>
+        public DotOpeningSettings GetDotOpeningSettings(PlayerClass playerClass)
+        {
+            if (IsDotOpeningClass(playerClass) && DotOpeningByClass != null &&
+                DotOpeningByClass.TryGetValue(playerClass, out var settings) && settings != null)
+                return settings;
+
+            return new DotOpeningSettings();
+        }
+
+        /// <summary>Creates an independent class configuration on the first edit.</summary>
+        public DotOpeningSettings GetOrCreateDotOpeningSettings(PlayerClass playerClass)
+        {
+            if (!IsDotOpeningClass(playerClass))
+                throw new System.ArgumentOutOfRangeException(nameof(playerClass));
+
+            DotOpeningByClass ??= new();
+            if (!DotOpeningByClass.TryGetValue(playerClass, out var settings) || settings == null)
+            {
+                settings = new DotOpeningSettings();
+                DotOpeningByClass[playerClass] = settings;
+            }
+            return settings;
+        }
+
+        internal static bool IsDotOpeningClass(PlayerClass playerClass) => playerClass is
+            PlayerClass.Mage or PlayerClass.Archer;
+
         // --- Workflow options ---
         /// <summary>If true, skip actual RepotSystem.Repot() and just log "dry run".</summary>
         public bool DryRunRepot { get; set; } = false;

@@ -74,6 +74,12 @@ namespace DriverScanTester.Services
 
         // ── State ──
         private bool _wasAttacking;
+        /// <summary>
+        /// Monster id of the current attack episode. Used to recognize a DIRECT target
+        /// replacement (A → B without an empty-target interval), which starts a fresh
+        /// DoT opening for B. Staying on A never restarts it.
+        /// </summary>
+        private int _currentTargetId;
         private DateTime _lastNonIdleActionTime = DateTime.MinValue;
         private DateTime _lastMoveModeTabTime = DateTime.MinValue;
         private DateTime _lastAttackSpeedCheck = DateTime.MinValue;
@@ -265,6 +271,16 @@ namespace DriverScanTester.Services
         /// only a confirmed monster may be attacked. Null keeps the legacy caller decision (the
         /// physical key press is still gated by MovementSystem.HoldSkillThree).
         /// </param>
+        /// <param name="dotOpeningCapable">
+        /// True when the live class + profile configuration + EXP route permit the DoT opening.
+        /// Only then is a direct target replacement reported as a fresh
+        /// <see cref="CombatAction.Attack"/>; disabled configurations keep the original behavior.
+        /// </param>
+        /// <param name="dotOpeningIntervalMs">
+        /// Configured skill-4 interval while an opening is in progress (0 = no opening). It
+        /// is only used to extend the idle/death timeout so ordinary opening spacing can never
+        /// be mistaken for a dead monster. It is never used as an attack cooldown by this handler.
+        /// </param>
         /// <returns>A <see cref="CombatAction"/> describing what input to perform next.</returns>
         public CombatAction EvaluateCombatAction(
             GameMemoryService memoryService,
@@ -272,7 +288,9 @@ namespace DriverScanTester.Services
             bool isUnstuckActive,
             float currX,
             float currY,
-            CombatTargetSafety? targetSafety = null)
+            CombatTargetSafety? targetSafety = null,
+            bool dotOpeningCapable = false,
+            int dotOpeningIntervalMs = 0)
         {
             if (_externallySuspended)
                 return CombatAction.None;
@@ -320,6 +338,7 @@ namespace DriverScanTester.Services
                         }
 
                         _wasAttacking = false;
+                        _currentTargetId = 0;
                         _combatIdleStartTime = DateTime.MinValue;
                         _lastManaChangeAt = DateTime.MinValue;
                         _lastCombatPosChangeAt = DateTime.MinValue;
@@ -336,51 +355,67 @@ namespace DriverScanTester.Services
                     CapturePlayerScreenshot();
                     _log($"[Combat] Target ID {targetId} is a player character — skipping attack. TAB.");
                     _wasAttacking = false;
+                    _currentTargetId = 0;
                     _combatIdleStartTime = DateTime.MinValue;
                     return CombatAction.TabTarget;
+                }
+
+                // ── New target identity ──
+                // The selected monster can change WHILE combat continues (no empty-target
+                // interval). With DoT opening enabled that transition starts a fresh opening
+                // for the new monster, so report Attack again. The same monster on a normal
+                // combat tick never reaches this branch because its id is unchanged.
+                bool targetChanged = _wasAttacking &&
+                                     _currentTargetId > 0 &&
+                                     _currentTargetId != targetId;
+                if (targetChanged && dotOpeningCapable)
+                {
+                    StartAttackEpisode(targetId, currX, currY);
+                    return CombatAction.Attack;
                 }
 
                 // ── Attacking ──
                 if (!_wasAttacking)
                 {
-                    _wasAttacking = true;
-                    _lastNonIdleActionTime = DateTime.Now;
-                    _combatIdleStartTime = DateTime.MinValue;
-
-                    // Start the mana+position stuck-detection baseline at attack start:
-                    // if NEITHER changes for the timeout, the attack is not connecting.
-                    _lastManaChangeAt = DateTime.Now;
-                    _lastCombatPosChangeAt = DateTime.Now;
-                    _lastManaValue = int.MinValue;
-                    _lastCombatPos = (currX, currY);
-                    // Independent movement-progress baseline: chasing a mob can legitimately
-                    // take longer than the mana-stall timeout without consuming any mana.
-                    _movementProgressAnchor = (currX, currY);
-                    _lastMovementProgressAt = DateTime.Now;
+                    StartAttackEpisode(targetId, currX, currY);
                     return CombatAction.Attack;
                 }
 
+                // Same monster (or a replacement while DoT is disabled): keep the original
+                // combat behavior and only refresh the identity snapshot.
+                _currentTargetId = targetId;
+
                 // ── Unified idle/stuck detection ──
-                // If a mob is still selected, require 1000ms of continuous idle
-                // action (0/25/1) before declaring it dead. Brief animation pauses
+                // If a mob is still selected, require continuous idle action (0/25/1)
+                // for the idle timeout before declaring it dead. Brief animation pauses
                 // from hit-recovery, action transitions, etc. are ignored.
                 if (memoryService.IsMobSelected())
                 {
+                    // While the skill-4 opening owns combat, the configured interval is a
+                    // legitimate no-attack gap. Extend the idle/death window by that interval
+                    // so normal opening spacing is never mistaken for a dead monster. A truly
+                    // dead/despawned monster (target id cleared) still reports TabAfterKill
+                    // immediately through the no-target branch below.
+                    double idleTimeoutMs = dotOpeningIntervalMs > 0
+                        ? Math.Max(COMBAT_IDLE_TIMEOUT_MS, dotOpeningIntervalMs + 250.0)
+                        : COMBAT_IDLE_TIMEOUT_MS;
+
                     bool isIdle = StuckDetector.IsActionIdleOrStuck(currentAction) || currentAction == 0;
                     if (isIdle)
                     {
                         if (_combatIdleStartTime == DateTime.MinValue)
                         {
                             _combatIdleStartTime = DateTime.Now;
-                            _log($"[Combat] Action idle — waiting {COMBAT_IDLE_TIMEOUT_MS}ms before declaring stuck.");
+                            _log($"[Combat] Action idle — waiting {idleTimeoutMs:F0}ms before declaring stuck.");
                             return CombatAction.CombatWait;
                         }
 
                         double idleMs = (DateTime.Now - _combatIdleStartTime).TotalMilliseconds;
-                        if (idleMs >= COMBAT_IDLE_TIMEOUT_MS)
+                        if (idleMs >= idleTimeoutMs)
                         {
                             _log($"[Combat] Action stuck for {idleMs:F0}ms. Mob dead or stuck. TAB.");
                             _wasAttacking = false;
+                            _currentTargetId = 0;
                             _combatIdleStartTime = DateTime.MinValue;
                             return CombatAction.TabAfterKill;
                         }
@@ -497,6 +532,7 @@ namespace DriverScanTester.Services
                 // perform its close-camera target check before scanning for loot.
                 bool killedSinceLastEvaluation = _wasAttacking;
                 _wasAttacking = false;
+                _currentTargetId = 0;
                 _combatIdleStartTime = DateTime.MinValue;
 
                 // Reset the combat stuck detection — no combat in progress.
@@ -645,6 +681,7 @@ namespace DriverScanTester.Services
         public void ResetState()
         {
             _wasAttacking = false;
+            _currentTargetId = 0;
             _combatIdleStartTime = DateTime.MinValue;
             _lastManaValue = int.MinValue;
             _lastCombatPos = null;
@@ -652,6 +689,31 @@ namespace DriverScanTester.Services
             _lastCombatPosChangeAt = DateTime.MinValue;
             _movementProgressAnchor = null;
             _lastMovementProgressAt = DateTime.MinValue;
+        }
+
+        /// <summary>
+        /// Starts a new attack episode for <paramref name="targetId"/> and baselines every
+        /// watchdog. Used for a genuinely new encounter (first target or a direct monster
+        /// replacement) so stale mana/position progress from the previous monster cannot
+        /// authorize or suppress an action against the new one.
+        /// </summary>
+        private void StartAttackEpisode(int targetId, float currX, float currY)
+        {
+            _wasAttacking = true;
+            _currentTargetId = targetId;
+            _lastNonIdleActionTime = DateTime.Now;
+            _combatIdleStartTime = DateTime.MinValue;
+
+            // Start the mana+position stuck-detection baseline at attack start:
+            // if NEITHER changes for the timeout, the attack is not connecting.
+            _lastManaChangeAt = DateTime.Now;
+            _lastCombatPosChangeAt = DateTime.Now;
+            _lastManaValue = int.MinValue;
+            _lastCombatPos = (currX, currY);
+            // Independent movement-progress baseline: chasing a mob can legitimately
+            // take longer than the mana-stall timeout without consuming any mana.
+            _movementProgressAnchor = (currX, currY);
+            _lastMovementProgressAt = DateTime.Now;
         }
 
         /// <summary>
