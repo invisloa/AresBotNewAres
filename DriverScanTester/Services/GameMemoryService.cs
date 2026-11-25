@@ -1639,6 +1639,8 @@ namespace DriverScanTester.Services
             var (hp, mana, hpManaSuccess) = GetHpMana();
             int hpPotions = GetHpPotionCount();
             int manaPotions = GetManaPotionCount();
+            int whitePotions = GetWhitePotionCount();
+            int redPotions = GetRedPotionCount();
             var (currentWeight, maxWeight) = GetWeight();
 
             return new GameSnapshot(
@@ -1652,7 +1654,9 @@ namespace DriverScanTester.Services
                 hpPotions: hpPotions,
                 manaPotions: manaPotions,
                 currentWeight: currentWeight,
-                maxWeight: maxWeight
+                maxWeight: maxWeight,
+                whitePotions: whitePotions,
+                redPotions: redPotions
             );
         }
 

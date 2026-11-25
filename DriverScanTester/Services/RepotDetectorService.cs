@@ -3,6 +3,32 @@ using DriverScanTester.Models;
 namespace DriverScanTester.Services
 {
     /// <summary>
+    /// Why a repot (teleport to the city) is needed. The workflow needs the reason to
+    /// tell a WEIGHT repot apart from a low-potion repot: only the weight repot may be
+    /// preceded by the LOOT PRIORITY potion dump.
+    /// </summary>
+    public enum RepotReason
+    {
+        /// <summary>No repot condition is met.</summary>
+        None = 0,
+
+        /// <summary>The HP potion stock reached <see cref="RepotDetectorService.MinHpPotions"/>.</summary>
+        LowHpPotions,
+
+        /// <summary>The mana potion stock reached <see cref="RepotDetectorService.MinManaPotions"/>.</summary>
+        LowManaPotions,
+
+        /// <summary>The bag reached the weight limit (LOOT PRIORITY only).</summary>
+        Weight,
+
+        /// <summary>HP is low and no HP potions are left.</summary>
+        LowHp,
+
+        /// <summary>Mana is low and no mana potions are left.</summary>
+        LowMana
+    }
+
+    /// <summary>
     /// Decides whether the player needs to repot based on a GameSnapshot.
     /// Thresholds are configurable.
     /// </summary>
@@ -65,46 +91,79 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
+        /// True when the bag reached the weight limit and the weight check is enabled
+        /// (LOOT PRIORITY). Pure weight test: the potion and HP/mana conditions are NOT
+        /// evaluated, so the workflow can react to the weight trigger on its own and run
+        /// the potion dump before deciding to teleport.
+        /// </summary>
+        public bool IsWeightRepotNeeded(GameSnapshot snapshot)
+        {
+            return IsWeightLimitReached(snapshot.CurrentWeight, snapshot.MaxWeight);
+        }
+
+        /// <summary>
+        /// Weight-only variant for re-reading the weight after a potion dump.
+        /// An unreadable max weight (≤ 0) never triggers the ratio check.
+        /// </summary>
+        public bool IsWeightLimitReached(int currentWeight, int maxWeight)
+        {
+            if (!WeightRepotEnabled)
+                return false;
+
+            // An exact weight limit for the current class takes precedence over the
+            // percentage, so it also works when the game reports no max weight.
+            if (MaxWeightValue > 0)
+                return currentWeight >= MaxWeightValue;
+
+            if (maxWeight <= 0)
+                return false;
+
+            float ratio = (float)currentWeight / maxWeight;
+            return ratio >= MaxWeightRatio;
+        }
+
+        /// <summary>
         /// Checks if the player needs to repot based on the snapshot.
         /// </summary>
         public bool NeedsRepot(GameSnapshot snapshot)
         {
+            return Diagnose(snapshot) != RepotReason.None;
+        }
+
+        /// <summary>
+        /// Returns the first repot condition that fires (in the same priority order the
+        /// repot checks always used) and logs it. <see cref="RepotReason.None"/> means no
+        /// repot is needed.
+        /// </summary>
+        public RepotReason Diagnose(GameSnapshot snapshot)
+        {
             if (snapshot.HpPotions <= MinHpPotions)
             {
                 _log($"[RepotDetector] Low HP potions: {snapshot.HpPotions} <= {MinHpPotions}");
-                return true;
+                return RepotReason.LowHpPotions;
             }
 
             if (snapshot.ManaPotions <= MinManaPotions)
             {
                 _log($"[RepotDetector] Low mana potions: {snapshot.ManaPotions} <= {MinManaPotions}");
-                return true;
+                return RepotReason.LowManaPotions;
             }
 
             // The weight check only applies with loot priority enabled (the profile's
             // "Loot Priority" flag). Without loot priority the bot keeps exp'ing as the
             // profile states and a full bag never forces a repot.
-            if (WeightRepotEnabled)
+            if (IsWeightRepotNeeded(snapshot))
             {
-                // An exact weight limit for the current class takes precedence over the
-                // percentage, so it also works when the game reports no max weight.
                 if (MaxWeightValue > 0)
                 {
-                    if (snapshot.CurrentWeight >= MaxWeightValue)
-                    {
-                        _log($"[RepotDetector] Weight high: {snapshot.CurrentWeight} >= {MaxWeightValue} (exact class limit)");
-                        return true;
-                    }
+                    _log($"[RepotDetector] Weight high: {snapshot.CurrentWeight} >= {MaxWeightValue} (exact class limit)");
                 }
-                else if (snapshot.MaxWeight > 0)
+                else
                 {
                     float ratio = (float)snapshot.CurrentWeight / snapshot.MaxWeight;
-                    if (ratio >= MaxWeightRatio)
-                    {
-                        _log($"[RepotDetector] Weight high: {snapshot.CurrentWeight}/{snapshot.MaxWeight} ({ratio:P0} >= {MaxWeightRatio:P0})");
-                        return true;
-                    }
+                    _log($"[RepotDetector] Weight high: {snapshot.CurrentWeight}/{snapshot.MaxWeight} ({ratio:P0} >= {MaxWeightRatio:P0})");
                 }
+                return RepotReason.Weight;
             }
 
             // Low current HP/Mana triggers a repot only when the corresponding potion
@@ -114,16 +173,16 @@ namespace DriverScanTester.Services
             if (snapshot.HpPotions <= MinHpPotions && snapshot.Hp <= MinHp)
             {
                 _log($"[RepotDetector] HP is {snapshot.Hp} <= {MinHp} and HP potions are low ({snapshot.HpPotions} <= {MinHpPotions})");
-                return true;
+                return RepotReason.LowHp;
             }
 
             if (snapshot.ManaPotions <= MinManaPotions && snapshot.Mana <= MinMana)
             {
                 _log($"[RepotDetector] Mana is {snapshot.Mana} <= {MinMana} and mana potions are low ({snapshot.ManaPotions} <= {MinManaPotions})");
-                return true;
+                return RepotReason.LowMana;
             }
 
-            return false;
+            return RepotReason.None;
         }
     }
 }

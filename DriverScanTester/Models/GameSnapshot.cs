@@ -15,6 +15,13 @@ namespace DriverScanTester.Models
         public int Mana { get; }
         public int HpPotions { get; }
         public int ManaPotions { get; }
+
+        /// <summary>White (movement-speed) potions — potion-slot count at the white-potion offset.</summary>
+        public int WhitePotions { get; }
+
+        /// <summary>Red (attack) potions — potion-slot count at the red-potion offset.</summary>
+        public int RedPotions { get; }
+
         public int CurrentWeight { get; }
         public int MaxWeight { get; }
 
@@ -25,7 +32,8 @@ namespace DriverScanTester.Models
             bool isInCity,
             int hp, int mana,
             int hpPotions, int manaPotions,
-            int currentWeight, int maxWeight)
+            int currentWeight, int maxWeight,
+            int whitePotions = 0, int redPotions = 0)
         {
             X = x;
             Y = y;
@@ -36,6 +44,8 @@ namespace DriverScanTester.Models
             Mana = mana;
             HpPotions = hpPotions;
             ManaPotions = manaPotions;
+            WhitePotions = whitePotions;
+            RedPotions = redPotions;
             CurrentWeight = currentWeight;
             MaxWeight = maxWeight;
         }
