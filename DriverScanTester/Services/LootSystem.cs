@@ -6378,7 +6378,14 @@ namespace DriverScanTester.Services
                         inventoryChanged = true;
                         collectionDiagnostics.InventoryChanged = true;
                         if (InventoryHasIncrease(previousInventory, inventoryRound))
+                        {
                             itemCollectedObserved = true;
+                            // Inventory is the authoritative pickup confirmation. Stop the
+                            // spacebar/walk polling now so the caller can continue its loot
+                            // cycle immediately instead of waiting for position stability.
+                            collectionDiagnostics.ExitReason = "ItemCollected";
+                            break;
+                        }
                     }
 
                     previousInventory = inventoryRound;
@@ -6450,7 +6457,10 @@ namespace DriverScanTester.Services
                 return;
             }
 
-            Thread.Sleep(BotConstants.Delays.CollectAnimationMs); // Wait for collection animation/movement
+            // The inventory increase above is already proof that the pickup completed.
+            // Waiting out the full collection animation here only delays the next action.
+            if (!itemCollectedObserved)
+                Thread.Sleep(BotConstants.Delays.CollectAnimationMs);
 
             bool inventoryAfterValid = TryCaptureInventorySnapshot("AfterCollection", out var inventoryAfter);
             collectionDiagnostics.InventoryAfterValid = inventoryAfterValid;
