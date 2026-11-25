@@ -68,6 +68,13 @@ namespace DriverScanTester.Services
 
         private readonly BotProfile _profile;
 
+        /// <summary>
+        /// LOOT PRIORITY weight relief: drinks surplus potions (white/red buffs → mana →
+        /// HP) when the bag hits the weight limit, so the weight repot (town teleport) is
+        /// only used once the potion stacks are at their keep values.
+        /// </summary>
+        private LootPriorityWeightDumpService? _weightDumpService;
+
         private CancellationTokenSource? _cts;
         private bool _isRunning;
         private volatile bool _stopRequested;
@@ -1857,7 +1864,62 @@ namespace DriverScanTester.Services
                     lastRepotCheckAt = DateTime.UtcNow;
 
                     ApplyClassRepotSettings();
-                    if (_repotDetector.NeedsRepot(snapshot))
+                    RepotReason repotReason = _repotDetector.Diagnose(snapshot);
+
+                    // LOOT PRIORITY weight relief: the bag is full, but the potion stacks may
+                    // still hold a large surplus. Drinking white/red buff potions first, then
+                    // mana down to 4, then HP down to 4 frees weight and lets the hunt
+                    // continue instead of paying a town teleport + repot for a full bag.
+                    //
+                    // Only the pure WEIGHT trigger dumps potions: a low-potion trigger means
+                    // the bot is almost out of supplies and must repot immediately. When any
+                    // stack is already at its keep value the dump is skipped and the weight
+                    // repot runs exactly as before.
+                    if (repotReason == RepotReason.Weight && _profile.LootPriority)
+                    {
+                        _weightDumpService ??= new LootPriorityWeightDumpService(_memoryService, _log, PausableDelayAsync);
+
+                        // The dump keeps HP/mana at 4. When the profile's potion repot limit is
+                        // at/above 4 the next repot check fires a low-potion repot right after
+                        // the dump, so drinking would only waste potions before the same town
+                        // teleport — keep the old behaviour for such profiles.
+                        if (!LootPriorityWeightDumpService.IsDumpUseful(_repotDetector.MinHpPotions, _repotDetector.MinManaPotions))
+                        {
+                            _log($"[ExpLoop] Weight repot: potion dump skipped — the profile potion limit (HP {_repotDetector.MinHpPotions}, mana {_repotDetector.MinManaPotions}) is at/above the dump keep values (HP {BotConstants.Repot.LootPriorityWeightDumpKeepHpPotions}, mana {BotConstants.Repot.LootPriorityWeightDumpKeepManaPotions}), so a repot would follow the dump immediately.");
+                        }
+                        else if (await _weightDumpService.TryDumpSurplusAsync(token))
+                        {
+                            // The client applies the weight of the drunk potions
+                            // asynchronously, so give the weight value a bounded moment to
+                            // settle before deciding whether the town teleport is still needed.
+                            var (weightAfterDump, maxWeightAfterDump) = _memoryService.GetWeight();
+                            DateTime weightSettleDeadline = DateTime.UtcNow.AddMilliseconds(BotConstants.Delays.WeightReliefTimeoutMs);
+                            while (_repotDetector.IsWeightLimitReached(weightAfterDump, maxWeightAfterDump)
+                                && !token.IsCancellationRequested
+                                && DateTime.UtcNow < weightSettleDeadline)
+                            {
+                                await PausableDelayAsync(BotConstants.Delays.WeightReliefPollMs, token);
+                                (weightAfterDump, maxWeightAfterDump) = _memoryService.GetWeight();
+                            }
+
+                            // The dump changed the potion stocks substantially, so every
+                            // decision after it uses a fresh snapshot (a fresh low-potion
+                            // trigger must still fire normally).
+                            snapshot = _memoryService.GetSnapshot();
+
+                            if (!_repotDetector.IsWeightRepotNeeded(snapshot))
+                            {
+                                _log($"[ExpLoop] Weight limit relieved by drinking surplus potions (weight now {snapshot.CurrentWeight}/{snapshot.MaxWeight}) — continuing EXP instead of teleporting to the city.");
+                                lastRepotCheckAt = DateTime.UtcNow;
+                                continue;
+                            }
+
+                            _log($"[ExpLoop] Weight still at the limit after the potion dump ({snapshot.CurrentWeight}/{snapshot.MaxWeight}) — proceeding with the repot.");
+                            repotReason = _repotDetector.Diagnose(snapshot);
+                        }
+                    }
+
+                    if (repotReason != RepotReason.None)
                     {
                         _log("[ExpLoop] Repot condition detected. Stopping exp loop.");
                         if (_repotDetector.IsLowHpPotions(snapshot))

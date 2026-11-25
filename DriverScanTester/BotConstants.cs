@@ -1668,6 +1668,18 @@ namespace DriverScanTester
             /// drop after a weight-relief potion before attempting the pickup anyway.</summary>
             public const int WeightReliefTimeoutMs = 1000;
 
+            /// <summary>Poll interval (ms) used by the LOOT PRIORITY weight dump to observe
+            /// a potion count drop after a drink key was pressed.</summary>
+            public const int PotionDumpPollMs = 50;
+
+            /// <summary>Maximum time (ms) the LOOT PRIORITY weight dump waits for one drink
+            /// key press to consume a potion before it counts as a stalled press.</summary>
+            public const int PotionDumpConfirmTimeoutMs = 700;
+
+            /// <summary>Gap (ms) between the two buff-potion drink keys (6 and 7) during
+            /// the LOOT PRIORITY weight dump.</summary>
+            public const int PotionDumpBuffKeyGapMs = 120;
+
             // ── Teleport delays ──
             /// <summary>Delay after pressing teleport key.</summary>
             public const int TeleportKeyDownMs = 50;
@@ -1996,6 +2008,41 @@ namespace DriverScanTester
             /// is strictly above this value.
             /// </summary>
             public const int PotionSlotReserve = 1;
+
+            // ── LOOT PRIORITY weight relief (pot dump before the town teleport) ──
+            // When the bag hits the weight limit in LOOT PRIORITY mode the bot first
+            // drinks surplus potions to free weight instead of teleporting to the city
+            // immediately. The dump only starts while EVERY stack is above its keep
+            // value (so the hunt keeps a usable potion supply) and drinks in this order:
+            //   white/red buff potions → mana potions → HP potions.
+            // These are the counts that are KEPT (never drunk below).
+
+            /// <summary>HP potions kept when dumping surplus potions to relieve weight.</summary>
+            public const int LootPriorityWeightDumpKeepHpPotions = 4;
+
+            /// <summary>Mana potions kept when dumping surplus potions to relieve weight.</summary>
+            public const int LootPriorityWeightDumpKeepManaPotions = 4;
+
+            /// <summary>White (movement-speed) potions kept when dumping surplus potions.</summary>
+            public const int LootPriorityWeightDumpKeepWhitePotions = 1;
+
+            /// <summary>Red (attack) potions kept when dumping surplus potions.</summary>
+            public const int LootPriorityWeightDumpKeepRedPotions = 1;
+
+            /// <summary>Consecutive presses of a potion key that do not consume a potion
+            /// before that potion type is abandoned (cooldown / key bound to something else).</summary>
+            public const int LootPriorityWeightDumpMaxStalledPresses = 3;
+
+            /// <summary>Safety bound on the presses per potion type in one weight dump.</summary>
+            public const int LootPriorityWeightDumpMaxPressesPerType = 300;
+
+            /// <summary>
+            /// Maximum duration of one LOOT PRIORITY potion dump. The dump runs inside the
+            /// EXP loop's repot check, so it must never block the workflow (city teleport,
+            /// death) for long — when the cap is hit the dump stops and the normal weight
+            /// repot proceeds.
+            /// </summary>
+            public const int LootPriorityWeightDumpMaxDurationMs = 60_000;
 
             /// <summary>
             /// Delay before redoing the full repot after the post-repot potion
