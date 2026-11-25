@@ -27,6 +27,7 @@ namespace DriverScanTester.Tests
         {
             public short Mana = 1400;
             public int Target = 5000;
+            public byte Action = 0;
             public bool ManaUnavailable;
             public GameMemoryService Create()
             {
@@ -35,6 +36,7 @@ namespace DriverScanTester.Tests
                     byte[]? value = address switch {
                         0x489BC8 => BitConverter.GetBytes(0x100000UL),
                         0x100060 => BitConverter.GetBytes(Target),
+                        0x1003B0 => new[] { Action },
                         0x100C58 => ManaUnavailable ? null : BitConverter.GetBytes(Mana),
                         _ => null
                     };
@@ -70,6 +72,21 @@ namespace DriverScanTester.Tests
             var memory = new Memory(); var rig = new Rig(memory);
             Invoke(rig, "HoldSkillThree"); Check(rig);
             Assert.Equal(new[] { false }, rig.Events);
+        }
+
+        /// <summary>
+        /// 2026-11-25 regression: when the character is already in an attack animation, the
+        /// one-second retry used to release and re-press skill 3 mid-swing. That can cancel a
+        /// slow but legitimate first hit. The retry is only for an input that produced NO
+        /// animation at all; the combat stall watchdog reacts to a silent attack.
+        /// </summary>
+        [Fact]
+        public void UnchangedManaWhileAttackAnimationIsPlaying_DoesNotRePressTheKey()
+        {
+            var memory = new Memory { Action = 214 }; var rig = new Rig(memory);
+            Invoke(rig, "HoldSkillThree"); Age(rig); Check(rig); Check(rig);
+            Assert.Equal(new[] { false }, rig.Events);
+            Assert.True(rig.IsAttackKeyHeld);
         }
 
         [Fact]

@@ -8977,6 +8977,23 @@ namespace DriverScanTester.Services
             float reachThreshold = GetEffectiveWaypointReachThreshold(target);
             float initialDistance = GeometryUtils.Distance(currX, currY, target.X, target.Y);
 
+            // ── Already at the waypoint ──
+            // There is nothing to walk to. This is not a failed reposition attempt and must
+            // not advance the escalation counter: the combat handler already marked the
+            // target as temporarily avoided, so the next tick cycles the target (or returns
+            // to route movement) instead of spending the 2500 ms walk budget. The previous
+            // "no W, no retry TAB, baseline kept" response fired again on every tick and
+            // escalated to unstuck within ~400 ms without actually doing anything.
+            if (initialDistance <= reachThreshold)
+            {
+                _repositionRetryCount = 0;
+                _lastRepositionPos = null;
+                _log($"[Combat] Reposition not needed — start=({currX:F1},{currY:F1}) is already inside the waypoint reach threshold " +
+                     $"(target=({target.X:F1},{target.Y:F1}), initialDistance={initialDistance:F2}, reachThreshold={reachThreshold:F2}); " +
+                     $"cycling the unreachable target instead.");
+                return;
+            }
+
             // ── Escalation ──
             // Count consecutive reposition cycles. Only movement that really reduced the
             // distance to the current waypoint resets the counter: walking away from (or
@@ -9010,18 +9027,7 @@ namespace DriverScanTester.Services
                 return;
             }
 
-            // ── Already at the waypoint ──
-            // There is nothing to walk to: W is never pressed, the 2500 ms budget is never
-            // spent and being nearby is never reported as a successful reposition. The attempt
-            // stays a failure, so the escalation counter above and the existing failed-recovery
-            // mechanism decide what happens to the still-unsuccessful attack.
-            if (initialDistance <= reachThreshold)
-            {
-                _log($"[Combat] Reposition skipped — start=({currX:F1},{currY:F1}) is already inside the waypoint reach threshold " +
-                     $"(target=({target.X:F1},{target.Y:F1}), initialDistance={initialDistance:F2}, reachThreshold={reachThreshold:F2}, " +
-                     $"attempt={_repositionRetryCount}/{REPOSITION_MAX_ATTEMPTS}); no W, no retry TAB, combat baselines kept.");
-                return;
-            }
+            // ── Already at the waypoint (handled before the escalation counter) ──
 
             int walkMs = BotConstants.Combat.CombatRepositionDurationMs;
 
@@ -9126,7 +9132,10 @@ namespace DriverScanTester.Services
             }
 
             // Fresh combat state for the retry: the next tick re-baselines the mana
-            // stuck detection and presses 3 when a target is selected.
+            // stuck detection and presses 3 when a target is selected. A verified physical
+            // move means the previously unreachable target may now be in range, so its
+            // short avoidance window is cleared as well.
+            _combatHandler.ClearTargetAvoidance();
             _combatHandler.ResetState();
 
             // ── Central attack safety gate ──
@@ -10506,6 +10515,7 @@ namespace DriverScanTester.Services
                 SendSkillThreeKeyEvent(keyUp: false);
                 _isSkillThreeHeld = true;
                 _attackRetryStartedAt = DateTime.UtcNow;
+                _combatHandler.NotifyAttackInputPressed();
                 _log("[Combat] Attack key 3 activated; retry check in 1000ms.");
             }
         }
@@ -10568,6 +10578,21 @@ namespace DriverScanTester.Services
                 _attackRetryLastMana = mana;
                 if ((DateTime.UtcNow - _attackRetryStartedAt).TotalMilliseconds < 1000)
                     return;
+
+                // If the character is already in an attack animation, the one-second retry
+                // would release and re-press skill 3 in the middle of a legitimate swing
+                // (the slow first-swing tail in production logs). Let the attack finish; the
+                // combat stall watchdog owns the no-mana reaction instead.
+                byte retryAction = _memoryService.GetCurrentAction();
+                bool retryActionIsIdle = retryAction == 0 ||
+                                         retryAction == 100 ||
+                                         StuckDetector.IsActionIdleOrStuck(retryAction);
+                if (!retryActionIsIdle)
+                {
+                    _attackRetryStartedAt = DateTime.MinValue;
+                    _log($"[Combat] Mana not consumed yet but attack action {retryAction} is already playing — not re-pressing key 3; the combat watchdog will react if it stays silent.");
+                    return;
+                }
 
                 _attackRetryStartedAt = DateTime.MinValue;
                 _log("[Combat] No mana consumption after 1000ms — releasing and pressing key 3 again (retry 1/1).");

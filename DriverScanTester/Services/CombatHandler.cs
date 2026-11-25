@@ -70,7 +70,18 @@ namespace DriverScanTester.Services
         private const double COMBAT_STUCK_TIMEOUT_MS = BotConstants.Combat.CombatStuckTimeoutMs;
         private const float COMBAT_STUCK_POS_EPSILON = BotConstants.Combat.CombatStuckPosEpsilon;
         private const double COMBAT_MANA_STUCK_TIMEOUT_MS = BotConstants.Combat.CombatManaStuckTimeoutMs;
+        private const double COMBAT_NO_ANIMATION_TIMEOUT_MS = BotConstants.Combat.CombatNoAnimationTimeoutMs;
         private const float COMBAT_MANA_STUCK_MOVE_PROGRESS = BotConstants.Combat.CombatManaStuckMoveProgressUnits;
+
+        /// <summary>
+        /// After an attack-not-connecting stall the selected target is skipped for this long.
+        /// TAB can cycle straight back to the same unreachable mob; without a short avoidance
+        /// window the bot would immediately attack it again and burn another stall timeout.
+        /// </summary>
+        private const double AVOID_TARGET_SECONDS = 5.0;
+
+        /// <summary>Minimum spacing between avoidance TAB presses so the key is never spammed.</summary>
+        private const double AVOID_TARGET_TAB_INTERVAL_MS = 1000.0;
 
         // ── State ──
         private bool _wasAttacking;
@@ -118,6 +129,18 @@ namespace DriverScanTester.Services
         private DateTime _lastMovementProgressAt = DateTime.MinValue;
         private bool _externallySuspended;
         private DateTime _externalSuspensionStartedAt = DateTime.MinValue;
+
+        // ── Attack input feedback (fast "attack did nothing" detection) ──
+        // The key press is performed by MovementSystem; it reports the exact moment skill 3
+        // was pressed so a game-rejected attack (no animation at all, no mana) can be told
+        // apart from a slow but legitimate first swing.
+        private DateTime _attackInputAt = DateTime.MinValue;
+        private bool _attackAnimationObserved;
+
+        // ── Recently unreachable target avoidance ──
+        private int _avoidTargetId;
+        private DateTime _avoidTargetUntil = DateTime.MinValue;
+        private bool _avoidTargetLogged;
 
         /// <summary>Last target id for which a player-target diagnostic screenshot was saved.</summary>
         private int _playerScreenshotTargetId = int.MinValue;
@@ -346,6 +369,8 @@ namespace DriverScanTester.Services
                         _lastCombatPos = null;
                         _movementProgressAnchor = null;
                         _lastMovementProgressAt = DateTime.MinValue;
+                        _attackInputAt = DateTime.MinValue;
+                        _attackAnimationObserved = false;
                         return CombatAction.TargetRejected;
                     }
                 }
@@ -358,6 +383,32 @@ namespace DriverScanTester.Services
                     _currentTargetId = 0;
                     _combatIdleStartTime = DateTime.MinValue;
                     return CombatAction.TabTarget;
+                }
+
+                // ── Recently unreachable target avoidance ──
+                // A previous attack against this exact target did not connect. TAB can cycle
+                // straight back to it (common when only one mob is nearby), which used to
+                // restart the full stall window. Skip it once and cycle the target instead so
+                // another mob or normal route movement gets control immediately.
+                if (_avoidTargetId == targetId && DateTime.Now < _avoidTargetUntil)
+                {
+                    if ((DateTime.Now - _lastMoveModeTabTime).TotalMilliseconds >= AVOID_TARGET_TAB_INTERVAL_MS)
+                    {
+                        _lastMoveModeTabTime = DateTime.Now;
+                        ClearAttackEpisode();
+                        if (!_avoidTargetLogged)
+                        {
+                            _avoidTargetLogged = true;
+                            _log($"[Combat] Target {targetId} is temporarily avoided (attack did not connect) — cycling target / letting route movement continue.");
+                        }
+
+                        return CombatAction.TabTarget;
+                    }
+
+                    // Between cycle attempts, keep normal route movement alive. Returning
+                    // CombatWait here would park the character next to an unreachable mob.
+                    // The avoidance window expires on its own after a few seconds.
+                    return CombatAction.None;
                 }
 
                 // ── New target identity ──
@@ -384,6 +435,18 @@ namespace DriverScanTester.Services
                 // Same monster (or a replacement while DoT is disabled): keep the original
                 // combat behavior and only refresh the identity snapshot.
                 _currentTargetId = targetId;
+
+                // Track whether skill 3 produced ANY attack animation. A completely idle
+                // action byte after the key press is strong evidence that the game rejected
+                // the attack (unreachable target / stale selection), not that the swing is
+                // merely slow.
+                bool noAttackAnimation = currentAction == 0 ||
+                                         currentAction == 100 ||
+                                         StuckDetector.IsActionIdleOrStuck(currentAction);
+                if (!noAttackAnimation)
+                {
+                    _attackAnimationObserved = true;
+                }
 
                 // ── Unified idle/stuck detection ──
                 // If a mob is still selected, require continuous idle action (0/25/1)
@@ -459,6 +522,27 @@ namespace DriverScanTester.Services
                 // _lastManaChangeAt (that timestamp must keep meaning "mana consumed").
                 UpdateMovementProgress(currX, currY);
 
+                // ── Fast "the attack input did nothing" detection ──
+                // The key was pressed, but the character never entered an attack animation
+                // at all and no mana was consumed. That is not a slow swing — the game
+                // rejected the attack (target behind a wall / out of range / stale target).
+                // React after a short animation-start window instead of waiting for the
+                // full mana-stall timeout. The movement-progress guard keeps a legitimate
+                // pursuit (still running toward the mob) from being interrupted.
+                if (!_attackAnimationObserved &&
+                    _attackInputAt != DateTime.MinValue &&
+                    (DateTime.Now - _attackInputAt).TotalMilliseconds >= COMBAT_NO_ANIMATION_TIMEOUT_MS &&
+                    _lastManaChangeAt < _attackInputAt &&
+                    _lastMovementProgressAt < _attackInputAt)
+                {
+                    double waitedMs = (DateTime.Now - _attackInputAt).TotalMilliseconds;
+                    _log($"[Combat] Attack input produced no animation for {waitedMs:F0}ms and no mana " +
+                         $"was consumed — the game rejected the attack. player=({currX:F1},{currY:F1}), " +
+                         $"target={_currentTargetId}, action={currentAction}, lastMana={_lastManaValue}. " +
+                         $"Repositioning / cycling the unreachable target.");
+                    return RepositionAndAvoidCurrentTarget(currX, currY);
+                }
+
                 // Only fire when mana was actually sampled at least once (otherwise the
                 // unreadable-mana case falls through to the position-based check below).
                 // The stall window is anchored on the MOST RECENT of the two progress signals.
@@ -489,7 +573,7 @@ namespace DriverScanTester.Services
                              $"player=({currX:F1},{currY:F1}), progressAnchor={anchorText}, anchorDisplacement={anchorDisplacement:F2}, " +
                              $"requiredMovement={COMBAT_MANA_STUCK_MOVE_PROGRESS:F1}, lastMana={_lastManaValue}. " +
                              $"Reason: neither a sampled mana decrease nor >= {COMBAT_MANA_STUCK_MOVE_PROGRESS:F1} units of position progress for {COMBAT_MANA_STUCK_TIMEOUT_MS:F0}ms. Target HP is not measured; repositioning toward next waypoint.");
-                        return CombatAction.RepositionAndRetry;
+                        return RepositionAndAvoidCurrentTarget(currX, currY);
                     }
                 }
 
@@ -512,6 +596,7 @@ namespace DriverScanTester.Services
                     (DateTime.Now - _lastCombatPosChangeAt).TotalMilliseconds >= COMBAT_STUCK_TIMEOUT_MS)
                 {
                     _log($"[Combat] Position and mana unchanged for {COMBAT_STUCK_TIMEOUT_MS:F0}ms while a mob is selected — attack not consuming mana, player is stuck. Starting standard unstuck.");
+                    MarkCurrentTargetUnreachable();
                     return CombatAction.Unstuck;
                 }
 
@@ -542,6 +627,8 @@ namespace DriverScanTester.Services
                 _lastCombatPosChangeAt = DateTime.MinValue;
                 _movementProgressAnchor = null;
                 _lastMovementProgressAt = DateTime.MinValue;
+                _attackInputAt = DateTime.MinValue;
+                _attackAnimationObserved = false;
 
                 // Loot mode (MoveAndAttackAndLoot) with no mob selected: keep cycling
                 // targets on the normal interval. Attacking always has priority — the
@@ -659,6 +746,8 @@ namespace DriverScanTester.Services
             ShiftTimestamp(ref _lastManaChangeAt, suspension);
             ShiftTimestamp(ref _lastCombatPosChangeAt, suspension);
             ShiftTimestamp(ref _lastMovementProgressAt, suspension);
+            ShiftTimestamp(ref _attackInputAt, suspension);
+            ShiftTimestamp(ref _avoidTargetUntil, suspension);
             _externalSuspensionStartedAt = DateTime.MinValue;
             _externallySuspended = false;
         }
@@ -676,9 +765,33 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Resets all combat tracking state (called when waypoints advance or unstuck ends).
+        /// Called by MovementSystem immediately AFTER skill 3 is physically held. Starts the
+        /// fast "attack produced no animation" watchdog. It is intentionally not called for the
+        /// one-second retry press: a retry must not postpone the first press's reaction window.
         /// </summary>
-        public void ResetState()
+        public void NotifyAttackInputPressed()
+        {
+            _attackInputAt = DateTime.Now;
+            _attackAnimationObserved = false;
+        }
+
+        /// <summary>
+        /// Clears the short unreachable-target avoidance. Used only after a VERIFIED physical
+        /// reposition: the target may be reachable from the new position, so it must be allowed
+        /// to receive a normal attack again.
+        /// </summary>
+        public void ClearTargetAvoidance()
+        {
+            _avoidTargetId = 0;
+            _avoidTargetUntil = DateTime.MinValue;
+            _avoidTargetLogged = false;
+        }
+
+        /// <summary>
+        /// Consumes the current attack episode. Keeps the target-avoidance window intact so the
+        /// just-stalled monster is not immediately re-attacked when TAB cycles back to it.
+        /// </summary>
+        private void ClearAttackEpisode()
         {
             _wasAttacking = false;
             _currentTargetId = 0;
@@ -689,6 +802,49 @@ namespace DriverScanTester.Services
             _lastCombatPosChangeAt = DateTime.MinValue;
             _movementProgressAnchor = null;
             _lastMovementProgressAt = DateTime.MinValue;
+            _attackInputAt = DateTime.MinValue;
+            _attackAnimationObserved = false;
+        }
+
+        /// <summary>
+        /// Marks the current monster as temporarily avoided after a failed attack episode and
+        /// consumes the stall signal. Rearming both progress clocks prevents the same expired
+        /// stall from returning <see cref="CombatAction.RepositionAndRetry"/> on every 100 ms
+        /// tick while the recovery is still being handled.
+        /// </summary>
+        private CombatAction RepositionAndAvoidCurrentTarget(float currX, float currY)
+        {
+            MarkCurrentTargetUnreachable();
+
+            DateTime now = DateTime.Now;
+            _lastManaChangeAt = now;
+            _lastMovementProgressAt = now;
+            _movementProgressAnchor = (currX, currY);
+            return CombatAction.RepositionAndRetry;
+        }
+
+        private void MarkCurrentTargetUnreachable()
+        {
+            if (_currentTargetId > 0)
+            {
+                _avoidTargetId = _currentTargetId;
+                _avoidTargetUntil = DateTime.Now.AddSeconds(AVOID_TARGET_SECONDS);
+                _avoidTargetLogged = false;
+            }
+
+            _attackInputAt = DateTime.MinValue;
+            _attackAnimationObserved = false;
+        }
+
+        /// <summary>
+        /// Resets all combat tracking state (called when waypoints advance or unstuck ends).
+        /// The short unreachable-target avoidance window is deliberately preserved: it must
+        /// outlive a combat reset, otherwise the next Evaluate would attack the same phantom
+        /// target again.
+        /// </summary>
+        public void ResetState()
+        {
+            ClearAttackEpisode();
         }
 
         /// <summary>
@@ -714,6 +870,10 @@ namespace DriverScanTester.Services
             // take longer than the mana-stall timeout without consuming any mana.
             _movementProgressAnchor = (currX, currY);
             _lastMovementProgressAt = DateTime.Now;
+            // A new episode starts before MovementSystem actually presses the key; the
+            // press timestamp is reported by NotifyAttackInputPressed afterwards.
+            _attackInputAt = DateTime.MinValue;
+            _attackAnimationObserved = false;
         }
 
         /// <summary>

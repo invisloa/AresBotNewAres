@@ -1001,7 +1001,7 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public async Task AlreadyInsideTheWaypointThresholdNeverPressesForwardOrRetabs()
+        public async Task AlreadyInsideTheWaypointThresholdDoesNotWalkOrCountAFailedAttempt()
         {
             using var scenario = new Scenario(BotMode.MoveAndAttack, MediumWaypoint(100, 100));
 
@@ -1016,14 +1016,20 @@ namespace DriverScanTester.Tests
             Assert.True(stopwatch.ElapsedMilliseconds < 500,
                 $"An already-reached waypoint must not spend the reposition budget (took {stopwatch.ElapsedMilliseconds} ms).");
             Assert.Equal(0, scenario.Movement.ForwardKeyDowns);
+
+            // The target cycle is intentionally NOT performed here: CombatHandler marks the
+            // target as temporarily avoided when it requests the recovery, and its next
+            // evaluation TABs instead of re-attacking the phantom target. This method must
+            // therefore stay side-effect free and must not count a failed attempt (the old
+            // behaviour fired four no-op attempts in ~400 ms and escalated to unstuck).
             Assert.Equal(0, scenario.Movement.TargetCyclePresses);
-            Assert.Contains(scenario.Log, l => l.Contains("Reposition skipped", StringComparison.Ordinal));
+            Assert.Contains(scenario.Log, l => l.Contains("Reposition not needed", StringComparison.Ordinal));
             Assert.DoesNotContain(scenario.Log, l => l.Contains("Reposition confirmed by", StringComparison.Ordinal));
             Assert.DoesNotContain(scenario.Log, l => l.Contains("Retrying attack", StringComparison.Ordinal));
-            Assert.True(GetWasAttacking(scenario.Movement), "Being nearby is not a reposition and must not reset combat.");
+            Assert.True(GetWasAttacking(scenario.Movement), "Being nearby is not a physical reposition and must not fake success.");
             Assert.False(IsMovingForward(scenario.Movement));
-            // The failed attempt still counts, so the existing escalation stays in charge.
-            Assert.Equal(1, RepositionRetryCount(scenario.Movement));
+            // Nothing walked, so the escalation counter is not advanced by this no-op.
+            Assert.Equal(0, RepositionRetryCount(scenario.Movement));
         }
 
         [Fact]

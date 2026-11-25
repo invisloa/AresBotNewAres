@@ -378,8 +378,24 @@ namespace DriverScanTester
             /// is deliberately NOT part of this check — the attack lunge animation moves
             /// the player every swing, so a static-position test never fires. Triggers the
             /// reposition-and-retry action (walk toward next waypoint, then TAB + attack).
+            ///
+            /// Was 5000 ms. Production logs showed the bot standing on an unreachable mob
+            /// for a full five seconds before reacting; the median real mana consumption is
+            /// ~0.8 s after the key press and the 99th percentile ~2.0 s, so a 2 s window
+            /// still never interrupts a connecting attack while cutting the dead time by 60%.
             /// </summary>
-            public const double CombatManaStuckTimeoutMs = 5000;
+            public const double CombatManaStuckTimeoutMs = 2000;
+
+            /// <summary>
+            /// Faster "the attack input did nothing" detector. When skill 3 is pressed but
+            /// the character never enters ANY attack animation (action stays at the standing
+            /// idle 100 / 0 / 25 / 1) and mana does not drop, the attack was rejected by the
+            /// game (target behind a wall, out of range, stale selection). This is much
+            /// stronger evidence than a slow swing, so it may react sooner than the full
+            /// <see cref="CombatManaStuckTimeoutMs"/> window. 1.5 s covers the slow tail of
+            /// legitimate animation starts (p97 ≈ 1.5 s) while removing most of the wait.
+            /// </summary>
+            public const double CombatNoAnimationTimeoutMs = 1500;
 
             /// <summary>
             /// Movement progress (game-coordinate units) that also proves the attack episode is
@@ -941,8 +957,13 @@ namespace DriverScanTester
             /// </summary>
             public const float NoProgressMinDistance = 1.0f;
 
-            /// <summary>Time window for the position-based no-progress stuck detection.</summary>
-            public const int NoProgressTimeoutMs = 2000;
+            /// <summary>
+            /// Time window for the position-based no-progress stuck detection. Production
+            /// logs showed a character pressed against a wall staying there for a full 2 s
+            /// before recovery; 1.25 s still covers several server position updates while
+            /// reacting noticeably faster.
+            /// </summary>
+            public const int NoProgressTimeoutMs = 1250;
 
             /// <summary>
             /// Extra distance beyond the waypoint reach threshold inside which the
