@@ -190,12 +190,13 @@
       "MaxWeightValue": 0,
       "MinHp": 999,
       "MinMana": 100,
-      "HpBuyTarget": 40,
-      "ManaBuyTarget": 22,
+      "HpBuyTarget": 30,
+      "ManaBuyTarget": 18,
       "RedBuyTarget": 4,
       "WhiteBuyTarget": 4
     }
   },
+  "DotOpeningByClass": {},
   "DryRunRepot": false,
   "EnableStartPositionCheck": true,
   "StartPositionX": 214,
