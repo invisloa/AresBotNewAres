@@ -247,6 +247,67 @@ namespace DriverScanTester.Tests
             Assert.Contains(lines, line => line.Contains("CollectionExitReason=MaxEmptyRoundsReached", StringComparison.Ordinal));
         }
 
+        [Theory]
+        [InlineData(true, null, (int)LootSystem.LootScanPassResult.Collected)]
+        [InlineData(true, "GameWindowFocusLost", (int)LootSystem.LootScanPassResult.Collected)]
+        [InlineData(false, null, (int)LootSystem.LootScanPassResult.PickupUnconfirmed)]
+        [InlineData(null, null, (int)LootSystem.LootScanPassResult.PickupUnconfirmed)]
+        [InlineData(false, "GameWindowFocusLost", (int)LootSystem.LootScanPassResult.Cancelled)]
+        [InlineData(false, "ScanCancelled", (int)LootSystem.LootScanPassResult.Cancelled)]
+        public void CollectionEvidenceDeterminesTheScanResult(
+            bool? itemCollected, string? abortReason, int expectedResult)
+        {
+            var probe = LootSystem.ResolveCollectionProbeResult(itemCollected, abortReason);
+
+            Assert.Equal((LootSystem.LootScanPassResult)expectedResult, LootSystem.ProbeOutcomeToScanResult(probe));
+        }
+
+        [Theory]
+        [InlineData(10, 0, false)]
+        [InlineData(8, 0, false)]
+        [InlineData(8, 3, true)]
+        public void PickupRequiresAnIncreaseAcrossAllStacksOfTheItem(int firstStack, int secondStack, bool expected)
+        {
+            var before = new GameMemoryService.InventorySnapshot(new[] { 9050, 9050 }, new[] { 4, 6 });
+            var after = new GameMemoryService.InventorySnapshot(
+                new[] { 9050, secondStack > 0 ? 9050 : 0 }, new[] { firstStack, secondStack });
+
+            Assert.Equal(expected, LootSystem.DetermineItemCollected(true, before, true, after) == true);
+        }
+
+        [Fact]
+        public void ARecoveredInventoryReadDoesNotReplaceThePreClickBaseline()
+        {
+            var diagnostics = new LootSystem.LootCollectionDiagnostics();
+            var firstRead = new GameMemoryService.InventorySnapshot(new[] { 9050 }, new[] { 4 });
+            var secondRead = new GameMemoryService.InventorySnapshot(new[] { 9050 }, new[] { 5 });
+
+            LootSystem.ObserveCollectionInventory(diagnostics, true, firstRead);
+            LootSystem.ObserveCollectionInventory(diagnostics, true, secondRead);
+            Assert.Null(diagnostics.ItemCollected);
+
+            diagnostics.InventoryBeforeValid = true;
+            diagnostics.InventoryBefore = firstRead;
+            LootSystem.ObserveCollectionInventory(diagnostics, true, secondRead);
+            LootSystem.ObserveCollectionInventory(diagnostics, false, default);
+            Assert.True(diagnostics.ItemCollected);
+        }
+
+        [Theory]
+        [InlineData(0, LootSystem.LootDiagnosticOutcome.NoItem)]
+        [InlineData(1, LootSystem.LootDiagnosticOutcome.Collected)]
+        public void FinalEmptyDiagnosticPassPreservesConfirmedPickups(
+            int items, LootSystem.LootDiagnosticOutcome expected)
+        {
+            using var loot = CreateLoot(_ => { }, new PositionMemory());
+
+            var result = loot.CompleteDiagnosticPass(
+                LootSystem.LootDiagnosticMode.NormalLoot, LootSystem.LootScanPassResult.NoItem, items, items + 1);
+
+            Assert.Equal(expected, result.Outcome);
+            Assert.Equal(items, result.ItemsCollected);
+        }
+
         [Fact]
         public void DiagnosticPositionReadFailureCannotTriggerTheGroundClick()
         {

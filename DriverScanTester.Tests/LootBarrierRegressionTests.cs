@@ -709,6 +709,41 @@ namespace DriverScanTester.Tests
             Assert.False(loot.IsLootCycleActive);
         }
 
+        [Theory]
+        [InlineData(LootBarrierReason.PostKill)]
+        [InlineData(LootBarrierReason.TravelCandidateVerification)]
+        public async Task TwoUnconfirmedPickupsReleaseNavigationWithoutCompletingTheScan(LootBarrierReason reason)
+        {
+            using var scenario = CreateRetargetScenario();
+            InvokePrivate(scenario.Movement, "ArmMandatoryLootBarrier", reason);
+            long requestId = scenario.Movement.LootBarrier.RequestId;
+            if (reason == LootBarrierReason.PostKill)
+                SetPrivateField(scenario.Movement, "_postKillRetargetRequestId", requestId);
+            RunMandatoryService(scenario.Loot);
+
+            InvokePrivate(scenario.Loot, "HandleUnconfirmedMandatoryPickup", requestId);
+            InvokePrivate(scenario.Loot, "HandleUnconfirmedMandatoryPickup", requestId + 1);
+            InvokePrivate(scenario.Movement, "RefreshLootBarrier");
+            Assert.True(scenario.Movement.IsLootNavigationBlocked);
+            Assert.Equal(LootBarrierPhase.Running, scenario.Movement.LootBarrier.Phase);
+
+            InvokePrivate(scenario.Loot, "DeferMandatoryLootRequest", requestId, "test focus loss");
+            RunMandatoryService(scenario.Loot);
+            InvokePrivate(scenario.Loot, "HandleUnconfirmedMandatoryPickup", requestId);
+            InvokePrivate(scenario.Movement, "RefreshLootBarrier");
+
+            Assert.True(scenario.Loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus status));
+            Assert.Equal(LootRequestState.PickupAbandoned, status.State);
+            Assert.False(status.CameraVerified);
+            Assert.Equal(0, status.ItemsCollected);
+            Assert.Equal(LootBarrierPhase.PickupAbandoned, scenario.Movement.LootBarrier.Phase);
+            Assert.False(scenario.Movement.IsLootNavigationBlocked);
+            Assert.False(BarrierHoldsInput(scenario.Movement));
+            Assert.False(scenario.Loot.IsLootCycleActive);
+            Assert.False(await InvokePrivateBoolAsync(
+                scenario.Movement, "HandlePostKillRetargetRequestAsync", CancellationToken.None));
+        }
+
         // ── Test 6 — last mob killed ────────────────────────────────────────────
 
         [Fact]

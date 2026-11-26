@@ -134,47 +134,68 @@ namespace DriverScanTester.Services
             return drunk > 0;
         }
 
-        /// <summary>
-        /// Buff potions are dumped only while BOTH counts are above the keep value: each
-        /// round presses both keys, then verifies that at least one of the two counts
-        /// dropped. The last potion of either type is never drunk.
-        /// </summary>
+        private enum BuffStack { Unknown, White, Red }
+
         private async Task<PotionCounts> DumpBuffPotionsAsync(PotionCounts counts, DateTime dumpDeadline, CancellationToken token)
         {
-            int stalledPresses = 0;
+            (Action Press, string Key)[] keys = [(PressRedPotion, "6"), (PressWhitePotion, "7")];
+            var observedStacks = new BuffStack[keys.Length];
+            var stalledPresses = new int[keys.Length];
             int presses = 0;
+            int maxPresses = BotConstants.Repot.LootPriorityWeightDumpMaxPressesPerType;
+            int maxStalledPresses = BotConstants.Repot.LootPriorityWeightDumpMaxStalledPresses;
 
-            while (counts.White > BotConstants.Repot.LootPriorityWeightDumpKeepWhitePotions
-                && counts.Red > BotConstants.Repot.LootPriorityWeightDumpKeepRedPotions)
+            while (presses < maxPresses)
             {
-                if (ShouldStopDump("buff", dumpDeadline, token))
-                    break;
-
-                if (presses >= BotConstants.Repot.LootPriorityWeightDumpMaxPressesPerType)
+                bool pressed = false;
+                for (int i = 0; i < keys.Length && presses < maxPresses; i++)
                 {
-                    _log($"[WeightDump] Buff potion press limit ({BotConstants.Repot.LootPriorityWeightDumpMaxPressesPerType}) reached — moving on (white {counts.White}, red {counts.Red}).");
-                    break;
+                    if (ShouldStopDump("buff", dumpDeadline, token))
+                        return counts;
+                    if (stalledPresses[i] >= maxStalledPresses)
+                        continue;
+
+                    counts = ReadPotionCounts();
+                    bool whiteSurplus = counts.White > BotConstants.Repot.LootPriorityWeightDumpKeepWhitePotions;
+                    bool redSurplus = counts.Red > BotConstants.Repot.LootPriorityWeightDumpKeepRedPotions;
+                    bool canPress = observedStacks[i] switch
+                    {
+                        BuffStack.White => whiteSurplus,
+                        BuffStack.Red => redSurplus,
+                        _ => whiteSurplus && redSurplus
+                    };
+                    if (!canPress)
+                        continue;
+
+                    PotionCounts before = counts;
+                    keys[i].Press();
+                    pressed = true;
+                    presses++;
+                    counts = await WaitForConsumptionAsync(WeightDumpPotion.Buff, before, token);
+                    bool whiteConsumed = counts.White < before.White;
+                    bool redConsumed = counts.Red < before.Red;
+                    if (whiteConsumed || redConsumed)
+                    {
+                        // Learn the mapping from inventory so either binding can reach its reserve.
+                        observedStacks[i] = whiteConsumed == redConsumed
+                            ? BuffStack.Unknown
+                            : whiteConsumed ? BuffStack.White : BuffStack.Red;
+                        stalledPresses[i] = 0;
+                    }
+                    else if (++stalledPresses[i] == maxStalledPresses)
+                    {
+                        _log($"[WeightDump] Buff key {keys[i].Key} consumed nothing after {maxStalledPresses} presses; moving on.");
+                    }
+
+                    await _delay(BotConstants.Delays.PotionDumpBuffKeyGapMs, token);
                 }
 
-                PotionCounts before = counts;
-                PressRedPotion();
-                await _delay(BotConstants.Delays.PotionDumpBuffKeyGapMs, token);
-                PressWhitePotion();
-                presses++;
-
-                counts = await WaitForConsumptionAsync(WeightDumpPotion.Buff, before, token);
-                bool consumed = counts.White < before.White || counts.Red < before.Red;
-
-                if (consumed)
-                {
-                    stalledPresses = 0;
-                }
-                else if (++stalledPresses >= BotConstants.Repot.LootPriorityWeightDumpMaxStalledPresses)
-                {
-                    _log($"[WeightDump] Buff potion keys (6+7) consumed nothing after {stalledPresses} presses (buff already active or key bound elsewhere) — moving on (white {counts.White}, red {counts.Red}).");
+                if (!pressed)
                     break;
-                }
             }
+
+            if (presses >= maxPresses)
+                _log($"[WeightDump] Buff potion press limit ({maxPresses}) reached; moving on (white {counts.White}, red {counts.Red}).");
 
             return counts;
         }

@@ -464,12 +464,12 @@ namespace DriverScanTester.Services
         private bool _lootMoveSuppressedLogged;
 
         // ── Combat-owned physical recovery authorization ──
-        // A Deferred post-kill obligation keeps ordinary waypoint navigation and input
+        // A Deferred loot obligation keeps ordinary waypoint navigation and input
         // blocked, but a combat-owned recovery (RepositionAndRetry / combat unstuck) must
         // be able to turn the camera and hold W to physically escape a phantom or
         // unreachable target — otherwise every recovery input is suppressed while combat
         // keeps TABbing into the same target. The authorization is scoped to one exact
-        // Deferred PostKill request generation and is revalidated before every authorized
+        // Deferred request generation and is revalidated before every authorized
         // input. Ordinary waypoint navigation never sets it.
         private bool _combatRecoveryMovementAuthorized;
         private long _combatRecoveryMovementRequestId;
@@ -2739,6 +2739,15 @@ namespace DriverScanTester.Services
                 _log($"[LootBarrier] Travel verification unavailable request={requestId}; " +
                      $"navigation released — resuming waypoint {DescribeCurrentWaypoint()}.");
             }
+            else if (phase == LootBarrierPhase.PickupAbandoned)
+            {
+                SetLootNavigationBarrierHoldsInput(false);
+                _lootBarrierBlockedLogged = false;
+                if (_postKillRetargetRequestId == requestId)
+                    ResetPostKillRetargetState();
+                _log($"[LootBarrier] Pickup abandoned request={requestId}; " +
+                     $"navigation released — resuming waypoint {DescribeCurrentWaypoint()}.");
+            }
             else if (phase == LootBarrierPhase.Failed || phase == LootBarrierPhase.Cancelled)
             {
                 SetLootNavigationBarrierHoldsInput(true);
@@ -2804,17 +2813,16 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// True while a combat-owned recovery is physically repositioning the player under
-        /// an authorized Deferred post-kill loot obligation.
+        /// an authorized Deferred loot obligation.
         /// </summary>
         internal bool IsCombatRecoveryMovementAuthorized => _combatRecoveryMovementAuthorized;
 
         /// <summary>
         /// Grants the narrow combat-recovery authorization: the exact armed request remains
-        /// Deferred with a PostKill reason, no in-flight loot collection, and an atomic handoff
-        /// through <see cref="LootSystem"/>. The CombatGate return may use its captured target
-        /// after the release click clears selection. Ordinary navigation and
-        /// ordinary stuck recovery never call this, so the barrier stays fully in force for
-        /// them.
+        /// Deferred with no in-flight loot collection and an atomic handoff through
+        /// <see cref="LootSystem"/>. For post-kill requests, the CombatGate return may use
+        /// its captured target after the release click clears selection. Ordinary navigation
+        /// and ordinary stuck recovery remain behind the barrier.
         /// </summary>
         private bool TryBeginCombatRecoveryMovement(string reason)
         {
@@ -2825,8 +2833,7 @@ namespace DriverScanTester.Services
                 return false;
 
             if (!_lootBarrier.TryGetRequestId(out long requestId) ||
-                _lootBarrier.Phase != LootBarrierPhase.Deferred ||
-                _lootBarrier.Reason != LootBarrierReason.PostKill)
+                _lootBarrier.Phase != LootBarrierPhase.Deferred)
                 return false;
 
             bool isCombatGateReturn = string.Equals(reason, "CombatGate waypoint return", StringComparison.Ordinal);
@@ -2834,6 +2841,7 @@ namespace DriverScanTester.Services
             bool targetReleaseBelongsToActiveGate =
                 isCombatGateTargetRelease && _attackSuppressedForCurrentWaypoint;
             bool combatGateReturnHasReleasedTarget =
+                _lootBarrier.Reason == LootBarrierReason.PostKill &&
                 (isCombatGateReturn || targetReleaseBelongsToActiveGate) &&
                 _waypoints.Count > 0 &&
                 IsCombatGateTargetSuppressionActive &&
@@ -2850,7 +2858,7 @@ namespace DriverScanTester.Services
             if (loot == null ||
                 !loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus status) ||
                 status.State != LootRequestState.Deferred ||
-                status.Reason != LootBarrierReason.PostKill)
+                status.Reason != _lootBarrier.Reason)
                 return false;
 
             if (isCombatGateReturn && _combatGateReturnHandoffReserved &&
@@ -2865,13 +2873,13 @@ namespace DriverScanTester.Services
             _combatRecoveryMovementDeniedLogged = false;
             _combatUnstuckDeniedCount = 0;
             _combatRecoverySuspendedByLootHold = false;
-            _log($"[CombatRecovery] Authorized physical recovery movement request={requestId} for {reason}.");
+            _log($"[CombatRecovery] Authorized physical recovery movement request={requestId} ({status.Reason}) for {reason}.");
             return true;
         }
 
         /// <summary>
         /// Revalidates the active combat-recovery authorization against live state. It stays
-        /// valid only while the same post-kill generation is still Deferred and the game client
+        /// valid only while the same loot request is still Deferred and the game client
         /// still owns the foreground. Other combat recoveries still require a selected mob; the
         /// CombatGate return is the narrow exception after its captured target is released. A request
         /// phase transition or supersession, focus loss, stop and route-fatal states all
@@ -2889,11 +2897,11 @@ namespace DriverScanTester.Services
 
             if (!_lootBarrier.TryGetRequestId(out long requestId) ||
                 requestId != _combatRecoveryMovementRequestId ||
-                _lootBarrier.Phase != LootBarrierPhase.Deferred ||
-                _lootBarrier.Reason != LootBarrierReason.PostKill)
+                _lootBarrier.Phase != LootBarrierPhase.Deferred)
                 return false;
 
             bool combatGateReturnOwnsTargetRelease =
+                _lootBarrier.Reason == LootBarrierReason.PostKill &&
                 _combatGateReturnActive &&
                 _combatGateReturnTargetId > 0 &&
                 _combatGateReturnTargetId == _combatGateSuppressedTargetId &&
@@ -2905,6 +2913,7 @@ namespace DriverScanTester.Services
             if (loot == null ||
                 !loot.TryGetMandatoryLootRequestStatus(requestId, out LootRequestStatus status) ||
                 status.State != LootRequestState.Deferred ||
+                status.Reason != _lootBarrier.Reason ||
                 !loot.IsCombatRecoveryMovementActiveFor(requestId))
                 return false;
 
@@ -4843,8 +4852,21 @@ namespace DriverScanTester.Services
                     _log("[Key] 6 (pot1, red)");
                     GameInput.PressKey(GameInput.VK_6, GameInput.SCAN_6);
                     await Task.Delay(BotConstants.SpeedPotion.PostPotionDelayMs, token);
-                    _log("[Key] 7 (pot2, white)");
-                    GameInput.PressKey(GameInput.VK_7, GameInput.SCAN_7);
+                    // Re-read both stacks after key 6. Potion key assignments vary between
+                    // clients, so key 6 may have consumed the white stack. The original
+                    // one-time check above could then let key 7 drink the last white potion.
+                    redPots = _memoryService.GetRedPotionCount();
+                    whitePots = _memoryService.GetWhitePotionCount();
+                    if (redPots > BotConstants.Repot.PotionSlotReserve &&
+                        whitePots > BotConstants.Repot.PotionSlotReserve)
+                    {
+                        _log("[Key] 7 (pot2, white)");
+                        GameInput.PressKey(GameInput.VK_7, GameInput.SCAN_7);
+                    }
+                    else
+                    {
+                        _log($"[Tick {_tickCount}] Skipping key 7 after key 6 left a potion stack at its slot reserve (red={redPots}, white={whitePots}) — keeping the last potion.");
+                    }
                 }
                 else if (plan.PressWhite)
                 {
@@ -4869,6 +4891,13 @@ namespace DriverScanTester.Services
                     {
                         // The configured key really is the white-potion key.
                         _speedPotWhiteCountWarningLogged = false;
+                    }
+                    else if (_memoryService.GetWhitePotionCount() <= BotConstants.Repot.PotionSlotReserve)
+                    {
+                        // Do not probe the alternate key after the first press brought the
+                        // white stack to its reserve. The key mapping can be ambiguous, so
+                        // that probe could otherwise drink the last white potion.
+                        _log($"[SpeedPot] Skipping alternate key test: white potions are at the slot reserve ({_memoryService.GetWhitePotionCount()}); keeping the last potion.");
                     }
                     else
                     {
@@ -5868,7 +5897,7 @@ namespace DriverScanTester.Services
 
                 // ── Active ReverseDiagonalRecovery ──
                 // A combat-owned recovery may only keep driving W/camera while its Deferred
-                // post-kill authorization is still valid. Losing it (target gone, request
+                // loot authorization is still valid. Losing it (target gone, request
                 // transitioned/superseded, focus lost) must stop the recovery input at once
                 // and hand the still-Deferred obligation back to the loot system.
                 if (_combatRecoveryMovementAuthorized && _reverseDiagonalRecovery.IsActive &&
@@ -8896,11 +8925,8 @@ namespace DriverScanTester.Services
                 _combatRecoveryMovementDeniedLogged = false;
             }
 
-            // A combat-owned recovery may physically walk only under the exact Deferred
-            // post-kill authorization; ordinary waypoint recovery never receives it. When the
-            // mandatory loot hold owns the input and refuses the authorization, starting the
-            // ReverseDiagonalRecovery would leave the unstuck routine active while neither the
-            // camera nor W can run — so it is not started at all and the denial is bounded.
+            // Start reverse-diagonal recovery under a mandatory loot hold only after the
+            // exact Deferred request hands over input. A refusal counts toward the denial limit.
             if (_lootNavigationBarrierHoldsInput && !TryBeginCombatRecoveryMovement("combat unstuck"))
             {
                 _combatUnstuckDeniedCount++;
@@ -9034,7 +9060,7 @@ namespace DriverScanTester.Services
             // Without a mandatory loot hold the reposition is unrestricted (the original
             // behaviour, unchanged for MoveAndAttack and for MoveAndAttackAndLoot without a
             // request). Only a hold that blocks input needs the explicit combat-recovery
-            // authorization for the exact Deferred PostKill request.
+            // authorization for the exact Deferred request.
             bool authorizedRecovery = false;
             if (_lootNavigationBarrierHoldsInput)
             {
@@ -9045,7 +9071,7 @@ namespace DriverScanTester.Services
                     {
                         _combatRecoveryMovementDeniedLogged = true;
                         _log("[CombatRecovery] Reposition denied — mandatory loot barrier holds input and combat recovery is not authorized " +
-                             "(no selected mob / request no longer Deferred PostKill / loot owns input). Not waiting and not TABbing into the same target.");
+                             "(no selected mob / request no longer Deferred / loot owns input). Not waiting and not TABbing into the same target.");
                     }
 
                     // Bounded retry through the existing escalation policy (counted by the
@@ -9397,7 +9423,7 @@ namespace DriverScanTester.Services
         /// when forward input is actually accepted, so a caller can never mistake an elapsed
         /// timer for a performed movement. The mandatory loot hold keeps blocking ordinary
         /// navigation; it is bypassed only for an authorized combat-owned recovery of the
-        /// exact Deferred post-kill obligation (see <see cref="TryBeginCombatRecoveryMovement"/>).
+        /// exact Deferred loot obligation (see <see cref="TryBeginCombatRecoveryMovement"/>).
         /// </summary>
         private bool TryStartMoving()
         {

@@ -23,10 +23,8 @@ namespace DriverScanTester.Services
     }
 
     /// <summary>
-    /// Lifecycle of one mandatory loot request. Only <see cref="Completed"/> (a verified
-    /// empty pass) or, for a travel candidate, <see cref="Unavailable"/> (verification
-    /// could not run) releases waypoint navigation. A mandatory post-kill obligation
-    /// never treats <see cref="Unavailable"/> as success.
+    /// Lifecycle of one mandatory loot request. Waypoint navigation resumes after a verified
+    /// empty pass, an abandoned pickup, or unavailable verification of a travel candidate.
     /// </summary>
     public enum LootRequestState
     {
@@ -53,7 +51,10 @@ namespace DriverScanTester.Services
         Failed,
 
         /// <summary>Explicitly cancelled (stop/city/mode change); never success.</summary>
-        Cancelled
+        Cancelled,
+
+        /// <summary>A visible candidate was clicked and the bounded pickup retry was exhausted.</summary>
+        PickupAbandoned
     }
 
     /// <summary>
@@ -78,7 +79,8 @@ namespace DriverScanTester.Services
         Completed,
         Unavailable,
         Failed,
-        Cancelled
+        Cancelled,
+        PickupAbandoned
     }
 
     /// <summary>
@@ -86,11 +88,8 @@ namespace DriverScanTester.Services
     ///
     /// The barrier stores the single request generation movement is waiting for and
     /// applies authoritative status snapshots supplied by <see cref="LootSystem"/>.
-    /// "Loot is inactive" is never interpreted as success: only an explicit
-    /// <see cref="LootRequestState.Completed"/> with camera verification releases a
-    /// post-kill obligation, and only for the exact request id that was armed. A travel
-    /// candidate may also be released as <see cref="LootRequestState.Unavailable"/> when
-    /// verification cannot run; that state is never reported as an empty scan.
+    /// The armed request can release the barrier with a verified completion or an explicit
+    /// pickup abandonment. A travel candidate can also release it as unavailable.
     ///
     /// All fields are guarded by one short-held lock; no lock is held across a wait.
     /// </summary>
@@ -268,6 +267,9 @@ namespace DriverScanTester.Services
                         break;
                     case LootRequestState.Cancelled:
                         _phase = LootBarrierPhase.Cancelled;
+                        break;
+                    case LootRequestState.PickupAbandoned:
+                        _phase = LootBarrierPhase.PickupAbandoned;
                         break;
                 }
 

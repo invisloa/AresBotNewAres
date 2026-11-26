@@ -21,9 +21,10 @@ namespace DriverScanTester.Services
             CameraVerificationFailed,
             InvalidGeometry,
             Incomplete,
-            Cancelled
+            Cancelled,
+            PickupUnconfirmed
         }
-        private enum LootProbeResult { Miss, Collected, CaptureInvalid, Cancelled }
+        internal enum LootProbeResult { Miss, Collected, CaptureInvalid, Cancelled, PickupUnconfirmed }
 
         /// <summary>
         /// Outcome of one normal combined-loot pass. The result preserves the distinction
@@ -58,6 +59,7 @@ namespace DriverScanTester.Services
             public bool NeedsFreshCycle { get; set; } = true;
             public int CaptureAttempts { get; set; }
             public int CameraAttempts { get; set; }
+            public bool PickupRetryUsed { get; set; }
 
             /// <summary>
             /// True once MovementSystem has released W/steering for this request. The
@@ -112,12 +114,13 @@ namespace DriverScanTester.Services
             NotFocused,
             InCity,
             Busy,
-            Error
+            Error,
+            PickupUnconfirmed
         }
 
         /// <summary>
         /// Result of a manual diagnostic loot run started from the Tools tab.
-        /// <see cref="ItemsCollected"/> is the number of mouseover-confirmed pickups;
+        /// <see cref="ItemsCollected"/> is the number of inventory-confirmed pickups;
         /// <see cref="Passes"/> is the number of scan passes performed.
         /// </summary>
         public readonly record struct LootDiagnosticResult(
@@ -236,9 +239,13 @@ namespace DriverScanTester.Services
         private enum LootMachineState { Idle, PostMobTab, AreaLoot, AreaLootWait, Scan, PinkScan, ScanComplete }
         private volatile LootMachineState _lootState = LootMachineState.Idle;
         private DateTime _nextActionTime = DateTime.MinValue;
-        private int _inventoryChecksumBefore;
+        private GameMemoryService.InventorySnapshot _areaLootInventoryBefore;
+        private bool _areaLootInventoryBeforeValid;
+        private long _areaLootRequestId;
         private int _consecutiveEmptySpacePresses;
         private int _consecutivePinkCaptureFailures;
+        private bool _pinkPickupRetryUsed;
+        private const int UnconfirmedPickupHoldMs = 10000;
         private const int MaxEmptySpacePressesBeforeScan = 3;
         private const int MaxImmediatePinkCaptureFailures = 3;
 
@@ -398,7 +405,7 @@ namespace DriverScanTester.Services
         private const int MaxMandatoryLootRequestHistory = 32;
 
         // Combat-owned physical recovery movement (RepositionAndRetry / combat unstuck)
-        // under a Deferred post-kill obligation. While this holds the id of the active
+        // under a Deferred loot obligation. While this holds the id of the active
         // Deferred request, the request stays Deferred and no stationary loot cycle may
         // start (the character is physically walking under combat ownership). Guarded by
         // _cameraCursorOwnershipGate; 0 = no combat-owned recovery movement is active.
@@ -792,10 +799,10 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Atomically hands the character to a combat-owned physical recovery for one
-        /// Deferred post-kill request. While the handoff is held the request stays
+        /// Deferred loot request. While the handoff is held the request stays
         /// Deferred and no stationary loot cycle/camera may start, so a zoom can never
-        /// race the recovery walk. Only the exact Deferred post-kill generation qualifies;
-        /// a request that is Pending/Running/terminal is refused.
+        /// race the recovery walk. The exact Deferred generation can be either a post-kill
+        /// request or a travel candidate interrupted by combat.
         /// </summary>
         internal bool TryBeginCombatRecoveryMovement(long requestId)
         {
@@ -806,7 +813,6 @@ namespace DriverScanTester.Services
             {
                 MandatoryLootRequest? request = _activeMandatoryLootRequest;
                 if (request == null || request.Id != requestId ||
-                    request.Reason != LootBarrierReason.PostKill ||
                     request.State != LootRequestState.Deferred)
                     return false;
 
@@ -1779,11 +1785,14 @@ namespace DriverScanTester.Services
             }
         }
 
-        private LootDiagnosticResult CompleteDiagnosticPass(
+        internal LootDiagnosticResult CompleteDiagnosticPass(
             LootDiagnosticMode mode, LootScanPassResult pass, int items, int passes)
         {
             return pass switch
             {
+                LootScanPassResult.NoItem when items > 0 => BuildDiagnosticResult(
+                    mode, LootDiagnosticOutcome.Collected, items, passes,
+                    $"Collected {items} item(s) in {passes} pass(es); final scan found no remaining loot."),
                 LootScanPassResult.NoItem => BuildDiagnosticResult(
                     mode, LootDiagnosticOutcome.NoItem, items, passes,
                     $"Scan completed with no matching item collected ({passes} pass(es), {items} item(s) already collected)."),
@@ -1802,6 +1811,9 @@ namespace DriverScanTester.Services
                 LootScanPassResult.Cancelled => BuildDiagnosticResult(
                     mode, LootDiagnosticOutcome.Cancelled, items, passes,
                     "Scan cancelled (timeout, focus loss, or city entry)."),
+                LootScanPassResult.PickupUnconfirmed => BuildDiagnosticResult(
+                    mode, LootDiagnosticOutcome.PickupUnconfirmed, items, passes,
+                    $"Pickup unconfirmed in the final pass ({items} item(s) already collected)."),
                 _ => BuildDiagnosticResult(
                     mode, LootDiagnosticOutcome.CaptureFailed, items, passes,
                     $"Scan ended without a valid empty result ({passes} pass(es)).")
@@ -2003,6 +2015,7 @@ namespace DriverScanTester.Services
                         _pinkScanOwnsCameraCursor = true;
                         IsLootingActive = true;
                         _lootState = LootMachineState.PinkScan;
+                        _pinkPickupRetryUsed = false;
                         _nextActionTime = DateTime.UtcNow.AddMilliseconds(BotConstants.Delays.LootPostKillDelayMs);
                         _consecutiveEmptySpacePresses = 0;
                         pinkScanStarted = true;
@@ -2140,20 +2153,22 @@ namespace DriverScanTester.Services
                         }
 
                         // Snapshot inventory before pressing spacebar.
-                        _inventoryChecksumBefore = _memoryService.ComputeInventoryChecksum();
+                        _areaLootRequestId = GetRunningMandatoryRequestForScan()?.Id ?? 0;
+                        _areaLootInventoryBeforeValid = TryCaptureInventorySnapshot(
+                            "BeforeAreaLoot", out _areaLootInventoryBefore);
+                        if (GetLootInputAbortReason() != null)
+                            break;
 
                         // Press spacebar THREE times with 30ms gap.
-                        // Check combat between each press so we cancel immediately
-                        // if a mob gets selected during the presses (unless loot
-                        // priority mode, where looting outranks combat).
+                        // Check input safety between presses.
                         if (LootRuntimeSettings.SpacebarLootEnabled)
                             GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
-                        if (ShouldAbortLoot()) { _lootState = LootMachineState.Idle; break; }
                         Thread.Sleep(30);
+                        if (GetLootInputAbortReason() != null) break;
                         if (LootRuntimeSettings.SpacebarLootEnabled)
                             GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
-                        if (ShouldAbortLoot()) { _lootState = LootMachineState.Idle; break; }
                         Thread.Sleep(30);
+                        if (GetLootInputAbortReason() != null) break;
                         if (LootRuntimeSettings.SpacebarLootEnabled)
                             GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                         _log($"[Loot] Spacebar x3 (round {_consecutiveEmptySpacePresses + 1}/3{KillElapsed()}).");
@@ -2168,12 +2183,14 @@ namespace DriverScanTester.Services
                 case LootMachineState.AreaLootWait:
                     if (DateTime.UtcNow >= _nextActionTime)
                     {
-                        int checksumAfter = _memoryService.ComputeInventoryChecksum();
-                        if (checksumAfter != _inventoryChecksumBefore)
+                        bool inventoryAfterValid = TryCaptureInventorySnapshot("AfterAreaLoot", out var inventoryAfter);
+                        if (DetermineItemCollected(_areaLootInventoryBeforeValid, _areaLootInventoryBefore,
+                            inventoryAfterValid, inventoryAfter) == true)
                         {
-                            // Items were collected — press spacebar again soon.
-                            _log($"[Loot] Items collected (chk {_inventoryChecksumBefore} → {checksumAfter}) — repeating spacebar{KillElapsed()}.");
+                            _log($"[Loot] Spacebar pickup confirmed in inventory — repeating spacebar{KillElapsed()}.");
                             _lastItemCollectedAt = DateTime.UtcNow;
+                            if (_areaLootRequestId > 0)
+                                RecordMandatoryItemCollected(_areaLootRequestId);
                             _consecutiveEmptySpacePresses = 0;
                             _nextActionTime = DateTime.UtcNow.AddMilliseconds(50);
                             _lootState = LootMachineState.AreaLoot;
@@ -2184,7 +2201,7 @@ namespace DriverScanTester.Services
                             if (_consecutiveEmptySpacePresses >= MaxEmptySpacePressesBeforeScan)
                             {
                                 // No more items via spacebar → switch to scan after 100ms delay.
-                                _log($"[Loot] No more items via spacebar ({_consecutiveEmptySpacePresses} empty, chk {checksumAfter}) — switching to pixel scan in 100ms{KillElapsed()}.");
+                                _log($"[Loot] No confirmed spacebar pickup after {_consecutiveEmptySpacePresses} rounds — switching to pixel scan in 100ms{KillElapsed()}.");
                                 _consecutiveEmptySpacePresses = 0;
                                 _lootState = LootMachineState.Scan;
                                 _nextActionTime = DateTime.UtcNow.AddMilliseconds(100);
@@ -2192,7 +2209,7 @@ namespace DriverScanTester.Services
                             else
                             {
                                 // Try spacebar again after a brief pause.
-                                _log($"[Loot] Space check empty ({_consecutiveEmptySpacePresses}/{MaxEmptySpacePressesBeforeScan}, chk {checksumAfter}) — retry in {BotConstants.Delays.LootSpacePressMs}ms{KillElapsed()}.");
+                                _log($"[Loot] Spacebar pickup unconfirmed ({_consecutiveEmptySpacePresses}/{MaxEmptySpacePressesBeforeScan}) — retry in {BotConstants.Delays.LootSpacePressMs}ms{KillElapsed()}.");
                                 _nextActionTime = DateTime.UtcNow.AddMilliseconds(
                                     BotConstants.Delays.LootSpacePressMs);
                                 _lootState = LootMachineState.AreaLoot;
@@ -2212,7 +2229,8 @@ namespace DriverScanTester.Services
                         {
                             GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                             Thread.Sleep(30);
-                            GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                            if (LootRuntimeSettings.SpacebarLootEnabled && GetCollectionAbortReason(LootScanMode.NormalCombined) == null)
+                                GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                         }
                         break;
                     }
@@ -2233,7 +2251,7 @@ namespace DriverScanTester.Services
                     try
                     {
                         _log($"[Loot] PixelScan starting (request={(mandatoryRequestId > 0 ? mandatoryRequestId.ToString() : "none")}).");
-                        outcome = PixelScan(mandatoryRequestId);
+                        outcome = PixelScan(mandatoryRequestId, allowPickupRecovery: mandatoryRequest?.PickupRetryUsed != true);
                     }
                     finally
                     {
@@ -2249,6 +2267,17 @@ namespace DriverScanTester.Services
                         {
                             RecordMandatoryItemCollected(mandatoryRequestId);
                             _log($"[Loot] Item collected — mandatory request={mandatoryRequestId} requires another scan.");
+                        }
+                    }
+                    else if (outcome.Result == LootScanPassResult.PickupUnconfirmed)
+                    {
+                        if (mandatoryRequestId > 0)
+                            HandleUnconfirmedMandatoryPickup(mandatoryRequestId);
+                        else
+                        {
+                            lock (_cameraCursorOwnershipGate)
+                                EndUnconfirmedPickupCycleLocked("standalone pickup unconfirmed");
+                            _log("[Loot] Standalone scan ended after an unconfirmed pickup.");
                         }
                     }
                     else if (outcome.Result == LootScanPassResult.NoItem && outcome.IsValidComplete)
@@ -2362,12 +2391,26 @@ namespace DriverScanTester.Services
                         break;
                     }
 
-                    LootScanPassResult pinkResult = PinkPixelScan("post-kill");
+                    LootScanPassResult pinkResult = PinkPixelScan("post-kill", allowPickupRecovery: !_pinkPickupRetryUsed);
                     if (pinkResult == LootScanPassResult.Collected)
                     {
                         _consecutivePinkCaptureFailures = 0;
+                        _pinkPickupRetryUsed = false;
                         _lastItemCollectedAt = DateTime.UtcNow;
                         _nextActionTime = DateTime.UtcNow.AddMilliseconds(50);
+                    }
+                    else if (pinkResult == LootScanPassResult.PickupUnconfirmed)
+                    {
+                        if (!_pinkPickupRetryUsed)
+                        {
+                            _pinkPickupRetryUsed = true;
+                            _nextActionTime = DateTime.UtcNow.AddMilliseconds(50);
+                            _log("[Loot] SOD/SOP pickup unconfirmed; rescanning once.");
+                        }
+                        else
+                        {
+                            CompleteImmediatePinkScan("[Loot] Immediate pink scan ended after two unconfirmed pickups.");
+                        }
                     }
                     else if (pinkResult == LootScanPassResult.NoItem)
                     {
@@ -2434,7 +2477,8 @@ namespace DriverScanTester.Services
                 while (!token.IsCancellationRequested)
                 {
                     // A runtime toggle-off must stop the spam immediately.
-                    if (!LootRuntimeSettings.SpacebarLootEnabled)
+                    if (!LootRuntimeSettings.SpacebarLootEnabled || _automaticLootDisabled ||
+                        _scanToken.IsCancellationRequested || _lootState != LootMachineState.Scan)
                         break;
 
                     // If the game window lost focus, stop spamming to avoid
@@ -2447,7 +2491,8 @@ namespace DriverScanTester.Services
                         GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
                     Thread.Sleep(30);
                     if (token.IsCancellationRequested || !IsGameWindowForeground(_hwnd) ||
-                        !LootRuntimeSettings.SpacebarLootEnabled)
+                        !LootRuntimeSettings.SpacebarLootEnabled || _automaticLootDisabled ||
+                        _scanToken.IsCancellationRequested || _lootState != LootMachineState.Scan)
                         break;
                     if (LootRuntimeSettings.SpacebarLootEnabled)
                         GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
@@ -2941,6 +2986,7 @@ namespace DriverScanTester.Services
                     _activeMandatoryLootRequest.State == LootRequestState.Running)
                 {
                     _activeMandatoryLootRequest.ItemsCollected++;
+                    _activeMandatoryLootRequest.PickupRetryUsed = false;
                     _activeMandatoryLootRequest.CaptureAttempts = 0;
                     _activeMandatoryLootRequest.CameraAttempts = 0;
                     _activeMandatoryLootRequest.UpdatedAtUtc = DateTime.UtcNow;
@@ -2950,6 +2996,49 @@ namespace DriverScanTester.Services
                     _candidateSuppression.Clear();
                 }
             }
+        }
+
+        private void HandleUnconfirmedMandatoryPickup(long requestId)
+        {
+            bool travelCandidate;
+            lock (_cameraCursorOwnershipGate)
+            {
+                MandatoryLootRequest? request = _activeMandatoryLootRequest;
+                if (request == null || request.Id != requestId || request.State != LootRequestState.Running)
+                    return;
+
+                if (!request.PickupRetryUsed)
+                {
+                    request.PickupRetryUsed = true;
+                    _nextActionTime = DateTime.UtcNow.AddMilliseconds(50);
+                    _log($"[LootBarrier] Pickup unconfirmed request={requestId}; rescanning once.");
+                    return;
+                }
+
+                travelCandidate = request.Reason == LootBarrierReason.TravelCandidateVerification;
+                request.State = LootRequestState.PickupAbandoned;
+                request.Detail = "pickup unconfirmed after two attempts";
+                request.UpdatedAtUtc = DateTime.UtcNow;
+                _activeMandatoryLootRequest = null;
+                if (_combatRecoveryMovementRequestId == requestId)
+                    _combatRecoveryMovementRequestId = 0;
+                EndUnconfirmedPickupCycleLocked($"request {requestId} pickup abandoned");
+            }
+
+            if (travelCandidate)
+                RecordTravelCandidateVerificationResult(requestId, unavailable: false);
+            _log($"[LootBarrier] Pickup abandoned request={requestId}; navigation released after two unconfirmed attempts.");
+        }
+
+        private void EndUnconfirmedPickupCycleLocked(string reason)
+        {
+            IsLootingActive = false;
+            _lastKillAt = DateTime.MinValue;
+            _consecutiveEmptySpacePresses = 0;
+            _lootState = LootMachineState.ScanComplete;
+            _scanCompleteUntil = DateTime.UtcNow.AddMilliseconds(UnconfirmedPickupHoldMs);
+            _nextPassivePreScanAt = _scanCompleteUntil;
+            ReleaseLootScanCameraLocked(reason);
         }
 
         private bool IncrementMandatoryCaptureAttempt(long requestId, int maxAttempts, out int attempt)
@@ -3812,7 +3901,7 @@ namespace DriverScanTester.Services
         /// discovery request itself is decided before the scan; the result feeds the
         /// failed-item count during the scan.
         /// </summary>
-        private LootScanPassOutcome PixelScan(long mandatoryRequestId)
+        private LootScanPassOutcome PixelScan(long mandatoryRequestId, bool allowPickupRecovery)
         {
             if (mandatoryRequestId == 0 || mandatoryRequestId != _failedItemRequestId)
             {
@@ -3827,7 +3916,7 @@ namespace DriverScanTester.Services
             bool hasOutcome = false;
             try
             {
-                outcome = PixelScanCore();
+                outcome = PixelScanCore(allowPickupRecovery);
                 hasOutcome = true;
                 NoteItemScanResult(outcome.Result);
             }
@@ -3855,7 +3944,7 @@ namespace DriverScanTester.Services
                 hasOutcome = false;
                 try
                 {
-                    outcome = PixelScanCore();
+                    outcome = PixelScanCore(allowPickupRecovery);
                     hasOutcome = true;
                     NoteItemScanResult(outcome.Result);
                 }
@@ -3882,7 +3971,7 @@ namespace DriverScanTester.Services
             return outcome;
         }
 
-        private LootScanPassOutcome PixelScanCore()
+        private LootScanPassOutcome PixelScanCore(bool allowPickupRecovery)
         {
             if (!EnsureLootScanCamera(out string cameraDetail))
             {
@@ -3899,7 +3988,8 @@ namespace DriverScanTester.Services
             // inside the small rectangle before a nearer one outside it.
             _log("[Loot] BigScan started");
             LootScanPassResult big = ScanRegion(
-                bigX, bigY, "BigScan", scanMode: LootScanMode.NormalCombined, verifyLootCamera: true);
+                bigX, bigY, "BigScan", scanMode: LootScanMode.NormalCombined, verifyLootCamera: true,
+                allowPickupRecovery: allowPickupRecovery);
             _log($"[Loot] BigScan completed status={big}");
 
             bool cameraVerified = big != LootScanPassResult.CameraVerificationFailed;
@@ -3920,10 +4010,11 @@ namespace DriverScanTester.Services
         /// sweep after each successful pickup so remaining drops are still collected,
         /// and a sweep that collects nothing ends the post-kill check.
         /// </summary>
-        private LootScanPassResult PinkPixelScan(string scanReason)
+        private LootScanPassResult PinkPixelScan(string scanReason, bool allowPickupRecovery = true)
         {
             LootScanPassResult result = ScanRegion(
-                bigX, bigY, "BigScan-Pink", scanMode: LootScanMode.PinkOnly, scanReason: scanReason);
+                bigX, bigY, "BigScan-Pink", scanMode: LootScanMode.PinkOnly, scanReason: scanReason,
+                allowPickupRecovery: allowPickupRecovery);
             if (_diagnosticScanActive == 0)
                 NoteItemScanResult(result);
             return result;
@@ -4266,7 +4357,8 @@ namespace DriverScanTester.Services
             int[] xRange, int[] yRange, string regionName,
             LootScanMode scanMode = LootScanMode.NormalCombined,
             string scanReason = "normal-loot",
-            bool verifyLootCamera = false)
+            bool verifyLootCamera = false,
+            bool allowPickupRecovery = true)
         {
             bool pinkOnly = scanMode == LootScanMode.PinkOnly;
             string pixelNoun = pinkOnly ? "pink" : "aquamarine+pink";
@@ -4545,7 +4637,7 @@ namespace DriverScanTester.Services
                         component.YMin + (component.Height / 2));
 
                     LootProbeResult probeResult = TryCollectAt(
-                        probe.X, probe.Y, candidate.Kind, scanMode, itemAnchor);
+                        probe.X, probe.Y, candidate.Kind, scanMode, itemAnchor, allowPickupRecovery);
                     diagnosticProbeHits.Add(probe);
                     if (probeResult == LootProbeResult.Collected)
                     {
@@ -4559,17 +4651,10 @@ namespace DriverScanTester.Services
                         ClearLootProbeProgress();
                         return FinishRegion(LootScanPassResult.Collected, "collected");
                     }
-                    if (probeResult == LootProbeResult.CaptureInvalid)
+                    if (probeResult != LootProbeResult.Miss)
                     {
-                        diagnosticOutcome = "capture-geometry-changed-during-probes";
                         ClearLootProbeProgress();
-                        return FinishRegion(LootScanPassResult.CaptureFailed, "capture-geometry-changed-during-probes");
-                    }
-                    if (probeResult == LootProbeResult.Cancelled)
-                    {
-                        diagnosticOutcome = "probe-cancelled-or-focus-lost";
-                        ClearLootProbeProgress();
-                        return FinishRegion(LootScanPassResult.Cancelled, "probe-cancelled-or-focus-lost");
+                        return FinishRegion(ProbeOutcomeToScanResult(probeResult), ProbeOutcomeName(probeResult));
                     }
 
                     if (addDiagonals)
@@ -4580,7 +4665,7 @@ namespace DriverScanTester.Services
                             LootProbeResult result = TryCollectAtWithCount(
                                 diagonal.X, diagonal.Y, candidate.Kind, scanMode,
                                 ref actualCursorProbes, ref diagnosticAquamarineProbes, ref diagnosticPinkProbes,
-                                itemAnchor);
+                                itemAnchor, allowPickupRecovery);
                             if (result == LootProbeResult.Collected)
                                 diagnosticSuccessProbe = diagonal;
                             return result;
@@ -5978,7 +6063,7 @@ namespace DriverScanTester.Services
         private LootProbeResult CheckProbeCaptureOwnership(LootScanMode scanMode)
         {
             if (_automaticLootDisabled || _scanToken.IsCancellationRequested || ShouldAbortLoot() ||
-                !IsLootScanModeAuthorized(scanMode, IsPinkScanAuthorized))
+                !IsCollectionScanActive(scanMode))
                 return LootProbeResult.Cancelled;
 
             lock (_captureGate)
@@ -6063,13 +6148,13 @@ namespace DriverScanTester.Services
 
         private LootProbeResult TryCollectAt(
             int x, int y, LootCandidateKind candidateKind, LootScanMode scanMode,
-            Point? itemAnchor = null)
+            Point? itemAnchor, bool allowPickupRecovery)
         {
             LootProbeResult guard = CheckProbeCaptureOwnership(scanMode);
             if (guard != LootProbeResult.Miss)
                 return guard;
 
-            WaitMouseInPosition(x, y, candidateKind);
+            Point probeCursor = WaitMouseInPosition(x, y, candidateKind);
             guard = CheckProbeCaptureOwnership(scanMode);
             if (guard != LootProbeResult.Miss)
                 return guard;
@@ -6099,8 +6184,7 @@ namespace DriverScanTester.Services
                     return guard;
                 if (_automaticLootDisabled)
                     return LootProbeResult.Cancelled;
-                CollectionClick();
-                return LootProbeResult.Collected;
+                return CollectionClick(scanMode, probeCursor, allowPickupRecovery);
             }
             return LootProbeResult.Miss;
         }
@@ -6108,26 +6192,28 @@ namespace DriverScanTester.Services
         private LootProbeResult TryCollectAtWithCount(
             int x, int y, LootCandidateKind candidateKind, LootScanMode scanMode,
             ref int cursorProbes, ref int aquamarineProbes, ref int pinkProbes,
-            Point? itemAnchor = null)
+            Point? itemAnchor, bool allowPickupRecovery)
         {
             cursorProbes++;
             if (candidateKind == LootCandidateKind.SodSopPink)
                 pinkProbes++;
             else
                 aquamarineProbes++;
-            return TryCollectAt(x, y, candidateKind, scanMode, itemAnchor);
+            return TryCollectAt(x, y, candidateKind, scanMode, itemAnchor, allowPickupRecovery);
         }
 
         private static string ProbeOutcomeName(LootProbeResult result) => result switch
         {
             LootProbeResult.Collected => "collected",
+            LootProbeResult.PickupUnconfirmed => "pickup-unconfirmed",
             LootProbeResult.CaptureInvalid => "capture-geometry-changed-during-probes",
             _ => "probe-cancelled-or-focus-lost"
         };
 
-        private static LootScanPassResult ProbeOutcomeToScanResult(LootProbeResult result) => result switch
+        internal static LootScanPassResult ProbeOutcomeToScanResult(LootProbeResult result) => result switch
         {
             LootProbeResult.Collected => LootScanPassResult.Collected,
+            LootProbeResult.PickupUnconfirmed => LootScanPassResult.PickupUnconfirmed,
             LootProbeResult.CaptureInvalid => LootScanPassResult.CaptureFailed,
             _ => LootScanPassResult.Cancelled
         };
@@ -6259,280 +6345,207 @@ namespace DriverScanTester.Services
             public string ExitReason { get; set; } = "Unknown";
         }
 
-        private void CollectionClick()
+        private LootProbeResult CollectionClick(LootScanMode scanMode, Point probeCursor, bool allowPickupRecovery)
         {
             if (_automaticLootDisabled)
-                return;
+                return LootProbeResult.Cancelled;
 
             long attemptId = Interlocked.Increment(ref _nextLootCollectionAttemptId);
             int positionBeforeClick = GetPositionX();
             var beforePosition = TryGetDiagnosticPlayerPosition("CollectionStart");
-            var collectionDiagnostics = new LootCollectionDiagnostics
+            var diagnostics = new LootCollectionDiagnostics
             {
                 AttemptId = attemptId,
                 BeforeTriggerX = positionBeforeClick,
                 BeforePositionValid = beforePosition.Success,
                 BeforePositionX = beforePosition.X,
-                BeforePositionY = beforePosition.Y
+                BeforePositionY = beforePosition.Y,
+                StableChecksRequired = 3,
+                MaxEmptyRounds = 10
             };
             _log($"[LootUnstuck] COLLECTION START attempt={attemptId} source=LootSystem.CollectionClick " +
                  $"BeforeX={positionBeforeClick} BeforeXSource={LootPositionXSource} " +
                  $"BeforePosition={FormatDiagnosticPosition(beforePosition.Success, beforePosition.X, beforePosition.Y)} " +
                  $"BeforePositionSource={PlayerPositionSource}");
 
-            bool leftButtonDown = false;
             _isCollecting = true;
             try
             {
-            // Release any held right button, then capture inventory before issuing the collection click.
-            MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.RightUp);
-            if (_automaticLootDisabled)
-                return;
-            bool inventoryBeforeValid = TryCaptureInventorySnapshot("BeforeClick", out var inventoryBefore);
-            collectionDiagnostics.InventoryBeforeValid = inventoryBeforeValid;
-            collectionDiagnostics.InventoryBefore = inventoryBefore;
-            int checksumBefore = _memoryService.ComputeInventoryChecksum();
-            int checksumAtCollectionStart = checksumBefore;
+                diagnostics.InventoryBeforeValid = TryCaptureInventorySnapshot("BeforeClick", out var inventoryBefore);
+                diagnostics.InventoryBefore = inventoryBefore;
+                diagnostics.ChecksumBeforeWait = inventoryBefore.ItemTypes?.Sum() ?? 0;
+                diagnostics.ChecksumAfterWait = diagnostics.ChecksumBeforeWait;
 
-            if (_automaticLootDisabled)
-                return;
+                LootProbeResult inputGuard = CheckProbeCaptureOwnership(scanMode);
+                if (inputGuard != LootProbeResult.Miss)
+                    return inputGuard;
+                if (!MouseOperations.TryGetCursorPosition(out int cursorX, out int cursorY) ||
+                    cursorX != probeCursor.X || cursorY != probeCursor.Y || !_memoryService.IsLootMouseOver())
+                    return LootProbeResult.Miss;
 
-            MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.LeftDown);
-            leftButtonDown = true;
-
-            _log("Collecting item (SOD/SOP by pixel color + mouseover indicator).");
-            Thread.Sleep(BotConstants.Delays.CollectClickHoldMs);
-
-            MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.LeftUp);
-            leftButtonDown = false;
-
-            // Spam spacebar while the character auto-walks to the clicked item.
-            // There is NO hardcoded timeout — we track the player's X position
-            // to detect when the character starts moving (click registered) and
-            // when they stop (arrived at item).  Spacebar keeps pressing during
-            // the entire walk so the character also area-loots any other items
-            // it passes along the way.
-            int checksumAfter = checksumBefore;
-            bool inventoryChanged = false;
-            bool itemCollectedObserved = false;
-            var previousInventory = inventoryBefore;
-            bool previousInventoryValid = inventoryBeforeValid;
-            collectionDiagnostics.ChecksumBeforeWait = checksumBefore;
-            collectionDiagnostics.ChecksumAfterWait = checksumBefore;
-            int beforeX = positionBeforeClick;
-            int lastX = beforeX;
-            int stableChecks = 0;
-            const int stableRequired = 3;
-            int emptyRounds = 0;
-            const int maxEmptyRounds = 10;
-            bool xMovementObserved = false;
-            bool inventoryReadFailureLoggedDuringWait = false;
-
-            while (true)
-            {
-                // If the player entered city, abort immediately. A mob being selected
-                // only aborts the spacebar spam outside loot-priority mode — in
-                // priority mode the walk to the clicked loot item must finish.
-                bool scanCancelled = _scanToken.IsCancellationRequested;
-                bool lootAborted = !scanCancelled && (_automaticLootDisabled || ShouldAbortLoot());
-                bool focusLost = !scanCancelled && !lootAborted && !IsGameWindowFocused();
-                string? abortReason = DetectCollectionAbortReason(scanCancelled, lootAborted, focusLost);
-                if (abortReason != null)
+                MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.RightUp);
+                MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.LeftDown);
+                try
                 {
-                    collectionDiagnostics.ExitReason = abortReason;
-                    _log("[Loot] Stop/city/focus change detected during collection — aborting spacebar spam.");
-                    break;
+                    _log("[Loot] Attempting pickup at mouseover-confirmed candidate.");
+                    Thread.Sleep(BotConstants.Delays.CollectClickHoldMs);
+                }
+                finally
+                {
+                    MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.LeftUp);
                 }
 
-                // The background loop still waits for the clicked-item walk to finish,
-                // but spacebar presses only happen when spacebar looting is enabled.
-                if (LootRuntimeSettings.SpacebarLootEnabled)
-                    GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
-                Thread.Sleep(30);
-                bool scanCancelledAfterSleep = _scanToken.IsCancellationRequested;
-                bool lootAbortedAfterSleep = !scanCancelledAfterSleep &&
-                    (_automaticLootDisabled || ShouldAbortLoot());
-                bool focusLostAfterSleep = !scanCancelledAfterSleep && !lootAbortedAfterSleep && !IsGameWindowFocused();
-                string? abortReasonAfterSleep = DetectCollectionAbortReason(
-                    scanCancelledAfterSleep, lootAbortedAfterSleep, focusLostAfterSleep);
-                if (abortReasonAfterSleep != null)
+                // Allow a moving character to reach the item while bounding both stalls and walks.
+                var lastPosition = beforePosition;
+                bool movementObserved = false;
+                long startedWaiting = System.Diagnostics.Stopwatch.GetTimestamp();
+                const int maxCollectionWaitMs = 5000;
+                string? abortReason;
+                while (true)
                 {
-                    collectionDiagnostics.ExitReason = abortReasonAfterSleep;
-                    break;
-                }
-                if (LootRuntimeSettings.SpacebarLootEnabled)
-                    GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
-                Thread.Sleep(100);
+                    abortReason = GetCollectionAbortReason(scanMode);
+                    if (abortReason != null)
+                        break;
 
-                bool inventoryRoundValid = TryCaptureInventorySnapshot(
-                    "CollectionWait", out var inventoryRound, logFailure: !inventoryReadFailureLoggedDuringWait);
-                if (!inventoryRoundValid)
-                    inventoryReadFailureLoggedDuringWait = true;
-                if (inventoryRoundValid)
-                {
-                    collectionDiagnostics.InventoryAfterValid = true;
-                    collectionDiagnostics.InventoryAfter = inventoryRound;
-
-                    if (previousInventoryValid && !InventorySnapshotsEqual(previousInventory, inventoryRound))
+                    if (System.Diagnostics.Stopwatch.GetElapsedTime(startedWaiting).TotalMilliseconds >= maxCollectionWaitMs)
                     {
-                        inventoryChanged = true;
-                        collectionDiagnostics.InventoryChanged = true;
-                        if (InventoryHasIncrease(previousInventory, inventoryRound))
-                        {
-                            itemCollectedObserved = true;
-                            // Inventory is the authoritative pickup confirmation. Stop the
-                            // spacebar/walk polling now so the caller can continue its loot
-                            // cycle immediately instead of waiting for position stability.
-                            collectionDiagnostics.ExitReason = "ItemCollected";
-                            break;
-                        }
+                        diagnostics.ExitReason = "CollectionWaitLimitReached";
+                        break;
                     }
 
-                    previousInventory = inventoryRound;
-                    previousInventoryValid = true;
-                }
+                    if (LootRuntimeSettings.SpacebarLootEnabled)
+                        GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                    Thread.Sleep(30);
+                    abortReason = GetCollectionAbortReason(scanMode);
+                    if (abortReason != null)
+                        break;
+                    if (LootRuntimeSettings.SpacebarLootEnabled)
+                        GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                    Thread.Sleep(100);
 
-                checksumAfter = _memoryService.ComputeInventoryChecksum();
-                collectionDiagnostics.ChecksumAfterWait = checksumAfter;
-                if (checksumAfter != checksumBefore)
-                {
-                    // Preserve the existing checksum-based collection wait behavior.
-                    inventoryChanged = true;
-                    collectionDiagnostics.InventoryChanged = true;
-                    checksumBefore = checksumAfter;
-                    emptyRounds = 0;
-                    continue;
-                }
+                    abortReason = GetCollectionAbortReason(scanMode);
+                    if (abortReason != null)
+                        break;
 
-                emptyRounds++;
-                collectionDiagnostics.EmptyRounds = emptyRounds;
+                    bool inventoryRead = TryCaptureInventorySnapshot("CollectionWait", out var inventoryRound, logFailure: false);
+                    ObserveCollectionInventory(diagnostics, inventoryRead, inventoryRound);
+                    if (diagnostics.ItemCollected == true)
+                        break;
 
-                int currentX = GetPositionX();
-                bool hasMoved = currentX != beforeX;
-
-                if (hasMoved)
-                {
-                    xMovementObserved = true;
-                    collectionDiagnostics.XMovementObserved = true;
-                    if (currentX == lastX)
+                    var currentPosition = _memoryService.GetPlayerPosition();
+                    bool? moved = DeterminePositionChanged(
+                        lastPosition.Success, lastPosition.X, lastPosition.Y,
+                        currentPosition.success, currentPosition.x, currentPosition.y);
+                    if (moved == true)
                     {
-                        stableChecks++;
-                        collectionDiagnostics.StableChecks = stableChecks;
-                        if (stableChecks >= stableRequired)
-                        {
-                            // Character reached destination and stopped — done.
-                            collectionDiagnostics.ExitReason = "PositionStable";
-                            break;
-                        }
+                        movementObserved = true;
+                        diagnostics.XMovementObserved |= currentPosition.x != lastPosition.X;
+                        diagnostics.EmptyRounds = 0;
+                        diagnostics.StableChecks = 0;
                     }
                     else
                     {
-                        stableChecks = 0; // still walking
-                        collectionDiagnostics.StableChecks = stableChecks;
+                        diagnostics.EmptyRounds++;
+                        if (movementObserved && moved == false)
+                            diagnostics.StableChecks++;
+                        else
+                            diagnostics.StableChecks = 0;
                     }
-                    lastX = currentX;
+                    if (currentPosition.success)
+                        lastPosition = currentPosition;
+
+                    if (diagnostics.StableChecks >= diagnostics.StableChecksRequired)
+                    {
+                        diagnostics.ExitReason = "PositionStable";
+                        break;
+                    }
+                    if (diagnostics.EmptyRounds >= diagnostics.MaxEmptyRounds)
+                    {
+                        diagnostics.ExitReason = "MaxEmptyRoundsReached";
+                        break;
+                    }
                 }
 
-                // Safety exit: no movement at all or walking too long with no pickups.
-                if (emptyRounds >= maxEmptyRounds)
+                if (diagnostics.ItemCollected != true && abortReason == null)
                 {
-                    collectionDiagnostics.ExitReason = "MaxEmptyRoundsReached";
-                    break;
+                    Thread.Sleep(BotConstants.Delays.CollectAnimationMs);
+                    abortReason = GetCollectionAbortReason(scanMode);
+                    if (abortReason == null)
+                    {
+                        bool inventoryRead = TryCaptureInventorySnapshot("AfterCollection", out var inventoryAfter);
+                        ObserveCollectionInventory(diagnostics, inventoryRead, inventoryAfter);
+                    }
                 }
-            }
 
-            collectionDiagnostics.ChecksumBeforeWait = checksumAtCollectionStart;
-            collectionDiagnostics.ChecksumAfterWait = checksumAfter;
-            collectionDiagnostics.InventoryChanged = inventoryChanged;
-            collectionDiagnostics.XMovementObserved = xMovementObserved;
-            collectionDiagnostics.StableChecks = stableChecks;
-            collectionDiagnostics.StableChecksRequired = stableRequired;
-            collectionDiagnostics.EmptyRounds = emptyRounds;
-            collectionDiagnostics.MaxEmptyRounds = maxEmptyRounds;
+                var afterPosition = TryGetDiagnosticPlayerPosition("UnstuckDecision");
+                diagnostics.AfterPositionCaptured = true;
+                diagnostics.AfterPositionValid = afterPosition.Success;
+                diagnostics.AfterPositionX = afterPosition.X;
+                diagnostics.AfterPositionY = afterPosition.Y;
+                diagnostics.PositionChanged = DeterminePositionChanged(
+                    beforePosition.Success, beforePosition.X, beforePosition.Y,
+                    afterPosition.Success, afterPosition.X, afterPosition.Y);
 
-            if (_automaticLootDisabled)
-            {
-                collectionDiagnostics.ExitReason = "AutomaticLootDisabled";
-                _log("[Loot] Automatic loot disabled during collection — aborting without unstuck, inventory verification or post-click capture.");
-                return;
-            }
+                abortReason ??= GetCollectionAbortReason(scanMode);
+                LootProbeResult result = ResolveCollectionProbeResult(diagnostics.ItemCollected, abortReason);
+                if (result == LootProbeResult.Collected)
+                    diagnostics.ExitReason = "ItemCollected";
+                else if (abortReason != null)
+                    diagnostics.ExitReason = abortReason;
+                LogLootCollectionSummary(diagnostics);
 
-            // The inventory increase above is already proof that the pickup completed.
-            // Waiting out the full collection animation here only delays the next action.
-            if (!itemCollectedObserved)
-                Thread.Sleep(BotConstants.Delays.CollectAnimationMs);
-
-            bool inventoryAfterValid = TryCaptureInventorySnapshot("AfterCollection", out var inventoryAfter);
-            collectionDiagnostics.InventoryAfterValid = inventoryAfterValid;
-            collectionDiagnostics.InventoryAfter = inventoryAfter;
-            checksumAfter = _memoryService.ComputeInventoryChecksum();
-            collectionDiagnostics.ChecksumAfterWait = checksumAfter;
-            if (inventoryAfterValid)
-            {
-                if (inventoryBeforeValid)
+                if (allowPickupRecovery && result == LootProbeResult.PickupUnconfirmed &&
+                    CheckProbeCaptureOwnership(scanMode) == LootProbeResult.Miss)
                 {
-                    bool finalInventoryChanged = !InventorySnapshotsEqual(inventoryBefore, inventoryAfter);
-                    inventoryChanged |= finalInventoryChanged;
-                    if (InventoryHasIncrease(inventoryBefore, inventoryAfter))
-                        itemCollectedObserved = true;
+                    UnbugWhenCollecting(positionBeforeClick, diagnostics,
+                        canClick: () => CheckProbeCaptureOwnership(scanMode) == LootProbeResult.Miss);
+                    abortReason = GetCollectionAbortReason(scanMode);
+                    result = ResolveCollectionProbeResult(diagnostics.ItemCollected, abortReason);
                 }
-            }
 
-            collectionDiagnostics.InventoryChanged = inventoryChanged;
-            bool? finalCollectionResult = DetermineItemCollected(
-                inventoryBeforeValid, inventoryBefore, inventoryAfterValid, inventoryAfter);
-            collectionDiagnostics.ItemCollected = itemCollectedObserved
-                ? true
-                : inventoryChanged && finalCollectionResult == false
-                    ? null
-                    : finalCollectionResult;
-
-            var afterPosition = TryGetDiagnosticPlayerPosition("UnstuckDecision");
-            collectionDiagnostics.AfterPositionCaptured = true;
-            collectionDiagnostics.AfterPositionValid = afterPosition.Success;
-            collectionDiagnostics.AfterPositionX = afterPosition.X;
-            collectionDiagnostics.AfterPositionY = afterPosition.Y;
-            collectionDiagnostics.PositionChanged = DeterminePositionChanged(
-                collectionDiagnostics.BeforePositionValid,
-                collectionDiagnostics.BeforePositionX,
-                collectionDiagnostics.BeforePositionY,
-                afterPosition.Success,
-                afterPosition.X,
-                afterPosition.Y);
-
-            LogLootCollectionSummary(collectionDiagnostics);
-            UnbugWhenCollecting(positionBeforeClick, collectionDiagnostics);
-
-            // PixelScanUnderChar disabled — spam spacebar instead.
-            // PixelScanUnderChar();
-
-            // Force a fresh screen capture here so the next scan does NOT use the
-            // stale bitmap from before the click (character has moved, item is gone,
-            // screen content has changed).
-            bool postClickCaptureSucceeded = CaptureScreen();
-            if (postClickCaptureSucceeded)
-            {
-                _log("[Loot] Fresh screen capture forced after click.");
-
-                // This refresh only avoids scanning a stale bitmap. Saved diagnostics
-                // come from actual loot-scan passes, not the post-click refresh.
-            }
-            else
-            {
-                _log("[LootCapture] Post-click frame capture failed; no frame was interpreted as empty.");
-            }
+                // The next pass captures a fresh frame through CaptureScanFrame.
+                return result;
             }
             finally
             {
-                if (leftButtonDown)
-                {
-                    try { MouseOperations.MouseEvent(MouseOperations.MouseEventFlags.LeftUp); }
-                    catch (Exception ex) { _log($"[Loot] Failed to release left mouse button after collection: {ex.Message}"); }
-                }
-                // Collection finished (item picked up / aborted) — the movement and
-                // combat systems may resume attacking.
                 _isCollecting = false;
             }
+        }
+
+        internal static void ObserveCollectionInventory(
+            LootCollectionDiagnostics diagnostics, bool valid, GameMemoryService.InventorySnapshot inventory)
+        {
+            diagnostics.InventoryAfterValid = valid;
+            diagnostics.InventoryAfter = inventory;
+            diagnostics.ChecksumAfterWait = inventory.ItemTypes?.Sum() ?? 0;
+            bool? collected = DetermineItemCollected(
+                diagnostics.InventoryBeforeValid, diagnostics.InventoryBefore, valid, inventory);
+            diagnostics.InventoryChanged |= diagnostics.InventoryBeforeValid && valid &&
+                !InventorySnapshotsEqual(diagnostics.InventoryBefore, inventory);
+            if (diagnostics.ItemCollected != true)
+                diagnostics.ItemCollected = collected == false && diagnostics.InventoryChanged ? null : collected;
+        }
+
+        private bool IsCollectionScanActive(LootScanMode scanMode) =>
+            IsLootScanModeAuthorized(scanMode, IsPinkScanAuthorized) &&
+            (Volatile.Read(ref _diagnosticScanActive) != 0 ||
+             _lootState == (scanMode == LootScanMode.PinkOnly ? LootMachineState.PinkScan : LootMachineState.Scan));
+
+        private string? GetCollectionAbortReason(LootScanMode scanMode) =>
+            IsCollectionScanActive(scanMode) ? GetLootInputAbortReason() : "LootAborted";
+
+        private string? GetLootInputAbortReason()
+        {
+            bool cancelled = _scanToken.IsCancellationRequested;
+            bool aborted = !cancelled && (_automaticLootDisabled || ShouldAbortLoot());
+            return DetectCollectionAbortReason(cancelled, aborted, !cancelled && !aborted && !IsGameWindowFocused());
+        }
+
+        internal static LootProbeResult ResolveCollectionProbeResult(bool? itemCollected, string? abortReason)
+        {
+            if (itemCollected == true)
+                return LootProbeResult.Collected;
+            return abortReason != null ? LootProbeResult.Cancelled : LootProbeResult.PickupUnconfirmed;
         }
 
         internal static string? DetectCollectionAbortReason(
@@ -6585,7 +6598,8 @@ namespace DriverScanTester.Services
         internal void UnbugWhenCollecting(
             int beforeClickPosX,
             LootCollectionDiagnostics collectionDiagnostics,
-            Action<int, int, int>? clickOperation = null)
+            Action<int, int, int>? clickOperation = null,
+            Func<bool>? canClick = null)
         {
             var currentPosition = collectionDiagnostics.AfterPositionCaptured
                 ? (collectionDiagnostics.AfterPositionX, collectionDiagnostics.AfterPositionY, collectionDiagnostics.AfterPositionValid)
@@ -6666,11 +6680,30 @@ namespace DriverScanTester.Services
             _log($"[LootUnstuck] ClickScreen=({screenX},{screenY})");
             _log($"[LootUnstuck] ClickDelayMs={clickDelayMs}");
             _log("[LootUnstuck] ClickSource=LootSystem.UnbugWhenCollecting");
-            _log($"[LootUnstuck] CLICK START source=UnbugWhenCollecting screen=({screenX},{screenY})");
             try
             {
-                Action<int, int, int> click = clickOperation ?? MouseOperations.MoveAndLeftClickAbsolute;
-                click(screenX, screenY, clickDelayMs);
+                if (canClick != null)
+                {
+                    if (!canClick())
+                        return;
+                    MouseOperations.SetCursorPositionAbsolute(screenX, screenY);
+                    Thread.Sleep(clickDelayMs);
+                    if (!canClick() ||
+                        !MouseOperations.TryGetCursorPosition(out int cursorX, out int cursorY) ||
+                        cursorX != screenX || cursorY != screenY)
+                    {
+                        _log("[LootUnstuck] Ground click skipped because input ownership or cursor position changed.");
+                        return;
+                    }
+                }
+
+                _log($"[LootUnstuck] CLICK START source=UnbugWhenCollecting screen=({screenX},{screenY})");
+                if (clickOperation != null)
+                    clickOperation(screenX, screenY, clickDelayMs);
+                else if (canClick == null)
+                    MouseOperations.MoveAndLeftClickAbsolute(screenX, screenY, clickDelayMs);
+                else
+                    MouseOperations.LeftClick();
                 _log("[LootUnstuck] CLICK RETURNED source=UnbugWhenCollecting");
             }
             catch (Exception ex)
@@ -6711,9 +6744,9 @@ namespace DriverScanTester.Services
         {
             if (!beforeValid || !afterValid)
                 return null;
-            if (InventoryHasIncrease(before, after))
-                return true;
-            return InventorySnapshotsEqual(before, after) ? false : null;
+            if (InventorySnapshotsEqual(before, after))
+                return false;
+            return InventoryHasIncrease(before, after) ? true : null;
         }
 
         internal static bool InventoryHasIncrease(
@@ -6722,18 +6755,10 @@ namespace DriverScanTester.Services
         {
             if (before.ItemTypes == null || before.ItemCounts == null ||
                 after.ItemTypes == null || after.ItemCounts == null ||
+                before.ItemTypes.Length != after.ItemTypes.Length ||
                 before.ItemTypes.Length != before.ItemCounts.Length ||
                 after.ItemTypes.Length != after.ItemCounts.Length)
                 return false;
-
-            int sharedSlotCount = Math.Min(before.ItemTypes.Length, after.ItemTypes.Length);
-            for (int i = 0; i < sharedSlotCount; i++)
-            {
-                if (before.ItemTypes[i] != 0 &&
-                    before.ItemTypes[i] == after.ItemTypes[i] &&
-                    after.ItemCounts[i] > before.ItemCounts[i])
-                    return true;
-            }
 
             var beforeTotals = GetInventoryItemTotals(before);
             var afterTotals = GetInventoryItemTotals(after);
@@ -6880,7 +6905,7 @@ namespace DriverScanTester.Services
         //     }
         // }
 
-        private void WaitMouseInPosition(
+        private Point WaitMouseInPosition(
             int bitmapLocalX, int bitmapLocalY, LootCandidateKind candidateKind)
         {
             // Clamp to actual client area as safety net.
@@ -6897,6 +6922,7 @@ namespace DriverScanTester.Services
             if (_itemCalibration is { IsActive: true })
                 settleMs = Math.Max(settleMs, BotConstants.Delays.ItemCalibrationMouseOverSettleMs);
             _scanToken.WaitHandle.WaitOne(settleMs);
+            return new Point(screenX, screenY);
         }
 
         /// <summary>

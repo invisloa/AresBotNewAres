@@ -1133,6 +1133,9 @@ namespace DriverScanTester.ViewModels
             {
                 LootSystem.LootDiagnosticOutcome.Collected => $"{label}: collected {result.ItemsCollected}",
                 LootSystem.LootDiagnosticOutcome.NoItem => $"{label}: no item found",
+                LootSystem.LootDiagnosticOutcome.PickupUnconfirmed when result.ItemsCollected > 0 =>
+                    $"{label}: collected {result.ItemsCollected}, last pickup unconfirmed",
+                LootSystem.LootDiagnosticOutcome.PickupUnconfirmed => $"{label}: pickup unconfirmed",
                 LootSystem.LootDiagnosticOutcome.CaptureFailed => $"{label}: capture failed",
                 LootSystem.LootDiagnosticOutcome.Cancelled => $"{label}: cancelled",
                 LootSystem.LootDiagnosticOutcome.NotAttached => $"{label}: not attached",

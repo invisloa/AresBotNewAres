@@ -1344,7 +1344,7 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Reads all inventory slot item types and returns a simple checksum (sum of non-zero item types).
-        /// Used to detect if items were collected after a spacebar press.
+        /// For pickup confirmation use a complete inventory snapshot with stack counts.
         /// Reads in bulk for performance: 72 slots × 2 bytes = 144 bytes.
         /// </summary>
         public int ComputeInventoryChecksum()

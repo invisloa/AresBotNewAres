@@ -40,8 +40,10 @@ namespace DriverScanTester.Tests
 
         // ── Drink order: buff → mana → HP is verified by the press sequence below ──
 
-        [Fact]
-        public async Task Dump_DrinksBuffsFirstThenManaThenHpAndKeepsTheReserves()
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task Dump_DrinksBuffsFirstThenManaThenHpAndKeepsTheReserves(bool swapBuffKeys)
         {
             var simulation = new SimulatedPotions
             {
@@ -51,7 +53,7 @@ namespace DriverScanTester.Tests
                 RedPotions = 3
             };
             var log = new List<string>();
-            var service = new RecordingWeightDumpService(simulation, log.Add);
+            var service = new RecordingWeightDumpService(simulation, log.Add) { SwapBuffKeys = swapBuffKeys };
 
             bool dumped = await service.TryDumpSurplusAsync(CancellationToken.None);
 
@@ -318,7 +320,7 @@ namespace DriverScanTester.Tests
 
         /// <summary>
         /// Records drink keys and applies their simulated potion consumption.
-        /// Key mapping does not matter for the dump: the buff round presses both keys.
+        /// Buff keys can be mapped to either potion stack.
         /// </summary>
         private sealed class RecordingWeightDumpService : LootPriorityWeightDumpService
         {
@@ -331,6 +333,7 @@ namespace DriverScanTester.Tests
 
             /// <summary>False simulates a red-potion key that cannot be consumed.</summary>
             public bool RedKeyConsumes { get; init; } = true;
+            public bool SwapBuffKeys { get; init; }
 
             public RecordingWeightDumpService(SimulatedPotions simulation, Action<string> log)
                 : base(simulation.CreateMemory(log), log, (_, _) => Task.CompletedTask)
@@ -355,15 +358,23 @@ namespace DriverScanTester.Tests
             protected override void PressRedPotion()
             {
                 Presses.Add("Red");
-                if (RedKeyConsumes && _simulation.RedPotions > 0)
-                    _simulation.RedPotions--;
+                if (RedKeyConsumes)
+                    DrinkBuffPotion(white: SwapBuffKeys);
             }
 
             protected override void PressWhitePotion()
             {
                 Presses.Add("White");
-                if (WhiteKeyConsumes && _simulation.WhitePotions > 0)
+                if (WhiteKeyConsumes)
+                    DrinkBuffPotion(white: !SwapBuffKeys);
+            }
+
+            private void DrinkBuffPotion(bool white)
+            {
+                if (white && _simulation.WhitePotions > 0)
                     _simulation.WhitePotions--;
+                if (!white && _simulation.RedPotions > 0)
+                    _simulation.RedPotions--;
             }
         }
     }

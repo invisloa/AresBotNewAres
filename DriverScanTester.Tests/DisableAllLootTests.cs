@@ -517,6 +517,7 @@ namespace DriverScanTester.Tests
                 "BigScan",
                 LootSystem.LootScanMode.NormalCombined,
                 "test",
+                true,
                 true);
             Assert.Equal(LootSystem.LootScanPassResult.Cancelled, (LootSystem.LootScanPassResult)scan!);
             Assert.DoesNotContain(log, line => line.Contains("Collecting candidate", StringComparison.Ordinal));
@@ -530,8 +531,10 @@ namespace DriverScanTester.Tests
             using var loot = CreateLoot(log.Add);
             loot.AutomaticLootDisabled = true;
 
-            InvokePrivate(loot, "CollectionClick");
+            var result = InvokePrivateResult(loot, "CollectionClick", LootSystem.LootScanMode.NormalCombined,
+                System.Drawing.Point.Empty, true);
 
+            Assert.Equal(LootSystem.LootProbeResult.Cancelled, (LootSystem.LootProbeResult)result!);
             Assert.False(loot.IsCollecting);
             Assert.DoesNotContain(log, line => line.Contains("COLLECTION START", StringComparison.Ordinal));
             Assert.DoesNotContain(log, line => line.Contains("Collecting item", StringComparison.Ordinal));

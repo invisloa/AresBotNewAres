@@ -173,6 +173,12 @@ namespace DriverScanTester.Tests
                 RequestId = Movement.LootBarrier.RequestId;
             }
 
+            public void ArmTravelVerification()
+            {
+                RequestId = Loot.BeginMandatoryLootRequest(LootBarrierReason.TravelCandidateVerification);
+                RefreshBarrier();
+            }
+
             /// <summary>Defers the armed obligation because combat holds a selected mob.</summary>
             public void DeferForCombat()
             {
@@ -608,6 +614,47 @@ namespace DriverScanTester.Tests
         }
 
         // ── 7. Combat unstuck / ReverseDiagonal under the Deferred barrier ─────
+
+        [Fact]
+        public async Task TravelVerificationDeferredByTarget831LetsCombatRecoverAtReachedWaypoint()
+        {
+            using var scenario = new Scenario(
+                BotMode.MoveAndAttackAndLoot, MediumWaypoint(85, 73, BotMode.MoveAndAttackAndLoot));
+            scenario.ArmTravelVerification();
+            InvokePrivate(scenario.Loot, "ServiceMandatoryLootRequest", false);
+            scenario.RefreshBarrier();
+            Assert.Equal(LootRequestState.Running, scenario.Status().State);
+            Assert.False(InvokeTryBeginCombatRecovery(scenario.Movement, "combat unstuck"));
+
+            scenario.Stub.TargetId = 831;
+            scenario.DeferForCombat();
+            Assert.False(InvokeTryStartMoving(scenario.Movement));
+
+            // The stall occurred 4.47 units from a waypoint with a five-unit reach threshold.
+            await StartReposition(scenario.Movement, 89, 71, CancellationToken.None);
+            Assert.True(IsUnstuckRoutineActive(scenario.Movement));
+            Assert.True(scenario.Loot.IsCombatRecoveryMovementActiveFor(scenario.RequestId));
+
+            await Task.Delay(220);
+            InvokePrivate(scenario.Movement, "TickCombatRecoveryUnderLootHold", 89f, 71f);
+            Assert.True(scenario.Movement.ForwardKeyDowns > 0);
+
+            await Task.Delay(220);
+            InvokePrivate(scenario.Movement, "TickCombatRecoveryUnderLootHold", 85f, 71f);
+            await Task.Delay(320);
+            InvokePrivate(scenario.Movement, "TickCombatRecoveryUnderLootHold", 85f, 71f);
+
+            Assert.False(IsUnstuckRoutineActive(scenario.Movement));
+            Assert.False(IsMovingForward(scenario.Movement));
+            Assert.False(scenario.Loot.IsCombatRecoveryMovementActiveFor(scenario.RequestId));
+            Assert.Equal(0, scenario.Movement.TargetCyclePresses);
+            Assert.True(BarrierHoldsInput(scenario.Movement));
+            Assert.Equal(LootRequestState.Deferred, scenario.Status().State);
+
+            scenario.Stub.TargetId = 0;
+            InvokePrivate(scenario.Loot, "ServiceMandatoryLootRequest", false);
+            Assert.Equal(LootRequestState.Running, scenario.Status().State);
+        }
 
         [Fact]
         public async Task CombatUnstuckReverseDiagonalRecoversUnderDeferredBarrier()
