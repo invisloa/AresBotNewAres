@@ -11618,41 +11618,44 @@ namespace DriverScanTester.Services
 
         /// <summary>
         /// Finds the index of the current queue-peek waypoint within <see cref="_initialPath"/>.
-        /// Returns 0 if no match is found or the queue is empty.
+        /// Returns -1 if no match is found or the queue is empty.
         /// </summary>
-        private int GetCurrentWaypointIndex()
+        private int GetCurrentWaypointIndex(bool goBackward)
         {
             if (_waypoints.Count == 0 || _initialPath.Count == 0)
-                return 0;
+                return -1;
 
             var current = _waypoints.Peek();
+            // A loop can visit the same coordinates more than once. The remaining
+            // queue length identifies the current occurrence on the active leg.
+            int queuedIndex = goBackward ? _waypoints.Count - 1 : _initialPath.Count - _waypoints.Count;
+            if (queuedIndex >= 0 && queuedIndex < _initialPath.Count && current.Equals(_initialPath[queuedIndex]))
+                return queuedIndex;
+
             for (int i = 0; i < _initialPath.Count; i++)
             {
-                if (GeometryUtils.Distance(current.X, current.Y, _initialPath[i].X, _initialPath[i].Y) < 0.5f)
+                if (current.Equals(_initialPath[i]))
                     return i;
             }
-            return 0;
+            return -1;
         }
 
         /// <summary>
-        /// Finds the index of the nearest waypoint in <see cref="_initialPath"/>
-        /// to the given world position. Fallback when player is far from all segments.
+        /// Finds the nearest positional waypoint through <paramref name="lastIndex"/>.
+        /// Breaks distance ties by how close the waypoint is to the current route index.
         /// </summary>
-        private int FindNearestWaypointIndex(float currX, float currY)
+        private int FindNearestWaypointIndex(float currX, float currY, int lastIndex, int currentTargetIndex)
         {
-            if (_initialPath.Count == 0) return 0;
-
-            // Method steps have no meaningful position — only positional waypoints
-            // participate. Returns -1 when there is no positional waypoint at all
-            // (the rebuild then reports TerminalSkip and the queue is left alone).
             int bestIdx = -1;
             float bestDist = float.MaxValue;
-            for (int i = 0; i < _initialPath.Count; i++)
+            for (int i = 0; i <= lastIndex; i++)
             {
                 if (_initialPath[i].IsOperationStep)
                     continue;
                 float d = GeometryUtils.Distance(currX, currY, _initialPath[i].X, _initialPath[i].Y);
-                if (d < bestDist)
+                if (d < bestDist ||
+                    (d == bestDist && currentTargetIndex >= 0 &&
+                     Math.Abs(i - currentTargetIndex) < Math.Abs(bestIdx - currentTargetIndex)))
                 {
                     bestDist = d;
                     bestIdx = i;
@@ -11666,7 +11669,8 @@ namespace DriverScanTester.Services
         /// For forward legs (or non-loop / closed loops) the queue runs to the end of
         /// <see cref="_initialPath"/>; for the backward leg of an open ping-pong loop it
         /// runs back down to index 0. Does nothing if the new target is effectively the
-        /// same as the current queue peek (within 0.5 distance). Clears relevant state on change.
+        /// same as the current queue peek. On loops, waypoint order distinguishes repeated
+        /// coordinates. Clears relevant state on change.
         /// </summary>
         /// <returns>
         /// <see cref="RouteResyncResult.TerminalSkip"/> if <paramref name="startIndex"/> is invalid;
@@ -11681,19 +11685,20 @@ namespace DriverScanTester.Services
                 return RouteResyncResult.TerminalSkip;
             }
 
-            // Check if new target is effectively the same as current target
+            bool goBackward = LoopPath && !IsClosedLoop() && !_loopForward;
             if (_waypoints.Count > 0)
             {
                 var currentTarget = _waypoints.Peek();
                 var newTarget = _initialPath[startIndex];
-                if (GeometryUtils.Distance(currentTarget.X, currentTarget.Y, newTarget.X, newTarget.Y) < 0.5f)
+                bool sameTarget = LoopPath
+                    ? startIndex == GetCurrentWaypointIndex(goBackward)
+                    : GeometryUtils.Distance(currentTarget.X, currentTarget.Y, newTarget.X, newTarget.Y) < 0.5f;
+                if (sameTarget)
                 {
                     _log($"[RouteResync] Rebuild skipped: same target (index={startIndex})");
                     return RouteResyncResult.SameTarget;
                 }
             }
-
-            bool goBackward = LoopPath && !IsClosedLoop() && !_loopForward;
 
             int oldCount = _waypoints.Count;
             _waypoints.Clear();
@@ -11798,7 +11803,14 @@ namespace DriverScanTester.Services
                 ? _waypoints.Peek()
                 : new Waypoint(0, 0, MovementPrecision.Medium, BotMode.OnlyMove);
 
-            int currentTargetIdx = _waypoints.Count > 0 ? GetCurrentWaypointIndex() : -1;
+            bool useWrapSegment = LoopPath && IsClosedLoop();
+            bool openLoopBackward = LoopPath && !useWrapSegment && !_loopForward;
+            int currentTargetIdx = GetCurrentWaypointIndex(openLoopBackward);
+            // The approach to the current return target can still be used for projection.
+            // Its higher-index endpoint has already been passed and cannot be a target.
+            int lastCandidateIndex = openLoopBackward && currentTargetIdx >= 0
+                ? currentTargetIdx
+                : _initialPath.Count - 1;
 
             // ── Find the best (nearest) route segment ──
             int bestSegmentStart = -1;
@@ -11809,10 +11821,9 @@ namespace DriverScanTester.Services
             int normalSegmentCount = _initialPath.Count - 1;
             // The wrap segment (last → first) only exists for CLOSED loops. For open
             // ping-pong loops it would cut straight through unrecorded terrain.
-            bool useWrapSegment = LoopPath && IsClosedLoop();
             int segmentCount = normalSegmentCount + (useWrapSegment ? 1 : 0);
 
-            for (int i = 0; i < segmentCount; i++)
+            for (int i = 0; i < segmentCount && i <= lastCandidateIndex; i++)
             {
                 int idxA = i;
                 int idxB = i + 1;
@@ -11853,9 +11864,9 @@ namespace DriverScanTester.Services
                 }
                 else if (dist <= bestDist + tieEpsilon && currentTargetIdx >= 0)
                 {
-                    // Tie-breaker: prefer segment whose end index is closer to the current queue target
-                    int segmentEndIdx = (useWrapSegment && idxA == _initialPath.Count - 1) ? 0 : idxA + 1;
-                    int bestEndIdx = (useWrapSegment && bestSegmentStart == _initialPath.Count - 1) ? 0 : bestSegmentStart + 1;
+                    // Compare the endpoint we would approach in the current direction.
+                    int segmentEndIdx = openLoopBackward ? idxA : idxB;
+                    int bestEndIdx = openLoopBackward ? bestSegmentStart : bestSegmentEnd;
 
                     int newDiff = Math.Abs(segmentEndIdx - currentTargetIdx);
                     int bestDiff = Math.Abs(bestEndIdx - currentTargetIdx);
@@ -11870,7 +11881,7 @@ namespace DriverScanTester.Services
                 }
             }
 
-            if (bestSegmentStart < 0)
+            if (bestSegmentStart < 0 && !openLoopBackward)
             {
                 _log("[RouteResync] skipped terminal: no-valid-segment");
                 return RouteResyncResult.TerminalSkip;
@@ -11883,13 +11894,12 @@ namespace DriverScanTester.Services
             int nextWpIndex;
 
             float maxSegDist = BotConstants.Movement.RouteResyncMaxSegmentDistance;
-            bool openLoopBackward = LoopPath && !IsClosedLoop() && !_loopForward;
 
             if (bestDist > maxSegDist)
             {
-                // Fallback: player is far from all segments — go to nearest waypoint.
+                // Fallback when no eligible segment is close enough.
                 // RebuildWaypointQueueFromIndex applies the current leg direction.
-                nextWpIndex = FindNearestWaypointIndex(currX, currY);
+                nextWpIndex = FindNearestWaypointIndex(currX, currY, lastCandidateIndex, LoopPath ? currentTargetIdx : -1);
                 reason = $"fallback-nearest-wp d={bestDist:F2} dir={(openLoopBackward ? "backward" : "forward")}";
             }
             else if (openLoopBackward)
@@ -11951,6 +11961,12 @@ namespace DriverScanTester.Services
                 reason = "nearest-segment";
             }
 
+            if (nextWpIndex < 0)
+            {
+                _log("[RouteResync] skipped terminal: no-positional-waypoint");
+                return RouteResyncResult.TerminalSkip;
+            }
+
             // ── Non-loop guard: if already near the last waypoint, let natural completion handle it ──
             if (!LoopPath && nextWpIndex >= _initialPath.Count - 1)
             {
@@ -12008,7 +12024,8 @@ namespace DriverScanTester.Services
                 }
             }
 
-            LogSkippedStartCameraWaypoints(nextWpIndex);
+            if (!openLoopBackward)
+                LogSkippedStartCameraWaypoints(nextWpIndex);
 
             // ── Log and apply ──
             _log($"[RouteResync] bestSegment={bestSegmentStart}->{bestSegmentEnd} t={bestT:F2} dist={bestDist:F2} nextIndex={nextWpIndex} reason={reason}");

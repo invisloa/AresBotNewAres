@@ -14,7 +14,10 @@ namespace DriverScanTester.Models
         Archer,
 
         /// <summary>Mage account.</summary>
-        Mage
+        Mage,
+
+        /// <summary>Second Mage account.</summary>
+        MageAlli
     }
 
     public static class LoginCharacterExtensions
@@ -23,6 +26,7 @@ namespace DriverScanTester.Models
         public static string ToDisplayName(this LoginCharacter character) => character switch
         {
             LoginCharacter.Mage => "Mage",
+            LoginCharacter.MageAlli => "mage_alli",
             LoginCharacter.Archer => "Archer",
             _ => "Knight"
         };

@@ -289,6 +289,7 @@ namespace DriverScanTester.Tests
         [InlineData(LoginCharacter.Knight)]
         [InlineData(LoginCharacter.Archer)]
         [InlineData(LoginCharacter.Mage)]
+        [InlineData(LoginCharacter.MageAlli)]
         public async Task RecoveryPassesTheSelectedLoginCharacterToTheStartup(LoginCharacter loginCharacter)
         {
             var rig = new Rig();

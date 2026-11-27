@@ -69,6 +69,7 @@ namespace DriverScanTester.Services
         private const string KnightLoginUsername = "superknaj87";
         private const string ArcherLoginUsername = "superloa87";
         private const string MageLoginUsername = "supermage";
+        private const string MageAlliLoginUsername = "supermage87";
         private const string GameLoginPassword = "Jankoza8712";
 
         private readonly Action<string> _log;
@@ -403,6 +404,7 @@ namespace DriverScanTester.Services
         private static string ResolveLoginUsername(LoginCharacter loginCharacter) => loginCharacter switch
         {
             LoginCharacter.Mage => MageLoginUsername,
+            LoginCharacter.MageAlli => MageAlliLoginUsername,
             LoginCharacter.Archer => ArcherLoginUsername,
             _ => KnightLoginUsername
         };

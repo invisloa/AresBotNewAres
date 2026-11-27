@@ -117,6 +117,8 @@
                             <RadioButton Content="Archer" IsChecked="{Binding IsArcherLoginSelected, Mode=TwoWay}"
                                          GroupName="LoginCharacter" Margin="4,0,10,0"/>
                             <RadioButton Content="Mage" IsChecked="{Binding IsMageLoginSelected, Mode=TwoWay}"
+                                         GroupName="LoginCharacter" Margin="4,0,10,0"/>
+                            <RadioButton Content="mage_alli" IsChecked="{Binding IsMageAlliLoginSelected, Mode=TwoWay}"
                                          GroupName="LoginCharacter" Margin="4,0"/>
                         </StackPanel>
                     </GroupBox>

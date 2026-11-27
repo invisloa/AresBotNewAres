@@ -224,6 +224,69 @@ namespace DriverScanTester.Tests
             Assert.Contains(lines, line => line.Contains("method-step") && line.Contains("EtanaRepotUnstuck"));
         }
 
+        [Theory]
+        [InlineData(185f, 101f)] // Near a segment already passed on the return leg.
+        [InlineData(180f, 120f)] // Far enough from the route to use the nearest waypoint.
+        public async Task PostCombatResyncDoesNotRevisitPassedWaypointsOnTheReturnLeg(float x, float y)
+        {
+            var path = new List<Waypoint>
+            {
+                new Waypoint(100, 100, MovementPrecision.Accurate, BotMode.OnlyMove),
+                new Waypoint(120, 100, MovementPrecision.Accurate, BotMode.OnlyMove),
+                new Waypoint(140, 100, MovementPrecision.Accurate, BotMode.OnlyMove),
+                new Waypoint(160, 100, MovementPrecision.Accurate, BotMode.OnlyMove),
+                new Waypoint(180, 100, MovementPrecision.Accurate, BotMode.OnlyMove),
+                new Waypoint(200, 100, MovementPrecision.Accurate, BotMode.OnlyMove)
+            };
+            Action<string> log = _ => { };
+            var movement = new MovementSystem(CreateStubMemory(log), log, 200, 100,
+                customPath: path, loopPath: true);
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            var advance = typeof(MovementSystem).GetMethod("AdvanceReachedWaypoints", flags)!;
+            var resync = typeof(MovementSystem).GetMethod("RouteResyncFromCurrentPosition", flags)!;
+            var queue = Assert.IsType<Queue<Waypoint>>(
+                typeof(MovementSystem).GetField("_waypoints", flags)!.GetValue(movement));
+
+            foreach (var waypoint in path)
+                Assert.True(await (Task<bool>)advance.Invoke(movement, new object[] { waypoint.X, waypoint.Y, CancellationToken.None })!);
+            Assert.True(await (Task<bool>)advance.Invoke(movement, new object[] { 180f, 100f, CancellationToken.None })!);
+
+            resync.Invoke(movement, new object[] { x, y, false });
+            Assert.Equal(new[] { path[3], path[2], path[1], path[0] }, queue.ToArray());
+
+            resync.Invoke(movement, new object[] { 130f, 101f, false });
+            Assert.Equal(new[] { path[1], path[0] }, queue.ToArray());
+
+            Assert.True(await (Task<bool>)advance.Invoke(movement, new object[] { 120f, 100f, CancellationToken.None })!);
+            Assert.True(await (Task<bool>)advance.Invoke(movement, new object[] { 100f, 100f, CancellationToken.None })!);
+            Assert.Equal(path.GetRange(1, path.Count - 1).ToArray(), queue.ToArray());
+        }
+
+        [Theory]
+        [InlineData(110f, 101f)]
+        [InlineData(100f, 120f)]
+        public async Task PostCombatResyncUsesTheRepeatedWaypointOnTheCurrentLeg(float x, float y)
+        {
+            var start = new Waypoint(100, 100, MovementPrecision.Accurate, BotMode.OnlyMove);
+            var repeated = new Waypoint(120, 100, MovementPrecision.Accurate, BotMode.OnlyMove);
+            var turn = new Waypoint(140, 100, MovementPrecision.Accurate, BotMode.OnlyMove);
+            var path = new[] { start, repeated, turn, repeated, start };
+            Action<string> log = _ => { };
+            var movement = new MovementSystem(CreateStubMemory(log), log, 100, 100,
+                customPath: path, loopPath: true);
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            var advance = typeof(MovementSystem).GetMethod("AdvanceReachedWaypoints", flags)!;
+            var resync = typeof(MovementSystem).GetMethod("RouteResyncFromCurrentPosition", flags)!;
+            var queue = Assert.IsType<Queue<Waypoint>>(
+                typeof(MovementSystem).GetField("_waypoints", flags)!.GetValue(movement));
+
+            foreach (var waypoint in new[] { start, repeated, turn })
+                Assert.True(await (Task<bool>)advance.Invoke(movement, new object[] { waypoint.X, waypoint.Y, CancellationToken.None })!);
+
+            resync.Invoke(movement, new object[] { x, y, false });
+            Assert.Equal(start, Assert.Single(queue));
+        }
+
         [Fact]
         public void InitialResyncAtTheRouteEndTargetsTheTerminalWaypointInsteadOfWalkingBack()
         {
