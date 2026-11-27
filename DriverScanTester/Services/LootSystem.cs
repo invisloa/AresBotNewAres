@@ -3058,20 +3058,18 @@ namespace DriverScanTester.Services
         }
 
         /// <summary>
-        /// Movement-owned deadlock backstop. The movement tick observed that the armed post-kill
-        /// obligation has been Deferred for a sustained period with no owner (no close-mob search,
-        /// no combat recovery, nothing selected and no loot work in flight). Clearing the ordering
-        /// guard and forcing a fresh cycle lets the next loot tick service the obligation instead
-        /// of leaving navigation blocked forever.
+        /// Resumes a Deferred post-kill request after movement confirms that it has no owner.
+        /// Clearing the ordering guard and requesting a fresh cycle lets the next loot tick
+        /// service the obligation.
         ///
         /// It never completes, cancels or fails the request and never releases navigation: the
         /// regular camera-verified scan result still decides. Idempotent and safe to call for a
         /// stale or foreign generation.
         /// </summary>
-        internal void RequestPostKillLootResume(long requestId, string reason)
+        internal bool RequestPostKillLootResume(long requestId, string reason)
         {
             if (requestId <= 0)
-                return;
+                return false;
 
             lock (_cameraCursorOwnershipGate)
             {
@@ -3081,7 +3079,7 @@ namespace DriverScanTester.Services
                     request.Reason != LootBarrierReason.PostKill ||
                     request.State != LootRequestState.Deferred ||
                     _combatRecoveryMovementRequestId == requestId)
-                    return;
+                    return false;
 
                 bool handoffPending = _awaitingPostKillHandoff;
                 ClearPostKillHandoff();
@@ -3095,6 +3093,7 @@ namespace DriverScanTester.Services
                 request.UpdatedAtUtc = DateTime.UtcNow;
                 _log($"[LootBarrier] Resume requested request={requestId} reason={request.Detail}" +
                      (handoffPending ? " (ordering guard cleared)." : "."));
+                return true;
             }
         }
 

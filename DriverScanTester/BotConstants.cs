@@ -991,6 +991,9 @@ namespace DriverScanTester
         {
             /// <summary>Total budget for one AttackMob search-and-attack recovery.</summary>
             public const int AttackMobTimeoutMs = 20_000;
+
+            /// <summary>Total movement budget for a return to the last reached waypoint.</summary>
+            public const int ReturnToLastReachedTimeoutMs = 8_000;
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -2051,6 +2054,10 @@ namespace DriverScanTester
             /// whole repot step from the top (teleport check + walk + shop + buy).
             /// </summary>
             public const int PostRepotVerifyRetryDelayMs = 300_000;
+
+            public const int WhitePotionPurchaseAttempts = 3;
+            public const int WhitePotionPurchaseConfirmationMs = 6_000;
+            public const int WhitePotionPurchasePollMs = 250;
 
             /// <summary>
             /// Maximum post-repot verification failures before the workflow fails

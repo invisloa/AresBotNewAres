@@ -671,15 +671,16 @@ namespace DriverScanTester.Services
             return ReadSelectedTargetId();
         }
 
-        private int ReadSelectedTargetId()
+        internal bool TryGetSelectedTargetId(out int targetId)
         {
             // The current target ID is stored in the player structure. All target
             // classification must use this same source.
+            targetId = 0;
             ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
-            if (playerBase == 0) return 0;
-
-            return ReadInt(playerBase + TargetSelectedOffset);
+            return playerBase != 0 && TryReadInt(playerBase + TargetSelectedOffset, out targetId);
         }
+
+        private int ReadSelectedTargetId() => TryGetSelectedTargetId(out int targetId) ? targetId : 0;
 
         /// <summary>
         /// Raw "an entity is selected" indicator: a positive target id below the legacy

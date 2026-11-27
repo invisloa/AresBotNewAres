@@ -349,7 +349,7 @@ namespace DriverScanTester.Tests
         }
 
         [Fact]
-        public void ManaDecrease_CountsAsAttackProgress_NoReposition()
+        public void ManaDecrease_DoublesStallWindowOnSameTarget()
         {
             var stub = new MemoryStub { Mana = 1400 };
             var handler = new CombatHandler(NoLog);
@@ -364,9 +364,32 @@ namespace DriverScanTester.Tests
 
             Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory));
 
-            // The mana consumption also re-arms the stall window.
-            BackdateProgressClocks(handler, StallSeconds / 2.0);
+            BackdateProgressClocks(handler, 2 * StallSeconds - 0.5);
             Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory));
+
+            BackdateProgressClocks(handler, 2 * StallSeconds + 0.2);
+            Assert.Equal(CombatAction.RepositionAndRetry, Evaluate(handler, memory));
+        }
+
+        [Fact]
+        public void TargetReplacementWithKeyHeld_StartsWithBaseStallWindow()
+        {
+            var stub = new MemoryStub();
+            var handler = new CombatHandler(NoLog);
+            GameMemoryService memory = stub.Create(NoLog);
+
+            Assert.Equal(CombatAction.Attack, Evaluate(handler, memory));
+            handler.NotifyAttackInputPressed(stub.Mana);
+            stub.Mana -= 20;
+            Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory));
+
+            BackdateProgressClocks(handler, 2 * StallSeconds + 0.2);
+            stub.TargetId++;
+            stub.Mana -= 20;
+            Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory));
+
+            BackdateProgressClocks(handler, PastStallSeconds);
+            Assert.Equal(CombatAction.RepositionAndRetry, Evaluate(handler, memory));
         }
 
         [Fact]
@@ -488,6 +511,44 @@ namespace DriverScanTester.Tests
             // The full mana-stall window has NOT expired yet, so only the fast path can fire.
             Assert.True(NoAnimationSeconds + 0.1 < StallSeconds);
             Assert.Equal(CombatAction.RepositionAndRetry, Evaluate(handler, memory, 100f, 100f));
+        }
+
+        [Fact]
+        public void ManaDropBeforeFirstCombatSampleCountsAsProgress()
+        {
+            var stub = new MemoryStub { Mana = 1400, Action = 100 };
+            var handler = new CombatHandler(NoLog);
+            GameMemoryService memory = stub.Create(NoLog);
+
+            Assert.Equal(CombatAction.Attack, Evaluate(handler, memory));
+            handler.NotifyAttackInputPressed(stub.Mana);
+            Backdate(handler, "_attackInputAt", NoAnimationSeconds + 0.1);
+            Backdate(handler, "_lastMovementProgressAt", NoAnimationSeconds + 0.25);
+            stub.Mana -= 20;
+
+            Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory));
+            Assert.True(handler.AttackManaObserved);
+        }
+
+        [Fact]
+        public void NewKeyPressOnSameTarget_KeepsExtendedWindowWithoutAnimation()
+        {
+            var stub = new MemoryStub();
+            var handler = new CombatHandler(NoLog);
+            GameMemoryService memory = stub.Create(NoLog);
+
+            Assert.Equal(CombatAction.Attack, Evaluate(handler, memory));
+            handler.NotifyAttackInputPressed(stub.Mana);
+            stub.Mana -= 20;
+            Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory));
+
+            handler.NotifyAttackInputPressed(stub.Mana);
+            stub.Action = 100;
+            Backdate(handler, "_attackInputAt", PastStallSeconds);
+            BackdateProgressClocks(handler, PastStallSeconds + 0.2);
+
+            Assert.False(handler.AttackManaObserved);
+            Assert.Equal(CombatAction.CombatWait, Evaluate(handler, memory));
         }
 
         /// <summary>A slow but real attack animation must not be interrupted by the fast path.</summary>

@@ -88,6 +88,7 @@ namespace DriverScanTester.Services
         // sweeping the view until the mouse points at it.
         private const int ShopRelX = 145;
         private const int ShopRelY = 460;
+        private const int PotionQuantityDialogDelayMs = 1000;
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool GetWindowRect(nint hWnd, out RECT lpRect);
@@ -126,8 +127,11 @@ namespace DriverScanTester.Services
             else _log("Failed to open Shop Window.");
         }
 
-        public void BuyPotions()
+        public async Task BuyPotionsAsync(
+            CancellationToken token,
+            Func<int, CancellationToken, Task>? delayAsync = null)
         {
+            delayAsync ??= Task.Delay;
             _log("Buying Potions...");
             // City-specific buy positions: Kharon, Etana and Hershal each have their
             // own shop layout; everything else falls back to the Hershal positions.
@@ -152,33 +156,49 @@ namespace DriverScanTester.Services
                 // the shop window closed (a missed click on a tab/option) every following
                 // click lands in the game world and walks the character to strange spots.
                 // Check BEFORE each click and abort the repot instead.
+                token.ThrowIfCancellationRequested();
                 EnsureShopOpenForClick($"potion buy click for slot {i}");
 
-                Thread.Sleep(1000);
+                await delayAsync(BotConstants.Delays.BuyPotionIntervalMs, token);
+                token.ThrowIfCancellationRequested();
 
                 // HP Potions (Index 3)
                 if (i == 3 && GetHpPotionCount() < HpBuyTarget)
                 {
                     ClickCalibrated(positions[i].X, positions[i].Y, 150);
-                    HowManyPotionsToBuy(HpBuyTarget - GetHpPotionCount());
+                    await BuyPotionQuantityAsync(HpBuyTarget - GetHpPotionCount(), delayAsync, token);
                 }
                 // Mana Potions (Index 0)
                 else if (i == 0 && GetManaPotionCount() < ManaBuyTarget)
                 {
                     ClickCalibrated(positions[i].X, positions[i].Y, 150);
-                    HowManyPotionsToBuy(ManaBuyTarget - GetManaPotionCount());
+                    await BuyPotionQuantityAsync(ManaBuyTarget - GetManaPotionCount(), delayAsync, token);
                 }
                 // Red Potions (Index 1)
                 else if (i == 1 && GetRedPotionCount() < RedBuyTarget)
                 {
                     ClickCalibrated(positions[i].X, positions[i].Y, 150);
-                    HowManyPotionsToBuy(RedBuyTarget - GetRedPotionCount());
+                    await BuyPotionQuantityAsync(RedBuyTarget - GetRedPotionCount(), delayAsync, token);
                 }
                 // White Potions (Index 2)
-                else if (i == 2 && GetWhitePotionCount() < WhiteBuyTarget)
+                else if (i == 2)
                 {
-                    ClickCalibrated(positions[i].X, positions[i].Y, 150);
-                    HowManyPotionsToBuy(WhiteBuyTarget - GetWhitePotionCount());
+                    int target = WhiteBuyTarget;
+                    await BuyWhitePotionsWithRetryAsync(
+                        target,
+                        GetWhitePotionCount,
+                        (quantity, attempt, purchaseToken) =>
+                        {
+                            purchaseToken.ThrowIfCancellationRequested();
+                            ClickCalibrated(positions[i].X, positions[i].Y, 150);
+                            return BuyPotionQuantityAsync(
+                                quantity, delayAsync, purchaseToken,
+                                quantityDialogDelayMs: attempt * PotionQuantityDialogDelayMs,
+                                getRemainingQuantity: () => target - GetWhitePotionCount());
+                        },
+                        delayAsync,
+                        _log,
+                        token);
                 }
                 // SOR — Scroll of Return (Index 4, the 5th shop slot right after HP)
                 // The SOR limit is ALWAYS hardcoded (BotConstants.Repot.SorBuyTarget =
@@ -189,8 +209,47 @@ namespace DriverScanTester.Services
                 else if (i == 4 && GetSorPotionCount() < BotConstants.Repot.SorBuyTarget)
                 {
                     ClickCalibrated(positions[i].X, positions[i].Y, 150);
-                    HowManyPotionsToBuy(BotConstants.Repot.SorBuyTarget - GetSorPotionCount());
+                    await BuyPotionQuantityAsync(BotConstants.Repot.SorBuyTarget - GetSorPotionCount(), delayAsync, token);
                 }
+            }
+        }
+
+        internal static async Task BuyWhitePotionsWithRetryAsync(
+            int target,
+            Func<int> readCount,
+            Func<int, int, CancellationToken, Task> purchaseAsync,
+            Func<int, CancellationToken, Task> delayAsync,
+            Action<string> log,
+            CancellationToken token)
+        {
+            const int maxAttempts = BotConstants.Repot.WhitePotionPurchaseAttempts;
+            const int pollMs = BotConstants.Repot.WhitePotionPurchasePollMs;
+            const int confirmationMs = BotConstants.Repot.WhitePotionPurchaseConfirmationMs;
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                token.ThrowIfCancellationRequested();
+                int before = readCount();
+                if (before >= target)
+                    return;
+
+                int quantity = target - before;
+                log($"[Repot] White potion purchase {attempt}/{maxAttempts}, stock {before}/{target}, requesting {quantity}.");
+                await purchaseAsync(quantity, attempt, token);
+
+                int after = readCount();
+                // Observe delayed updates before resubmitting. A partial update
+                // reduces the quantity requested by the next attempt.
+                for (int waitedMs = 0; after < target && waitedMs < confirmationMs; waitedMs += pollMs)
+                {
+                    await delayAsync(pollMs, token);
+                    token.ThrowIfCancellationRequested();
+                    after = readCount();
+                }
+
+                log($"[Repot] White potion stock after purchase {attempt}/{maxAttempts} is {after}/{target} (was {before}).");
+                if (after >= target)
+                    return;
             }
         }
 
@@ -200,7 +259,12 @@ namespace DriverScanTester.Services
         /// potion count, so the profile values are honored exactly (no more hardcoded
         /// quantities or MAX buys).
         /// </summary>
-        private void HowManyPotionsToBuy(int amountToBuy)
+        private async Task BuyPotionQuantityAsync(
+            int amountToBuy,
+            Func<int, CancellationToken, Task> delayAsync,
+            CancellationToken token,
+            int quantityDialogDelayMs = PotionQuantityDialogDelayMs,
+            Func<int>? getRemainingQuantity = null)
         {
             if (amountToBuy <= 0) return;
 
@@ -213,10 +277,12 @@ namespace DriverScanTester.Services
             // Move to the quantity input field (calibrated absolute 1295,530 at
             // reference window 445,105), wait for the dialog, then click once.
             MoveCalibrated(1295, 530);
-            Thread.Sleep(1000);
+            await delayAsync(quantityDialogDelayMs, token);
+            token.ThrowIfCancellationRequested();
             EnsureShopOpenForClick("quantity field click");
             MouseOperations.LeftClick(); // Down/Up with delay
-            Thread.Sleep(500);
+            await delayAsync(BotConstants.Delays.PostBuyClickMs, token);
+            token.ThrowIfCancellationRequested();
 
             // Type the amount as digits (max 3 digits, same as the old bot).
             // GATE: typing with the shop closed would send the digits to the game/chat.
@@ -225,21 +291,28 @@ namespace DriverScanTester.Services
             string amountStr = digits.ToString();
             foreach (char c in amountStr)
             {
+                token.ThrowIfCancellationRequested();
                 PressKey((byte)(0x30 + (c - '0'))); // VK_0..VK_9
             }
-            Thread.Sleep(500);
-            ClickOkWhenBuying();
-        }
+            await delayAsync(BotConstants.Delays.PotionQuantityKeyMs + BotConstants.Delays.PreBuyOkMs, token);
+            token.ThrowIfCancellationRequested();
 
-        private void ClickOkWhenBuying()
-        {
-            Thread.Sleep(300);
             // GATE: the OK button click is an absolute click — never send it blind.
             EnsureShopOpenForClick("buy OK button click");
             MoveCalibrated(560, 570);
             EnsureShopOpenForClick("buy OK button click");
+
+            // The preceding purchase may settle while the retry dialog is being
+            // filled. Discard an amount that would now exceed the target.
+            if (getRemainingQuantity != null && getRemainingQuantity() < digits)
+            {
+                _log("[Repot] White potion stock increased before confirmation. Dismissing the stale quantity.");
+                GameInput.PressKey(GameInput.VK_ESCAPE, GameInput.SCAN_ESCAPE);
+                return;
+            }
+
             MouseOperations.LeftClick();
-            Thread.Sleep(500);
+            await delayAsync(BotConstants.Delays.PostBuyOkMs, token);
         }
 
         /// <summary>
@@ -395,18 +468,23 @@ namespace DriverScanTester.Services
             return hwnd;
         }
 
-        public virtual void Repot()
+        public virtual async Task RepotAsync(
+            CancellationToken token,
+            Func<int, CancellationToken, Task>? delayAsync = null)
         {
+            delayAsync ??= Task.Delay;
             _log("Starting Repot Sequence...");
 
             // Give the character a moment to settle at the repot waypoint before
             // any mouse input (2s per user requirement).
-            Thread.Sleep(BotConstants.Delays.RepotArrivalWaitMs);
+            await delayAsync(BotConstants.Delays.RepotArrivalWaitMs, token);
+            token.ThrowIfCancellationRequested();
 
             // 1. Open Shop: zoom the camera to the known sell view, then scan the
             //    view until the mouse points at the seller NPC (S_IsSellerPointed),
             //    right-click it and click the Shop option.
             OpenShop();
+            token.ThrowIfCancellationRequested();
 
             if (!IsShopOpen())
             {
@@ -422,10 +500,12 @@ namespace DriverScanTester.Services
             // 3. Buy Potions — only while the shop window is still open. The sell step
             //    may have closed it (missed tab/slot click); buying then would click
             //    predefined positions on the game world and walk the character away.
+            token.ThrowIfCancellationRequested();
             EnsureShopOpenForClick("start of the potion buy step");
-            BuyPotions();
+            await BuyPotionsAsync(token, delayAsync);
 
             // Close Shop (Escape key)
+            token.ThrowIfCancellationRequested();
             GameInput.PressKey(GameInput.VK_ESCAPE, GameInput.SCAN_ESCAPE);
         }
 

@@ -95,7 +95,26 @@ namespace DriverScanTester.Tests
             var memory = new Memory(); var rig = new Rig(memory);
             Invoke(rig, "HoldSkillThree"); memory.Mana--; Age(rig); Check(rig); Check(rig);
             Assert.Equal(new[] { false }, rig.Events);
+            Assert.True(ReadCombatHandler(rig).AttackManaObserved);
         }
+
+        [Fact]
+        public void ManaDropSeenByWatchdogPreventsRetryAfterManaRecovers()
+        {
+            var memory = new Memory();
+            var rig = new Rig(memory);
+            Invoke(rig, "HoldSkillThree");
+            ReadCombatHandler(rig).ObserveMana((short)(memory.Mana - 1));
+
+            Age(rig);
+            Check(rig);
+
+            Assert.Equal(new[] { false }, rig.Events);
+        }
+
+        private static CombatHandler ReadCombatHandler(Rig rig) =>
+            (CombatHandler)typeof(MovementSystem)
+                .GetField("_combatHandler", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(rig)!;
 
         [Fact]
         public void ReleaseAndNewAttack_StartsFreshWindow()

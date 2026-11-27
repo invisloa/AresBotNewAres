@@ -1256,7 +1256,7 @@ namespace DriverScanTester.Services
             try
             {
                 ApplyClassRepotSettings();
-                _repotSystem.Repot();
+                await _repotSystem.RepotAsync(token, PausableDelayAsync);
                 _shopClosedRepotRestartCount = 0;
                 _log("[Repot] Repot completed.");
             }
@@ -1329,6 +1329,10 @@ namespace DriverScanTester.Services
                 RedirectToRepotStep("shop window closed mid-repot");
                 return false; // the flow position was set by the redirect; never advance past it
             }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 _log($"[Repot] Repot failed: {ex.Message}");
@@ -1342,19 +1346,22 @@ namespace DriverScanTester.Services
             var snapshot = _memoryService.GetSnapshot();
             _log($"[Repot] Post-repot: HP Pots: {snapshot.HpPotions}, Mana Pots: {snapshot.ManaPotions}");
 
-            // Post-repot verification: the shop buy is fire-and-forget (a missed
-            // click or a rejected quantity leaves the count unchanged), so a silent
-            // buy failure must not look like success — otherwise the bot walks back
-            // to exp with 0 potions. On mismatch: wait 5 minutes, then redo the
-            // whole repot step from the top (teleport check + walk + shop + buy),
-            // exactly like an exp-triggered repot. Already in the city, the teleport
-            // phase is a no-op (no scroll wasted).
+            // White already has its own retry budget while the shop is open.
+            // Keep the full repot retry budget for shortages in the other supplies.
             int redPots = _memoryService.GetRedPotionCount();
             int whitePots = _memoryService.GetWhitePotionCount();
-            if (snapshot.HpPotions < _repotSystem.HpBuyTarget ||
+            bool otherSuppliesMissing = snapshot.HpPotions < _repotSystem.HpBuyTarget ||
                 snapshot.ManaPotions < _repotSystem.ManaBuyTarget ||
-                redPots < _repotSystem.RedBuyTarget ||
-                whitePots < _repotSystem.WhiteBuyTarget)
+                redPots < _repotSystem.RedBuyTarget;
+            if (!otherSuppliesMissing && whitePots < _repotSystem.WhiteBuyTarget)
+            {
+                _log($"[Repot] White potion stock is still {whitePots}/{_repotSystem.WhiteBuyTarget} after the shop purchase attempts. Check the shop and restart the workflow.");
+                _postRepotVerifyRetryCount = 0;
+                CurrentPhase = BotPhase.Failed;
+                return false;
+            }
+
+            if (otherSuppliesMissing)
             {
                 _postRepotVerifyRetryCount++;
                 if (_postRepotVerifyRetryCount >= BotConstants.Repot.MaxPostRepotVerifyRetries)
@@ -3813,7 +3820,7 @@ namespace DriverScanTester.Services
                 }
 
                 ApplyClassRepotSettings();
-                _repotSystem.Repot();
+                await _repotSystem.RepotAsync(token, PausableDelayAsync);
                 _log("[StartProtection] Repot completed.");
             }
             catch (BotStopRequestedException)
@@ -3838,6 +3845,10 @@ namespace DriverScanTester.Services
                 {
                     _log($"[StartProtection] Could not close the leftover shop window: {closeEx.Message}");
                 }
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {

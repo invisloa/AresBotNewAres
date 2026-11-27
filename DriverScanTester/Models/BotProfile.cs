@@ -129,7 +129,7 @@ namespace DriverScanTester.Models
             PlayerClass.Mage or PlayerClass.Archer;
 
         // --- Workflow options ---
-        /// <summary>If true, skip actual RepotSystem.Repot() and just log "dry run".</summary>
+        /// <summary>If true, skip the shop sequence and log "dry run".</summary>
         public bool DryRunRepot { get; set; } = false;
 
         // --- Start position check (protection) ---

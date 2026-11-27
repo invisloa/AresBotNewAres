@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
@@ -65,7 +66,8 @@ namespace DriverScanTester.Services
         Repot = 1,
         Operation = 2,
         RecoveryPath = 3,
-        AttackMob = 4
+        AttackMob = 4,
+        ReturnToLastReachedWaypoint = 5
     }
 
     public struct Waypoint
@@ -410,6 +412,10 @@ namespace DriverScanTester.Services
         // State
         private Queue<Waypoint> _waypoints = new Queue<Waypoint>();
         private List<Waypoint> _initialPath = new List<Waypoint>();
+        private Waypoint? _lastReachedWaypoint;
+        // A return stays spent until the blocked point is actually reached,
+        // even if resynchronizing skips the point in the meantime.
+        private readonly HashSet<(float X, float Y)> _waypointReturnsAttempted = new();
         private bool _isInitialized = false;
         private bool _goalReached = false;
 
@@ -1727,7 +1733,7 @@ namespace DriverScanTester.Services
         private bool _isSkillThreeHeld = false;
         private bool _isSkillFourHeld = false;
         private DateTime _attackRetryStartedAt = DateTime.MinValue;
-        private int _attackRetryLastMana = int.MinValue;
+        private bool _attackRetryHasManaBaseline;
         private int _attackRetryTargetId;
         private bool _attackSuppressedForCurrentWaypoint = false;
 
@@ -6153,6 +6159,12 @@ namespace DriverScanTester.Services
                     {
                         break;
                     }
+
+                    if (_initialPath.Contains(target))
+                    {
+                        _lastReachedWaypoint = target;
+                        _waypointReturnsAttempted.Remove((target.X, target.Y));
+                    }
                 }
 
                 _waypoints.Dequeue();
@@ -8326,6 +8338,8 @@ namespace DriverScanTester.Services
             _reverseDiagonalRecovery.Stop();
             EndCombatRecoveryMovement($"unstuck reset: {reason}");
             ReleaseRecoveryOwnership($"unstuck reset: {reason}");
+            _lastReachedWaypoint = null;
+            _waypointReturnsAttempted.Clear();
             _isUnstuckRoutineActive = false;
             _consecutiveStuckAttempts = 0;
             _lastStuckAttemptPos = null;
@@ -8408,7 +8422,12 @@ namespace DriverScanTester.Services
             if (succeeded)
             {
                 ResetBearingState();
-                _routeResyncPendingAfterCombat = true;
+                // A return positions us for another attempt at the same leg.
+                // Nearest-segment resync could immediately undo that choice.
+                _routeResyncPendingAfterCombat =
+                    target.StuckRecoveryType != WaypointStuckRecoveryType.ReturnToLastReachedWaypoint;
+                if (!_routeResyncPendingAfterCombat)
+                    _lastNavigationProgressTime = DateTime.UtcNow;
             }
 
             _activeSpecialRecoveryTarget = null;
@@ -8645,17 +8664,25 @@ namespace DriverScanTester.Services
                 return;
             }
 
-            if (_specialRecoveryAttempted)
+            bool returnToLastReached = target.StuckRecoveryType == WaypointStuckRecoveryType.ReturnToLastReachedWaypoint;
+            var blockedPoint = (target.X, target.Y);
+            bool alreadyAttempted = returnToLastReached
+                ? !_waypointReturnsAttempted.Add(blockedPoint)
+                : _specialRecoveryAttempted;
+            if (alreadyAttempted)
             {
                 _log("[WaypointRecovery] Special recovery already attempted at this stuck location with no real progress — using standard unstuck.");
                 StartReverseDiagonalRecovery(currX, currY, target, token);
                 return;
             }
 
-            _specialRecoveryAttempted = true;
-            _specialRecoveryAnchor = (currX, currY);
-            _specialRecoveryTargetX = target.X;
-            _specialRecoveryTargetY = target.Y;
+            if (!returnToLastReached)
+            {
+                _specialRecoveryAttempted = true;
+                _specialRecoveryAnchor = (currX, currY);
+                _specialRecoveryTargetX = target.X;
+                _specialRecoveryTargetY = target.Y;
+            }
             _log($"[WaypointRecovery] Stuck at waypoint ({target.X:F1},{target.Y:F1}), configured={target.StuckRecoveryType}, source={source}.");
 
             if (target.StuckRecoveryType == WaypointStuckRecoveryType.Repot)
@@ -8699,7 +8726,11 @@ namespace DriverScanTester.Services
             bool succeeded = false;
             try
             {
-                if (WaypointRecoveryExecutor != null)
+                if (returnToLastReached)
+                {
+                    succeeded = await ReturnToLastReachedWaypointAsync(token);
+                }
+                else if (WaypointRecoveryExecutor != null)
                 {
                     succeeded = target.StuckRecoveryType == WaypointStuckRecoveryType.Operation
                         ? await WaypointRecoveryExecutor.RunOperationAsync(target.StuckRecoveryOperation, token)
@@ -8727,16 +8758,91 @@ namespace DriverScanTester.Services
                 return;
             }
 
-            token.ThrowIfCancellationRequested();
-            if (Volatile.Read(ref _stopRequested) != 0)
+            if (token.IsCancellationRequested || Volatile.Read(ref _stopRequested) != 0)
             {
                 FinishSpecialRecovery(target, succeeded: false);
+                token.ThrowIfCancellationRequested();
                 return;
             }
 
-            _log("[WaypointRecovery] Special recovery failed — falling back to standard unstuck.");
             FinishSpecialRecovery(target, succeeded: false);
+            if (returnToLastReached)
+            {
+                if (MobGroupingPausePredicate?.Invoke() == true)
+                {
+                    _waypointReturnsAttempted.Remove(blockedPoint);
+                    return;
+                }
+
+                // The return may have gotten partway. Use the real position for
+                // the fallback and let the main loop handle any map transition.
+                PlayerStateSnapshot current = _memoryService.GetPlayerStateSnapshot();
+                if (!current.HasCoherentState || current.Map != _currentMapId)
+                    return;
+                currX = current.X;
+                currY = current.Y;
+            }
+
+            _log("[WaypointRecovery] Special recovery failed — falling back to standard unstuck.");
             StartReverseDiagonalRecovery(currX, currY, target, token);
+        }
+
+        private async Task<bool> ReturnToLastReachedWaypointAsync(CancellationToken token)
+        {
+            if (_lastReachedWaypoint is not { } previous)
+            {
+                _log("[WaypointRecovery] No waypoint has been reached on this route yet.");
+                return false;
+            }
+
+            int map = _currentMapId;
+            PlayerStateSnapshot state = _memoryService.GetPlayerStateSnapshot();
+            if (map <= 0 || !state.HasCoherentState || state.Map != map ||
+                MobGroupingPausePredicate?.Invoke() == true)
+                return false;
+
+            float threshold = Math.Min(GetEffectiveWaypointReachThreshold(previous), BotConstants.WaypointThresholds.Accurate);
+            float bestDistance = GeometryUtils.Distance(state.X, state.Y, previous.X, previous.Y);
+            if (bestDistance <= threshold)
+                return false;
+
+            _log($"[WaypointRecovery] Returning to last reached waypoint ({previous.X:F1},{previous.Y:F1}).");
+            token.ThrowIfCancellationRequested();
+            ClearStartCameraAngleApplication();
+            ResetBearingState();
+            ApplyCameraBearing(GeometryUtils.GetBearingToTargetDeg(state.X, state.Y, previous.X, previous.Y));
+            if (!TryStartMoving())
+                return false;
+
+            var timer = Stopwatch.StartNew();
+            long lastProgressMs = 0;
+            while (timer.ElapsedMilliseconds < BotConstants.WaypointRecovery.ReturnToLastReachedTimeoutMs)
+            {
+                await Task.Delay(BotConstants.Combat.CombatRepositionPollMs, token);
+                if (!_isMovingForward || Volatile.Read(ref _stopRequested) != 0 ||
+                    MobGroupingPausePredicate?.Invoke() == true)
+                    return false;
+
+                state = _memoryService.GetPlayerStateSnapshot();
+                if (state.MapReadSucceeded && state.Map != map)
+                    return false;
+                if (state.HasCoherentState)
+                {
+                    float distance = GeometryUtils.Distance(state.X, state.Y, previous.X, previous.Y);
+                    if (distance <= threshold)
+                        return true;
+                    if (distance < bestDistance - 0.5f)
+                    {
+                        bestDistance = distance;
+                        lastProgressMs = timer.ElapsedMilliseconds;
+                    }
+                }
+
+                if (timer.ElapsedMilliseconds - lastProgressMs >= BotConstants.Movement.NoProgressTimeoutMs)
+                    return false;
+            }
+
+            return false;
         }
 
         private void TickWaypointMobRecovery(float currX, float currY)
@@ -9148,6 +9254,7 @@ namespace DriverScanTester.Services
 
                 case CombatRepositionResult.AuthorizationLost:
                     _log($"[Combat] Reposition aborted — authorization lost mid-attempt; combat baselines kept, no retry TAB. {report}.");
+                    ResumePostKillLootAfterEmptyCombatRetry(token);
                     return;
 
                 case CombatRepositionResult.Cancelled:
@@ -9168,7 +9275,10 @@ namespace DriverScanTester.Services
             // in the meantime. Revalidate with fresh evidence BEFORE TABbing into the same
             // target so a rejected target cannot be reactivated by the retry path.
             if (!IsRetryTargetStillAttackable())
+            {
+                ResumePostKillLootAfterEmptyCombatRetry(token);
                 return;
+            }
 
             _log("[Combat] Retrying attack — TAB, then attack if a target is selected.");
             if (!TryPressTargetCycleKey())
@@ -9177,6 +9287,25 @@ namespace DriverScanTester.Services
                 return;
             }
             await Task.Delay(BotConstants.Delays.PreTabWaitMs, token);
+            ResumePostKillLootAfterEmptyCombatRetry(token);
+        }
+
+        private void ResumePostKillLootAfterEmptyCombatRetry(CancellationToken token)
+        {
+            if (!_postKillNormalLootWithheld || token.IsCancellationRequested ||
+                Volatile.Read(ref _stopRequested) != 0 ||
+                !IsGameClientForegroundForRecovery() ||
+                !_memoryService.TryGetSelectedTargetId(out int targetId) ||
+                targetId is not (0 or -1) ||
+                !TryDescribeOrphanedPostKillLootObligation(targetId, confirmedMonsterTarget: false,
+                    out long requestId, out _))
+                return;
+
+            if (LootSystemRef?.RequestPostKillLootResume(requestId, "no target after combat reposition") == true)
+            {
+                _postKillNormalLootWithheld = false;
+                _postKillLootOrphanSinceUtc = DateTime.UtcNow;
+            }
         }
 
         /// <summary>
@@ -10535,12 +10664,12 @@ namespace DriverScanTester.Services
                 }
 
                 _attackRetryTargetId = _memoryService.GetSelectedTargetId();
-                _attackRetryLastMana = _memoryService.TryGetMana(out short mana) ? mana : int.MinValue;
+                _attackRetryHasManaBaseline = _memoryService.TryGetMana(out short mana);
                 _log("[Key] 3 hold (attack skill)");
                 SendSkillThreeKeyEvent(keyUp: false);
                 _isSkillThreeHeld = true;
                 _attackRetryStartedAt = DateTime.UtcNow;
-                _combatHandler.NotifyAttackInputPressed();
+                _combatHandler.NotifyAttackInputPressed(_attackRetryHasManaBaseline ? mana : null);
                 _log("[Combat] Attack key 3 activated; retry check in 1000ms.");
             }
         }
@@ -10587,20 +10716,20 @@ namespace DriverScanTester.Services
 
                 if (!_memoryService.TryGetMana(out short mana))
                     return;
-                if (_attackRetryLastMana == int.MinValue)
-                {
-                    // A failed initial read cannot prove that mana was not consumed.
-                    _attackRetryLastMana = mana;
-                    _attackRetryStartedAt = DateTime.UtcNow;
-                    return;
-                }
-                if (mana < _attackRetryLastMana)
+                _combatHandler.ObserveMana(mana);
+                if (_combatHandler.AttackManaObserved)
                 {
                     _attackRetryStartedAt = DateTime.MinValue;
                     _log("[Combat] Mana consumption detected — attack retry not needed.");
                     return;
                 }
-                _attackRetryLastMana = mana;
+                if (!_attackRetryHasManaBaseline)
+                {
+                    // Give the first readable sample a full window to show a change.
+                    _attackRetryHasManaBaseline = true;
+                    _attackRetryStartedAt = DateTime.UtcNow;
+                    return;
+                }
                 if ((DateTime.UtcNow - _attackRetryStartedAt).TotalMilliseconds < 1000)
                     return;
 

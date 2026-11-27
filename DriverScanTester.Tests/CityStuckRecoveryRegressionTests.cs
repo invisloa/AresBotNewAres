@@ -962,11 +962,12 @@ namespace DriverScanTester.Tests
 
         private static async Task<bool> RunRepotStepAsync(
             BotWorkflowCoordinator coordinator,
-            BotFlowStep step)
+            BotFlowStep step,
+            CancellationToken token = default)
         {
             var task = (Task<bool>?)ExecuteRepotStepMethod.Invoke(
                 coordinator,
-                new object[] { step, CancellationToken.None });
+                new object[] { step, token });
             Assert.NotNull(task);
             return await task!;
         }
@@ -974,7 +975,7 @@ namespace DriverScanTester.Tests
         /// <summary>
         /// Test-only RepotSystem: reproduces the production failure where the shop window
         /// disappears in the middle of the repot sequence (a missed click closed it). The
-        /// real <see cref="RepotSystem.Repot"/> would move the real mouse, so the test
+        /// real <see cref="RepotSystem.RepotAsync"/> would move the real mouse, so the test
         /// throws the very same <see cref="ShopWindowClosedException"/> the per-click gate
         /// throws before it sends a click.
         /// </summary>
@@ -985,7 +986,9 @@ namespace DriverScanTester.Tests
             {
             }
 
-            public override void Repot()
+            public override Task RepotAsync(
+                CancellationToken token,
+                Func<int, CancellationToken, Task>? delayAsync = null)
                 => throw new ShopWindowClosedException(
                     "Shop window closed before 'potion buy click for slot 1' (a missed click closed it).");
         }
@@ -1008,13 +1011,16 @@ namespace DriverScanTester.Tests
 
             public int Calls => Volatile.Read(ref _calls);
 
-            public override void Repot()
+            public override Task RepotAsync(
+                CancellationToken token,
+                Func<int, CancellationToken, Task>? delayAsync = null)
             {
                 if (Interlocked.Increment(ref _calls) == 1)
                 {
                     throw new ShopWindowClosedException(
                         "Shop window closed before 'potion buy click for slot 1' (a missed click closed it).");
                 }
+                return Task.CompletedTask;
             }
         }
 
@@ -1104,14 +1110,15 @@ namespace DriverScanTester.Tests
         // ════════════════════════════════════════════════════════════════
 
         [Fact]
-        public void BuyPotionsAbortsBeforeAnyClickWhenTheShopWindowIsClosed()
+        public async Task BuyPotionsAbortsBeforeAnyClickWhenTheShopWindowIsClosed()
         {
             var lines = new List<string>();
             var simulation = new SimulatedGameMemory { InCity = true, X = 100, Y = 100, Map = ItemSellerService.MapEtana };
             var memory = simulation.CreateMemory(lines.Add);
             var repotSystem = new RepotSystem(memory, lines.Add);
 
-            var ex = Assert.Throws<ShopWindowClosedException>(() => repotSystem.BuyPotions());
+            var ex = await Assert.ThrowsAsync<ShopWindowClosedException>(
+                () => repotSystem.BuyPotionsAsync(CancellationToken.None));
 
             Assert.Contains("Shop window closed before", ex.Message);
             Assert.Contains(lines, line => line.Contains("Shop window is CLOSED before"));
@@ -1214,8 +1221,10 @@ namespace DriverScanTester.Tests
             }
         }
 
-        [Fact]
-        public async Task RepotRestartedWhileStandingAtTheShopSkipsTheRouteWalk()
+        [Theory]
+        [InlineData(0)]
+        [InlineData(4)]
+        public async Task RepotRestartedAtTheShopSkipsTheWalkAndChecksWhiteStock(int whiteTarget)
         {
             string saveDirectory = Path.GetFullPath(
                 Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "SavedPaths"));
@@ -1244,12 +1253,12 @@ namespace DriverScanTester.Tests
                 var profile = new BotProfile
                 {
                     Name = "shop-closed-no-walk",
-                    // The simulator has no potion counts: verify against zero targets so the
-                    // post-repot check never waits for the production 5-minute retry delay.
+                    // The simulator has no potion counts. A positive White target
+                    // exercises the outcome after the in-shop retry budget is spent.
                     HpBuyTarget = 0,
                     ManaBuyTarget = 0,
                     RedBuyTarget = 0,
-                    WhiteBuyTarget = 0
+                    WhiteBuyTarget = whiteTarget
                 };
                 var operationContext = new OperationContext(memory, pathRunner, itemSeller, profile, lines.Add, () => { });
                 var operationRunner = new OperationRunnerService(operationContext, lines.Add);
@@ -1278,11 +1287,18 @@ namespace DriverScanTester.Tests
                 // 2nd run (the shop-closed restart, exactly like a fresh profile cycle): the
                 // character still stands at the repot point, so the repot route must NOT be
                 // walked again from its first waypoint — the sell/buy sequence runs right away.
-                Assert.True(await RunRepotStepAsync(coordinator, repotStep));
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                Assert.Equal(whiteTarget == 0, await RunRepotStepAsync(coordinator, repotStep, timeout.Token));
                 Assert.Equal(2, repotSystem.Calls);
                 Assert.Contains(lines, line => line.Contains("still at the repot point") && line.Contains("skipping repot path"));
                 Assert.Equal(routeRuns, lines.Count(line => line.Contains("[Coordinator] Repot path — loading path")));
                 Assert.Contains(lines, line => line.Contains("[Repot] Repot completed."));
+                if (whiteTarget > 0)
+                {
+                    Assert.Equal(BotPhase.Failed, coordinator.CurrentPhase);
+                    Assert.Contains(lines, line => line.Contains("White potion stock is still 0/4"));
+                    Assert.DoesNotContain(lines, line => line.Contains("before redoing the full repot"));
+                }
             }
             finally
             {

@@ -110,6 +110,7 @@ namespace DriverScanTester.Services
         private DateTime _lastManaChangeAt = DateTime.MinValue;
         /// <summary>Previous mana sample (for consumption detection — decreases only).</summary>
         private int _lastManaValue = int.MinValue;
+        private bool _manaConsumedOnCurrentTarget;
         /// <summary>Last time the player position changed while a mob was selected.</summary>
         private DateTime _lastCombatPosChangeAt = DateTime.MinValue;
         /// <summary>Previous position sample (for change detection).</summary>
@@ -136,6 +137,9 @@ namespace DriverScanTester.Services
         // apart from a slow but legitimate first swing.
         private DateTime _attackInputAt = DateTime.MinValue;
         private bool _attackAnimationObserved;
+        private bool _attackManaObserved;
+
+        internal bool AttackManaObserved => _attackInputAt != DateTime.MinValue && _attackManaObserved;
 
         // ── Recently unreachable target avoidance ──
         private int _avoidTargetId;
@@ -360,17 +364,7 @@ namespace DriverScanTester.Services
                             CapturePlayerScreenshot();
                         }
 
-                        _wasAttacking = false;
-                        _currentTargetId = 0;
-                        _combatIdleStartTime = DateTime.MinValue;
-                        _lastManaChangeAt = DateTime.MinValue;
-                        _lastCombatPosChangeAt = DateTime.MinValue;
-                        _lastManaValue = int.MinValue;
-                        _lastCombatPos = null;
-                        _movementProgressAnchor = null;
-                        _lastMovementProgressAt = DateTime.MinValue;
-                        _attackInputAt = DateTime.MinValue;
-                        _attackAnimationObserved = false;
+                        ClearAttackEpisode();
                         return CombatAction.TargetRejected;
                     }
                 }
@@ -411,29 +405,16 @@ namespace DriverScanTester.Services
                     return CombatAction.None;
                 }
 
-                // ── New target identity ──
-                // The selected monster can change WHILE combat continues (no empty-target
-                // interval). With DoT opening enabled that transition starts a fresh opening
-                // for the new monster, so report Attack again. The same monster on a normal
-                // combat tick never reaches this branch because its id is unchanged.
-                bool targetChanged = _wasAttacking &&
-                                     _currentTargetId > 0 &&
-                                     _currentTargetId != targetId;
-                if (targetChanged && dotOpeningCapable)
+                // Start fresh progress tracking for each monster. A direct replacement
+                // keeps the held key unless the new monster needs a DoT opening.
+                bool targetChanged = _currentTargetId > 0 && _currentTargetId != targetId;
+                if (!_wasAttacking || targetChanged)
                 {
+                    bool needsAttack = !_wasAttacking || dotOpeningCapable;
                     StartAttackEpisode(targetId, currX, currY);
-                    return CombatAction.Attack;
+                    if (needsAttack)
+                        return CombatAction.Attack;
                 }
-
-                // ── Attacking ──
-                if (!_wasAttacking)
-                {
-                    StartAttackEpisode(targetId, currX, currY);
-                    return CombatAction.Attack;
-                }
-
-                // Same monster (or a replacement while DoT is disabled): keep the original
-                // combat behavior and only refresh the identity snapshot.
                 _currentTargetId = targetId;
 
                 // Track whether skill 3 produced ANY attack animation. A completely idle
@@ -492,13 +473,8 @@ namespace DriverScanTester.Services
                 _combatIdleStartTime = DateTime.MinValue;
 
                 // ── Attack-not-connecting detection: no mana AND no movement progress ──
-                // A real attack consumes mana (skill) with every swing. If the attack
-                // animation keeps playing (a target ID is present) but NEITHER mana is
-                // consumed NOR the character makes real progress toward the selected mob for
-                // COMBAT_MANA_STUCK_TIMEOUT_MS, the attack is not connecting — the mob looks
-                // attacked but its HP never drops (phantom/unreachable target). The bot must
-                // physically reposition: walk toward the next waypoint for a short time, then
-                // TAB and attack again.
+                // Reposition when neither mana consumption nor movement shows progress.
+                // The first mana decrease doubles the stall window for this target.
                 //
                 // Movement progress is a second, independent source of legitimate activity: a
                 // selected target that still has to be reached (running for more than the
@@ -510,29 +486,22 @@ namespace DriverScanTester.Services
                 // every few seconds) so the phantom-attack hang never triggered a
                 // reposition or unstuck.
                 if (memoryService.TryGetMana(out short mana))
-                {
-                    if (_lastManaValue != int.MinValue && mana < _lastManaValue)
-                    {
-                        _lastManaChangeAt = DateTime.Now;
-                    }
-                    _lastManaValue = mana;
-                }
+                    ObserveMana(mana);
 
                 // Movement progress is tracked independently and never touches
                 // _lastManaChangeAt (that timestamp must keep meaning "mana consumed").
                 UpdateMovementProgress(currX, currY);
 
                 // ── Fast "the attack input did nothing" detection ──
-                // The key was pressed, but the character never entered an attack animation
-                // at all and no mana was consumed. That is not a slow swing — the game
-                // rejected the attack (target behind a wall / out of range / stale target).
+                // Use the shorter window if this target has yet to consume mana and
+                // the last key press produced no attack animation.
                 // React after a short animation-start window instead of waiting for the
                 // full mana-stall timeout. The movement-progress guard keeps a legitimate
                 // pursuit (still running toward the mob) from being interrupted.
-                if (!_attackAnimationObserved &&
+                if (!_manaConsumedOnCurrentTarget &&
+                    !_attackAnimationObserved &&
                     _attackInputAt != DateTime.MinValue &&
                     (DateTime.Now - _attackInputAt).TotalMilliseconds >= COMBAT_NO_ANIMATION_TIMEOUT_MS &&
-                    _lastManaChangeAt < _attackInputAt &&
                     _lastMovementProgressAt < _attackInputAt)
                 {
                     double waitedMs = (DateTime.Now - _attackInputAt).TotalMilliseconds;
@@ -551,9 +520,12 @@ namespace DriverScanTester.Services
                     DateTime lastProgressAt = _lastManaChangeAt > _lastMovementProgressAt
                         ? _lastManaChangeAt
                         : _lastMovementProgressAt;
+                    double manaStallTimeoutMs = _manaConsumedOnCurrentTarget
+                        ? 2 * COMBAT_MANA_STUCK_TIMEOUT_MS
+                        : COMBAT_MANA_STUCK_TIMEOUT_MS;
 
                     if (lastProgressAt != DateTime.MinValue &&
-                        (DateTime.Now - lastProgressAt).TotalMilliseconds >= COMBAT_MANA_STUCK_TIMEOUT_MS)
+                        (DateTime.Now - lastProgressAt).TotalMilliseconds >= manaStallTimeoutMs)
                     {
                         double sinceManaMs = _lastManaChangeAt == DateTime.MinValue
                             ? -1
@@ -572,7 +544,7 @@ namespace DriverScanTester.Services
                              $"sinceLastManaConsumption={sinceManaMs:F0}ms, sinceMovementProgress={sinceMovementMs:F0}ms, " +
                              $"player=({currX:F1},{currY:F1}), progressAnchor={anchorText}, anchorDisplacement={anchorDisplacement:F2}, " +
                              $"requiredMovement={COMBAT_MANA_STUCK_MOVE_PROGRESS:F1}, lastMana={_lastManaValue}. " +
-                             $"Reason: neither a sampled mana decrease nor >= {COMBAT_MANA_STUCK_MOVE_PROGRESS:F1} units of position progress for {COMBAT_MANA_STUCK_TIMEOUT_MS:F0}ms. Target HP is not measured; repositioning toward next waypoint.");
+                             $"Reason: neither a sampled mana decrease nor >= {COMBAT_MANA_STUCK_MOVE_PROGRESS:F1} units of position progress for {manaStallTimeoutMs:F0}ms. Target HP is not measured; repositioning toward next waypoint.");
                         return RepositionAndAvoidCurrentTarget(currX, currY);
                     }
                 }
@@ -616,19 +588,7 @@ namespace DriverScanTester.Services
                 // evaluation, report TabAfterKill so MoveAndAttack SOD/SOP mode can
                 // perform its close-camera target check before scanning for loot.
                 bool killedSinceLastEvaluation = _wasAttacking;
-                _wasAttacking = false;
-                _currentTargetId = 0;
-                _combatIdleStartTime = DateTime.MinValue;
-
-                // Reset the combat stuck detection — no combat in progress.
-                _lastManaValue = int.MinValue;
-                _lastCombatPos = null;
-                _lastManaChangeAt = DateTime.MinValue;
-                _lastCombatPosChangeAt = DateTime.MinValue;
-                _movementProgressAnchor = null;
-                _lastMovementProgressAt = DateTime.MinValue;
-                _attackInputAt = DateTime.MinValue;
-                _attackAnimationObserved = false;
+                ClearAttackEpisode();
 
                 // Loot mode (MoveAndAttackAndLoot) with no mob selected: keep cycling
                 // targets on the normal interval. Attacking always has priority — the
@@ -769,10 +729,25 @@ namespace DriverScanTester.Services
         /// fast "attack produced no animation" watchdog. It is intentionally not called for the
         /// one-second retry press: a retry must not postpone the first press's reaction window.
         /// </summary>
-        public void NotifyAttackInputPressed()
+        public void NotifyAttackInputPressed(short? manaBeforePress = null)
         {
             _attackInputAt = DateTime.Now;
             _attackAnimationObserved = false;
+            _attackManaObserved = false;
+            _lastManaValue = manaBeforePress.HasValue ? manaBeforePress.Value : int.MinValue;
+            _lastManaChangeAt = _attackInputAt;
+        }
+
+        internal void ObserveMana(short mana)
+        {
+            if (_lastManaValue != int.MinValue && mana < _lastManaValue)
+            {
+                _lastManaChangeAt = DateTime.Now;
+                _manaConsumedOnCurrentTarget = true;
+                if (_attackInputAt != DateTime.MinValue)
+                    _attackManaObserved = true;
+            }
+            _lastManaValue = mana;
         }
 
         /// <summary>
@@ -797,6 +772,7 @@ namespace DriverScanTester.Services
             _currentTargetId = 0;
             _combatIdleStartTime = DateTime.MinValue;
             _lastManaValue = int.MinValue;
+            _manaConsumedOnCurrentTarget = false;
             _lastCombatPos = null;
             _lastManaChangeAt = DateTime.MinValue;
             _lastCombatPosChangeAt = DateTime.MinValue;
@@ -865,6 +841,7 @@ namespace DriverScanTester.Services
             _lastManaChangeAt = DateTime.Now;
             _lastCombatPosChangeAt = DateTime.Now;
             _lastManaValue = int.MinValue;
+            _manaConsumedOnCurrentTarget = false;
             _lastCombatPos = (currX, currY);
             // Independent movement-progress baseline: chasing a mob can legitimately
             // take longer than the mana-stall timeout without consuming any mana.

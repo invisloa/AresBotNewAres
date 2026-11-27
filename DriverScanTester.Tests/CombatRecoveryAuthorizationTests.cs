@@ -47,6 +47,8 @@ namespace DriverScanTester.Tests
             private const ulong PlayerBase = 0x100000;
 
             public int TargetId = 5000;   // valid mob (< MaxMobTargetId)
+            public bool TargetReadAvailable = true;
+            public int MapId;
             public byte Action = 39;      // attacking (non-idle)
             public Func<(short X, short Y)> Position = () => ((short)100, (short)100);
 
@@ -61,7 +63,10 @@ namespace DriverScanTester.Tests
                             return Fill(buffer, BitConverter.GetBytes(PlayerBase), out bytesRead);
 
                         if (address == PlayerBase + BotConstants.MemoryOffsets.TargetSelected)
-                            return Fill(buffer, BitConverter.GetBytes(TargetId), out bytesRead);
+                            return TargetReadAvailable && Fill(buffer, BitConverter.GetBytes(TargetId), out bytesRead);
+
+                        if (address == PlayerBase + BotConstants.MemoryOffsets.CurrentMap)
+                            return Fill(buffer, BitConverter.GetBytes(MapId), out bytesRead);
 
                         if (address == PlayerBase + BotConstants.MemoryOffsets.CurrentAction)
                         {
@@ -127,8 +132,11 @@ namespace DriverScanTester.Tests
             public int ForwardKeyDowns { get; private set; }
             public int ForwardKeyUps { get; private set; }
             public int TargetCyclePresses { get; private set; }
+            public Action? OnTargetCycle { get; set; }
 
             protected override bool IsGameClientForegroundForRecovery() => Foreground;
+            protected override void SendSyntheticBackwardKeyEvent(bool keyUp) { }
+            protected override void SendTurnKeyEvent(bool leftA, bool keyUp) { }
 
             protected override void SendSyntheticForwardKeyEvent(bool keyUp)
             {
@@ -138,7 +146,11 @@ namespace DriverScanTester.Tests
                     ForwardKeyDowns++;
             }
 
-            protected override void SendTargetCycleKey() => TargetCyclePresses++;
+            protected override void SendTargetCycleKey()
+            {
+                TargetCyclePresses++;
+                OnTargetCycle?.Invoke();
+            }
         }
 
         // ── Scenario fixture ───────────────────────────────────────────────────
@@ -1236,6 +1248,98 @@ namespace DriverScanTester.Tests
         }
 
         // ── 18. Authorized recovery finishing early keeps the loot obligation ──
+
+        [Theory]
+        [InlineData(0, true)]
+        [InlineData(5000, true)]
+        [InlineData(0, false)]
+        public async Task CombatRetryHandsLootBackOnlyAfterAReadableEmptyTarget(int targetAfterTab, bool targetReadable)
+        {
+            using var scenario = new Scenario(
+                BotMode.MoveAndAttackAndLoot, MediumWaypoint(100, 100, BotMode.MoveAndAttackAndLoot));
+            scenario.ArmPostKill();
+            scenario.DeferForCombat();
+            FieldInfo withheld = typeof(MovementSystem).GetField("_postKillNormalLootWithheld", PrivateInstance)!;
+            withheld.SetValue(scenario.Movement, true);
+            scenario.Stub.Position = () => ((short)96, (short)100);
+            scenario.Movement.OnTargetCycle = () =>
+            {
+                scenario.Stub.TargetId = targetAfterTab;
+                scenario.Stub.TargetReadAvailable = targetReadable;
+            };
+
+            await StartReposition(scenario.Movement, 92, 100, CancellationToken.None);
+
+            bool expectedResume = targetAfterTab == 0 && targetReadable;
+            Assert.Equal(1, scenario.Movement.TargetCyclePresses);
+            Assert.Equal(!expectedResume, (bool)withheld.GetValue(scenario.Movement)!);
+            Assert.Equal(expectedResume, scenario.Log.Exists(line => line.Contains("reason=no target after combat reposition")));
+            Assert.Equal(LootRequestState.Deferred, scenario.Status().State);
+            Assert.True(scenario.Movement.LootBarrier.IsBlockingNavigation);
+        }
+
+        [Fact]
+        public async Task WaypointReturnUsesTheLastReachedPointAfterAQueueResync()
+        {
+            var stub = new CombatMemoryStub { MapId = 36, TargetId = 0 };
+            var log = new List<string>();
+            var previous = MediumWaypoint(100, 100, BotMode.OnlyMove);
+            var skipped = MediumWaypoint(120, 100, BotMode.OnlyMove);
+            var blocked = new Waypoint(140, 100, MovementPrecision.Medium, BotMode.OnlyMove,
+                stuckRecoveryType: WaypointStuckRecoveryType.ReturnToLastReachedWaypoint);
+            var movement = new TestMovementSystem(stub.Create(log.Add), log.Add, new[] { previous, skipped, blocked });
+            Assert.True(await (Task<bool>)InvokePrivate(movement,
+                "AdvanceReachedWaypoints", 100f, 100f, CancellationToken.None)!);
+
+            InvokePrivate(movement, "RebuildWaypointQueueFromIndex", 2, skipped, false);
+            stub.Position = () => movement.ForwardKeyDowns == 0
+                ? ((short)132, (short)100)
+                : ((short)100, (short)100);
+
+            await (Task)InvokePrivate(movement, "HandleConfirmedNavigationStuckAsync",
+                132f, 100f, blocked, CancellationToken.None, "test")!;
+
+            var queue = (Queue<Waypoint>)typeof(MovementSystem).GetField("_waypoints", PrivateInstance)!.GetValue(movement)!;
+            Assert.Equal(blocked, Assert.Single(queue));
+            Assert.Equal(1, movement.ForwardKeyDowns);
+            Assert.False(IsMovingForward(movement));
+            Assert.Contains(log, line => line.Contains("W up (StopMoving)"));
+            Assert.Contains(log, line => line.Contains("ReturnToLastReachedWaypoint succeeded"));
+
+            // Another resync and more displacement cannot re-arm the return while
+            // the blocked point is still outstanding.
+            InvokePrivate(movement, "ResetSpecialRecoveryAttempt");
+            await (Task)InvokePrivate(movement, "HandleConfirmedNavigationStuckAsync",
+                100f, 100f, blocked, CancellationToken.None, "test")!;
+            Assert.Single(log.FindAll(line => line.Contains("Returning to last reached waypoint")));
+            Assert.Contains(log, line => line.Contains("using standard unstuck"));
+            movement.Stop();
+        }
+
+        [Fact]
+        public async Task CancellingAWaypointReturnReleasesMovement()
+        {
+            var stub = new CombatMemoryStub { MapId = 36, TargetId = 0 };
+            var log = new List<string>();
+            var previous = MediumWaypoint(100, 100, BotMode.OnlyMove);
+            var blocked = new Waypoint(140, 100, MovementPrecision.Medium, BotMode.OnlyMove,
+                stuckRecoveryType: WaypointStuckRecoveryType.ReturnToLastReachedWaypoint);
+            var movement = new TestMovementSystem(stub.Create(log.Add), log.Add, new[] { previous, blocked });
+            Assert.True(await (Task<bool>)InvokePrivate(movement,
+                "AdvanceReachedWaypoints", 100f, 100f, CancellationToken.None)!);
+
+            stub.Position = () => ((short)132, (short)100);
+            using var cancellation = new CancellationTokenSource();
+            var recovery = (Task)InvokePrivate(movement, "HandleConfirmedNavigationStuckAsync",
+                132f, 100f, blocked, cancellation.Token, "test")!;
+            Assert.True(IsMovingForward(movement));
+            cancellation.Cancel();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => recovery);
+            Assert.False(IsMovingForward(movement));
+            Assert.False(movement.IsWaypointSpecialRecoveryActive);
+            Assert.DoesNotContain(log, line => line.Contains("falling back to standard unstuck"));
+        }
 
         [Fact]
         public async Task AuthorizedRepositionReachingTheWaypointEarlyKeepsTheDeferredObligation()
