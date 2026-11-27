@@ -48,7 +48,7 @@ namespace DriverScanTester.ViewModels
         private bool _stopOnOtherPlayerDetected = true;
         private LoginCharacter _selectedLoginCharacter = LoginCharacter.Knight;
 
-        /// <summary>Character the automatic launcher login should use (Knight/Archer/Mage).</summary>
+        /// <summary>Character the automatic launcher login should use.</summary>
         public LoginCharacter SelectedLoginCharacter
         {
             get => _selectedLoginCharacter;
@@ -60,6 +60,7 @@ namespace DriverScanTester.ViewModels
                 OnPropertyChanged(nameof(IsKnightLoginSelected));
                 OnPropertyChanged(nameof(IsArcherLoginSelected));
                 OnPropertyChanged(nameof(IsMageLoginSelected));
+                OnPropertyChanged(nameof(IsMageAlliLoginSelected));
             }
         }
 
@@ -90,6 +91,16 @@ namespace DriverScanTester.ViewModels
             {
                 if (value)
                     SelectedLoginCharacter = LoginCharacter.Mage;
+            }
+        }
+
+        public bool IsMageAlliLoginSelected
+        {
+            get => _selectedLoginCharacter == LoginCharacter.MageAlli;
+            set
+            {
+                if (value)
+                    SelectedLoginCharacter = LoginCharacter.MageAlli;
             }
         }
 
