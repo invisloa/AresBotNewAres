@@ -118,8 +118,8 @@ namespace DriverScanTester.Tests
         {
             Assert.Equal(0.5, BotConstants.ManaRegen.ManaThresholdFraction);
             Assert.Equal(5_000, BotConstants.ManaRegen.CooldownMs);
-            Assert.Equal(BotConstants.Rebuff.StopMovementSettleMs, BotConstants.ManaRegen.StopMovementSettleMs);
-            Assert.Equal(BotConstants.Rebuff.PostCastSettleMs, BotConstants.ManaRegen.PostCastSettleMs);
+            Assert.Equal(200, BotConstants.ManaRegen.StopMovementSettleMs);
+            Assert.Equal(200, BotConstants.ManaRegen.PostCastSettleMs);
             Assert.True(BotConstants.ManaRegen.OpportunityMaxAgeMs > 0);
         }
 

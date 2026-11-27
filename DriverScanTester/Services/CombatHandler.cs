@@ -95,7 +95,6 @@ namespace DriverScanTester.Services
         private DateTime _lastMoveModeTabTime = DateTime.MinValue;
         private DateTime _lastAttackSpeedCheck = DateTime.MinValue;
         private DateTime _lastRunSpeedCheck = DateTime.MinValue;
-        private DateTime _lastRebuffCheck = DateTime.MinValue;
         private DateTime _combatIdleStartTime = DateTime.MinValue;
 
         // ── Combat stuck detection (mana + position based) ──
@@ -214,74 +213,6 @@ namespace DriverScanTester.Services
                        runSpeed == BotConstants.SpeedPotion.RunSpeedNoPotionValue;
             }
             return false;
-        }
-
-        /// <summary>
-        /// Buff-slot values read by the last <see cref="CheckRebuff"/> call (six 16-bit
-        /// slots, index 0 = FirstSlotBuff). Empty until a successful full read.
-        /// </summary>
-        public short[] LastBuffSlotValues { get; private set; } = Array.Empty<short>();
-
-        /// <summary>
-        /// Result of the last successful buff-slot read: true when any slot held
-        /// <see cref="BotConstants.Rebuff.RapidBuffActiveValue"/> (rapid buff active).
-        /// </summary>
-        public bool LastRapidBuffActive { get; private set; }
-
-        /// <summary>Whether the last successful Archer buff-slot read found SpeedUpBuff.</summary>
-        public bool LastSpeedUpBuffActive { get; private set; }
-
-        /// <summary>
-        /// Decides whether the class rebuff must run in this check cycle. Evaluated on the
-        /// SAME throttled cadence as the white/red speed-potion check (every
-        /// <see cref="BotConstants.SpeedPotion.CheckIntervalSeconds"/> seconds) and only
-        /// OUTSIDE the city.
-        ///
-        /// Uses the class buff definition: Mage rapid buff = 3384, Archer SpeedUpBuff = 12.
-        /// Any matching slot means the buff is active; only a buff missing from all six
-        /// readable slots is recast. Classes without a definition never rebuff.
-        ///
-        /// A failed read of the city flag or of ANY buff slot means "do not rebuff": the bot
-        /// must never fire buff keys based on an unknown state.
-        /// </summary>
-        public bool CheckRebuff(GameMemoryService memoryService, PlayerClass playerClass)
-        {
-            if (_externallySuspended)
-                return false;
-
-            if ((DateTime.Now - _lastRebuffCheck).TotalSeconds < BotConstants.SpeedPotion.CheckIntervalSeconds)
-                return false;
-
-            _lastRebuffCheck = DateTime.Now;
-
-            var buff = ClassRebuffDefinition.ForClass(playerClass);
-            if (buff == null)
-                return false;
-
-            // Rebuff is forbidden inside the city — and an unreadable city flag is not
-            // permission to press buff keys.
-            if (!memoryService.TryGetIsInCity(out bool isInCity) || isInCity)
-                return false;
-
-            // Read all six slots. A partial read is unknown, never "buff missing".
-            if (!memoryService.TryGetBuffSlotValues(out short[] buffValues))
-                return false;
-
-            LastBuffSlotValues = buffValues;
-            LastRapidBuffActive = false;
-            LastSpeedUpBuffActive = false;
-
-            for (int i = 0; i < buffValues.Length; i++)
-            {
-                if (buffValues[i] == buff.ActiveValue)
-                {
-                    LastRapidBuffActive = playerClass == PlayerClass.Mage;
-                    LastSpeedUpBuffActive = playerClass == PlayerClass.Archer;
-                    return false;
-                }
-            }
-
-            return true;
         }
 
         /// <summary>
@@ -701,7 +632,6 @@ namespace DriverScanTester.Services
             ShiftTimestamp(ref _lastMoveModeTabTime, suspension);
             ShiftTimestamp(ref _lastAttackSpeedCheck, suspension);
             ShiftTimestamp(ref _lastRunSpeedCheck, suspension);
-            ShiftTimestamp(ref _lastRebuffCheck, suspension);
             ShiftTimestamp(ref _combatIdleStartTime, suspension);
             ShiftTimestamp(ref _lastManaChangeAt, suspension);
             ShiftTimestamp(ref _lastCombatPosChangeAt, suspension);

@@ -79,7 +79,7 @@ namespace DriverScanTester.Tests
             Assert.Equal(0, value);
         }
 
-        private sealed class MemoryFixture
+        internal sealed class MemoryFixture
         {
             private readonly Dictionary<ulong, byte[]> _memory = new();
             private readonly HashSet<ulong> _failedReads = new();
@@ -98,6 +98,12 @@ namespace DriverScanTester.Tests
                 Set(address, BitConverter.GetBytes(value));
 
             public void FailRead(ulong address) => _failedReads.Add(address);
+
+            public void RestoreRead(ulong address) => _failedReads.Remove(address);
+
+            public static ulong SlotAddress(int index) =>
+                BuffHolder + (ulong)BotConstants.MemoryOffsets.FirstBuffSlot +
+                (ulong)(index * BotConstants.MemoryOffsets.BuffSlotSize);
 
             public GameMemoryService CreateService()
             {

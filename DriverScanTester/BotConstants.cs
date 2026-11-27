@@ -245,39 +245,16 @@ namespace DriverScanTester
             public const short BuffInactiveValue = unchecked((short)0xBF80);
         }
 
-        // ════════════════════════════════════════════════════════════════
-        //  REBUFF — shared class buff timing (Mage and Archer)
-        // ════════════════════════════════════════════════════════════════
-        public static class Rebuff
+        public static class AutoBuff
         {
-            /// <summary>
-            /// 16-bit buff-slot value that identifies the mage rapid buff as ACTIVE.
-            /// Verified live in the lock tool: FirstSlotBuff held 3384 (0x0D38). Any of
-            /// the six buff slots may carry the value while the buff is active; when none
-            /// of the readable slots equals it, the buff is inactive and must be recast.
-            /// </summary>
-            public const short RapidBuffActiveValue = 3384; // 0x0D38
+            public static readonly TimeSpan CheckInterval = TimeSpan.FromSeconds(5);
+            public static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(30);
+            public static readonly TimeSpan SpeedPotionSettle = TimeSpan.FromMilliseconds(2000);
 
-            /// <summary>16-bit buff-slot value identifying the Archer SpeedUpBuff as active.</summary>
-            public const short SpeedUpBuffActiveValue = 12;
-
-            /// <summary>
-            /// Gap in ms between the two class buff-key presses (Mage: 4, Archer: 5).
-            /// </summary>
-            public const int KeyPressIntervalMs = 500;
-
-            /// <summary>
-            /// Settle time (ms) after releasing W/A/D before the first class buff-key press.
-            /// The client ignores the buff key while the character is still running, so the
-            /// bot must stop and let the movement state settle before rebuffing.
-            /// </summary>
             public const int StopMovementSettleMs = 200;
-
-            /// <summary>
-            /// Settle time (ms) after the second class buff-key press, still with movement
-            /// stopped, so the cast can finish before W is pressed again on the next tick.
-            /// </summary>
-            public const int PostCastSettleMs = 200;
+            public const int CastSettleMs = 2000;
+            public const int LearningConfirmationMs = 100;
+            public const int InterruptionCheckMs = 100;
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -319,16 +296,15 @@ namespace DriverScanTester
 
             /// <summary>
             /// Settle time (ms) after <c>StopMoving()</c> before the mana-skill key is pressed —
-            /// the client ignores the skill key while the character is still running, so the
-            /// existing rebuff settle is reused.
+            /// the client ignores the skill key while the character is still running.
             /// </summary>
-            public const int StopMovementSettleMs = Rebuff.StopMovementSettleMs;
+            public const int StopMovementSettleMs = 200;
 
             /// <summary>
             /// Settle time (ms) after the mana-skill key press, still with movement stopped, so
-            /// the cast animation can start before W is pressed again (existing rebuff value).
+            /// the cast animation can start before W is pressed again.
             /// </summary>
-            public const int PostCastSettleMs = Rebuff.PostCastSettleMs;
+            public const int PostCastSettleMs = 200;
 
             /// <summary>
             /// How long (ms) a one-shot no-enemy cast opportunity stays valid. The opportunity
@@ -1133,9 +1109,6 @@ namespace DriverScanTester
             // value -16512 (0xBF80) = cast-speed buff NOT active. Read width is 2 bytes —
             // the sibling short at +0x13A is what the tool displayed as "-16512 (0xBF80)".
             // See BotConstants.CastSpeed.BuffInactiveValue.
-            // NOTE: rebuff decisions use the six-slot buff array below
-            // (BotConstants.Rebuff.RapidBuffActiveValue); this field is kept for
-            // diagnostics/backwards compatibility only.
             public const int CastSpeedBuffPtr = 0x178;
             public const int CastSpeedBuff = 0x13A;
 
@@ -1362,13 +1335,9 @@ namespace DriverScanTester
             public const byte Vk3 = 0x33;
             public const byte Scan3 = 0x04;
 
-            // Key 4 (class buff / rebuff)
+            // Key 4 (DoT opening)
             public const byte Vk4 = 0x34;
             public const byte Scan4 = 0x05;
-
-            // Key 5 (Archer SpeedUpBuff)
-            public const byte Vk5 = 0x35;
-            public const byte Scan5 = 0x06;
 
             // Key 6 (red potion)
             public const byte Vk6 = 0x36;

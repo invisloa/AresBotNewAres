@@ -238,7 +238,7 @@ namespace DriverScanTester.Services
         PositionUnreadable
     }
 
-    public class MovementSystem
+    public partial class MovementSystem
     {
         private readonly GameMemoryService _memoryService;
         private readonly Action<string> _log;
@@ -1985,37 +1985,6 @@ namespace DriverScanTester.Services
             bool BlockedByReserve,
             bool WhitePotionOnly);
 
-        /// <summary>
-        /// Performs the configured class rebuff (Mage: key 4, Archer: key 5), pressing
-        /// the key twice roughly half a second apart. Unconfigured classes do nothing.
-        /// </summary>
-        internal async Task PerformRebuffAsync(PlayerClass playerClass, CancellationToken token)
-        {
-            var buff = ClassRebuffDefinition.ForClass(playerClass);
-            if (buff == null)
-                return;
-
-            // The client ignores the buff key while the character is running. Release W
-            // (and any A/D turn / camera W hold) and let the movement state settle before
-            // pressing the class buff key. The main loop is awaiting, so nothing re-presses W until the
-            // whole two-key rebuff sequence has finished.
-            StopMoving();
-            await Task.Delay(BotConstants.Rebuff.StopMovementSettleMs, token);
-
-            string slotValues = string.Join(", ", _combatHandler.LastBuffSlotValues);
-            char key = (char)buff.VirtualKey;
-            _log($"[Tick {_tickCount}] [Rebuff] {playerClass} {buff.Name} inactive (no buff slot = {buff.ActiveValue}; slots=[{slotValues}]) — movement stopped, pressing key {key} twice, {BotConstants.Rebuff.KeyPressIntervalMs} ms apart.");
-            _log($"[Key] {key} (rebuff, first press)");
-            GameInput.PressKey(buff.VirtualKey, buff.ScanCode);
-            await Task.Delay(BotConstants.Rebuff.KeyPressIntervalMs, token);
-            _log($"[Key] {key} (rebuff, second press)");
-            GameInput.PressKey(buff.VirtualKey, buff.ScanCode);
-
-            // Keep movement stopped for one more short window so the cast animation can
-            // finish before the next movement tick presses W again.
-            await Task.Delay(BotConstants.Rebuff.PostCastSettleMs, token);
-        }
-
         // ========================================================================
         //  MANA REGEN — AUTOMATIC SORCERER MANA RESTORATION (key 6, EXP hunting only)
         // ========================================================================
@@ -2265,7 +2234,7 @@ namespace DriverScanTester.Services
         /// Called from the idle-combat flow — i.e. AFTER the existing enemy detection
         /// (EvaluateCombatAction / TAB cycle / multi-stage retarget search) completed without
         /// acquiring a valid monster — and BEFORE ordinary movement/target cycling resumes.
-        /// The sequence mirrors <see cref="PerformRebuffAsync"/>: release the held attack key,
+        /// The sequence releases the held attack key,
         /// stop movement, let it settle, revalidate, press key 6 exactly once, wait the short
         /// post-cast interval and return. No new mob scanner and no changes to the existing
         /// target-classification rules are involved.
@@ -4789,7 +4758,8 @@ namespace DriverScanTester.Services
             // Each game map has its own navigation file. If the player changed maps,
             // save the current map's data and load the new map's data.
             int currentMapId = _memoryService.GetMapNumber();
-            if (currentMapId != _currentMapId)
+            bool mapChanged = currentMapId != _currentMapId;
+            if (mapChanged)
             {
                 _connectionWatchdog.Reset();
                 CancelMobGrouping("map/teleport transition");
@@ -4856,7 +4826,7 @@ namespace DriverScanTester.Services
                     _speedPotReserveLogged = false;
                     _log($"[Tick {_tickCount}] Speed pot buff missing ({speedDetail}) — using potions (keys 6+7)");
                     _log("[Key] 6 (pot1, red)");
-                    GameInput.PressKey(GameInput.VK_6, GameInput.SCAN_6);
+                    PressSpeedPotion(GameInput.VK_6, GameInput.SCAN_6);
                     await Task.Delay(BotConstants.SpeedPotion.PostPotionDelayMs, token);
                     // Re-read both stacks after key 6. Potion key assignments vary between
                     // clients, so key 6 may have consumed the white stack. The original
@@ -4867,7 +4837,7 @@ namespace DriverScanTester.Services
                         whitePots > BotConstants.Repot.PotionSlotReserve)
                     {
                         _log("[Key] 7 (pot2, white)");
-                        GameInput.PressKey(GameInput.VK_7, GameInput.SCAN_7);
+                        PressSpeedPotion(GameInput.VK_7, GameInput.SCAN_7);
                     }
                     else
                     {
@@ -4880,12 +4850,8 @@ namespace DriverScanTester.Services
                     int potionKey = _mageWhitePotionVk == GameInput.VK_6 ? 6 : 7;
                     _log($"[Tick {_tickCount}] Speed pot buff missing ({speedDetail}, red={redPots}, white={whitePots}) — mage/sorcerer class uses the white potion only (key {potionKey})");
                     _log($"[Key] {potionKey} (white pot, mage class)");
-                    GameInput.PressKey(_mageWhitePotionVk, _mageWhitePotionScan);
+                    PressSpeedPotion(_mageWhitePotionVk, _mageWhitePotionScan);
 
-                    // Give the client a full input frame to consume the potion BEFORE the
-                    // class rebuff presses key 4 on the same movement tick. Without this gap
-                    // the rebuff was issued ~20 ms after the potion and the white pot was
-                    // never actually applied (run speed stayed at the no-potion value).
                     await Task.Delay(BotConstants.SpeedPotion.PostPotionDelayMs, token);
 
                     int whiteAfter = _memoryService.GetWhitePotionCount();
@@ -4918,7 +4884,7 @@ namespace DriverScanTester.Services
                         int otherKey = otherVk == GameInput.VK_6 ? 6 : 7;
 
                         _log($"[SpeedPot] Key {potionKey} did not consume a white potion (white {whitePots}->{whiteAfter}, red {redPots}->{redAfter}) — testing key {otherKey}.");
-                        GameInput.PressKey(otherVk, otherScan);
+                        PressSpeedPotion(otherVk, otherScan);
                         await Task.Delay(BotConstants.SpeedPotion.PostPotionDelayMs, token);
 
                         int whiteAfterOther = _memoryService.GetWhitePotionCount();
@@ -4961,14 +4927,8 @@ namespace DriverScanTester.Services
                 }
             }
 
-            // ── Class rebuff (same check cycle as the speed potions) ──
-            // Evaluated on the SAME throttle as the white/red potion check and only outside
-            // the city. CombatHandler.CheckRebuff uses the shared class definition for
-            // Mage rapid buff (3384) and Archer SpeedUpBuff (12).
-            if (_combatHandler.CheckRebuff(_memoryService, playerClass))
-            {
-                await PerformRebuffAsync(playerClass, token);
-            }
+            if (!mapChanged && await TryCastAutoBuffsAsync(token))
+                return;
 
             var (currX, currY, success) = _memoryService.GetPlayerPosition();
             if (!success)

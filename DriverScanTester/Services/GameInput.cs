@@ -15,7 +15,31 @@ namespace DriverScanTester.Services
         [DllImport("user32.dll")]
         private static extern short GetKeyState(int virtualKey);
 
+        [DllImport("user32.dll", EntryPoint = "MapVirtualKeyW")]
+        private static extern uint MapVirtualKey(uint code, uint mapType);
+
         internal const int KEYEVENTF_KEYUP = BotConstants.Keyboard.KeyEventKeyUp;
+
+        internal static string FormatVirtualKey(int key) => key switch
+        {
+            >= 0x30 and <= 0x39 => ((char)key).ToString(),
+            >= 0x70 and <= 0x7B => $"F{key - 0x70 + 1}",
+            _ => $"0x{key:X}"
+        };
+
+        internal static bool PressVirtualKey(int key)
+        {
+            const uint vkToScanCode = 0;
+            if (key is <= 0 or > byte.MaxValue)
+                return false;
+
+            uint scan = MapVirtualKey((uint)key, vkToScanCode);
+            if (scan is 0 or > byte.MaxValue)
+                return false;
+
+            PressKey((byte)key, (byte)scan);
+            return true;
+        }
 
         // Virtual-key and scan codes
         internal const byte VK_W = BotConstants.Keyboard.VkW;

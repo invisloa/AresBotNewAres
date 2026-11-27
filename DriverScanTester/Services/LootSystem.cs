@@ -207,6 +207,8 @@ namespace DriverScanTester.Services
         private Graphics _graphics;
         private readonly object _captureGate = new();
         private readonly object _cameraCursorOwnershipGate = new();
+        private int _lootUpdatesInProgress;
+        private bool _autoBuffInputReserved;
         private StableLootCaptureResult _lastCaptureResult;
         private LootClientGeometry? _lastStableCaptureGeometry;
         private string _lastLoggedCaptureFailure = string.Empty;
@@ -540,6 +542,26 @@ namespace DriverScanTester.Services
             _lootState == LootMachineState.AreaLootWait ||
             _lootState == LootMachineState.Scan ||
             _lootState == LootMachineState.PinkScan;
+
+        internal bool TryReserveInputForAutoBuff()
+        {
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (_autoBuffInputReserved || _lootUpdatesInProgress != 0 || _diagnosticScanActive != 0 ||
+                    _lootScanCameraOwned || _isCollecting || IsLootCycleActive || IsPinkScanPendingOrActive ||
+                    HasActiveMandatoryLootRequest)
+                    return false;
+
+                _autoBuffInputReserved = true;
+                return true;
+            }
+        }
+
+        internal void ReleaseInputForAutoBuff()
+        {
+            lock (_cameraCursorOwnershipGate)
+                _autoBuffInputReserved = false;
+        }
 
         /// <summary>
         /// True while the effective waypoint mode is MoveAndAttackAndLoot. In this mode
@@ -1608,9 +1630,12 @@ namespace DriverScanTester.Services
             LootDiagnosticMode mode, CancellationToken token)
         {
             bool pinkOnly = mode == LootDiagnosticMode.SodSopPink;
-            if (Interlocked.CompareExchange(ref _diagnosticScanActive, 1, 0) != 0)
-                return BuildDiagnosticResult(mode, LootDiagnosticOutcome.Busy, 0, 0,
-                    "Another diagnostic loot scan is already running.");
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (_autoBuffInputReserved || Interlocked.CompareExchange(ref _diagnosticScanActive, 1, 0) != 0)
+                    return BuildDiagnosticResult(mode, LootDiagnosticOutcome.Busy, 0, 0,
+                        "Another loot scan or an automatic buff cast owns input.");
+            }
 
             bool diagnosticCameraOwnerHeld = false;
             object diagnosticCameraOwner = new();
@@ -1833,6 +1858,14 @@ namespace DriverScanTester.Services
 
         public async Task Update(CancellationToken token)
         {
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (_autoBuffInputReserved)
+                    return;
+
+                _lootUpdatesInProgress++;
+            }
+
             try
             {
                 await UpdateCore(token);
@@ -1842,6 +1875,11 @@ namespace DriverScanTester.Services
                 StopScanSpacebarSpam();
                 CancelAllLootWork("stop/cancellation during scan");
                 throw;
+            }
+            finally
+            {
+                lock (_cameraCursorOwnershipGate)
+                    _lootUpdatesInProgress--;
             }
         }
 
@@ -2487,18 +2525,25 @@ namespace DriverScanTester.Services
                         break;
 
                     // Double-press spacebar with 30ms gap (same pattern as AreaLoot).
-                    if (LootRuntimeSettings.SpacebarLootEnabled)
-                        GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                    PressScanSpacebar(token);
                     Thread.Sleep(30);
                     if (token.IsCancellationRequested || !IsGameWindowForeground(_hwnd) ||
                         !LootRuntimeSettings.SpacebarLootEnabled || _automaticLootDisabled ||
                         _scanToken.IsCancellationRequested || _lootState != LootMachineState.Scan)
                         break;
-                    if (LootRuntimeSettings.SpacebarLootEnabled)
-                        GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+                    PressScanSpacebar(token);
                     Thread.Sleep(100);
                 }
             }, token);
+        }
+
+        private void PressScanSpacebar(CancellationToken token)
+        {
+            lock (_cameraCursorOwnershipGate)
+            {
+                if (!_autoBuffInputReserved && !token.IsCancellationRequested && LootRuntimeSettings.SpacebarLootEnabled)
+                    GameInput.PressKey(GameInput.VK_SPACE, GameInput.SCAN_SPACE);
+            }
         }
 
         /// <summary>

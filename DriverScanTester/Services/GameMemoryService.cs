@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Diagnostics;
 using System.Text;
+using System.Threading;
 using DriverScanTester.Models;
 
 namespace DriverScanTester.Services
@@ -43,6 +44,13 @@ namespace DriverScanTester.Services
         /// MouseOver calibration markers). Never persisted.
         /// </summary>
         internal (uint ProcessId, ulong ModuleBase) GameSessionIdentity => (_pid, _moduleBase);
+
+        // Normal, repot and auxiliary recovery runners share this game attachment.
+        private long _lastSpeedPotionInputTicks;
+        internal DateTime LastSpeedPotionInputAt => new(Interlocked.Read(ref _lastSpeedPotionInputTicks), DateTimeKind.Utc);
+
+        internal void RecordSpeedPotionInput(DateTime now) =>
+            Interlocked.Exchange(ref _lastSpeedPotionInputTicks, now.Ticks);
 
         // --- Offsets from MovementSystem ---
         private const ulong PlayerPtrOffset = BotConstants.MemoryOffsets.PlayerPtr;
@@ -1209,8 +1217,7 @@ namespace DriverScanTester.Services
         /// Reads all six 16-bit buff-slot values in one pass:
         ///   [[Ares.exe + 0x489BE8] + 0x178] + 0x12C + i * 0x50   (i = 0..5)
         /// Returns false when any link of the pointer chain or ANY slot value cannot be
-        /// read. Callers that must never act on an unknown state (the mage rebuff) treat
-        /// false as "do not press buff keys" instead of "no buff is active".
+        /// read. Automatic buffing requires a successful full read.
         /// </summary>
         public bool TryGetBuffSlotValues(out short[] values)
         {
@@ -1262,6 +1269,17 @@ namespace DriverScanTester.Services
             ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
             if (playerBase == 0) return 0;
             return ReadShort(playerBase + WhitePotionsCountOffset);
+        }
+
+        internal (short Red, short White)? ReadSpeedPotionCounts()
+        {
+            ulong playerBase = ReadPointer(_moduleBase + PlayerPtrOffset);
+            if (playerBase == 0 ||
+                !TryReadShort(playerBase + RedPotionsCountOffset, out short red) ||
+                !TryReadShort(playerBase + WhitePotionsCountOffset, out short white))
+                return null;
+
+            return (red, white);
         }
 
         public int GetHpPotionCount()

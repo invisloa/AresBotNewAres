@@ -111,6 +111,7 @@ namespace DriverScanTester.Services
         /// <param name="dotOpeningByClass">Per-class DoT opening configuration of the active
         /// profile. It is copied into the movement run only for the EXP loop; travel, repot,
         /// city and recovery routes never receive it.</param>
+        /// <param name="autoBuffController">Workflow state shared by normal profile routes, including travel and EXP.</param>
         /// <returns>True if the path completed normally (non-loop); false if cancelled.</returns>
         public async Task<bool> RunPathAsync(
             List<Waypoint> waypoints,
@@ -123,7 +124,8 @@ namespace DriverScanTester.Services
             bool ignoreEmpirePlayers = false,
             bool expHuntLoop = false,
             bool enableManaRegen = false,
-            IReadOnlyDictionary<PlayerClass, DotOpeningSettings>? dotOpeningByClass = null)
+            IReadOnlyDictionary<PlayerClass, DotOpeningSettings>? dotOpeningByClass = null,
+            AutoBuffController? autoBuffController = null)
         {
             LastStopReason = PathRunStopReason.None;
             if (waypoints == null || waypoints.Count == 0)
@@ -193,7 +195,8 @@ namespace DriverScanTester.Services
                     // for the workflow ExpLoop step with a combat waypoint mode.
                     ExpHuntLoopMode = expHuntLoop,
                     EnableManaRegen = enableManaRegen,
-                    DotOpeningByClass = routeDotOpening
+                    DotOpeningByClass = routeDotOpening,
+                    AutoBuffController = autoBuffController
                 };
             }
             catch

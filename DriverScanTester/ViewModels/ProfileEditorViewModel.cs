@@ -26,6 +26,7 @@ namespace DriverScanTester.ViewModels
 
         private readonly Action<string> _log;
         private readonly BotProfileLoader _profileLoader;
+        private readonly BuffCalibrationStore _buffCalibrations = new();
 
         /// <summary>
         /// Reads the current in-game player state for the "capture start position"
@@ -61,6 +62,7 @@ namespace DriverScanTester.ViewModels
             DeleteProfileCommand = new RelayCommand(_ => DeleteSelectedProfile(), _ => SelectedProfileName != null);
             RefreshProfilesCommand = new RelayCommand(_ => RefreshProfiles());
             RefreshPathsCommand = new RelayCommand(_ => RefreshPaths());
+            AddAutoBuffCommand = new RelayCommand(_ => AddAutoBuff(), _ => HasProfile);
 
             AddFlowStepCommand = new RelayCommand(_ => AddFlowStep(), _ => CurrentProfile != null);
             RemoveFlowStepCommand = new RelayCommand(_ => RemoveFlowStep(), _ => CanRemoveFlowStep);
@@ -176,6 +178,7 @@ namespace DriverScanTester.ViewModels
                     OnPropertyChanged(nameof(DotOpeningInputsEnabled));
                     OnPropertyChanged(nameof(DotOpeningAttackCount));
                     OnPropertyChanged(nameof(DotOpeningAttackIntervalMs));
+                    LoadAutoBuffs();
                     LoadProfileIntoEditor();
                     CommandManager.InvalidateRequerySuggested();
                 }
@@ -189,7 +192,123 @@ namespace DriverScanTester.ViewModels
         public string ProfileName
         {
             get => CurrentProfile?.Name ?? "";
-            set { if (CurrentProfile != null) { CurrentProfile.Name = value; OnPropertyChanged(); } }
+            set
+            {
+                if (CurrentProfile == null || CurrentProfile.Name == value)
+                    return;
+
+                CurrentProfile.Name = value;
+                OnPropertyChanged();
+                RefreshAutoBuffStatuses();
+            }
+        }
+
+        public IReadOnlyList<KeyValuePair<PlayerClass, string>> AutoBuffClassOptions { get; } =
+            new[]
+            {
+                new KeyValuePair<PlayerClass, string>(PlayerClass.Knight, "Knight"),
+                new KeyValuePair<PlayerClass, string>(PlayerClass.Archer, "Archer"),
+                new KeyValuePair<PlayerClass, string>(PlayerClass.Mage, "Sorcerer"),
+                new KeyValuePair<PlayerClass, string>(PlayerClass.Spear, "Spear")
+            };
+
+        private PlayerClass _selectedAutoBuffClass = PlayerClass.Knight;
+        public PlayerClass SelectedAutoBuffClass
+        {
+            get => _selectedAutoBuffClass;
+            set
+            {
+                if (SetProperty(ref _selectedAutoBuffClass, value))
+                    LoadAutoBuffs();
+            }
+        }
+
+        public bool AutoBuffEnabled
+        {
+            get => CurrentProfile?.GetAutoBuffSettings(SelectedAutoBuffClass).Enabled == true;
+            set
+            {
+                if (CurrentProfile == null || value == AutoBuffEnabled)
+                    return;
+
+                CurrentProfile.GetOrCreateAutoBuffSettings(SelectedAutoBuffClass).Enabled = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public ObservableCollection<AutoBuffEntryViewModel> AutoBuffs { get; } = new();
+        public ICommand AddAutoBuffCommand { get; }
+
+        public IReadOnlyList<KeyValuePair<int, string>> AutoBuffKeyOptions =>
+            CurrentProfile == null ? Array.Empty<KeyValuePair<int, string>>() :
+                Enumerable.Range(0x30, 10).Concat(Enumerable.Range(0x70, 12))
+                    .Where(key => BotProfileLoader.IsAutoBuffKeyAvailable(CurrentProfile, SelectedAutoBuffClass, key))
+                    .Select(key => new KeyValuePair<int, string>(key, GameInput.FormatVirtualKey(key))).ToArray();
+
+        private void LoadAutoBuffs()
+        {
+            AutoBuffs.Clear();
+            var buffs = CurrentProfile?.GetAutoBuffSettings(SelectedAutoBuffClass).Buffs;
+            if (buffs != null)
+            {
+                foreach (var buff in buffs.Where(buff => buff != null))
+                    AddAutoBuffRow(buff);
+            }
+
+            OnPropertyChanged(nameof(AutoBuffEnabled));
+            OnPropertyChanged(nameof(AutoBuffKeyOptions));
+        }
+
+        private void AddAutoBuff()
+        {
+            if (CurrentProfile == null)
+                return;
+
+            var settings = CurrentProfile.GetOrCreateAutoBuffSettings(SelectedAutoBuffClass);
+            var activeKeys = settings.Buffs.Where(buff => buff?.Enabled == true).Select(buff => buff.VirtualKey).ToHashSet();
+            var keys = AutoBuffKeyOptions;
+            int unusedKey = keys.FirstOrDefault(key => !activeKeys.Contains(key.Key)).Key;
+            var buff = new AutoBuffEntry
+            {
+                Name = "New buff",
+                VirtualKey = unusedKey != 0 ? unusedKey : keys[0].Key,
+                Enabled = unusedKey != 0 && activeKeys.Count < BotConstants.MemoryOffsets.BuffSlotCount
+            };
+            settings.Buffs.Add(buff);
+            AddAutoBuffRow(buff);
+        }
+
+        private void AddAutoBuffRow(AutoBuffEntry buff)
+        {
+            var playerClass = SelectedAutoBuffClass;
+            var settings = CurrentProfile!.GetAutoBuffSettings(playerClass);
+            AutoBuffs.Add(new AutoBuffEntryViewModel(buff, () => ReadBuffCalibration(playerClass, buff), row =>
+            {
+                settings.Buffs.Remove(buff);
+                AutoBuffs.Remove(row);
+            }));
+        }
+
+        private short? ReadBuffCalibration(PlayerClass playerClass, AutoBuffEntry buff)
+        {
+            string? savedPath = CurrentProfile?.SavedProfilePath;
+            if (savedPath == null || string.IsNullOrWhiteSpace(ProfileName))
+                return null;
+
+            try
+            {
+                if (string.Equals(savedPath, BotProfileLoader.GetProfilePath(ProfileName.Trim()), StringComparison.OrdinalIgnoreCase))
+                    return _buffCalibrations.Load(savedPath, playerClass, buff.Id, buff.VirtualKey);
+            }
+            catch (ArgumentException) { }
+
+            return null;
+        }
+
+        internal void RefreshAutoBuffStatuses()
+        {
+            foreach (var buff in AutoBuffs)
+                buff.RefreshCalibration();
         }
 
         public IReadOnlyList<KeyValuePair<PlayerClass, string>> RepotClassOptions { get; } =
@@ -371,6 +490,7 @@ namespace DriverScanTester.ViewModels
                 GetOrCreateDisplayedDotOpeningSettings().Enabled = value;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(DotOpeningInputsEnabled));
+                OnPropertyChanged(nameof(AutoBuffKeyOptions));
             }
         }
 
@@ -497,7 +617,15 @@ namespace DriverScanTester.ViewModels
         public int TeleportKey
         {
             get => CurrentProfile?.TeleportKey ?? BotConstants.Workflow.DefaultTeleportKey;
-            set { if (CurrentProfile != null) { CurrentProfile.TeleportKey = value; OnPropertyChanged(); } }
+            set
+            {
+                if (CurrentProfile == null || CurrentProfile.TeleportKey == value)
+                    return;
+
+                CurrentProfile.TeleportKey = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(AutoBuffKeyOptions));
+            }
         }
 
         public int TeleportScanCode
@@ -774,6 +902,7 @@ namespace DriverScanTester.ViewModels
             // 7. Success: refresh the profile list (preserves editor state) and report success
             // using the captured name.
             RefreshProfiles();
+            RefreshAutoBuffStatuses();
             StatusText = $"Saved profile '{savedName}'.";
         }
 
@@ -1186,6 +1315,67 @@ namespace DriverScanTester.ViewModels
     }
 
     // ──────────────────── Helper ViewModels ────────────────────
+
+    public sealed class AutoBuffEntryViewModel : BaseViewModel
+    {
+        private readonly AutoBuffEntry _entry;
+        private readonly Func<short?> _readCalibration;
+
+        internal AutoBuffEntryViewModel(AutoBuffEntry entry, Func<short?> readCalibration, Action<AutoBuffEntryViewModel> remove)
+        {
+            _entry = entry;
+            _readCalibration = readCalibration;
+            ResetLearningCommand = new RelayCommand(_ => ResetLearning());
+            RemoveCommand = new RelayCommand(_ => remove(this));
+            RefreshCalibration();
+        }
+
+        public string Name
+        {
+            get => _entry.Name;
+            set { _entry.Name = value; OnPropertyChanged(); }
+        }
+
+        public bool Enabled
+        {
+            get => _entry.Enabled;
+            set { _entry.Enabled = value; OnPropertyChanged(); }
+        }
+
+        public int VirtualKey
+        {
+            get => _entry.VirtualKey;
+            set
+            {
+                if (value == _entry.VirtualKey)
+                    return;
+
+                _entry.VirtualKey = value;
+                ResetLearning();
+                OnPropertyChanged();
+            }
+        }
+
+        private short? _learnedValue;
+        public string CalibrationStatus => _learnedValue.HasValue ? "Learned" : "Not learned";
+        public string CalibrationDetail => _learnedValue is short value ? $"Memory value {value}" : "Use the buff while inactive to learn its value.";
+
+        public ICommand ResetLearningCommand { get; }
+        public ICommand RemoveCommand { get; }
+
+        private void ResetLearning()
+        {
+            _entry.Id = Guid.NewGuid();
+            RefreshCalibration();
+        }
+
+        internal void RefreshCalibration()
+        {
+            _learnedValue = _readCalibration();
+            OnPropertyChanged(nameof(CalibrationStatus));
+            OnPropertyChanged(nameof(CalibrationDetail));
+        }
+    }
 
     /// <summary>
     /// Editor representation of one flow step. Which fields are used depends on Type.

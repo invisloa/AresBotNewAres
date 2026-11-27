@@ -67,6 +67,7 @@ namespace DriverScanTester.Services
         private readonly Action _focusGameWindow;
 
         private readonly BotProfile _profile;
+        private AutoBuffController? _autoBuffController;
 
         /// <summary>
         /// LOOT PRIORITY weight relief: drinks surplus potions (white/red buffs → mana →
@@ -567,6 +568,7 @@ namespace DriverScanTester.Services
             Task? healTask = null;
             try
             {
+                _autoBuffController = AutoBuffController.Create(_profile, _log);
                 // ── Map-based startup action detection (exactly once per explicit start) ──
                 // Only this StartAsync path runs the detection: normal loop iterations,
                 // repot, recovery, pause/resume and flow wrapping never do.
@@ -634,6 +636,7 @@ namespace DriverScanTester.Services
             }
             finally
             {
+                _autoBuffController = null;
                 _pathRunner.Stop();
                 if (healTask != null)
                 {
@@ -1614,7 +1617,8 @@ namespace DriverScanTester.Services
                 expHuntLoop: true,
                 // DoT opening is scoped to this EXP route execution only; the
                 // path runner copies the class settings before the run starts.
-                dotOpeningByClass: _profile.DotOpeningByClass);
+                dotOpeningByClass: _profile.DotOpeningByClass,
+                autoBuffController: _autoBuffController);
 
             // The EXP route is a hunting route: run the loot system in parallel so drops
             // are collected while walking and after kills. MoveAndAttackAndLoot routes use
@@ -1681,6 +1685,12 @@ namespace DriverScanTester.Services
                         {
                             while (!expToken.IsCancellationRequested && lootSystem != null)
                             {
+                                if (_pathRunner.CurrentMovement?.IsAutoBuffCastActive == true)
+                                {
+                                    await PausableDelayAsync(BotConstants.Delays.LootUpdateMs, expToken);
+                                    continue;
+                                }
+
                                 // Profile/path policy is authoritative for this tick. It is
                                 // re-evaluated so a mixed path can suspend loot on a disabled
                                 // waypoint and resume normally on an enabled one.
@@ -2647,7 +2657,8 @@ namespace DriverScanTester.Services
                     waypoints, loop: false, token,
                     disableAllLoot: _profile.DisableAllLoot,
                     ignoreAlliancePlayers: _profile.IgnoreAlliancePlayers,
-                    ignoreEmpirePlayers: _profile.IgnoreEmpirePlayers);
+                    ignoreEmpirePlayers: _profile.IgnoreEmpirePlayers,
+                    autoBuffController: _autoBuffController);
                 if (token.IsCancellationRequested) return TravelRouteRunResult.Cancelled;
 
                 if (completed)
@@ -2718,7 +2729,8 @@ namespace DriverScanTester.Services
                 waypoints, loop: false, routeToken,
                 disableAllLoot: _profile.DisableAllLoot,
                 ignoreAlliancePlayers: _profile.IgnoreAlliancePlayers,
-                ignoreEmpirePlayers: _profile.IgnoreEmpirePlayers);
+                ignoreEmpirePlayers: _profile.IgnoreEmpirePlayers,
+                autoBuffController: _autoBuffController);
 
             int consecutiveDestReads = 0;
             bool destinationConfirmed = false;

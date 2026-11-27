@@ -14,7 +14,7 @@ namespace DriverScanTester.Services
     /// </summary>
     public class BotProfileLoader
     {
-        private static readonly string PROFILE_DIR = Path.GetFullPath(
+        internal static readonly string ProfileDirectory = Path.GetFullPath(
             Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "SavedBotProfiles"));
         private static readonly string SAVE_DIR = Path.GetFullPath(
             Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "SavedPaths"));
@@ -23,8 +23,16 @@ namespace DriverScanTester.Services
         public BotProfileLoader(Action<string> log)
         {
             _log = log;
-            if (!Directory.Exists(PROFILE_DIR))
-                Directory.CreateDirectory(PROFILE_DIR);
+            if (!Directory.Exists(ProfileDirectory))
+                Directory.CreateDirectory(ProfileDirectory);
+        }
+
+        internal static string GetProfilePath(string profileName)
+        {
+            if (!profileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                profileName += ".json";
+
+            return Path.GetFullPath(Path.Combine(ProfileDirectory, profileName));
         }
 
         /// <summary>
@@ -33,10 +41,10 @@ namespace DriverScanTester.Services
         public List<string> ListProfiles()
         {
             var result = new List<string>();
-            if (!Directory.Exists(PROFILE_DIR))
+            if (!Directory.Exists(ProfileDirectory))
                 return result;
 
-            foreach (var f in Directory.GetFiles(PROFILE_DIR, "*.json"))
+            foreach (var f in Directory.GetFiles(ProfileDirectory, "*.json"))
             {
                 result.Add(Path.GetFileNameWithoutExtension(f));
             }
@@ -51,10 +59,7 @@ namespace DriverScanTester.Services
         /// </summary>
         public BotProfile? LoadProfile(string profileName)
         {
-            if (!profileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
-                profileName += ".json";
-
-            string path = Path.Combine(PROFILE_DIR, profileName);
+            string path = GetProfilePath(profileName);
             if (!File.Exists(path))
             {
                 _log($"[BotProfileLoader] Profile not found: {path}");
@@ -78,6 +83,7 @@ namespace DriverScanTester.Services
                     return null;
                 }
 
+                profile.SavedProfilePath = path;
                 _log($"[BotProfileLoader] Loaded profile '{profile.Name}' with {profile.FlowSteps.Count} flow steps.");
                 return profile;
             }
@@ -101,17 +107,13 @@ namespace DriverScanTester.Services
                 return false;
             }
 
-            string fileName = profile.Name.Trim();
-            if (!fileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
-                fileName += ".json";
-
-            string path = Path.Combine(PROFILE_DIR, fileName);
-
             try
             {
+                string path = GetProfilePath(profile.Name.Trim());
                 var options = new JsonSerializerOptions { WriteIndented = true };
                 string json = JsonSerializer.Serialize(profile, options);
                 File.WriteAllText(path, json);
+                profile.SavedProfilePath = path;
                 _log($"[BotProfileLoader] Saved profile '{profile.Name}' to {path}");
                 return true;
             }
@@ -332,6 +334,8 @@ namespace DriverScanTester.Services
                 }
             }
 
+            ValidateAutoBuffSettings(profile, errors);
+
             // --- Start position check / protection ---
             if (profile.EnableStartPositionCheck && profile.ProtectionMapNumber <= 0)
                 errors.Add("Start position check: protected map number must be greater than 0. Set the map the player must be on after the start teleport.");
@@ -393,6 +397,47 @@ namespace DriverScanTester.Services
                 errors.Add($"{label}: exact max weight should be between 0 and {short.MaxValue} (0 uses the percentage instead).");
             if (settings.HpBuyTarget < 0 || settings.ManaBuyTarget < 0 || settings.RedBuyTarget < 0 || settings.WhiteBuyTarget < 0)
                 errors.Add($"{label}: potion buy targets cannot be negative.");
+        }
+
+        internal static bool IsAutoBuffKeyAvailable(BotProfile profile, PlayerClass playerClass, int key) =>
+            key != profile.TeleportKey &&
+            (key is 0x30 or 0x35 or 0x39 or >= 0x70 and <= 0x7B ||
+             (key == GameInput.VK_4 && !profile.GetDotOpeningSettings(playerClass).Enabled));
+
+        private static void ValidateAutoBuffSettings(BotProfile profile, List<string> errors)
+        {
+            if (profile.AutoBuffByClass == null)
+                return;
+
+            foreach (var (playerClass, settings) in profile.AutoBuffByClass)
+            {
+                string label = $"{playerClass} Automatic Buffs";
+                if (!BotProfile.IsRepotClass(playerClass))
+                    errors.Add($"{label}: unsupported class.");
+                if (settings?.Buffs == null)
+                {
+                    errors.Add($"{label}: buff settings are missing.");
+                    continue;
+                }
+
+                if (settings.Buffs.Count(buff => buff?.Enabled == true) > BotConstants.MemoryOffsets.BuffSlotCount)
+                    errors.Add($"{label}: enable at most {BotConstants.MemoryOffsets.BuffSlotCount} buffs.");
+
+                var ids = new HashSet<Guid>();
+                var activeKeys = new HashSet<int>();
+                foreach (var buff in settings.Buffs)
+                {
+                    if (buff == null || buff.Id == Guid.Empty || !ids.Add(buff.Id))
+                        errors.Add($"{label}: each buff must have a unique, non-empty ID.");
+                    if (buff == null)
+                        continue;
+
+                    if (!IsAutoBuffKeyAvailable(profile, playerClass, buff.VirtualKey))
+                        errors.Add($"{label}: key {GameInput.FormatVirtualKey(buff.VirtualKey)} is unavailable for '{buff.Name}'.");
+                    if (buff.Enabled && !activeKeys.Add(buff.VirtualKey))
+                        errors.Add($"{label}: more than one enabled buff uses key {GameInput.FormatVirtualKey(buff.VirtualKey)}.");
+                }
+            }
         }
 
         private static void ValidateDotOpeningSettings(List<string> errors, DotOpeningSettings settings, string label)

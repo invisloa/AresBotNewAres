@@ -674,6 +674,64 @@
                                 </StackPanel>
                             </GroupBox>
 
+                            <GroupBox Header="Automatic Buffs" Margin="0,0,0,10" BorderBrush="#FF99CCFF" BorderThickness="1" Padding="4">
+                                <StackPanel Margin="3">
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                        <TextBlock Text="Class:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                        <ComboBox ItemsSource="{Binding AutoBuffClassOptions}" DisplayMemberPath="Value" SelectedValuePath="Key"
+                                                  SelectedValue="{Binding SelectedAutoBuffClass}" Width="180"/>
+                                        <CheckBox Content="Enable Automatic Buffs" IsChecked="{Binding AutoBuffEnabled}"
+                                                  Margin="12,2,2,2" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                    <Grid Margin="2,4,2,2">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="70"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="70"/>
+                                            <ColumnDefinition Width="100"/>
+                                            <ColumnDefinition Width="178"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="Enabled" FontWeight="Bold"/>
+                                        <TextBlock Grid.Column="1" Text="Buff name" FontWeight="Bold"/>
+                                        <TextBlock Grid.Column="2" Text="Key" FontWeight="Bold"/>
+                                        <TextBlock Grid.Column="3" Text="Calibration" FontWeight="Bold"/>
+                                    </Grid>
+                                    <ItemsControl ItemsSource="{Binding AutoBuffs}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid Margin="2">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="70"/>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="70"/>
+                                                        <ColumnDefinition Width="100"/>
+                                                        <ColumnDefinition Width="178"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <CheckBox IsChecked="{Binding Enabled}" VerticalAlignment="Center"
+                                                              AutomationProperties.Name="Enable buff"/>
+                                                    <TextBox Grid.Column="1" Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,8,0"
+                                                             AutomationProperties.Name="Buff name"/>
+                                                    <ComboBox Grid.Column="2" Margin="0,0,8,0"
+                                                              ItemsSource="{Binding DataContext.AutoBuffKeyOptions, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                                              DisplayMemberPath="Value" SelectedValuePath="Key" SelectedValue="{Binding VirtualKey}"
+                                                              AutomationProperties.Name="Buff key"
+                                                              ToolTip="Assign the spell to this key in the game client, including when using F1–F12."/>
+                                                    <TextBlock Grid.Column="3" Text="{Binding CalibrationStatus}" ToolTip="{Binding CalibrationDetail}"
+                                                               VerticalAlignment="Center"/>
+                                                    <StackPanel Grid.Column="4" Orientation="Horizontal">
+                                                        <Button Content="Reset Learning" Command="{Binding ResetLearningCommand}" Width="98" Margin="0,0,6,0"
+                                                                ToolTip="Save the profile and start a new workflow to learn the buff again."/>
+                                                        <Button Content="Remove" Command="{Binding RemoveCommand}" Width="74"/>
+                                                    </StackPanel>
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <Button Content="Add Buff" Command="{Binding AddAutoBuffCommand}" Width="90"
+                                            HorizontalAlignment="Left" Margin="2,6,2,2"/>
+                                </StackPanel>
+                            </GroupBox>
+
                             <!-- ─────────── START POSITION CHECK / PROTECTION ─────────── -->
                             <GroupBox Header="Start position check (protection)" Margin="0,0,0,10" BorderBrush="#FF99CCFF" BorderThickness="1" Padding="4">
                                 <StackPanel Margin="3">

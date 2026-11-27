@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
 
 namespace DriverScanTester.Models
 {
@@ -19,6 +20,9 @@ namespace DriverScanTester.Models
     {
         /// <summary>Display name for this profile.</summary>
         public string Name { get; set; } = "NewProfile";
+
+        [JsonIgnore]
+        internal string? SavedProfilePath { get; set; }
 
         /// <summary>
         /// The ordered flow of steps executed by the workflow. Empty flows are invalid.
@@ -127,6 +131,32 @@ namespace DriverScanTester.Models
 
         internal static bool IsDotOpeningClass(PlayerClass playerClass) => playerClass is
             PlayerClass.Mage or PlayerClass.Archer;
+
+        public Dictionary<PlayerClass, AutoBuffSettings> AutoBuffByClass { get; set; } = new();
+
+        public AutoBuffSettings GetAutoBuffSettings(PlayerClass playerClass)
+        {
+            if (IsRepotClass(playerClass) && AutoBuffByClass != null &&
+                AutoBuffByClass.TryGetValue(playerClass, out var settings) && settings != null)
+                return settings;
+
+            return new AutoBuffSettings();
+        }
+
+        public AutoBuffSettings GetOrCreateAutoBuffSettings(PlayerClass playerClass)
+        {
+            if (!IsRepotClass(playerClass))
+                throw new System.ArgumentOutOfRangeException(nameof(playerClass));
+
+            AutoBuffByClass ??= new();
+            if (!AutoBuffByClass.TryGetValue(playerClass, out var settings) || settings == null)
+            {
+                settings = new AutoBuffSettings();
+                AutoBuffByClass[playerClass] = settings;
+            }
+            settings.Buffs ??= new();
+            return settings;
+        }
 
         // --- Workflow options ---
         /// <summary>If true, skip the shop sequence and log "dry run".</summary>
